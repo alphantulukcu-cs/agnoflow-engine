@@ -10,7 +10,8 @@ thiserror   = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 async-trait = { workspace = true }
-zen-engine  = { workspace = true }
+zen-engine      = { workspace = true }
+zen-expression  = { workspace = true }
 tracing     = { workspace = true }
 
 [dev-dependencies]

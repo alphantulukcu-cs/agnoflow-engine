@@ -14,6 +14,7 @@ chrono             = { version = "0.4", features = ["serde"] }
 async-trait        = "0.1"
 opendal            = { version = "0.50", features = ["services-fs", "services-s3"] }
 zen-engine         = "0.55"
+zen-expression     = "0.55"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http         = { version = "0.5", features = ["cors"] }

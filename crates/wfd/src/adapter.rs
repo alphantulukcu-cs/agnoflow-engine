@@ -30,7 +30,7 @@ impl WfdAdapter {
         self.storage.write(&key, bytes).await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
-        repo::insert(&self.pool, orgtnt_id, &wfd.name, version, &key).await?;
+        repo::insert(&self.pool, wfd_id, orgtnt_id, &wfd.name, version, &key).await?;
         Ok((wfd_id, version))
     }
 }

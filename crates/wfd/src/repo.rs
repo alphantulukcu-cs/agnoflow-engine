@@ -4,16 +4,18 @@ use crate::{error::WfdError, models::WfdMeta};
 
 pub async fn insert(
     pool:      &PgPool,
+    wfd_id:    Uuid,
     orgtnt_id: Uuid,
     name:      &str,
     version:   i32,
     s3_key:    &str,
 ) -> Result<Uuid, WfdError> {
     let id = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO wf.wfd_meta (orgtnt_id, name, version, s3_key)
-         VALUES ($1, $2, $3, $4)
+        "INSERT INTO wf.wfd_meta (wfd_id, orgtnt_id, name, version, s3_key)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING wfd_id"
     )
+    .bind(wfd_id)
     .bind(orgtnt_id)
     .bind(name)
     .bind(version)

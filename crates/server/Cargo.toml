@@ -1,15 +1,26 @@
 [package]
-name    = "server"
+name    = "wf-server"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "server"
+name = "wf-server"
 path = "src/main.rs"
 
 [dependencies]
-serde      = { workspace = true }
-serde_json = { workspace = true }
-thiserror  = { workspace = true }
-uuid       = { workspace = true }
-tokio      = { workspace = true }
+wfe-core           = { path = "../wfe-core" }
+wf-org             = { path = "../org" }
+wf-wfd             = { path = "../wfd" }
+wf-wfe             = { path = "../wfe" }
+axum               = { workspace = true }
+tokio              = { workspace = true }
+sqlx               = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+uuid               = { workspace = true }
+chrono             = { workspace = true }
+tower-http         = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+dotenvy            = { workspace = true }

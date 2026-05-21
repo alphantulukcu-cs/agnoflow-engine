@@ -1,0 +1,54 @@
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use sqlx::FromRow;
+use uuid::Uuid;
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Orgtnt {
+    pub orgtnt_id:  Uuid,
+    pub name:       String,
+    pub code:       String,
+    pub is_active:  bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Orgt {
+    pub orgt_id:     Uuid,
+    pub orgtnt_id:   Uuid,
+    pub name:        String,
+    pub description: Option<String>,
+    pub is_active:   bool,
+    pub created_at:  DateTime<Utc>,
+    pub updated_at:  DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Orgu {
+    pub orgu_id:        Uuid,
+    pub orgt_id:        Uuid,
+    pub orgtnt_id:      Uuid,
+    pub parent_orgu_id: Option<Uuid>,
+    pub path:           String,
+    pub orgu_type:      serde_json::Value,
+    pub name:           String,
+    pub metadata:       Option<serde_json::Value>,
+    pub is_active:      bool,
+    pub created_at:     DateTime<Utc>,
+    pub updated_at:     DateTime<Utc>,
+}
+
+/// Minimal org unit view used by wfe-core via OrgPort.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrgUnit {
+    pub orgu_id:   Uuid,
+    pub orgu_type: serde_json::Value,
+    pub path:      String,
+}
+
+impl From<Orgu> for OrgUnit {
+    fn from(o: Orgu) -> Self {
+        Self { orgu_id: o.orgu_id, orgu_type: o.orgu_type, path: o.path }
+    }
+}

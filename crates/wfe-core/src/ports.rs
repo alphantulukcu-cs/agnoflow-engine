@@ -9,13 +9,15 @@ use serde_json::Value;
 /// WFES — the complete execution state passed around the engine.
 #[derive(Debug, Clone)]
 pub struct WFES {
-    pub wfe_id:      Uuid,
-    pub dynctx:      DynCtx,
-    pub wfah:        crate::types::wfah::Wfah,
-    pub status:      WfeStatus,
-    pub orgtnt_id:   Uuid,
-    pub wfd_id:      Uuid,
-    pub wfd_version: u32,
+    pub wfe_id:       Uuid,
+    pub dynctx:       DynCtx,
+    pub wfah:         crate::types::wfah::Wfah,
+    pub status:       WfeStatus,
+    pub orgtnt_id:    Uuid,
+    pub wfd_id:       Uuid,
+    pub wfd_version:  u32,
+    pub current_c_a:  Vec<crate::types::actor::CandidateActor>,
+    pub end_response: Option<serde_json::Value>,
 }
 
 #[async_trait]

@@ -56,6 +56,7 @@ mod tests {
             wfe_id: Uuid::new_v4(), dynctx, wfah: Wfah::empty(),
             status: WfeStatus::Active, orgtnt_id: Uuid::new_v4(),
             wfd_id: Uuid::new_v4(), wfd_version: 1,
+            current_c_a: vec![], end_response: None,
         }
     }
 
@@ -80,6 +81,7 @@ mod tests {
             wfe_id: Uuid::new_v4(), dynctx, wfah: Wfah::empty(),
             status: WfeStatus::Active, orgtnt_id: Uuid::new_v4(),
             wfd_id: Uuid::new_v4(), wfd_version: 1,
+            current_c_a: vec![], end_response: None,
         };
         assert!(evaluate("$amount < 1000", &w).unwrap());
         assert!(!evaluate("$amount >= 1000", &w).unwrap());

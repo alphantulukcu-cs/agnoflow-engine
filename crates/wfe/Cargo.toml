@@ -1,10 +1,16 @@
 [package]
-name    = "wfe"
+name    = "wf-wfe"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde      = { workspace = true }
-serde_json = { workspace = true }
-thiserror  = { workspace = true }
-uuid       = { workspace = true }
+wfe-core    = { path = "../wfe-core" }
+wf-org      = { path = "../org" }
+sqlx        = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+async-trait = { workspace = true }
+tracing     = { workspace = true }

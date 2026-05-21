@@ -49,13 +49,15 @@ pub async fn apply_action(
 
     // 5. Build new WFES
     let new_wfes = WFES {
-        wfe_id:      wfes.wfe_id,
-        dynctx:      new_dynctx,
-        wfah:        new_wfah,
-        status:      WfeStatus::Active,
-        orgtnt_id:   wfes.orgtnt_id,
-        wfd_id:      wfes.wfd_id,
-        wfd_version: wfes.wfd_version,
+        wfe_id:       wfes.wfe_id,
+        dynctx:       new_dynctx,
+        wfah:         new_wfah,
+        status:       WfeStatus::Active,
+        orgtnt_id:    wfes.orgtnt_id,
+        wfd_id:       wfes.wfd_id,
+        wfd_version:  wfes.wfd_version,
+        current_c_a:  vec![],
+        end_response: None,
     };
 
     // 6. Check terminal_when
@@ -207,6 +209,7 @@ mod tests {
             wfe_id: Uuid::new_v4(), dynctx, wfah: Wfah::empty(),
             status: WfeStatus::Active, orgtnt_id: Uuid::new_v4(),
             wfd_id: Uuid::new_v4(), wfd_version: 1,
+            current_c_a: vec![], end_response: None,
         }
     }
 

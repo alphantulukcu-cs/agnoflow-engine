@@ -257,6 +257,12 @@ pub trait WfePort: Send + Sync {
 
 ```rust
 // core/engine/transition.rs
+
+pub enum WftOutcome {
+    NextCa(Vec<CandidateActor>),
+    Terminal { end_response: serde_json::Value },
+}
+
 pub async fn apply_action(
     wfes:   &WFES,
     actor:  &Actor,
@@ -446,6 +452,15 @@ impl WfeExecutor {
     ) -> Result<Vec<WfeSummary>>  // listable check applied
 }
 ```
+
+**`start` execution flow:**
+1. Fetch `WFD` via `WfdPort`
+2. Find matching `StartRule`: `check_permission` against `start[].c_a` for actor
+3. `initial_dynctx = DynCtx::empty().apply_effects(start.wfes_effects, actor, wfe_id, "start", input)`
+4. `initial_wfah = Wfah::new().push(WfahEntry { action: "start", actor, seq: 1 })`
+5. `initial_wfes = WFES { dynctx: initial_dynctx, wfah: initial_wfah }`
+6. Resolve initial `C_A` from `start.wft` via `OrgPort`
+7. Persist: create `wf.wfe` row with `status=active`, `current_c_a`, persist `wfe_dynctx` seq=1, `wfah` seq=1
 
 **`apply` execution flow** (maps exactly to terminology):
 1. Load `WFES` (latest `DynCtx` + full `WFAH`) via `WfePort`

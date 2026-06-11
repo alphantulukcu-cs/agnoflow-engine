@@ -16,7 +16,7 @@ pub async fn check(
     org:         &dyn OrgPort,
 ) -> Result<bool, EngineError> {
     for t in transitions {
-        if t.action != action {
+        if t.action.as_deref() != Some(action) {
             continue;
         }
         let when_matches = zen::evaluate(&t.when, wfes)?;
@@ -80,7 +80,7 @@ mod tests {
 
     fn transition(action: &str, when: &str) -> Transition {
         Transition {
-            id: "t1".into(), when: when.into(), action: action.into(),
+            id: "t1".into(), when: when.into(), action: Some(action.into()), autoexec: None,
             c_a: vec![CaRule {
                 c_orgu: COrguExpr::Expr("self".into()),
                 c_r: vec![["self".into(), "clerk".into()]],

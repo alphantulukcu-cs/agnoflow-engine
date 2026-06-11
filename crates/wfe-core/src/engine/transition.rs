@@ -36,7 +36,7 @@ pub async fn apply_action(
 
     // 2. Find matching transition
     let transition = wfd.transitions.iter()
-        .find(|t| t.action == action && zen::evaluate(&t.when, wfes).unwrap_or(false))
+        .find(|t| t.action.as_deref() == Some(action) && zen::evaluate(&t.when, wfes).unwrap_or(false))
         .ok_or_else(|| EngineError::TransitionNotFound(action.to_string()))?;
 
     // 3. Apply wfes_effects → new DynCtx (immutable)
@@ -180,7 +180,8 @@ mod tests {
             transitions: vec![Transition {
                 id: "t1".into(),
                 when: "$status == 'pending'".into(),
-                action: "approve".into(),
+                action: Some("approve".into()),
+                autoexec: None,
                 c_a: vec![CaRule {
                     c_orgu: COrguExpr::Expr("self".into()),
                     c_r: vec![["self".into(), "clerk".into()]],

@@ -47,7 +47,13 @@ pub struct StartRule {
 pub struct Transition {
     pub id:           String,
     pub when:         String,
-    pub action:       String,
+    /// Human transition: action name (references actions map key). None for autoexec transitions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action:       Option<String>,
+    /// Autoexec transition: fires immediately when `when` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub autoexec:     Option<AutoexecDef>,
+    #[serde(default)]
     pub c_a:          Vec<CaRule>,
     pub wfes_effects: WfesEffects,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -204,7 +204,9 @@ impl WfeExecutor {
                 if wfe_core::engine::c_a_resolver::actor_in_c_a(
                     &t.c_a, actor, wfes.orgtnt_id, &*self.org
                 ).await? {
-                    actions.push(t.action.clone());
+                    if let Some(action_name) = &t.action {
+                        actions.push(action_name.clone());
+                    }
                 }
             }
         }

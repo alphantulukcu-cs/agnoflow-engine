@@ -98,7 +98,8 @@ async fn traverse_orgu(
         .await
         .map_err(AppError::from)?;
 
-    let pipeline = parser::parse(&q.expr)
+    let expr = normalize_traverse_expr(&q.expr);
+    let pipeline = parser::parse(&expr)
         .map_err(|e| AppError(e.to_string(), axum::http::StatusCode::BAD_REQUEST))?;
 
     let result = executor::execute(&pool, orgu_id, orgt_id, &pipeline)
@@ -106,4 +107,13 @@ async fn traverse_orgu(
         .map_err(|e| AppError(e.to_string(), axum::http::StatusCode::INTERNAL_SERVER_ERROR))?;
 
     Ok(Json(result))
+}
+
+fn normalize_traverse_expr(expr: &str) -> String {
+    let expr = expr.trim();
+    if expr == "self" || expr.starts_with("self.") {
+        expr.to_string()
+    } else {
+        format!("self.{expr}")
+    }
 }

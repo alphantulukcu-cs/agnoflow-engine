@@ -6,6 +6,7 @@ mod state;
 use std::sync::Arc;
 use axum::Router;
 use sqlx::postgres::PgPoolOptions;
+use sqlx::Executor;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use wf_wfe::{OrgAdapter, WfeAdapter, WfeExecutor};
@@ -23,6 +24,10 @@ async fn main() {
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
+        .after_connect(|conn, _meta| Box::pin(async move {
+            conn.execute("SET search_path TO org, public").await?;
+            Ok(())
+        }))
         .connect(&cfg.database_url)
         .await
         .expect("db connect failed");

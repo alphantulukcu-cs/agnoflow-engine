@@ -1,12 +1,12 @@
+use crate::{repo, storage};
 use async_trait::async_trait;
 use opendal::Operator;
 use sqlx::PgPool;
 use uuid::Uuid;
-use wfe_core::{EngineError, WfdPort, types::wfd::WFD};
-use crate::{repo, storage};
+use wfe_core::{types::wfd::WFD, EngineError, WfdPort};
 
 pub struct WfdAdapter {
-    pub pool:    PgPool,
+    pub pool: PgPool,
     pub storage: Operator,
 }
 
@@ -19,18 +19,25 @@ impl WfdAdapter {
     pub async fn upload(
         &self,
         orgtnt_id: Uuid,
-        wfd:       &WFD,
+        wfd: &WFD,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
-        let version = repo::next_version(&self.pool, orgtnt_id, &wfd.name).await?;
-        let wfd_id  = Uuid::new_v4();
-        let key     = storage::s3_key(wfd_id, version);
+        let name = if wfd.name.trim().is_empty() {
+            &wfd.id
+        } else {
+            &wfd.name
+        };
+        let version = repo::next_version(&self.pool, orgtnt_id, name).await?;
+        let wfd_id = Uuid::new_v4();
+        let key = storage::s3_key(wfd_id, version);
 
         let bytes = serde_json::to_vec(wfd)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        self.storage.write(&key, bytes).await
+        self.storage
+            .write(&key, bytes)
+            .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
-        repo::insert(&self.pool, wfd_id, orgtnt_id, &wfd.name, version, &key).await?;
+        repo::insert(&self.pool, wfd_id, orgtnt_id, name, version, &key).await?;
         Ok((wfd_id, version))
     }
 }
@@ -42,13 +49,13 @@ impl WfdPort for WfdAdapter {
             .await
             .map_err(|e| EngineError::WfdPort(e.to_string()))?;
 
-        let bytes = self.storage
+        let bytes = self
+            .storage
             .read(&meta.s3_key)
             .await
             .map_err(|e| EngineError::WfdPort(format!("storage read: {e}")))?
             .to_bytes();
 
-        serde_json::from_slice::<WFD>(&bytes)
-            .map_err(|e| EngineError::InvalidWfd(e.to_string()))
+        serde_json::from_slice::<WFD>(&bytes).map_err(|e| EngineError::InvalidWfd(e.to_string()))
     }
 }

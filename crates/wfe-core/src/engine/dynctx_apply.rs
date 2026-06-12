@@ -1,38 +1,56 @@
-use chrono::Utc;
-use serde_json::{Value, json};
-use uuid::Uuid;
 use crate::{
     error::EngineError,
-    types::{actor::Actor, dynctx::DynCtx, wfd::{EffectValue, WfesEffects}},
+    types::{
+        actor::Actor,
+        dynctx::DynCtx,
+        wfd::{EffectValue, WfesEffects},
+    },
 };
+use chrono::Utc;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 /// Applies wfes_effects to produce a new immutable DynCtx. Never mutates `ctx`.
 pub fn apply(
-    ctx:     &DynCtx,
+    ctx: &DynCtx,
     effects: &WfesEffects,
-    actor:   &Actor,
-    wfe_id:  Uuid,
-    action:  &str,
-    input:   &Value,
+    actor: &Actor,
+    wfe_id: Uuid,
+    action: &str,
+    input: &Value,
 ) -> Result<DynCtx, EngineError> {
     let mut patch = serde_json::Map::new();
     for (field, effect_val) in &effects.set {
         let resolved = resolve(effect_val, actor, wfe_id, action, input, ctx)?;
         patch.insert(field.clone(), resolved);
     }
+    for (field, effect_val) in &effects.append {
+        let resolved = resolve(effect_val, actor, wfe_id, action, input, ctx)?;
+        let next = match ctx.get(field) {
+            Some(Value::Array(existing)) => {
+                let mut values = existing.clone();
+                values.push(resolved);
+                Value::Array(values)
+            }
+            Some(existing) => Value::Array(vec![existing.clone(), resolved]),
+            None => Value::Array(vec![resolved]),
+        };
+        patch.insert(field.clone(), next);
+    }
     Ok(ctx.merge(patch))
 }
 
 fn resolve(
-    val:    &EffectValue,
-    actor:  &Actor,
+    val: &EffectValue,
+    actor: &Actor,
     wfe_id: Uuid,
     action: &str,
-    input:  &Value,
-    ctx:    &DynCtx,
+    input: &Value,
+    ctx: &DynCtx,
 ) -> Result<Value, EngineError> {
     match val {
         EffectValue::Ref { path } => resolve_ctx_ref(path, ctx),
+        EffectValue::Ctx { ctx: path } => resolve_ctx_ref(path, ctx),
         EffectValue::Literal(v) => {
             if let Some(s) = v.as_str() {
                 Ok(resolve_special(s, actor, wfe_id, action, input))
@@ -43,15 +61,17 @@ fn resolve(
     }
 }
 
-fn resolve_special(s: &str, actor: &Actor, wfe_id: Uuid, action: &str, input: &Value) -> Value {
+fn resolve_special(s: &str, actor: &Actor, wfe_id: Uuid, _action: &str, input: &Value) -> Value {
     match s {
         "$actor" => json!({
+            "orgu":    actor.orgu_id,
+            "user":    actor.user_id,
             "orgu_id": actor.orgu_id,
             "user_id": actor.user_id,
             "role":    actor.role,
         }),
         "$timestamp" => json!(Utc::now().to_rfc3339()),
-        "$wfe_id"    => json!(wfe_id),
+        "$wfe_id" => json!(wfe_id),
         s if s.starts_with("$action.input.") => {
             let field = &s["$action.input.".len()..];
             input.get(field).cloned().unwrap_or(Value::Null)
@@ -61,9 +81,7 @@ fn resolve_special(s: &str, actor: &Actor, wfe_id: Uuid, action: &str, input: &V
 }
 
 fn resolve_ctx_ref(path: &str, ctx: &DynCtx) -> Result<Value, EngineError> {
-    let stripped = path
-        .strip_prefix("$ctx.")
-        .ok_or_else(|| EngineError::EffectValue(format!("ref path must start with $ctx.: {path}")))?;
+    let stripped = path.strip_prefix("$ctx.").unwrap_or(path);
 
     let mut current = ctx.as_value();
     for part in stripped.split('.') {
@@ -77,12 +95,20 @@ fn resolve_ctx_ref(path: &str, ctx: &DynCtx) -> Result<Value, EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+    use crate::types::{
+        actor::Actor,
+        dynctx::DynCtx,
+        wfd::{EffectValue, WfesEffects},
+    };
     use serde_json::json;
-    use crate::types::{actor::Actor, dynctx::DynCtx, wfd::{WfesEffects, EffectValue}};
+    use uuid::Uuid;
 
     fn actor() -> Actor {
-        Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() }
+        Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        }
     }
 
     #[test]
@@ -91,7 +117,9 @@ mod tests {
         let wfe_id = Uuid::new_v4();
         let actor = actor();
         let mut effects = WfesEffects::default();
-        effects.set.insert("status".into(), EffectValue::Literal(json!("pending")));
+        effects
+            .set
+            .insert("status".into(), EffectValue::Literal(json!("pending")));
 
         let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
         assert_eq!(new_ctx.get("status"), Some(&json!("pending")));
@@ -103,7 +131,9 @@ mod tests {
         let wfe_id = Uuid::new_v4();
         let actor = actor();
         let mut effects = WfesEffects::default();
-        effects.set.insert("initiated_by".into(), EffectValue::Literal(json!("$actor")));
+        effects
+            .set
+            .insert("initiated_by".into(), EffectValue::Literal(json!("$actor")));
 
         let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
         let stored = new_ctx.get("initiated_by").unwrap();
@@ -117,7 +147,10 @@ mod tests {
         let wfe_id = Uuid::new_v4();
         let actor = actor();
         let mut effects = WfesEffects::default();
-        effects.set.insert("amount".into(), EffectValue::Literal(json!("$action.input.amount")));
+        effects.set.insert(
+            "amount".into(),
+            EffectValue::Literal(json!("$action.input.amount")),
+        );
         let input = json!({"amount": 500});
 
         let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "submit", &input).unwrap();
@@ -130,7 +163,9 @@ mod tests {
         let wfe_id = Uuid::new_v4();
         let actor = actor();
         let mut effects = WfesEffects::default();
-        effects.set.insert("status".into(), EffectValue::Literal(json!("pending")));
+        effects
+            .set
+            .insert("status".into(), EffectValue::Literal(json!("pending")));
 
         let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
         assert!(ctx.get("status").is_none());
@@ -149,7 +184,9 @@ mod tests {
         let mut effects = WfesEffects::default();
         effects.set.insert(
             "orgu_copy".into(),
-            EffectValue::Ref { path: "$ctx.applicant_orgu.orgu".into() }
+            EffectValue::Ref {
+                path: "$ctx.applicant_orgu.orgu".into(),
+            },
         );
 
         let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();

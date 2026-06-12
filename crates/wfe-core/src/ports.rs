@@ -36,6 +36,11 @@ pub trait OrgPort: Send + Sync {
         orgu_id:   Uuid,
         role_name: &str,
     ) -> Result<bool, EngineError>;
+
+    async fn orgtnt_for_orgu(
+        &self,
+        orgu_id: Uuid,
+    ) -> Result<Uuid, EngineError>;
 }
 
 #[async_trait]

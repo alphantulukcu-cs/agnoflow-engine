@@ -1,5 +1,5 @@
-use serde_json::Value;
 use crate::types::{actor::Actor, dynctx::DynCtx, wfd::WFD};
+use serde_json::Value;
 
 /// V(DynCtx, Actor) → filtered DynCtx value
 /// Applies x-visibility rules from the WFD context schema.
@@ -28,12 +28,17 @@ pub fn apply(dynctx: &DynCtx, actor: &Actor, wfd: &WFD) -> Value {
 
 fn actor_matches_visibility(rule: &Value, actor: &Actor) -> bool {
     if let Some(c_r) = rule.get("c_r").and_then(|v| v.as_array()) {
-        for pair in c_r {
-            if let Some(arr) = pair.as_array() {
-                let role = arr.get(1).and_then(|v| v.as_str()).unwrap_or("");
-                if role == actor.role {
-                    return true;
-                }
+        for item in c_r {
+            let role = item
+                .as_str()
+                .or_else(|| {
+                    item.as_array()
+                        .and_then(|arr| arr.get(1))
+                        .and_then(|v| v.as_str())
+                })
+                .unwrap_or("");
+            if role == actor.role {
+                return true;
             }
         }
     }
@@ -43,19 +48,30 @@ fn actor_matches_visibility(rule: &Value, actor: &Actor) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use serde_json::json;
+    use uuid::Uuid;
 
     fn actor(role: &str) -> Actor {
-        Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: role.into() }
+        Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: role.into(),
+        }
     }
 
     fn minimal_wfd(context: Value) -> WFD {
         WFD {
-            id: Uuid::new_v4(), name: "t".into(), version: 1, description: None,
+            id: Uuid::new_v4().to_string(),
+            name: "t".into(),
+            version: "1.0.0".into(),
+            description: None,
             context,
-            start: vec![], actions: Default::default(), transitions: vec![],
-            listable: vec![], terminal_when: "false".into(),
+            start: vec![],
+            actions: Default::default(),
+            transitions: vec![],
+            listable: vec![],
+            terminal_when: "false".into(),
+            extra: Default::default(),
         }
     }
 

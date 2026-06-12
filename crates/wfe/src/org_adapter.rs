@@ -43,4 +43,21 @@ impl OrgPort for OrgAdapter {
             .await
             .map_err(|e| EngineError::OrgPort(e.to_string()))
     }
+
+    async fn orgtnt_for_orgu(
+        &self,
+        orgu_id: Uuid,
+    ) -> Result<Uuid, EngineError> {
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT orgtnt_id
+             FROM org.orgt_orgu
+             WHERE orgu_id = $1 AND is_active = true
+             LIMIT 1"
+        )
+        .bind(orgu_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| EngineError::OrgPort(e.to_string()))?
+        .ok_or_else(|| EngineError::OrgPort(format!("orgtnt not found for orgu {orgu_id}")))
+    }
 }

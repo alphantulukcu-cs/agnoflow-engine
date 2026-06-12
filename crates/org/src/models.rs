@@ -39,6 +39,52 @@ pub struct Orgu {
     pub updated_at:     DateTime<Utc>,
 }
 
+#[derive(Debug, Serialize, FromRow)]
+pub struct User {
+    pub u_id:       Uuid,
+    pub orgtnt_id:  Uuid,
+    pub username:   String,
+    pub full_name:  String,
+    pub email:      Option<String>,
+    pub is_active:  bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct Role {
+    pub r_id:         Uuid,
+    pub orgtnt_id:    Uuid,
+    pub name:         String,
+    pub display_name: String,
+    pub is_active:    bool,
+    pub created_at:   DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct UserOrgu {
+    pub u_orgu_id:  Uuid,
+    pub orgtnt_id:  Uuid,
+    pub u_id:       Uuid,
+    pub orgu_id:    Uuid,
+    pub is_primary: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct UserRole {
+    pub ur_id:       Uuid,
+    pub orgtnt_id:   Uuid,
+    pub u_id:        Uuid,
+    pub r_id:        Uuid,
+    pub role_name:   String,
+    pub orgu_id:     Option<Uuid>,
+    pub orgu_scope:  Option<String>,
+    pub ur_type:     String,
+    pub valid_from:  Option<DateTime<Utc>>,
+    pub valid_until: Option<DateTime<Utc>>,
+    pub created_at:  DateTime<Utc>,
+}
+
 /// Minimal org unit view used by wfe-core via OrgPort.
 #[derive(Debug, Clone, Serialize)]
 pub struct OrgUnit {

@@ -14,7 +14,11 @@ pub fn router(pool: PgPool) -> Router {
         .route("/orgtnt",            get(list_orgtnt))
         .route("/orgtnt/:id",        get(get_orgtnt))
         .route("/orgtnt/:id/orgt",   get(list_orgt_by_tenant))
+        .route("/orgtnt/:id/users",  get(list_users_by_tenant))
+        .route("/orgtnt/:id/roles",  get(list_roles_by_tenant))
         .route("/orgt/:id/orgu",     get(list_orgu_by_tree))
+        .route("/users/:id/orgu",    get(list_user_orgu))
+        .route("/users/:id/roles",   get(list_user_roles))
         .route("/orgu/:id",          get(get_orgu))
         .route("/orgu/:id/traverse", get(traverse_orgu))
         .with_state(pool)
@@ -40,11 +44,39 @@ async fn list_orgt_by_tenant(
     repo::orgt::list_by_tenant(&pool, orgtnt_id).await.map(Json).map_err(Into::into)
 }
 
+async fn list_users_by_tenant(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+) -> Result<Json<Vec<wf_org::models::User>>, AppError> {
+    repo::user_role::list_users(&pool, orgtnt_id).await.map(Json).map_err(Into::into)
+}
+
+async fn list_roles_by_tenant(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+) -> Result<Json<Vec<wf_org::models::Role>>, AppError> {
+    repo::user_role::list_roles(&pool, orgtnt_id).await.map(Json).map_err(Into::into)
+}
+
 async fn list_orgu_by_tree(
     State(pool): State<PgPool>,
     Path(orgt_id): Path<Uuid>,
 ) -> Result<Json<Vec<wf_org::models::Orgu>>, AppError> {
     repo::orgu::list_by_tree(&pool, orgt_id).await.map(Json).map_err(Into::into)
+}
+
+async fn list_user_orgu(
+    State(pool): State<PgPool>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<Vec<wf_org::models::UserOrgu>>, AppError> {
+    repo::user_role::list_user_orgus(&pool, user_id).await.map(Json).map_err(Into::into)
+}
+
+async fn list_user_roles(
+    State(pool): State<PgPool>,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<Vec<wf_org::models::UserRole>>, AppError> {
+    repo::user_role::list_user_roles(&pool, user_id).await.map(Json).map_err(Into::into)
 }
 
 async fn get_orgu(

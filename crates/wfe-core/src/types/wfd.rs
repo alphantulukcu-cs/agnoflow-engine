@@ -21,12 +21,53 @@ pub struct WFD {
     pub context: Value,
     pub start: Vec<StartRule>,
     pub actions: HashMap<String, ActionDef>,
+    #[serde(default)]
+    pub terminals: Vec<TerminalDef>,
     pub transitions: Vec<Transition>,
     #[serde(default)]
     pub listable: Vec<ListableRule>,
     pub terminal_when: String,
     #[serde(default, flatten)]
     pub extra: HashMap<String, Value>,
+}
+
+/// Named terminal node — referenced by ID from wft.conditions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalDef {
+    pub id: String,
+    #[serde(default)]
+    pub wfes_effects: WfesEffects,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wfe_end_response: Option<Value>,
+}
+
+/// Terminal reference in wft.conditions — either legacy `true`/`false` or a named ID string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TerminalRef {
+    Bool(bool),
+    Id(String),
+}
+
+impl Default for TerminalRef {
+    fn default() -> Self {
+        TerminalRef::Bool(false)
+    }
+}
+
+impl TerminalRef {
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            TerminalRef::Bool(b) => *b,
+            TerminalRef::Id(_) => true,
+        }
+    }
+    pub fn id(&self) -> Option<&str> {
+        match self {
+            TerminalRef::Bool(_) => None,
+            TerminalRef::Id(s) => Some(s.as_str()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +88,8 @@ pub struct ActionInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StartRule {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default = "true_expr")]
@@ -107,8 +150,9 @@ pub enum ParallelJoin {
 pub struct WftCondition {
     #[serde(default = "true_expr")]
     pub when: String,
+    /// Legacy: `true`/`false`. New format: terminal ID string. Default false = not terminal.
     #[serde(default)]
-    pub terminal: bool,
+    pub terminal: TerminalRef,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wfe_end_response: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

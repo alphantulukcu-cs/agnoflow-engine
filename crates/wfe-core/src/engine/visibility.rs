@@ -68,6 +68,7 @@ mod tests {
             context,
             start: vec![],
             actions: Default::default(),
+            terminals: vec![],
             transitions: vec![],
             listable: vec![],
             terminal_when: "false".into(),

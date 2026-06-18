@@ -74,12 +74,12 @@ pub async fn apply_action(
     // 6. Check terminal_when. The editor may export rule references here
     // (e.g. "rules#terminal_1"); those are design-time ids, not ZEN.
     if terminal_when_matches(&wfd.terminal_when, &new_wfes)? {
-        let end_response = build_end_response(&transition.wft, &new_wfes)?;
+        let end_response = build_end_response(&transition.wft, &new_wfes, wfd)?;
         return Ok((new_wfes, WftOutcome::Terminal { end_response }));
     }
 
     // 7. Resolve wft → new C_A or terminal branch
-    let outcome = resolve_wft(&transition.wft, &new_wfes, actor.orgu_id, org).await?;
+    let outcome = resolve_wft(&transition.wft, &new_wfes, actor.orgu_id, org, wfd).await?;
     Ok((new_wfes, outcome))
 }
 
@@ -96,6 +96,7 @@ async fn resolve_wft(
     wfes: &WFES,
     anchor_orgu_id: Uuid,
     org: &dyn OrgPort,
+    wfd: &WFD,
 ) -> Result<WftOutcome, EngineError> {
     match wft {
         WftRule::Simple { c_a } => {
@@ -105,12 +106,8 @@ async fn resolve_wft(
         WftRule::Conditional { conditions } => {
             for cond in conditions {
                 if zen::evaluate(&cond.when, wfes)? {
-                    if cond.terminal {
-                        let end_response = cond
-                            .wfe_end_response
-                            .as_ref()
-                            .map(|resp| resolve_end_response_refs(resp, wfes))
-                            .unwrap_or_else(|| json!({}));
+                    if cond.terminal.is_terminal() {
+                        let end_response = resolve_terminal_response(&cond.terminal, &cond.wfe_end_response, wfd, wfes);
                         return Ok(WftOutcome::Terminal { end_response });
                     }
                     if let Some(c_a) = &cond.c_a {
@@ -134,13 +131,33 @@ async fn resolve_wft(
     }
 }
 
-fn build_end_response(wft: &WftRule, wfes: &WFES) -> Result<Value, EngineError> {
+/// Resolve wfe_end_response: prefer named terminal def, fall back to inline.
+fn resolve_terminal_response(
+    terminal_ref: &crate::types::wfd::TerminalRef,
+    inline_response: &Option<serde_json::Value>,
+    wfd: &WFD,
+    wfes: &WFES,
+) -> serde_json::Value {
+    if let Some(id) = terminal_ref.id() {
+        if let Some(def) = wfd.terminals.iter().find(|t| t.id == id) {
+            return def
+                .wfe_end_response
+                .as_ref()
+                .map(|r| resolve_end_response_refs(r, wfes))
+                .unwrap_or_else(|| json!({}));
+        }
+    }
+    inline_response
+        .as_ref()
+        .map(|r| resolve_end_response_refs(r, wfes))
+        .unwrap_or_else(|| json!({}))
+}
+
+fn build_end_response(wft: &WftRule, wfes: &WFES, wfd: &WFD) -> Result<Value, EngineError> {
     if let WftRule::Conditional { conditions } = wft {
         for cond in conditions {
-            if cond.terminal && zen::evaluate(&cond.when, wfes).unwrap_or(false) {
-                if let Some(resp) = &cond.wfe_end_response {
-                    return Ok(resolve_end_response_refs(resp, wfes));
-                }
+            if cond.terminal.is_terminal() && zen::evaluate(&cond.when, wfes).unwrap_or(false) {
+                return Ok(resolve_terminal_response(&cond.terminal, &cond.wfe_end_response, wfd, wfes));
             }
         }
     }
@@ -238,6 +255,7 @@ mod tests {
             context: json!({}),
             start: vec![],
             actions,
+            terminals: vec![],
             transitions: vec![Transition {
                 id: "t1".into(),
                 when: "$status == 'pending'".into(),

@@ -319,7 +319,7 @@ impl WfeExecutor {
                 self.wfe.append_wfah(wfes.wfe_id, entry).await?;
             }
 
-            match resolve_wft_outcome(&transition.wft, &wfes, fallback_actor.orgu_id, &*self.org)
+            match resolve_wft_outcome(&transition.wft, &wfes, fallback_actor.orgu_id, &*self.org, wfd)
                 .await?
             {
                 WftOutcome::Terminal { end_response } => {
@@ -346,6 +346,7 @@ async fn resolve_wft_outcome(
     wfes: &WFES,
     anchor: Uuid,
     org: &dyn OrgPort,
+    wfd: &WFD,
 ) -> Result<WftOutcome, EngineError> {
     match wft {
         WftRule::Simple { c_a } => {
@@ -355,13 +356,15 @@ async fn resolve_wft_outcome(
         WftRule::Conditional { conditions } => {
             for cond in conditions {
                 if zen::evaluate(&cond.when, wfes)? {
-                    if cond.terminal {
-                        return Ok(WftOutcome::Terminal {
-                            end_response: cond
-                                .wfe_end_response
-                                .clone()
-                                .unwrap_or_else(|| json!({})),
-                        });
+                    if cond.terminal.is_terminal() {
+                        let end_response = if let Some(id) = cond.terminal.id() {
+                            wfd.terminals.iter().find(|t| t.id == id)
+                                .and_then(|t| t.wfe_end_response.clone())
+                                .unwrap_or_else(|| json!({}))
+                        } else {
+                            cond.wfe_end_response.clone().unwrap_or_else(|| json!({}))
+                        };
+                        return Ok(WftOutcome::Terminal { end_response });
                     }
                     if let Some(c_a) = &cond.c_a {
                         let c_a = resolve_c_a(c_a, anchor, wfes, org).await?;
@@ -392,7 +395,7 @@ async fn resolve_wft_c_a(
         WftRule::Simple { c_a } => resolve_c_a(c_a, anchor, wfes, org).await,
         WftRule::Conditional { conditions } => {
             for cond in conditions {
-                if !cond.terminal {
+                if !cond.terminal.is_terminal() {
                     if let Some(c_a) = &cond.c_a {
                         return resolve_c_a(c_a, anchor, wfes, org).await;
                     }

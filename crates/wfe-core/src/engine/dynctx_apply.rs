@@ -37,6 +37,24 @@ pub fn apply(
         };
         patch.insert(field.clone(), next);
     }
+
+    // Always expose the executing actor under _step_<action> so downstream
+    // c_orgu rules can reference it via from: "$ctx._step_<action>.actor.orgu"
+    // without requiring explicit wfes_effects.set["key"] = "$actor".
+    let step_key = format!("_step_{}", action);
+    patch.insert(
+        step_key,
+        json!({
+            "actor": {
+                "orgu":    actor.orgu_id,
+                "user":    actor.user_id,
+                "orgu_id": actor.orgu_id,
+                "user_id": actor.user_id,
+                "role":    actor.role,
+            }
+        }),
+    );
+
     Ok(ctx.merge(patch))
 }
 
@@ -155,6 +173,19 @@ mod tests {
 
         let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "submit", &input).unwrap();
         assert_eq!(new_ctx.get("amount"), Some(&json!(500)));
+    }
+
+    #[test]
+    fn auto_injects_step_actor() {
+        let ctx = DynCtx::empty();
+        let wfe_id = Uuid::new_v4();
+        let actor = actor();
+        let effects = WfesEffects::default();
+
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "approve", &json!({})).unwrap();
+        let step = new_ctx.get("_step_approve").unwrap();
+        assert_eq!(step["actor"]["orgu_id"], json!(actor.orgu_id));
+        assert_eq!(step["actor"]["role"], json!("clerk"));
     }
 
     #[test]

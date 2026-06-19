@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
+use tracing;
 use wfe_core::{
     engine::{
         c_a_resolver::resolve_c_a,
@@ -19,16 +20,32 @@ use wfe_core::{
     },
     zen,
 };
+use crate::autoexec::{AutoexecExecutor, RestExecutor, SqlExecutor, CalcExecutor, AutoexecContext};
 
 pub struct WfeExecutor {
     pub org: Arc<dyn OrgPort>,
     pub wfd: Arc<dyn WfdPort>,
     pub wfe: Arc<dyn WfePort>,
+    pub autoexec: AutoexecExecutor,
 }
 
 impl WfeExecutor {
     pub fn new(org: Arc<dyn OrgPort>, wfd: Arc<dyn WfdPort>, wfe: Arc<dyn WfePort>) -> Self {
-        Self { org, wfd, wfe }
+        let autoexec = AutoexecExecutor::new(
+            RestExecutor::new(),
+            SqlExecutor::new(None),
+            CalcExecutor::new(),
+        );
+        Self { org, wfd, wfe, autoexec }
+    }
+
+    pub fn with_autoexec(
+        org: Arc<dyn OrgPort>,
+        wfd: Arc<dyn WfdPort>,
+        wfe: Arc<dyn WfePort>,
+        autoexec: AutoexecExecutor,
+    ) -> Self {
+        Self { org, wfd, wfe, autoexec }
     }
 }
 
@@ -295,11 +312,48 @@ impl WfeExecutor {
                 user_id: fallback_actor.user_id,
                 role: "system".into(),
             };
+
+            // Execute the autoexec node
+            let exec_result = if let Some(autoexec_def) = &transition.autoexec {
+                let ctx = AutoexecContext {
+                    wfe_id: wfes.wfe_id,
+                    dynctx: wfes.dynctx.as_value().clone(),
+                    params: json!({}),
+                };
+                match self.autoexec.execute(autoexec_def, &ctx).await {
+                    Ok(result) => Some(result),
+                    Err(e) => {
+                        tracing::error!("autoexec error: {:?}", e);
+                        return Err(EngineError::Autoexec(e.to_string()));
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Build input with execution result
             let action = format!("auto:{}", transition.id);
-            let input = json!({ "autoexec": transition.autoexec });
+            let input = if let Some(result) = &exec_result {
+                json!({ "autoexec": transition.autoexec, "result": result })
+            } else {
+                json!({ "autoexec": transition.autoexec })
+            };
+
+            // Merge $exec.result into dynctx for wfes_effects evaluation
+            let enhanced_dynctx = if let Some(result) = &exec_result {
+                let mut obj = if let serde_json::Value::Object(m) = wfes.dynctx.as_value() {
+                    m.clone()
+                } else {
+                    serde_json::Map::new()
+                };
+                obj.insert("_exec".to_string(), json!({ "result": result }));
+                wfes.dynctx.clone().merge(obj)
+            } else {
+                wfes.dynctx.clone()
+            };
 
             let dynctx = dynctx_apply::apply(
-                &wfes.dynctx,
+                &enhanced_dynctx,
                 &transition.wfes_effects,
                 &system_actor,
                 wfes.wfe_id,

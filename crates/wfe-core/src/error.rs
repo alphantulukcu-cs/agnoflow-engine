@@ -24,4 +24,6 @@ pub enum EngineError {
     InvalidWfd(String),
     #[error("effect value error: {0}")]
     EffectValue(String),
+    #[error("autoexec error: {0}")]
+    Autoexec(String),
 }

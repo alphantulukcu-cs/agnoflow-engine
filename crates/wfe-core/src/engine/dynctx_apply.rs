@@ -109,6 +109,25 @@ fn resolve_special(s: &str, actor: &Actor, wfe_id: Uuid, _action: &str, input: &
 }
 
 fn resolve_ctx_ref(path: &str, ctx: &DynCtx) -> Result<Value, EngineError> {
+    // Handle $exec.result.field_name
+    if path.starts_with("$exec.") {
+        let stripped = &path[6..];
+        let mut current = ctx.as_value();
+
+        // First try to get _exec field
+        if let Some(exec) = current.get("_exec") {
+            current = exec;
+            for part in stripped.split('.') {
+                current = current
+                    .get(part)
+                    .ok_or_else(|| EngineError::EffectValue(format!("exec ref path not found: {path}")))?;
+            }
+            return Ok(current.clone());
+        }
+
+        return Err(EngineError::EffectValue(format!("_exec not found in context")));
+    }
+
     let stripped = path.strip_prefix("$ctx.").unwrap_or(path);
 
     let mut current = ctx.as_value();

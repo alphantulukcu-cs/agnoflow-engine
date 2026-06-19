@@ -1,3 +1,4 @@
+pub mod autoexec;
 pub mod error;
 pub mod executor;
 pub mod models;
@@ -8,3 +9,4 @@ pub mod wfe_adapter;
 pub use executor::WfeExecutor;
 pub use org_adapter::OrgAdapter;
 pub use wfe_adapter::WfeAdapter;
+pub use autoexec::{AutoexecExecutor, RestExecutor, SqlExecutor, CalcExecutor};

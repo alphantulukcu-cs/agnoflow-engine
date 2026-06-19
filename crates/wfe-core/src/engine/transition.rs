@@ -51,6 +51,7 @@ pub async fn apply_action(
         wfes.wfe_id,
         action,
         input,
+        &wfd.context,
     )?;
 
     // 4. Append to WFAH (immutable push)

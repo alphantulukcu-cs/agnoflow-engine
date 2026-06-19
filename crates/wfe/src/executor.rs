@@ -113,6 +113,7 @@ impl WfeExecutor {
             temp_wfe_id,
             "start",
             input,
+            &wfd.context,
         )?;
 
         let temp_wfes = WFES {
@@ -304,6 +305,7 @@ impl WfeExecutor {
                 wfes.wfe_id,
                 &action,
                 &input,
+                &wfd.context,
             )?;
             let wfah = wfes.wfah.push(action, system_actor, Some(input));
             let seq = wfah.entries().len() as u32;

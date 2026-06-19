@@ -18,6 +18,7 @@ pub fn apply(
     wfe_id: Uuid,
     action: &str,
     input: &Value,
+    wfd_context: &Value,
 ) -> Result<DynCtx, EngineError> {
     let mut patch = serde_json::Map::new();
     for (field, effect_val) in &effects.set {
@@ -38,22 +39,31 @@ pub fn apply(
         patch.insert(field.clone(), next);
     }
 
-    // Always expose the executing actor under _step_<action> so downstream
-    // c_orgu rules can reference it via from: "$ctx._step_<action>.actor.orgu"
-    // without requiring explicit wfes_effects.set["key"] = "$actor".
+    // Schema-driven injection: only inject _step_<action> when context declares it
+    // with x-wf-readonly: true. Naming convention _step_<action> is the contract.
     let step_key = format!("_step_{}", action);
-    patch.insert(
-        step_key,
-        json!({
-            "actor": {
-                "orgu":    actor.orgu_id,
-                "user":    actor.user_id,
-                "orgu_id": actor.orgu_id,
-                "user_id": actor.user_id,
-                "role":    actor.role,
-            }
-        }),
-    );
+    let should_inject = wfd_context
+        .get("properties")
+        .and_then(|p| p.get(&step_key))
+        .and_then(|prop| prop.get("x-wf-readonly"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    if should_inject {
+        patch.insert(
+            step_key,
+            json!({
+                "actor": {
+                    "orgu":    actor.orgu_id,
+                    "orgu_id": actor.orgu_id,
+                    "user":    actor.user_id,
+                    "user_id": actor.user_id,
+                    "role":    actor.role,
+                },
+                "at": Utc::now().format("%Y%m%d%H%M%S").to_string()
+            }),
+        );
+    }
 
     Ok(ctx.merge(patch))
 }
@@ -139,7 +149,7 @@ mod tests {
             .set
             .insert("status".into(), EffectValue::Literal(json!("pending")));
 
-        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({}), &json!({})).unwrap();
         assert_eq!(new_ctx.get("status"), Some(&json!("pending")));
     }
 
@@ -153,7 +163,7 @@ mod tests {
             .set
             .insert("initiated_by".into(), EffectValue::Literal(json!("$actor")));
 
-        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({}), &json!({})).unwrap();
         let stored = new_ctx.get("initiated_by").unwrap();
         assert_eq!(stored["orgu_id"], json!(actor.orgu_id));
         assert_eq!(stored["role"], json!("clerk"));
@@ -171,7 +181,7 @@ mod tests {
         );
         let input = json!({"amount": 500});
 
-        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "submit", &input).unwrap();
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "submit", &input, &json!({})).unwrap();
         assert_eq!(new_ctx.get("amount"), Some(&json!(500)));
     }
 
@@ -181,8 +191,13 @@ mod tests {
         let wfe_id = Uuid::new_v4();
         let actor = actor();
         let effects = WfesEffects::default();
+        let wfd_context = json!({
+            "properties": {
+                "_step_approve": { "type": "object", "x-wf-readonly": true }
+            }
+        });
 
-        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "approve", &json!({})).unwrap();
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "approve", &json!({}), &wfd_context).unwrap();
         let step = new_ctx.get("_step_approve").unwrap();
         assert_eq!(step["actor"]["orgu_id"], json!(actor.orgu_id));
         assert_eq!(step["actor"]["role"], json!("clerk"));
@@ -198,7 +213,7 @@ mod tests {
             .set
             .insert("status".into(), EffectValue::Literal(json!("pending")));
 
-        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({}), &json!({})).unwrap();
         assert!(ctx.get("status").is_none());
         assert!(new_ctx.get("status").is_some());
     }
@@ -220,7 +235,74 @@ mod tests {
             },
         );
 
-        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({})).unwrap();
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "start", &json!({}), &json!({})).unwrap();
         assert_eq!(new_ctx.get("orgu_copy"), Some(&json!("abc-uuid")));
+    }
+
+    #[test]
+    fn does_not_inject_step_when_not_in_schema() {
+        let ctx = DynCtx::empty();
+        let wfe_id = Uuid::new_v4();
+        let actor = actor();
+        let effects = WfesEffects::default();
+        let wfd_context = json!({"properties": {}});
+
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "approve", &json!({}), &wfd_context).unwrap();
+        assert!(new_ctx.get("_step_approve").is_none());
+    }
+
+    #[test]
+    fn injects_step_when_schema_declares_readonly() {
+        let ctx = DynCtx::empty();
+        let wfe_id = Uuid::new_v4();
+        let actor = actor();
+        let effects = WfesEffects::default();
+        let wfd_context = json!({
+            "properties": {
+                "_step_approve": { "type": "object", "x-wf-readonly": true }
+            }
+        });
+
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "approve", &json!({}), &wfd_context).unwrap();
+        let step = new_ctx.get("_step_approve").unwrap();
+        assert!(step.get("actor").is_some());
+        assert_eq!(step["actor"]["role"], json!("clerk"));
+        let at = step["at"].as_str().unwrap();
+        assert_eq!(at.len(), 14);
+        // format: yyyyMMddHHmmss — all digits
+        assert!(at.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn does_not_inject_when_readonly_is_false() {
+        let ctx = DynCtx::empty();
+        let wfe_id = Uuid::new_v4();
+        let actor = actor();
+        let effects = WfesEffects::default();
+        let wfd_context = json!({
+            "properties": {
+                "_step_approve": { "type": "object", "x-wf-readonly": false }
+            }
+        });
+
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "approve", &json!({}), &wfd_context).unwrap();
+        assert!(new_ctx.get("_step_approve").is_none());
+    }
+
+    #[test]
+    fn does_not_inject_step_for_wrong_action_name() {
+        let ctx = DynCtx::empty();
+        let wfe_id = Uuid::new_v4();
+        let actor = actor();
+        let effects = WfesEffects::default();
+        let wfd_context = json!({
+            "properties": {
+                "_step_approve": { "type": "object", "x-wf-readonly": true }
+            }
+        });
+        // Action is "submit", schema only has "_step_approve" — no injection
+        let new_ctx = apply(&ctx, &effects, &actor, wfe_id, "submit", &json!({}), &wfd_context).unwrap();
+        assert!(new_ctx.get("_step_submit").is_none());
+        assert!(new_ctx.get("_step_approve").is_none());
     }
 }

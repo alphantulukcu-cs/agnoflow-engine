@@ -76,33 +76,37 @@ impl WfePort for InMemoryWfePort {
         ctx:    &DynCtx,
         _seq:   u32,
     ) -> Result<(), EngineError> {
-        if let Some(w) = self.store.lock().unwrap().get_mut(&wfe_id) {
-            w.dynctx = ctx.clone();
-        }
+        let mut store = self.store.lock().unwrap();
+        let w = store.get_mut(&wfe_id)
+            .ok_or_else(|| EngineError::WfePort(format!("sim wfe not found: {wfe_id}")))?;
+        w.dynctx = ctx.clone();
         Ok(())
     }
 
     async fn append_wfah(&self, wfe_id: Uuid, entry: &WfahEntry) -> Result<(), EngineError> {
-        if let Some(w) = self.store.lock().unwrap().get_mut(&wfe_id) {
-            let mut entries = w.wfah.entries().to_vec();
-            entries.push(entry.clone());
-            w.wfah = Wfah(entries);
-        }
+        let mut store = self.store.lock().unwrap();
+        let w = store.get_mut(&wfe_id)
+            .ok_or_else(|| EngineError::WfePort(format!("sim wfe not found: {wfe_id}")))?;
+        let mut entries = w.wfah.entries().to_vec();
+        entries.push(entry.clone());
+        w.wfah = Wfah(entries);
         Ok(())
     }
 
     async fn update_c_a(&self, wfe_id: Uuid, c_a: &[CandidateActor]) -> Result<(), EngineError> {
-        if let Some(w) = self.store.lock().unwrap().get_mut(&wfe_id) {
-            w.current_c_a = c_a.to_vec();
-        }
+        let mut store = self.store.lock().unwrap();
+        let w = store.get_mut(&wfe_id)
+            .ok_or_else(|| EngineError::WfePort(format!("sim wfe not found: {wfe_id}")))?;
+        w.current_c_a = c_a.to_vec();
         Ok(())
     }
 
     async fn set_terminal(&self, wfe_id: Uuid, end_response: &Value) -> Result<(), EngineError> {
-        if let Some(w) = self.store.lock().unwrap().get_mut(&wfe_id) {
-            w.status       = WfeStatus::Terminal;
-            w.end_response = Some(end_response.clone());
-        }
+        let mut store = self.store.lock().unwrap();
+        let w = store.get_mut(&wfe_id)
+            .ok_or_else(|| EngineError::WfePort(format!("sim wfe not found: {wfe_id}")))?;
+        w.status       = WfeStatus::Terminal;
+        w.end_response = Some(end_response.clone());
         Ok(())
     }
 }

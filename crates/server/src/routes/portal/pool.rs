@@ -119,7 +119,7 @@ async fn claim(
     actor: PortalActor,
     Path(wfe_id): Path<Uuid>,
 ) -> Result<Json<ClaimResponse>, AppError> {
-    // Re-check eligibility at claim time (guards race condition)
+    // Re-check eligibility at claim time (V1 stateless — no DB write; concurrent claims are possible in V1)
     let ca: Option<Value> = sqlx::query_scalar::<_, Value>(
         "SELECT current_c_a FROM wf.wfe
          WHERE wfe_id = $1 AND status = 'active' AND orgtnt_id = $2"

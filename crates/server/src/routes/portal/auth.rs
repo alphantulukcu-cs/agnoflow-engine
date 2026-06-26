@@ -101,6 +101,7 @@ async fn login(
     let orgtnt_id = sqlx::query_scalar::<_, Uuid>(
         "SELECT orgtnt_id FROM org.orgt_orgu
          WHERE orgu_id = $1 AND is_active = true
+         ORDER BY created_at ASC
          LIMIT 1"
     )
     .bind(body.orgu_id)

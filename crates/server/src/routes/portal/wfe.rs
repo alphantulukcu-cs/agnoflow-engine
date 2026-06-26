@@ -70,7 +70,7 @@ async fn get_wfe_detail(
         "SELECT e.wfd_id, e.wfd_version, e.claimed_by, m.name AS wfd_name
          FROM wf.wfe e
          JOIN wf.wfd_meta m ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
-         WHERE e.wfe_id = $1 AND e.orgtnt_id = $2"
+         WHERE e.wfe_id = $1 AND e.orgtnt_id = $2 AND e.status = 'active'"
     )
     .bind(wfe_id)
     .bind(actor.orgtnt_id)
@@ -226,11 +226,12 @@ async fn submit_action(
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::BAD_REQUEST))?;
 
-    let _ = sqlx::query("UPDATE wf.wfe SET claimed_by = NULL WHERE wfe_id = $1 AND orgtnt_id = $2")
+    sqlx::query("UPDATE wf.wfe SET claimed_by = NULL WHERE wfe_id = $1 AND orgtnt_id = $2")
         .bind(wfe_id)
         .bind(actor.orgtnt_id)
         .execute(&s.pool)
-        .await;
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
     Ok(Json(ActionResponse {
         wfe_status: if result.terminal { "terminal".into() } else { "active".into() },

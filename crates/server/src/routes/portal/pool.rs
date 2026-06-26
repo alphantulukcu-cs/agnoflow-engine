@@ -198,9 +198,10 @@ async fn claim(
         "role":    actor.role
     });
 
-    sqlx::query("UPDATE wf.wfe SET claimed_by = $1, updated_at = now() WHERE wfe_id = $2")
+    sqlx::query("UPDATE wf.wfe SET claimed_by = $1, updated_at = now() WHERE wfe_id = $2 AND orgtnt_id = $3")
         .bind(claimed_by_json)
         .bind(wfe_id)
+        .bind(actor.orgtnt_id)
         .execute(&s.pool)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;

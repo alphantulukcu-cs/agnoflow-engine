@@ -1,0 +1,1 @@
+ALTER TABLE wf.wfe ADD COLUMN IF NOT EXISTS claimed_by JSONB;

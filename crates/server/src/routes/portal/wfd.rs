@@ -118,10 +118,11 @@ async fn start_wfd(
 ) -> Result<Json<StartResponse>, AppError> {
     let version: i32 = sqlx::query_scalar(
         "SELECT version FROM wf.wfd_meta
-         WHERE wfd_id = $1 AND is_active = true
+         WHERE wfd_id = $1 AND is_active = true AND orgtnt_id = $2
          ORDER BY version DESC LIMIT 1"
     )
     .bind(wfd_id)
+    .bind(actor.orgtnt_id)
     .fetch_optional(&s.pool)
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?

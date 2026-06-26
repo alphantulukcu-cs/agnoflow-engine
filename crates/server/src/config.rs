@@ -18,7 +18,7 @@ impl Config {
                 .map_err(|_| "PORT must be a number")?,
             storage: wf_wfd::StorageConfig::from_env(),
             jwt_secret: std::env::var("JWT_SECRET")
-                .expect("JWT_SECRET env var required"),
+                .map_err(|_| "JWT_SECRET env var required")?,
         })
     }
 }

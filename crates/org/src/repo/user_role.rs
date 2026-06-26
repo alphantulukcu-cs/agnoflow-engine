@@ -78,6 +78,7 @@ pub async fn check_user_role(
              WHERE u.u_id    = $1
                AND u.orgu_id = $2
                AND r.name    = $3
+               AND r.is_active = true
                AND u.ur_type != 'excluded'
                AND (u.valid_from  IS NULL OR u.valid_from  <= now())
                AND (u.valid_until IS NULL OR u.valid_until >  now())

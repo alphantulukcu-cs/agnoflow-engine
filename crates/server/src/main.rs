@@ -57,6 +57,7 @@ async fn main() {
         .nest("/wfe/simulate", routes::simulate::router(state.clone()))
         .nest("/wfe",          routes::wfe::router(state.clone()))
         .nest("/autoexec",     routes::autoexec::router(state.clone()))
+        .nest("/portal",       routes::portal::router(state.clone()))
         .layer(CorsLayer::permissive());
 
     let addr = format!("0.0.0.0:{}", cfg.port);

@@ -1,0 +1,1 @@
+ALTER TABLE org.u ADD COLUMN IF NOT EXISTS password_hash TEXT;

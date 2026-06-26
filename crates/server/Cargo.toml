@@ -24,3 +24,5 @@ tower-http         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 dotenvy            = { workspace = true }
+jsonwebtoken       = "9"
+bcrypt             = "0.15"

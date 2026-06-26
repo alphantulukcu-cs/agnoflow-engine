@@ -3,6 +3,7 @@ pub struct Config {
     pub database_url: String,
     pub port:         u16,
     pub storage:      wf_wfd::StorageConfig,
+    pub jwt_secret:   String,
 }
 
 impl Config {
@@ -16,6 +17,8 @@ impl Config {
                 .parse()
                 .map_err(|_| "PORT must be a number")?,
             storage: wf_wfd::StorageConfig::from_env(),
+            jwt_secret: std::env::var("JWT_SECRET")
+                .expect("JWT_SECRET env var required"),
         })
     }
 }

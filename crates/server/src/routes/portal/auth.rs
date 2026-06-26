@@ -60,7 +60,9 @@ async fn login(
     .ok_or_else(|| AppError("Kullanıcı adı veya şifre hatalı.".into(), StatusCode::UNAUTHORIZED))?;
 
     // 2. Verify password
-    let hash = row.password_hash.as_deref().unwrap_or("");
+    let hash = row.password_hash
+        .as_deref()
+        .ok_or_else(|| AppError("Kullanıcı adı veya şifre hatalı.".into(), StatusCode::UNAUTHORIZED))?;
     let ok = bcrypt::verify(&body.password, hash)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     if !ok {

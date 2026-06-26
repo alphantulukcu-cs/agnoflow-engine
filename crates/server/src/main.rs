@@ -20,7 +20,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let cfg = config::Config::from_env().expect("config error");
+    let cfg = Arc::new(config::Config::from_env().expect("config error"));
 
     let pool = PgPoolOptions::new()
         .max_connections(10)
@@ -48,6 +48,7 @@ async fn main() {
         pool:     pool.clone(),
         executor,
         wfd:      wfd_adapter,
+        cfg:      cfg.clone(),
     };
 
     let app = Router::new()

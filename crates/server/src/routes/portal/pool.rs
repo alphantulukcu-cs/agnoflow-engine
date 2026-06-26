@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimedByInfo {
     pub user_id: String,
@@ -172,21 +173,22 @@ async fn claim(
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
     .ok_or_else(|| AppError("WFE bulunamadı.".into(), StatusCode::NOT_FOUND))?;
 
-    if let Some(ref cb) = row.claimed_by {
-        let cb_user = cb.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
-        if cb_user != actor.user_id.to_string() {
-            return Err(AppError(
-                "Bu görev başka biri tarafından alınmış.".into(),
-                StatusCode::CONFLICT,
-            ));
-        }
-        return Ok(Json(ClaimResponse { success: true }));
-    }
+    let (can, reason) = compute_can_claim(
+        &row.current_c_a,
+        &row.claimed_by,
+        actor.orgu_id,
+        actor.user_id,
+        &actor.role,
+    );
 
-    if !actor_in_current_ca(&row.current_c_a, actor.orgu_id, &actor.role) {
+    if !can {
+        let status = match reason.as_deref() {
+            Some("already_claimed") => StatusCode::CONFLICT,
+            _ => StatusCode::FORBIDDEN,
+        };
         return Err(AppError(
-            "Bu görevi almak için yetkiniz yok.".into(),
-            StatusCode::FORBIDDEN,
+            reason.unwrap_or_else(|| "Bu görevi almak için yetkiniz yok.".into()),
+            status,
         ));
     }
 

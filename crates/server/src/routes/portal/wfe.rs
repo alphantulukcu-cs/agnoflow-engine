@@ -226,8 +226,9 @@ async fn submit_action(
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::BAD_REQUEST))?;
 
-    let _ = sqlx::query("UPDATE wf.wfe SET claimed_by = NULL WHERE wfe_id = $1")
+    let _ = sqlx::query("UPDATE wf.wfe SET claimed_by = NULL WHERE wfe_id = $1 AND orgtnt_id = $2")
         .bind(wfe_id)
+        .bind(actor.orgtnt_id)
         .execute(&s.pool)
         .await;
 

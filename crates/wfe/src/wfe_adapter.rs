@@ -68,10 +68,17 @@ impl WfeStore for WfeAdapter {
         let entries: Vec<WfahEntry> = wfah_rows
             .into_iter()
             .map(|r| {
-                let actor: Actor = serde_json::from_value(r.actor).unwrap_or(Actor {
-                    orgu_id: Uuid::nil(),
-                    user_id: Uuid::nil(),
-                    role: "unknown".into(),
+                let actor: Actor = serde_json::from_value(r.actor).unwrap_or_else(|e| {
+                    // WOR-19: bozuk kayıt sessiz kalmasın — audit izi log'a düşer
+                    tracing::warn!(
+                        "wfe {wfe_id} wfah seq {} actor parse edilemedi: {e}",
+                        r.seq
+                    );
+                    Actor {
+                        orgu_id: Uuid::nil(),
+                        user_id: Uuid::nil(),
+                        role: "unknown".into(),
+                    }
                 });
                 WfahEntry {
                     seq: r.seq as u32,

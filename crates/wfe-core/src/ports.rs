@@ -41,6 +41,12 @@ pub trait OrgPort: Send + Sync {
         &self,
         orgu_id: Uuid,
     ) -> Result<Uuid, EngineError>;
+
+    /// Kullanıcının c_u eşleşmesinde kullanılacak kimliği (username).
+    /// v2.2 c_u listeleri username veya UUID string içerebilir.
+    async fn user_ident(&self, _user_id: Uuid) -> Result<Option<String>, EngineError> {
+        Ok(None)
+    }
 }
 
 #[async_trait]

@@ -34,6 +34,19 @@ satırlarını siler ve golden fixture'ı (kredi-basvuru-v2) v2.2 seed'i olarak 
 Kart-limiti akışının v2.2'ye çevirisi ayrı işe bırakıldı — çok elemanlı c_a içeriyorsa
 İNSAN ONAYI gerekir (M10).
 
+## Ek kararlar (bağımsız issue'lar)
+
+- **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).
+  Unset ise dev modu: koruma kapalı + startup uyarısı. Kalıcı çözüm (admin JWT rolleri)
+  ayrı işe bırakıldı.
+- **WOR-11:** `CorsLayer::permissive()` kaldırıldı; `CORS_ORIGINS` env'i, unset ise
+  yalnızca localhost dev origin'leri.
+- **WOR-12/13/14/19:** Eski engine kodu silindiğinden kökten kapandı — v2.2'de
+  autoexec'ler transition'a bağlı sonlu trigger listesidir (sonsuz döngü yolu yok),
+  `trigger` alanı artık gerçekten çalışır, `next_seq` dead-code'ları kaldırıldı.
+- **WOR-16:** OrgAdapter'ın inline `orgtnt_for_orgu` SQL'i korundu (tek sorgu,
+  repo'ya taşıma davranış değiştirmiyor) — istenirse ayrı refactor.
+
 ## Kapsam notları
 
 - WOR-26 / WOR-29 / WOR-30 (editör kararları) bu branch'te ele alınmadı — editör tarafı.

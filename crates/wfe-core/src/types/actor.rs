@@ -35,12 +35,28 @@ pub struct CaRule {
     pub c_u: Vec<String>,
 }
 
-/// Two forms of c_orgu as defined in CLAUDE.md.
+/// WFAH query anchor: look up the last WFAH entry by action name and extract actor.orgu.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WfahQuery {
+    pub wfah:  String,
+    pub field: String,
+}
+
+/// The `from` field in an anchored c_orgu: either a DynCtx path string or a WFAH query object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum COrguFrom {
+    Wfah(WfahQuery),
+    DynCtx(String),
+}
+
+/// Three forms of c_orgu as defined in CLAUDE.md.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum COrguExpr {
-    /// {"from": "$ctx.field.orgu", "traverse": "self"}
-    Anchored { from: String, traverse: String },
+    /// {"from": {"wfah": "...", "field": "actor.orgu"}, "traverse": "..."}
+    /// {"from": "$ctx.field.orgu", "traverse": "..."}
+    Anchored { from: COrguFrom, traverse: String },
     /// ORGTRVLANG expr string or "*:[type:branch]"
     Expr(String),
 }

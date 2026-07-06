@@ -4,7 +4,7 @@ pub mod wfah;
 pub mod wfd;
 pub mod wfe;
 
-pub use actor::{Actor, CaRule, COrguExpr, CandidateActor, OrgUnit};
+pub use actor::{Actor, COrguExpr, COrguFrom, CaRule, CandidateActor, OrgUnit, WfahQuery};
 pub use dynctx::DynCtx;
 pub use wfah::{Wfah, WfahEntry};
 pub use wfd::{WFD, Transition, StartRule, WftRule, WftCondition, WfesEffects, EffectValue};

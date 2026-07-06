@@ -1,7 +1,7 @@
 use crate::{
     error::EngineError,
     ports::{OrgPort, WFES},
-    types::actor::{Actor, COrguExpr, CaRule, CandidateActor},
+    types::actor::{Actor, COrguExpr, COrguFrom, CaRule, CandidateActor},
 };
 use uuid::Uuid;
 
@@ -80,7 +80,15 @@ async fn resolve_c_orgu_for_rule(
                 .await
         }
         COrguExpr::Anchored { from, traverse } => {
-            let anchor = resolve_anchor_from_dynctx(from, wfes)?.unwrap_or(anchor_orgu_id);
+            let anchor = match from {
+                COrguFrom::DynCtx(path) => resolve_anchor_from_dynctx(path, wfes)?.unwrap_or(anchor_orgu_id),
+                COrguFrom::Wfah(query) => {
+                    wfes.wfah.entries().iter().rev()
+                        .find(|e| e.action == query.wfah)
+                        .map(|e| e.actor.orgu_id)
+                        .unwrap_or(anchor_orgu_id)
+                }
+            };
             let expr = normalize_traverse(traverse);
             org.resolve_c_orgu(anchor, &expr, wfes.orgtnt_id).await
         }

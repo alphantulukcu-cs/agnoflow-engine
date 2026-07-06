@@ -1,0 +1,409 @@
+//! WFD v2.2 modeli — Named Nodes, Single-Rule C_A.
+//! Kanonik referans: docs/spec/wfd_types_v2_2.rs + wfd_schema_v2_2.json.
+//! Kural: kod ile spec çelişirse spec kazanır.
+
+use crate::error::EngineError;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+pub const SUPPORTED_WFD_VERSION: &str = "2.2";
+
+fn default_true() -> bool {
+    true
+}
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_true(b: &bool) -> bool {
+    *b
+}
+fn default_timeout() -> u32 {
+    60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wfd {
+    pub wfd_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression_language: Option<String>,
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Root WFD timeout — ISO 8601 duration (örn. "P30D").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// JSON Schema 2020-12 + x-visibility / x-wf-readonly uzantıları.
+    pub context: Value,
+    pub nodes: BTreeMap<String, NodeDef>,
+    pub start: Vec<StartRule>,
+    pub actions: BTreeMap<String, ActionDef>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub autoexec: BTreeMap<String, AutoexecDef>,
+    pub transitions: Vec<Transition>,
+    pub terminals: Vec<Terminal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listable: Vec<ListableRule>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_when: Option<String>,
+}
+
+impl Wfd {
+    /// Yükleme kapısı (M14): tanınmayan `wfd_version` = red; root'ta bilinmeyen alan = red.
+    pub fn from_value(v: Value) -> Result<Wfd, EngineError> {
+        let version = v
+            .get("wfd_version")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                EngineError::UnsupportedWfdVersion("(yok — wfd_version zorunlu)".into())
+            })?;
+        if version != SUPPORTED_WFD_VERSION {
+            return Err(EngineError::UnsupportedWfdVersion(version.to_string()));
+        }
+        serde_json::from_value(v).map_err(|e| EngineError::InvalidWfd(e.to_string()))
+    }
+
+    pub fn from_json(s: &str) -> Result<Wfd, EngineError> {
+        let v: Value =
+            serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
+        Wfd::from_value(v)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// v2.2: TEK kural (obje). Eski array formu deserialize edilmez.
+    pub c_a: CandidateActor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub escalation: Vec<EscalationStep>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EscalationStep {
+    /// ISO 8601 duration — node'a girişten itibaren.
+    pub after: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+    pub wft: Wft,
+}
+
+/// Tek C_A kuralı. match = resolved(c_orgu) AND (rol_match OR user_match).
+/// Verilmeyen alan o kanaldan match üretmez (yok = false, wildcard DEĞİL).
+/// c_u match'i rol-agnostiktir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateActor {
+    pub c_orgu: COrgu,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_r: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_u: Option<Vec<String>>,
+}
+
+impl CandidateActor {
+    /// Kimlik kanalı: rol_match OR user_match (orgu kontrolü çağıran tarafta —
+    /// resolve edilmiş ORGU kümesine üyelik gerektirir).
+    pub fn matches_identity(&self, actor_role: &str, actor_user: &str) -> bool {
+        let role_hit = self
+            .c_r
+            .as_ref()
+            .map_or(false, |r| r.iter().any(|x| x == actor_role));
+        let user_hit = self
+            .c_u
+            .as_ref()
+            .map_or(false, |u| u.iter().any(|x| x == actor_user));
+        role_hit || user_hit
+    }
+
+    /// Canonical node slug (runtime-semantics §2a):
+    /// orgu_slug [+ "__" + sıralı_roller] [+ "__u_" + sıralı_userlar]
+    pub fn slug(&self) -> String {
+        let mut parts = vec![self.c_orgu.slug()];
+        if let Some(r) = &self.c_r {
+            let mut r: Vec<String> = r.iter().map(|x| sanitize(x)).collect();
+            r.sort();
+            parts.push(r.join("-"));
+        }
+        if let Some(u) = &self.c_u {
+            let mut u: Vec<String> = u.iter().map(|x| sanitize(x)).collect();
+            u.sort();
+            parts.push(format!("u_{}", u.join("-")));
+        }
+        parts.join("__")
+    }
+
+    /// Uniqueness karşılaştırması için canonical form (rol/user sıraları normalize).
+    pub fn canonical(&self) -> String {
+        let mut r = self.c_r.clone().unwrap_or_default();
+        r.sort();
+        let mut u = self.c_u.clone().unwrap_or_default();
+        u.sort();
+        format!("{:?}|r:{:?}|u:{:?}", self.c_orgu.slug(), r, u)
+    }
+}
+
+/// §2a sanitize: [A-Za-z0-9] korunur, diğerleri '_', ardışık '_' tekilleştirilir,
+/// baş/son '_' kırpılır. Case korunur.
+pub fn sanitize(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('_') {
+            out.push('_');
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum COrgu {
+    /// ORGTRVLANG ifadesi ("self", "parent", "*:[type:branch]" ...)
+    Selector(String),
+    /// DynCtx veya WFAH anchor'ından göreli traversal.
+    Anchor { from: AnchorFrom, traverse: String },
+}
+
+impl COrgu {
+    pub fn slug(&self) -> String {
+        match self {
+            COrgu::Selector(s) => sanitize(s),
+            COrgu::Anchor { from, traverse } => match from {
+                AnchorFrom::Ctx(p) => format!("{}_{}", sanitize(p), sanitize(traverse)),
+                AnchorFrom::Wfah { wfah, .. } => {
+                    format!("wfah_{}_{}", sanitize(wfah), sanitize(traverse))
+                }
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnchorFrom {
+    Ctx(String),
+    Wfah {
+        wfah: String,
+        field: String,
+        /// "first" | "last" (default: last) — M9.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        occurrence: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionDef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input: InputDef,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputDef {
+    pub required: Vec<String>,
+    pub optional: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoexecDef {
+    #[serde(rename = "type")]
+    pub kind: AutoexecType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u32,
+    pub config: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoexecType {
+    Rest,
+    Sql,
+    Calc,
+    Python,
+    Lambda,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WfesEffects {
+    pub set: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerInvocation {
+    /// Root autoexec kataloğundaki key.
+    #[serde(rename = "use")]
+    pub use_: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retry: Vec<Retrier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch: Option<CatchDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Retrier {
+    pub error_equals: Vec<String>,
+    #[serde(default = "Retrier::d_interval")]
+    pub interval_seconds: u32,
+    #[serde(default = "Retrier::d_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "Retrier::d_backoff")]
+    pub backoff_rate: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_delay_seconds: Option<u32>,
+}
+
+impl Retrier {
+    fn d_interval() -> u32 {
+        1
+    }
+    fn d_attempts() -> u32 {
+        3
+    }
+    fn d_backoff() -> f64 {
+        2.0
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatchDef {
+    #[serde(default = "CatchDef::d_all")]
+    pub error_equals: Vec<String>,
+    pub wfes_effects: WfesEffects,
+}
+
+impl CatchDef {
+    fn d_all() -> Vec<String> {
+        vec!["WFD.ALL".into()]
+    }
+}
+
+/// WFT üç formdan biridir (M3): {node} / {terminal} / {conditions, default?}.
+/// Inline `wft.c_a` YOKTUR.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Wft {
+    Node {
+        node: String,
+    },
+    Terminal {
+        terminal: String,
+    },
+    Conditional {
+        conditions: Vec<WftCondition>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<WftTarget>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WftTarget {
+    Node { node: String },
+    Terminal { terminal: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WftCondition {
+    pub when: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartRule {
+    pub id: String,
+    /// v2.2: TEK kural.
+    pub c_a: CandidateActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger: Vec<TriggerInvocation>,
+    pub wft: Wft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Transition {
+    pub id: String,
+    /// Kaynak node slug'ı veya slug listesi (M2).
+    pub from: FromNodes,
+    /// Opsiyonel ek veri guard'ı — state seçimi DEĞİL (M2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    pub action: String,
+    /// Opsiyonel EK yetki kısıtı — node c_a'sının üstüne AND'lenir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_a: Option<CandidateActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger: Vec<TriggerInvocation>,
+    pub wft: Wft,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FromNodes {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl FromNodes {
+    pub fn iter(&self) -> Vec<&str> {
+        match self {
+            FromNodes::One(s) => vec![s.as_str()],
+            FromNodes::Many(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+
+    pub fn contains(&self, node: &str) -> bool {
+        self.iter().iter().any(|n| *n == node)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Terminal {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+    pub wfe_end_response: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListableRule {
+    /// v2.2: TEK kural (çoklu grant = çoklu kayıt).
+    pub c_a: CandidateActor,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+}

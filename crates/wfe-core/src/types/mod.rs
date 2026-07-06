@@ -2,6 +2,7 @@ pub mod actor;
 pub mod dynctx;
 pub mod wfah;
 pub mod wfd;
+pub mod wfd_v22;
 pub mod wfe;
 
 pub use actor::{Actor, COrguExpr, COrguFrom, CaRule, CandidateActor, OrgUnit, WfahQuery};

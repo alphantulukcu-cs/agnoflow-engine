@@ -22,6 +22,8 @@ pub enum EngineError {
     WfePort(String),
     #[error("invalid wfd: {0}")]
     InvalidWfd(String),
+    #[error("unsupported wfd_version: {0} (desteklenen: 2.2)")]
+    UnsupportedWfdVersion(String),
     #[error("effect value error: {0}")]
     EffectValue(String),
     #[error("autoexec error: {0}")]

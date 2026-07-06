@@ -6,6 +6,9 @@ pub struct Config {
     pub jwt_secret:   String,
     /// İzinli CORS origin'leri (virgülle ayrık). Boşsa localhost dev origin'leri.
     pub cors_origins: Vec<String>,
+    /// /org admin API'si için zorunlu anahtar (X-Admin-Key). Yoksa dev modu:
+    /// koruma kapalı, startup'ta uyarı loglanır (WOR-10).
+    pub admin_api_key: Option<String>,
 }
 
 impl Config {
@@ -30,6 +33,7 @@ impl Config {
                         "http://127.0.0.1:5173".into(),
                     ]
                 }),
+            admin_api_key: std::env::var("ADMIN_API_KEY").ok(),
         })
     }
 }

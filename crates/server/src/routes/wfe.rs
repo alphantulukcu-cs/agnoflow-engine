@@ -125,9 +125,16 @@ async fn possible_actions(
         .map_err(AppError::from)
 }
 
+#[derive(Deserialize)]
+struct WfeListQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 async fn list_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
+    axum::extract::Query(q): axum::extract::Query<WfeListQuery>,
 ) -> Result<Json<Vec<wf_wfe::models::WfeRow>>, AppError> {
     let actor = extract_actor(&headers)?;
     // WOR-5 fix: orgu_id tenant DEĞİLDİR — orgtnt_id org katmanından çözülür
@@ -137,7 +144,9 @@ async fn list_wfe(
         .orgtnt_for_orgu(actor.orgu_id)
         .await
         .map_err(AppError::from)?;
-    wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id)
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id, limit, offset)
         .await
         .map(Json)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))

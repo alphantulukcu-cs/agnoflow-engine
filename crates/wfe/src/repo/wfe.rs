@@ -15,11 +15,19 @@ pub async fn get(pool: &PgPool, wfe_id: Uuid) -> Result<WfeRow, WfeError> {
     .ok_or_else(|| WfeError::NotFound(wfe_id.to_string()))
 }
 
-pub async fn list_by_tenant(pool: &PgPool, orgtnt_id: Uuid) -> Result<Vec<WfeRow>, WfeError> {
+pub async fn list_by_tenant(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WfeRow>, WfeError> {
     sqlx::query_as::<_, WfeRow>(&format!(
-        "SELECT {WFE_COLUMNS} FROM wf.wfe WHERE orgtnt_id = $1 ORDER BY created_at DESC"
+        "SELECT {WFE_COLUMNS} FROM wf.wfe WHERE orgtnt_id = $1
+         ORDER BY created_at DESC LIMIT $2 OFFSET $3"
     ))
     .bind(orgtnt_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(WfeError::Database)

@@ -21,13 +21,17 @@ pub fn router(state: AppState) -> Router {
 #[derive(Deserialize)]
 struct ListQuery {
     orgtnt_id: Uuid,
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 async fn list_wfd(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<wf_wfd::models::WfdMeta>>, AppError> {
-    wf_wfd::repo::list(&s.pool, q.orgtnt_id)
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0).max(0);
+    wf_wfd::repo::list(&s.pool, q.orgtnt_id, limit, offset)
         .await
         .map(Json)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))

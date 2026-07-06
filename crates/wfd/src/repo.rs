@@ -38,14 +38,22 @@ pub async fn get_meta(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<WfdMe
     .ok_or_else(|| WfdError::NotFound(format!("{wfd_id} v{version}")))
 }
 
-pub async fn list(pool: &PgPool, orgtnt_id: Uuid) -> Result<Vec<WfdMeta>, WfdError> {
+pub async fn list(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WfdMeta>, WfdError> {
     sqlx::query_as::<_, WfdMeta>(
         "SELECT wfd_id, orgtnt_id, name, version, s3_key, is_active, created_at
          FROM wf.wfd_meta
          WHERE orgtnt_id = $1 AND is_active = true
-         ORDER BY name, version DESC"
+         ORDER BY name, version DESC
+         LIMIT $2 OFFSET $3"
     )
     .bind(orgtnt_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(WfdError::Database)

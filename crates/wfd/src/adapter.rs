@@ -12,11 +12,20 @@ use wfe_core::EngineError;
 pub struct WfdAdapter {
     pub pool: PgPool,
     pub storage: Operator,
+    /// (wfd_id, version) → Wfd — WFD satırları immutable olduğundan
+    /// süresiz cache güvenlidir (WOR-17). Kaba sınır: CACHE_CAP.
+    cache: tokio::sync::RwLock<std::collections::HashMap<(Uuid, i32), Wfd>>,
 }
+
+const CACHE_CAP: usize = 256;
 
 impl WfdAdapter {
     pub fn new(pool: PgPool, storage: Operator) -> Self {
-        Self { pool, storage }
+        Self {
+            pool,
+            storage,
+            cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        }
     }
 
     /// Upload a new WFD — v2.2 yükleme kapısı (M14) + custom validator,
@@ -66,6 +75,9 @@ impl WfdAdapter {
 #[async_trait]
 impl WfdStore for WfdAdapter {
     async fn fetch(&self, wfd_id: Uuid, version: i32) -> Result<Wfd, EngineError> {
+        if let Some(cached) = self.cache.read().await.get(&(wfd_id, version)) {
+            return Ok(cached.clone());
+        }
         let meta = repo::get_meta(&self.pool, wfd_id, version)
             .await
             .map_err(|e| EngineError::WfdPort(e.to_string()))?;
@@ -80,6 +92,13 @@ impl WfdStore for WfdAdapter {
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| EngineError::InvalidWfd(format!("utf8: {e}")))?;
         // M14: wfd_version kapısı fetch'te de uygulanır — eski format çalıştırılamaz
-        Wfd::from_json(text)
+        let wfd = Wfd::from_json(text)?;
+
+        let mut cache = self.cache.write().await;
+        if cache.len() >= CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert((wfd_id, version), wfd.clone());
+        Ok(wfd)
     }
 }

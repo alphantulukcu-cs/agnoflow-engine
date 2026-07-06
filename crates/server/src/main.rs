@@ -3,7 +3,7 @@ mod error;
 mod routes;
 mod state;
 
-use axum::Router;
+use axum::{response::IntoResponse, Router};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Executor;
 use std::sync::Arc;
@@ -79,8 +79,39 @@ async fn main() {
         cfg: cfg.clone(),
     };
 
+    // WOR-10: /org admin API'si anahtar korumalı — ADMIN_API_KEY set edilmemişse
+    // yalnızca dev için açık kalır ve yüksek sesle uyarılır
+    let org_router = match cfg.admin_api_key.clone() {
+        Some(key) => routes::org::router(pool.clone()).layer(
+            axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
+                let key = key.clone();
+                async move {
+                    let provided = req
+                        .headers()
+                        .get("x-admin-key")
+                        .and_then(|v| v.to_str().ok());
+                    if provided == Some(key.as_str()) {
+                        next.run(req).await
+                    } else {
+                        (
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "X-Admin-Key required",
+                        )
+                            .into_response()
+                    }
+                }
+            }),
+        ),
+        None => {
+            tracing::warn!(
+                "ADMIN_API_KEY tanımlı değil — /org admin API'si KORUMASIZ (yalnızca dev için kabul edilebilir)"
+            );
+            routes::org::router(pool.clone())
+        }
+    };
+
     let app = Router::new()
-        .nest("/org", routes::org::router(pool.clone()))
+        .nest("/org", org_router)
         .nest("/wfd", routes::wfd::router(state.clone()))
         .nest("/wfe/simulate", routes::simulate::router(state.clone()))
         .nest("/wfe", routes::wfe::router(state.clone()))

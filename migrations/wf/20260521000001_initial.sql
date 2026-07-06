@@ -1,3 +1,6 @@
+-- WOR-15: uuid_generate_v4() bağımlılığı — org migrationdan bağımsız çalışabilmeli
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
 CREATE SCHEMA IF NOT EXISTS wf;
 
 CREATE TABLE wf.wfd_meta (

@@ -8,6 +8,14 @@ pub enum EngineError {
     TransitionNotFound(String),
     #[error("wfe is terminal — no further actions accepted")]
     WfeTerminal,
+    #[error("wfe is unassigned — claim required before acting")]
+    NotClaimed,
+    #[error("actor is not the assignment owner of this wfe")]
+    NotOwner,
+    #[error("WFD.NoConditionMatched: no wft condition matched and no default given")]
+    NoConditionMatched,
+    #[error("invalid action input: {0}")]
+    InvalidInput(String),
     #[error("start rule not matched — actor not eligible to initiate this workflow")]
     StartNotEligible,
     #[error("zen evaluation error: {0}")]

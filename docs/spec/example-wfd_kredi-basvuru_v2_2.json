@@ -1,0 +1,376 @@
+{
+  "wfd_version": "2.2",
+  "expression_language": "zen@1",
+  "id": "kredi-basvuru-v2",
+  "name": "Kredi Başvurusu",
+  "version": "2.1.0",
+  "description": "Bireysel kredi başvurusu onay akışı — v2.2: tek-kural C_A, slug node kimliği + label.",
+  "timeout": "P30D",
+  "context": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "applicant": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tckid": {
+            "type": "string"
+          },
+          "income": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "tckid",
+          "income"
+        ]
+      },
+      "credit_info": {
+        "type": "object",
+        "properties": {
+          "amount_requested": {
+            "type": "number"
+          },
+          "purpose": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "amount_requested"
+        ]
+      },
+      "manager_decision": {
+        "type": "string",
+        "enum": [
+          "approve",
+          "reject"
+        ],
+        "description": "Müdürün nihai kararı; manager_decide aksiyonunun input'udur."
+      },
+      "initiated_by": {
+        "type": "object",
+        "x-wf-readonly": true
+      },
+      "credit_score": {
+        "type": "number",
+        "x-wf-readonly": true
+      },
+      "credit_grade": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "within_limit": {
+        "type": "boolean",
+        "x-wf-readonly": true
+      },
+      "score_fetch_failed": {
+        "type": "boolean",
+        "x-wf-readonly": true
+      },
+      "analyst_approved_at": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "manager_reviewed_at": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "internal_notes": {
+        "type": "string",
+        "x-visibility": {
+          "c_r": [
+            "creditDeptManager",
+            "branchManager"
+          ]
+        }
+      }
+    },
+    "required": [
+      "applicant",
+      "credit_info"
+    ]
+  },
+  "nodes": {
+    "self__creditAnalyst": {
+      "label": "Analist Havuzu",
+      "description": "Başvuru, şubenin kredi analisti havuzunda claim edilmeyi bekliyor.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "creditAnalyst"
+        ]
+      },
+      "escalation": [
+        {
+          "after": "P3D",
+          "wfes_effects": {
+            "set": {
+              "internal_notes": "SLA aşımı: analist 3 gün içinde işlem yapmadı, müdüre eskalasyon."
+            }
+          },
+          "wft": {
+            "node": "self__branchManager"
+          }
+        }
+      ]
+    },
+    "self__branchManager": {
+      "label": "Şube Müdürü Havuzu",
+      "description": "Nihai karar için şube müdürü havuzunda.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "branchManager"
+        ]
+      },
+      "escalation": [
+        {
+          "after": "P5D",
+          "wft": {
+            "node": "parent__creditDeptManager"
+          }
+        }
+      ]
+    },
+    "parent__creditDeptManager": {
+      "label": "Departman Müdürü Havuzu",
+      "description": "Şube müdürü SLA'yı aşarsa üst birimdeki kredi departman müdürü havuzuna eskale edilir.",
+      "c_a": {
+        "c_orgu": "parent",
+        "c_r": [
+          "creditDeptManager"
+        ]
+      }
+    }
+  },
+  "start": [
+    {
+      "id": "start_branch_clerk",
+      "c_a": {
+        "c_orgu": "*:[type:branch]",
+        "c_r": [
+          "branchClerk"
+        ]
+      },
+      "wfes_effects": {
+        "set": {
+          "initiated_by": "$actor"
+        }
+      },
+      "wft": {
+        "node": "self__creditAnalyst"
+      }
+    }
+  ],
+  "actions": {
+    "analyst_approve": {
+      "label": "Analist Değerlendirmesi",
+      "description": "Analistin başvuruyu değerlendirmesi. Kredi skoru ve limit kontrolü trigger'larla otomatik yapılır.",
+      "input": {
+        "required": [
+          "credit_info.amount_requested"
+        ],
+        "optional": [
+          "internal_notes"
+        ]
+      }
+    },
+    "manager_decide": {
+      "label": "Müdür Kararı",
+      "description": "Müdürün (şube veya departman) nihai kararı.",
+      "input": {
+        "required": [
+          "manager_decision"
+        ],
+        "optional": [
+          "internal_notes"
+        ]
+      }
+    }
+  },
+  "autoexec": {
+    "kredi_skoru_getir": {
+      "type": "rest",
+      "description": "Başvuranın kredi skorunu dış servisten getirir.",
+      "timeout_seconds": 10,
+      "config": {
+        "method": "GET",
+        "url": "https://credit-score.internal/score",
+        "params": {
+          "tckid": "$ctx.applicant.tckid"
+        }
+      },
+      "wfes_effects": {
+        "set": {
+          "credit_score": "$exec.result.score",
+          "credit_grade": "$exec.result.grade"
+        }
+      }
+    },
+    "limit_kontrol": {
+      "type": "calc",
+      "description": "Talep edilen tutarın hesaplanan limite uyup uymadığını belirler.",
+      "timeout_seconds": 5,
+      "config": {
+        "expressions": {
+          "within_limit": "$ctx.credit_score >= 700 and $ctx.credit_info.amount_requested <= 50000"
+        }
+      },
+      "wfes_effects": {
+        "set": {
+          "within_limit": "$exec.result.within_limit"
+        }
+      }
+    },
+    "audit_log": {
+      "type": "rest",
+      "description": "Aksiyon audit kaydı gönderir.",
+      "timeout_seconds": 5,
+      "config": {
+        "method": "POST",
+        "url": "https://audit.internal/log",
+        "body": {
+          "wfe_id": "$wfe_id",
+          "actor": "$actor",
+          "at": "$timestamp",
+          "node": "$node"
+        }
+      }
+    }
+  },
+  "transitions": [
+    {
+      "id": "t_analyst_approve",
+      "from": "self__creditAnalyst",
+      "action": "analyst_approve",
+      "wfes_effects": {
+        "set": {
+          "analyst_approved_at": "$timestamp"
+        }
+      },
+      "trigger": [
+        {
+          "use": "kredi_skoru_getir",
+          "retry": [
+            {
+              "error_equals": [
+                "WFD.Timeout",
+                "WFD.AutoexecFailed"
+              ],
+              "interval_seconds": 1,
+              "max_attempts": 3,
+              "backoff_rate": 2.0,
+              "max_delay_seconds": 5
+            }
+          ],
+          "catch": {
+            "error_equals": [
+              "WFD.ALL"
+            ],
+            "wfes_effects": {
+              "set": {
+                "score_fetch_failed": true
+              }
+            }
+          }
+        },
+        {
+          "use": "limit_kontrol",
+          "when": "$ctx.score_fetch_failed != true"
+        },
+        {
+          "use": "audit_log",
+          "required": false
+        }
+      ],
+      "wft": {
+        "conditions": [
+          {
+            "when": "$ctx.score_fetch_failed == true",
+            "node": "self__branchManager"
+          },
+          {
+            "when": "$ctx.within_limit == true",
+            "terminal": "terminal_approved"
+          }
+        ],
+        "default": {
+          "node": "self__branchManager"
+        }
+      }
+    },
+    {
+      "id": "t_manager_decide",
+      "from": [
+        "self__branchManager",
+        "parent__creditDeptManager"
+      ],
+      "action": "manager_decide",
+      "wfes_effects": {
+        "set": {
+          "manager_reviewed_at": "$timestamp"
+        }
+      },
+      "trigger": [
+        {
+          "use": "audit_log",
+          "required": false
+        }
+      ],
+      "wft": {
+        "conditions": [
+          {
+            "when": "$action.input.manager_decision == 'approve'",
+            "terminal": "terminal_approved"
+          }
+        ],
+        "default": {
+          "terminal": "terminal_rejected"
+        }
+      }
+    }
+  ],
+  "terminals": [
+    {
+      "id": "terminal_approved",
+      "wfe_end_response": {
+        "status": "approved",
+        "message": "Başvurunuz onaylandı.",
+        "amount_granted": "$ctx.credit_info.amount_requested",
+        "applicant_name": "$ctx.applicant.name"
+      }
+    },
+    {
+      "id": "terminal_rejected",
+      "wfe_end_response": {
+        "status": "rejected",
+        "message": "Başvurunuz reddedildi.",
+        "amount_granted": 0,
+        "applicant_name": "$ctx.applicant.name"
+      }
+    }
+  ],
+  "listable": [
+    {
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "branchManager"
+        ]
+      }
+    },
+    {
+      "when": "$ctx.credit_info.amount_requested >= 100000",
+      "c_a": {
+        "c_orgu": "parent",
+        "c_r": [
+          "creditDeptManager"
+        ]
+      }
+    }
+  ]
+}

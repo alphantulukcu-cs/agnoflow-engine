@@ -1,0 +1,1013 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://workflow.example/schemas/wfd.schema.v2_2.json",
+  "title": "WFD JSON Schema - Named Nodes Model v2.2",
+  "description": "v2.2 (v2.1 uzerine): (1) C_A tek kuraldir - array/OR-listesi KALDIRILDI. Eslesme semantigi: resolved(c_orgu) AND (rol_match OR user_match); alan yoksa o kanal false'dur (wildcard degil); c_u match'i rol-agnostiktir. (2) Bir canonical c_a workflow'da en fazla BIR node'da bulunur; node key c_a'dan turetilen canonical slug'dir (bkz. runtime-semantics), 'label' display icindir. (3) x-visibility kriterleri bagimsizdir ve aralarinda OR vardir; V hicbir zaman ACT/claim vermez. v2.1 ozellikleri korunur: nodes+from, retry/catch, timeout, default branch, escalation, $exec.result, $node, WFD.* hata taksonomisi, atomik pipeline.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "wfd_version",
+    "id",
+    "name",
+    "version",
+    "context",
+    "start",
+    "actions",
+    "nodes",
+    "transitions",
+    "terminals"
+  ],
+  "properties": {
+    "wfd_version": {
+      "const": "2.2",
+      "description": "WFD spec versiyonu. Dokuman versiyonu olan 'version' alanindan farklidir; engine/editor uyumluluk kontratidir."
+    },
+    "expression_language": {
+      "type": "string",
+      "default": "zen@1",
+      "description": "when/effects expression'larinin dili ve versiyonu."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Bu WFD dokumaninin semver versiyonu."
+    },
+    "description": {
+      "type": "string"
+    },
+    "timeout": {
+      "$ref": "#/$defs/duration",
+      "description": "Opsiyonel WFE toplam yasam suresi. Asilirsa engine WFD.Timeout uretir."
+    },
+    "context": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/contextSchemaNode"
+        },
+        {
+          "type": "object",
+          "required": [
+            "type",
+            "properties"
+          ],
+          "properties": {
+            "type": {
+              "const": "object"
+            },
+            "properties": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/contextSchemaNode"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "nodes": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "Isimli bekleme havuzu katalogu. Her node, WFE'nin insan aksiyonu bekledigi bir konumdur; c_a havuzunu tanimlar. Claim/assignment runtime metadata'dir, node'u degistirmez.",
+      "propertyNames": {
+        "$ref": "#/$defs/idName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/nodeDef"
+      }
+    },
+    "start": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/startRule"
+      }
+    },
+    "actions": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/idName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/actionDef"
+      }
+    },
+    "autoexec": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/idName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/autoexecDef"
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/transition"
+      }
+    },
+    "terminals": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/terminal"
+      }
+    },
+    "listable": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/listableRule"
+      }
+    },
+    "terminal_when": {
+      "$ref": "#/$defs/expression"
+    }
+  },
+  "$defs": {
+    "idName": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
+    },
+    "expression": {
+      "type": "string",
+      "minLength": 1,
+      "description": "GoRules Zen Expression. Namespace'ler: $ctx, $wfah, $node (current node id), $actor, $timestamp, $wfe_id, $action.input.*, $exec.result.*. $exec.response.* gecersizdir."
+    },
+    "contextPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^P(?=\\d|T\\d)(\\d+D)?(T(\\d+H)?(\\d+M)?(\\d+S)?)?$",
+      "description": "ISO 8601 duration alt kumesi, orn: P3D, PT4H, P1DT12H."
+    },
+    "errorName": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Rezerve isimler: WFD.ALL (wildcard, retry listesinde tek basina ve en sonda olmalidir - custom validator kurali), WFD.Timeout, WFD.AutoexecFailed, WFD.NoConditionMatched. Adapter'lar 'WFD.' ile baslamayan kendi isimlerini uretebilir."
+    },
+    "jsonSchemaType": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "object",
+            "array",
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "object",
+              "array",
+              "string",
+              "number",
+              "integer",
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      ]
+    },
+    "contextSchemaNode": {
+      "type": "object",
+      "properties": {
+        "$schema": {
+          "type": "string"
+        },
+        "$id": {
+          "type": "string"
+        },
+        "$defs": {
+          "type": "object"
+        },
+        "$ref": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/jsonSchemaType"
+        },
+        "properties": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/contextSchemaNode"
+          }
+        },
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "items": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/contextSchemaNode"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/contextSchemaNode"
+              }
+            }
+          ]
+        },
+        "additionalProperties": true,
+        "enum": {
+          "type": "array"
+        },
+        "const": true,
+        "default": true,
+        "minimum": {
+          "type": "number"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "exclusiveMinimum": {
+          "type": "number"
+        },
+        "exclusiveMaximum": {
+          "type": "number"
+        },
+        "multipleOf": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "minLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pattern": {
+          "type": "string"
+        },
+        "format": {
+          "type": "string"
+        },
+        "minItems": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxItems": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "uniqueItems": {
+          "type": "boolean"
+        },
+        "minProperties": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maxProperties": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oneOf": {
+          "type": "array"
+        },
+        "anyOf": {
+          "type": "array"
+        },
+        "allOf": {
+          "type": "array"
+        },
+        "not": true,
+        "if": true,
+        "then": true,
+        "else": true,
+        "x-wf-readonly": {
+          "type": "boolean"
+        },
+        "x-visibility": {
+          "$ref": "#/$defs/visibility"
+        }
+      },
+      "additionalProperties": true
+    },
+    "visibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "c_orgu": {
+          "$ref": "#/$defs/cOrgu"
+        },
+        "c_r": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "c_u": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "c_a": {
+          "$ref": "#/$defs/candidateActor",
+          "description": "Tam C_A kuraliyla (scope'lu) eslesenler gorsun demenin yolu."
+        }
+      },
+      "description": "Field-level read grant. Kriterler BAGIMSIZDIR ve aralarinda OR vardir: c_orgu VEYA c_r VEYA c_u VEYA c_a match'i gorunurluk icin yeterlidir (authorization'dan bilincli olarak farkli; V asla ACT/claim vermez). c_r/c_u burada scope'suz degerlendirilir: rol/kisi hangi ORGU'da olursa olsun match eder."
+    },
+    "wfahAnchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wfah",
+        "field"
+      ],
+      "properties": {
+        "wfah": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Action adi. Birden fazla kayit varsa SON eslesen WFAH event'i kullanilir."
+        },
+        "field": {
+          "const": "actor.orgu"
+        },
+        "occurrence": {
+          "type": "string",
+          "enum": [
+            "first",
+            "last"
+          ],
+          "default": "last"
+        }
+      }
+    },
+    "cOrgu": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "from",
+            "traverse"
+          ],
+          "properties": {
+            "from": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "minLength": 1
+                },
+                {
+                  "$ref": "#/$defs/wfahAnchor"
+                }
+              ]
+            },
+            "traverse": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        }
+      ]
+    },
+    "candidateActor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "c_orgu"
+      ],
+      "properties": {
+        "c_orgu": {
+          "$ref": "#/$defs/cOrgu"
+        },
+        "c_r": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "c_u": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "c_r"
+          ]
+        },
+        {
+          "required": [
+            "c_u"
+          ]
+        }
+      ],
+      "description": "Tek C_A kurali. match = resolved(c_orgu) AND (rol_match OR user_match). c_r/c_u'dan en az biri zorunludur; verilmeyen alan o kanaldan match uretmez (yok = false, wildcard degil). c_u match'i rol-agnostiktir: kisi, anchor ORGU'daki herhangi bir rol kaydiyla havuza girer; ACT yine exact (ORGU,(U,R)) tuple ile uygulanir ve WFAH'a o tuple yazilir."
+    },
+    "inputDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "required",
+        "optional"
+      ],
+      "properties": {
+        "required": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/contextPath"
+          }
+        },
+        "optional": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/contextPath"
+          }
+        }
+      }
+    },
+    "actionDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "input"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Opsiyonel display label. v2'deki 'name' alani kaldirildi; ACT kimligi object key'dir."
+        },
+        "description": {
+          "type": "string"
+        },
+        "input": {
+          "$ref": "#/$defs/inputDef"
+        }
+      }
+    },
+    "wfesEffects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "set"
+      ],
+      "properties": {
+        "set": {
+          "type": "object",
+          "propertyNames": {
+            "$ref": "#/$defs/contextPath"
+          },
+          "additionalProperties": true
+        }
+      }
+    },
+    "retrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error_equals"
+      ],
+      "description": "ASL Retry semantigi: hata error_equals ile eslesirse interval_seconds * backoff_rate^attempt bekleyerek max_attempts kez tekrar denenir; max_delay_seconds bekleme suresini kirpar. Tek transition execution'i icindeki tum ziyaretlerde sayac paylasimlidir.",
+      "properties": {
+        "error_equals": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/errorName"
+          }
+        },
+        "interval_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 1
+        },
+        "max_attempts": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 3
+        },
+        "backoff_rate": {
+          "type": "number",
+          "minimum": 1.0,
+          "default": 2.0
+        },
+        "max_delay_seconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "catchDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wfes_effects"
+      ],
+      "description": "Retry tukendikten sonra hatayi yakalar: effects uygulanir, hata handled sayilir ve pipeline devam eder (required degeri ne olursa olsun). Routing YOK - yon karari yine transition.wft'dedir; catch'in yazdigi DynCtx alanlari wft condition'larinda kullanilir.",
+      "properties": {
+        "error_equals": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/errorName"
+          },
+          "default": [
+            "WFD.ALL"
+          ]
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects"
+        }
+      }
+    },
+    "autoexecDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "config"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "rest",
+            "sql",
+            "calc",
+            "python",
+            "lambda"
+          ]
+        },
+        "description": {
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 60,
+          "description": "Adapter execution ust siniri. Asilirsa WFD.Timeout uretilir (retry ile eslesebilir)."
+        },
+        "config": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects",
+          "description": "Adapter ciktisi TEK namespace ile referanslanir: $exec.result.*"
+        }
+      },
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "wft"
+            ]
+          },
+          {
+            "required": [
+              "c_a"
+            ]
+          },
+          {
+            "required": [
+              "terminal"
+            ]
+          },
+          {
+            "required": [
+              "node"
+            ]
+          },
+          {
+            "required": [
+              "action"
+            ]
+          },
+          {
+            "required": [
+              "trigger"
+            ]
+          }
+        ]
+      }
+    },
+    "triggerInvocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "use"
+      ],
+      "properties": {
+        "use": {
+          "$ref": "#/$defs/idName"
+        },
+        "when": {
+          "$ref": "#/$defs/expression"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "true: retry/catch sonrasi hala unhandled hata varsa pipeline fail olur, hicbir diff commit edilmez. false: hata loglanir, pipeline devam eder."
+        },
+        "retry": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/retrier"
+          }
+        },
+        "catch": {
+          "$ref": "#/$defs/catchDef"
+        }
+      }
+    },
+    "triggerList": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/triggerInvocation"
+      }
+    },
+    "nodeDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "c_a"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "UI'da gorunen isim. Editor default uretir, kullanici degistirebilir. Kimlik DEGILDIR."
+        },
+        "description": {
+          "type": "string"
+        },
+        "c_a": {
+          "$ref": "#/$defs/candidateActor",
+          "description": "Bu node'da bekleyen WFE'yi claim edebilecek candidate actor havuzu."
+        },
+        "escalation": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/escalationStep"
+          },
+          "description": "SLA zinciri: WFE bu node'a girdikten itibaren sure asiminda siradaki adim uygulanir. Assigned WFE'de de calisir; escalation WFT'si WFE'yi yeni node'a tasirsa assignment temizlenir."
+        }
+      },
+      "description": "Node key = c_a'dan turetilen canonical slug (validator yeniden hesaplayip karsilastirir). Ayni canonical c_a ikinci bir node'da BULUNAMAZ."
+    },
+    "escalationStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "after",
+        "wft"
+      ],
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/duration"
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects"
+        },
+        "wft": {
+          "$ref": "#/$defs/wft"
+        }
+      }
+    },
+    "wftNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/idName",
+          "description": "Root 'nodes' katalogundaki node id. v2'deki inline wft.c_a formunun yerini alir."
+        }
+      }
+    },
+    "wftSimpleTerminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "terminal"
+      ],
+      "properties": {
+        "terminal": {
+          "$ref": "#/$defs/idName"
+        }
+      }
+    },
+    "wftCondition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "when"
+      ],
+      "properties": {
+        "when": {
+          "$ref": "#/$defs/expression"
+        },
+        "node": {
+          "$ref": "#/$defs/idName"
+        },
+        "terminal": {
+          "$ref": "#/$defs/idName"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "node"
+          ],
+          "not": {
+            "required": [
+              "terminal"
+            ]
+          }
+        },
+        {
+          "required": [
+            "terminal"
+          ],
+          "not": {
+            "required": [
+              "node"
+            ]
+          }
+        }
+      ]
+    },
+    "wftDefault": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/idName"
+        },
+        "terminal": {
+          "$ref": "#/$defs/idName"
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "node"
+          ]
+        },
+        {
+          "required": [
+            "terminal"
+          ]
+        }
+      ]
+    },
+    "wftConditional": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "conditions"
+      ],
+      "properties": {
+        "conditions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/wftCondition"
+          },
+          "description": "Array sirasiyla degerlendirilir; ILK match kazanir (deterministik)."
+        },
+        "default": {
+          "$ref": "#/$defs/wftDefault",
+          "description": "Hicbir condition match olmazsa uygulanir. Yoksa engine WFD.NoConditionMatched uretir."
+        }
+      }
+    },
+    "wft": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/wftNode"
+        },
+        {
+          "$ref": "#/$defs/wftSimpleTerminal"
+        },
+        {
+          "$ref": "#/$defs/wftConditional"
+        }
+      ]
+    },
+    "startRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "c_a",
+        "wft"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/idName"
+        },
+        "c_a": {
+          "$ref": "#/$defs/candidateActor"
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects"
+        },
+        "trigger": {
+          "$ref": "#/$defs/triggerList"
+        },
+        "wft": {
+          "$ref": "#/$defs/wft"
+        }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "from",
+        "action",
+        "wft"
+      ],
+      "description": "Pipeline tek transaction'dir: effects/trigger diff'leri ancak wft basariyla cozuldugunde commit edilir. Ayni node'dan ayni action icin birden fazla transition varsa array sirasinda when'i true olan ILK transition secilir.",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/idName"
+        },
+        "from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/idName"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/idName"
+              }
+            }
+          ],
+          "description": "Bu transition'in gecerli oldugu kaynak node(lar). $ctx.status guard'inin yerini alir."
+        },
+        "when": {
+          "$ref": "#/$defs/expression",
+          "description": "Opsiyonel ek guard. State ayrimi icin degil, ayni node icindeki veri kosullari icin kullanilir."
+        },
+        "action": {
+          "$ref": "#/$defs/idName"
+        },
+        "c_a": {
+          "$ref": "#/$defs/candidateActor",
+          "description": "Opsiyonel EK kisit (tek kural): owner olmak yetmez, owner ayrica bu kurala da match etmelidir."
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects"
+        },
+        "trigger": {
+          "$ref": "#/$defs/triggerList"
+        },
+        "wft": {
+          "$ref": "#/$defs/wft"
+        }
+      }
+    },
+    "terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "wfe_end_response"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/idName"
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects",
+          "description": "v2.1'de opsiyonel."
+        },
+        "wfe_end_response": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/responseValue"
+          }
+        }
+      }
+    },
+    "responseValue": {
+      "oneOf": [
+        {
+          "type": [
+            "string",
+            "number",
+            "integer",
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/responseValue"
+          }
+        },
+        {
+          "type": "object",
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "ctx"
+                ]
+              },
+              {
+                "required": [
+                  "ref"
+                ]
+              }
+            ]
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/responseValue"
+          }
+        }
+      ]
+    },
+    "listableRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "c_a"
+      ],
+      "properties": {
+        "c_a": {
+          "$ref": "#/$defs/candidateActor"
+        },
+        "when": {
+          "$ref": "#/$defs/expression"
+        }
+      }
+    }
+  }
+}

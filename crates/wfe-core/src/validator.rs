@@ -1,0 +1,687 @@
+//! WFD v2.2 custom validator — şemanın yakalayamadığı kurallar.
+//! Spec: docs/spec/wfd-custom-validator-runtime-semantics_v2_2.md §1, §2b, §5, §6.
+//! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
+
+use crate::types::wfd_v22::{Wfd, Wft, WftCondition, WftTarget};
+use serde_json::Value;
+use std::collections::{HashMap, HashSet, VecDeque};
+
+#[derive(Debug, Clone)]
+pub struct ValidationIssue {
+    pub code: String,
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ValidationReport {
+    pub errors: Vec<ValidationIssue>,
+    pub warnings: Vec<ValidationIssue>,
+}
+
+impl ValidationReport {
+    pub fn is_valid(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    fn error(&mut self, code: &str, path: String, message: String) {
+        self.errors.push(ValidationIssue {
+            code: code.into(),
+            path,
+            message,
+        });
+    }
+
+    fn warn(&mut self, code: &str, path: String, message: String) {
+        self.warnings.push(ValidationIssue {
+            code: code.into(),
+            path,
+            message,
+        });
+    }
+}
+
+pub fn validate(wfd: &Wfd) -> ValidationReport {
+    let mut report = ValidationReport::default();
+    check_uniqueness(wfd, &mut report);
+    check_slugs(wfd, &mut report);
+    check_cross_refs(wfd, &mut report);
+    check_wft_conditions(wfd, &mut report);
+    check_graph(wfd, &mut report);
+    check_expressions(wfd, &mut report);
+    check_action_inputs(wfd, &mut report);
+    check_effect_paths(wfd, &mut report);
+    check_retries(wfd, &mut report);
+    check_string_namespaces(wfd, &mut report);
+    report
+}
+
+// ---- §1: uniqueness ----
+
+fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
+    let mut seen = HashSet::new();
+    for (i, t) in wfd.transitions.iter().enumerate() {
+        if !seen.insert(t.id.clone()) {
+            report.error(
+                "unique",
+                format!("transitions[{i}]"),
+                format!("transition id '{}' birden fazla kez tanımlı", t.id),
+            );
+        }
+    }
+    let mut seen = HashSet::new();
+    for (i, s) in wfd.start.iter().enumerate() {
+        if !seen.insert(s.id.clone()) {
+            report.error(
+                "unique",
+                format!("start[{i}]"),
+                format!("start id '{}' birden fazla kez tanımlı", s.id),
+            );
+        }
+    }
+    let mut terminal_ids = HashSet::new();
+    for (i, t) in wfd.terminals.iter().enumerate() {
+        if !terminal_ids.insert(t.id.clone()) {
+            report.error(
+                "unique",
+                format!("terminals[{i}]"),
+                format!("terminal id '{}' birden fazla kez tanımlı", t.id),
+            );
+        }
+    }
+    // node ve terminal id'leri global namespace'te çakışamaz
+    for key in wfd.nodes.keys() {
+        if terminal_ids.contains(key) {
+            report.error(
+                "unique",
+                format!("nodes[{key}]"),
+                format!("'{key}' hem node key hem terminal id — global namespace çakışması"),
+            );
+        }
+    }
+}
+
+// ---- §2b: slug + canonical c_a uniqueness ----
+
+fn check_slugs(wfd: &Wfd, report: &mut ValidationReport) {
+    for (key, node) in &wfd.nodes {
+        let slug = node.c_a.slug();
+        if key != &slug && !is_collision_suffixed(key, &slug) {
+            report.error(
+                "slug",
+                format!("nodes[{key}]"),
+                format!("node key '{key}' != slug(c_a) '{slug}'"),
+            );
+        }
+    }
+    let mut seen: HashMap<String, &String> = HashMap::new();
+    for (key, node) in &wfd.nodes {
+        let canonical = node.c_a.canonical();
+        if let Some(prev) = seen.insert(canonical, key) {
+            report.error(
+                "duplicate_c_a",
+                format!("nodes[{key}]"),
+                format!("aynı canonical c_a iki node'da: '{prev}' ve '{key}'"),
+            );
+        }
+    }
+}
+
+/// Collision durumunda editör `_<fnv1a16>` (4 hex) son eki ekler; validator kabul eder.
+fn is_collision_suffixed(key: &str, slug: &str) -> bool {
+    key.strip_prefix(slug)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .map(|hex| hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+        .unwrap_or(false)
+}
+
+// ---- §1: cross-reference ----
+
+fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
+    for (i, t) in wfd.transitions.iter().enumerate() {
+        let path = format!("transitions[{}]", t.id);
+        for node in t.from.iter() {
+            if !wfd.nodes.contains_key(node) {
+                report.error(
+                    "cross_ref",
+                    format!("{path}.from"),
+                    format!("bilinmeyen node '{node}'"),
+                );
+            }
+        }
+        if !wfd.actions.contains_key(&t.action) {
+            report.error(
+                "cross_ref",
+                format!("{path}.action"),
+                format!("bilinmeyen action '{}'", t.action),
+            );
+        }
+        for (j, trig) in t.trigger.iter().enumerate() {
+            if !wfd.autoexec.contains_key(&trig.use_) {
+                report.error(
+                    "cross_ref",
+                    format!("{path}.trigger[{j}]"),
+                    format!("bilinmeyen autoexec '{}'", trig.use_),
+                );
+            }
+        }
+        check_wft_refs(wfd, &t.wft, &format!("{path}.wft"), report);
+        let _ = i;
+    }
+    for s in &wfd.start {
+        let path = format!("start[{}]", s.id);
+        for (j, trig) in s.trigger.iter().enumerate() {
+            if !wfd.autoexec.contains_key(&trig.use_) {
+                report.error(
+                    "cross_ref",
+                    format!("{path}.trigger[{j}]"),
+                    format!("bilinmeyen autoexec '{}'", trig.use_),
+                );
+            }
+        }
+        check_wft_refs(wfd, &s.wft, &format!("{path}.wft"), report);
+    }
+    for (key, node) in &wfd.nodes {
+        for (j, esc) in node.escalation.iter().enumerate() {
+            check_wft_refs(
+                wfd,
+                &esc.wft,
+                &format!("nodes[{key}].escalation[{j}].wft"),
+                report,
+            );
+        }
+    }
+}
+
+fn check_wft_refs(wfd: &Wfd, wft: &Wft, path: &str, report: &mut ValidationReport) {
+    for (kind, target) in wft_targets(wft) {
+        let known = match kind {
+            TargetKind::Node => wfd.nodes.contains_key(target),
+            TargetKind::Terminal => wfd.terminals.iter().any(|t| t.id == target),
+        };
+        if !known {
+            let noun = match kind {
+                TargetKind::Node => "node",
+                TargetKind::Terminal => "terminal",
+            };
+            report.error(
+                "cross_ref",
+                path.to_string(),
+                format!("bilinmeyen {noun} '{target}'"),
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum TargetKind {
+    Node,
+    Terminal,
+}
+
+fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
+    let mut out = Vec::new();
+    match wft {
+        Wft::Node { node } => out.push((TargetKind::Node, node.as_str())),
+        Wft::Terminal { terminal } => out.push((TargetKind::Terminal, terminal.as_str())),
+        Wft::Conditional {
+            conditions,
+            default,
+        } => {
+            for c in conditions {
+                if let Some(n) = &c.node {
+                    out.push((TargetKind::Node, n.as_str()));
+                }
+                if let Some(t) = &c.terminal {
+                    out.push((TargetKind::Terminal, t.as_str()));
+                }
+            }
+            match default {
+                Some(WftTarget::Node { node }) => out.push((TargetKind::Node, node.as_str())),
+                Some(WftTarget::Terminal { terminal }) => {
+                    out.push((TargetKind::Terminal, terminal.as_str()))
+                }
+                None => {}
+            }
+        }
+    }
+    out
+}
+
+// ---- M3: wft.conditions hedef tekilliği ----
+
+fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
+    let visit = |wft: &Wft, path: String, report: &mut ValidationReport| {
+        if let Wft::Conditional { conditions, .. } = wft {
+            for (i, c) in conditions.iter().enumerate() {
+                check_condition_target(c, &format!("{path}.conditions[{i}]"), report);
+            }
+        }
+    };
+    for t in &wfd.transitions {
+        visit(&t.wft, format!("transitions[{}].wft", t.id), report);
+    }
+    for s in &wfd.start {
+        visit(&s.wft, format!("start[{}].wft", s.id), report);
+    }
+    for (key, node) in &wfd.nodes {
+        for (j, esc) in node.escalation.iter().enumerate() {
+            visit(
+                &esc.wft,
+                format!("nodes[{key}].escalation[{j}].wft"),
+                report,
+            );
+        }
+    }
+}
+
+fn check_condition_target(c: &WftCondition, path: &str, report: &mut ValidationReport) {
+    match (&c.node, &c.terminal) {
+        (Some(_), Some(_)) => report.error(
+            "wft_target",
+            path.to_string(),
+            "condition hem node hem terminal hedefliyor — tam olarak biri olmalı".into(),
+        ),
+        (None, None) => report.error(
+            "wft_target",
+            path.to_string(),
+            "condition hedefsiz — node veya terminal zorunlu".into(),
+        ),
+        _ => {}
+    }
+}
+
+// ---- §5: graf — BFS reachability (escalation DAHİL) + çıkışsız node + ilk-match belirsizliği ----
+
+fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
+    // BFS
+    let mut reached_nodes: HashSet<String> = HashSet::new();
+    let mut reached_terminals: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+
+    fn absorb(
+        targets: Vec<(TargetKind, &str)>,
+        reached_nodes: &mut HashSet<String>,
+        reached_terminals: &mut HashSet<String>,
+        queue: &mut VecDeque<String>,
+    ) {
+        for (kind, target) in targets {
+            match kind {
+                TargetKind::Node => {
+                    if reached_nodes.insert(target.to_string()) {
+                        queue.push_back(target.to_string());
+                    }
+                }
+                TargetKind::Terminal => {
+                    reached_terminals.insert(target.to_string());
+                }
+            }
+        }
+    }
+
+    for s in &wfd.start {
+        absorb(
+            wft_targets(&s.wft),
+            &mut reached_nodes,
+            &mut reached_terminals,
+            &mut queue,
+        );
+    }
+
+    while let Some(node_key) = queue.pop_front() {
+        for t in &wfd.transitions {
+            if t.from.contains(&node_key) {
+                absorb(
+                    wft_targets(&t.wft),
+                    &mut reached_nodes,
+                    &mut reached_terminals,
+                    &mut queue,
+                );
+            }
+        }
+        if let Some(node) = wfd.nodes.get(&node_key) {
+            for esc in &node.escalation {
+                absorb(
+                    wft_targets(&esc.wft),
+                    &mut reached_nodes,
+                    &mut reached_terminals,
+                    &mut queue,
+                );
+            }
+        }
+    }
+
+    for key in wfd.nodes.keys() {
+        if !reached_nodes.contains(key.as_str()) {
+            report.error(
+                "unreachable",
+                format!("nodes[{key}]"),
+                format!("WFD.Unreachable: '{key}' start'tan erişilemiyor"),
+            );
+        }
+    }
+    for t in &wfd.terminals {
+        if !reached_terminals.contains(t.id.as_str()) {
+            report.error(
+                "unreachable",
+                format!("terminals[{}]", t.id),
+                format!("WFD.Unreachable: terminal '{}' hiçbir wft'den referans almıyor", t.id),
+            );
+        }
+    }
+
+    // çıkışsız node: ne transition kaynağı ne escalation'ı var
+    for (key, node) in &wfd.nodes {
+        let has_transition = wfd.transitions.iter().any(|t| t.from.contains(key));
+        if !has_transition && node.escalation.is_empty() {
+            report.error(
+                "no_exit",
+                format!("nodes[{key}]"),
+                format!("'{key}' çıkışsız — transition veya escalation gerekli"),
+            );
+        }
+    }
+
+    // aynı (node, action) için çoklu transition
+    let mut groups: HashMap<(&str, &str), Vec<&crate::types::wfd_v22::Transition>> =
+        HashMap::new();
+    for t in &wfd.transitions {
+        for node in t.from.iter() {
+            groups.entry((node, t.action.as_str())).or_default().push(t);
+        }
+    }
+    for ((node, action), group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let without_when = group.iter().filter(|t| t.when.is_none()).count();
+        let ids: Vec<&str> = group.iter().map(|t| t.id.as_str()).collect();
+        if without_when >= 2 {
+            report.error(
+                "ambiguous_transition",
+                format!("transitions[{}]", ids.join(",")),
+                format!("({node}, {action}) için birden fazla when'siz transition — belirsiz"),
+            );
+        } else {
+            report.warn(
+                "ambiguous_transition",
+                format!("transitions[{}]", ids.join(",")),
+                format!("({node}, {action}) için çoklu transition — runtime ilk-match uygular"),
+            );
+        }
+    }
+}
+
+// ---- §6: ZEN parse ----
+
+fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
+    let check = |expr: &str, path: String, report: &mut ValidationReport| {
+        if let Err(e) = zen_expression::validate::validate_expression(expr) {
+            report.error(
+                "zen_parse",
+                path,
+                format!("ZEN ifadesi parse edilemedi: {e}"),
+            );
+        }
+    };
+
+    let visit_wft = |wft: &Wft, path: &str, report: &mut ValidationReport| {
+        if let Wft::Conditional { conditions, .. } = wft {
+            for (i, c) in conditions.iter().enumerate() {
+                check(&c.when, format!("{path}.conditions[{i}].when"), report);
+            }
+        }
+    };
+
+    for t in &wfd.transitions {
+        let path = format!("transitions[{}]", t.id);
+        if let Some(when) = &t.when {
+            check(when, format!("{path}.when"), report);
+        }
+        for (j, trig) in t.trigger.iter().enumerate() {
+            if let Some(when) = &trig.when {
+                check(when, format!("{path}.trigger[{j}].when"), report);
+            }
+        }
+        visit_wft(&t.wft, &format!("{path}.wft"), report);
+    }
+    for s in &wfd.start {
+        let path = format!("start[{}]", s.id);
+        for (j, trig) in s.trigger.iter().enumerate() {
+            if let Some(when) = &trig.when {
+                check(when, format!("{path}.trigger[{j}].when"), report);
+            }
+        }
+        visit_wft(&s.wft, &format!("{path}.wft"), report);
+    }
+    for (key, node) in &wfd.nodes {
+        for (j, esc) in node.escalation.iter().enumerate() {
+            visit_wft(
+                &esc.wft,
+                &format!("nodes[{key}].escalation[{j}].wft"),
+                report,
+            );
+        }
+    }
+    for (i, l) in wfd.listable.iter().enumerate() {
+        if let Some(when) = &l.when {
+            check(when, format!("listable[{i}].when"), report);
+        }
+    }
+    if let Some(tw) = &wfd.terminal_when {
+        check(tw, "terminal_when".into(), report);
+    }
+}
+
+// ---- §6: action input yolları ----
+
+fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
+    for (name, action) in &wfd.actions {
+        for path in action.input.required.iter().chain(&action.input.optional) {
+            match resolve_schema_path(&wfd.context, path) {
+                PathResolution::Missing => report.error(
+                    "input_path",
+                    format!("actions[{name}].input"),
+                    format!("input yolu '{path}' context şemasında yok"),
+                ),
+                PathResolution::Readonly => report.error(
+                    "readonly_input",
+                    format!("actions[{name}].input"),
+                    format!("input yolu '{path}' x-wf-readonly — kullanıcı yazamaz"),
+                ),
+                PathResolution::Found | PathResolution::Opaque => {}
+            }
+        }
+    }
+}
+
+// ---- §6: wfes_effects.set yolları (catch ve escalation dahil) ----
+
+fn check_effect_paths(wfd: &Wfd, report: &mut ValidationReport) {
+    let check_effects =
+        |effects: &Option<crate::types::wfd_v22::WfesEffects>, path: &str, report: &mut ValidationReport| {
+            let Some(effects) = effects else { return };
+            for key in effects.set.keys() {
+                if let PathResolution::Missing = resolve_schema_path(&wfd.context, key) {
+                    report.error(
+                        "effect_path",
+                        path.to_string(),
+                        format!("effect yolu '{key}' context şemasında yok"),
+                    );
+                }
+            }
+        };
+
+    for s in &wfd.start {
+        check_effects(&s.wfes_effects, &format!("start[{}]", s.id), report);
+        for (j, trig) in s.trigger.iter().enumerate() {
+            if let Some(c) = &trig.catch {
+                check_effects(
+                    &Some(c.wfes_effects.clone()),
+                    &format!("start[{}].trigger[{j}].catch", s.id),
+                    report,
+                );
+            }
+        }
+    }
+    for t in &wfd.transitions {
+        check_effects(&t.wfes_effects, &format!("transitions[{}]", t.id), report);
+        for (j, trig) in t.trigger.iter().enumerate() {
+            if let Some(c) = &trig.catch {
+                check_effects(
+                    &Some(c.wfes_effects.clone()),
+                    &format!("transitions[{}].trigger[{j}].catch", t.id),
+                    report,
+                );
+            }
+        }
+    }
+    for (key, node) in &wfd.nodes {
+        for (j, esc) in node.escalation.iter().enumerate() {
+            check_effects(
+                &esc.wfes_effects,
+                &format!("nodes[{key}].escalation[{j}]"),
+                report,
+            );
+        }
+    }
+    for t in &wfd.terminals {
+        check_effects(&t.wfes_effects, &format!("terminals[{}]", t.id), report);
+    }
+    for (name, ax) in &wfd.autoexec {
+        check_effects(&ax.wfes_effects, &format!("autoexec[{name}]"), report);
+    }
+}
+
+// ---- §6: retry — WFD.ALL tek başına ve yalnızca son retrier'da ----
+
+fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
+    let check_triggers =
+        |triggers: &[crate::types::wfd_v22::TriggerInvocation], path: &str, report: &mut ValidationReport| {
+            for (j, trig) in triggers.iter().enumerate() {
+                let last = trig.retry.len().saturating_sub(1);
+                for (k, r) in trig.retry.iter().enumerate() {
+                    if r.error_equals.iter().any(|e| e == "WFD.ALL") {
+                        if r.error_equals.len() > 1 {
+                            report.error(
+                                "retry_wfd_all",
+                                format!("{path}.trigger[{j}].retry[{k}]"),
+                                "WFD.ALL yalnızca tek başına kullanılabilir".into(),
+                            );
+                        }
+                        if k != last {
+                            report.error(
+                                "retry_wfd_all",
+                                format!("{path}.trigger[{j}].retry[{k}]"),
+                                "WFD.ALL yalnızca son retrier'da kullanılabilir".into(),
+                            );
+                        }
+                    }
+                }
+            }
+        };
+
+    for s in &wfd.start {
+        check_triggers(&s.trigger, &format!("start[{}]", s.id), report);
+    }
+    for t in &wfd.transitions {
+        check_triggers(&t.trigger, &format!("transitions[{}]", t.id), report);
+    }
+}
+
+// ---- M7: $exec.response.* her yerde hata; $ctx.* referans yolları şemada olmalı ----
+
+fn check_string_namespaces(wfd: &Wfd, report: &mut ValidationReport) {
+    let value = match serde_json::to_value(wfd) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    walk_strings(&value, "$", &mut |s, path| {
+        if s.contains("$exec.response.") {
+            report.error(
+                "exec_response",
+                path.to_string(),
+                format!("'$exec.response.*' kaldırıldı (M7) — '$exec.result.*' kullanın: '{s}'"),
+            );
+        }
+        // $ctx.<path> referansları — token'ı çıkar, şemada doğrula
+        let mut rest = s;
+        while let Some(idx) = rest.find("$ctx.") {
+            let token: String = rest[idx + 5..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                .collect();
+            let token = token.trim_end_matches('.').to_string();
+            if !token.is_empty() {
+                if let PathResolution::Missing = resolve_schema_path(&wfd.context, &token) {
+                    report.error(
+                        "ctx_ref",
+                        path.to_string(),
+                        format!("'$ctx.{token}' context şemasında yok"),
+                    );
+                }
+            }
+            rest = &rest[idx + 5..];
+        }
+    });
+}
+
+fn walk_strings<'a>(v: &'a Value, path: &str, f: &mut impl FnMut(&'a str, &str)) {
+    match v {
+        Value::String(s) => f(s, path),
+        Value::Array(arr) => {
+            for (i, item) in arr.iter().enumerate() {
+                walk_strings(item, &format!("{path}[{i}]"), f);
+            }
+        }
+        Value::Object(map) => {
+            for (k, item) in map {
+                // context şeması serbest metin içerebilir (description vb.) — atla
+                if path == "$" && k == "context" {
+                    continue;
+                }
+                walk_strings(item, &format!("{path}.{k}"), f);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---- context şeması yol çözümü ----
+
+enum PathResolution {
+    Found,
+    Missing,
+    /// Şema bu derinliği kısıtlamıyor (properties tanımsız, $ref, vs.)
+    Opaque,
+    Readonly,
+}
+
+fn resolve_schema_path(context: &Value, dotted: &str) -> PathResolution {
+    let mut current = context;
+    let mut readonly = false;
+    for segment in dotted.split('.') {
+        if current.get("$ref").is_some() {
+            return PathResolution::Opaque;
+        }
+        let Some(props) = current.get("properties").and_then(Value::as_object) else {
+            return PathResolution::Opaque;
+        };
+        let Some(next) = props.get(segment) else {
+            return PathResolution::Missing;
+        };
+        current = next;
+        if current
+            .get("x-wf-readonly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            readonly = true;
+        }
+    }
+    if readonly {
+        PathResolution::Readonly
+    } else {
+        PathResolution::Found
+    }
+}

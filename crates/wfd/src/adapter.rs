@@ -1,9 +1,13 @@
 use crate::{repo, storage};
 use async_trait::async_trait;
 use opendal::Operator;
+use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
-use wfe_core::{types::wfd::WFD, EngineError, WfdPort};
+use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::v22::ports::WfdStore;
+use wfe_core::validator;
+use wfe_core::EngineError;
 
 pub struct WfdAdapter {
     pub pool: PgPool,
@@ -15,12 +19,29 @@ impl WfdAdapter {
         Self { pool, storage }
     }
 
-    /// Upload a new WFD — stores JSON in OpenDAL, metadata in PostgreSQL.
+    /// Upload a new WFD — v2.2 yükleme kapısı (M14) + custom validator,
+    /// sonra JSON OpenDAL'a, metadata PostgreSQL'e.
     pub async fn upload(
         &self,
         orgtnt_id: Uuid,
-        wfd: &WFD,
+        wfd_json: &Value,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
+        let wfd = Wfd::from_value(wfd_json.clone())
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+
+        let report = validator::validate(&wfd);
+        if !report.is_valid() {
+            let summary = report
+                .errors
+                .iter()
+                .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(crate::error::WfdError::InvalidJson(format!(
+                "validator: {summary}"
+            )));
+        }
+
         let name = if wfd.name.trim().is_empty() {
             &wfd.id
         } else {
@@ -30,7 +51,7 @@ impl WfdAdapter {
         let wfd_id = Uuid::new_v4();
         let key = storage::s3_key(wfd_id, version);
 
-        let bytes = serde_json::to_vec(wfd)
+        let bytes = serde_json::to_vec(wfd_json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.storage
             .write(&key, bytes)
@@ -43,9 +64,9 @@ impl WfdAdapter {
 }
 
 #[async_trait]
-impl WfdPort for WfdAdapter {
-    async fn fetch(&self, wfd_id: Uuid, version: u32) -> Result<WFD, EngineError> {
-        let meta = repo::get_meta(&self.pool, wfd_id, version as i32)
+impl WfdStore for WfdAdapter {
+    async fn fetch(&self, wfd_id: Uuid, version: i32) -> Result<Wfd, EngineError> {
+        let meta = repo::get_meta(&self.pool, wfd_id, version)
             .await
             .map_err(|e| EngineError::WfdPort(e.to_string()))?;
 
@@ -56,6 +77,9 @@ impl WfdPort for WfdAdapter {
             .map_err(|e| EngineError::WfdPort(format!("storage read: {e}")))?
             .to_bytes();
 
-        serde_json::from_slice::<WFD>(&bytes).map_err(|e| EngineError::InvalidWfd(e.to_string()))
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|e| EngineError::InvalidWfd(format!("utf8: {e}")))?;
+        // M14: wfd_version kapısı fetch'te de uygulanır — eski format çalıştırılamaz
+        Wfd::from_json(text)
     }
 }

@@ -1,3 +1,4 @@
+use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -8,13 +9,13 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
-use crate::{error::AppError, state::AppState};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/",                     post(start_wfe).get(list_wfe))
-        .route("/:id/actions",          post(apply_action))
-        .route("/:id",                  get(query_wfe))
+        .route("/", post(start_wfe).get(list_wfe))
+        .route("/:id/actions", post(apply_action))
+        .route("/:id", get(query_wfe))
+        .route("/:id/claim", post(claim_wfe))
         .route("/:id/possible-actions", get(possible_actions))
         .with_state(state)
 }
@@ -35,18 +36,20 @@ fn parse_uuid_header(headers: &HeaderMap, name: &str) -> Result<Uuid, AppError> 
         .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| AppError(
-            format!("{name} header required (UUID)"),
-            StatusCode::BAD_REQUEST,
-        ))
+        .ok_or_else(|| {
+            AppError(
+                format!("{name} header required (UUID)"),
+                StatusCode::BAD_REQUEST,
+            )
+        })
 }
 
 #[derive(Deserialize)]
 struct StartBody {
-    wfd_id:  Uuid,
-    version: u32,
+    wfd_id: Uuid,
+    version: i32,
     #[serde(default)]
-    input:   Value,
+    input: Value,
 }
 
 async fn start_wfe(
@@ -66,7 +69,7 @@ async fn start_wfe(
 struct ApplyBody {
     action: String,
     #[serde(default)]
-    input:  Value,
+    input: Value,
 }
 
 async fn apply_action(
@@ -83,13 +86,30 @@ async fn apply_action(
         .map_err(AppError::from)
 }
 
+async fn claim_wfe(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+) -> Result<Json<wf_wfe::executor::ClaimOutcome>, AppError> {
+    let actor = extract_actor(&headers)?;
+    s.executor
+        .claim(wfe_id, &actor)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
 async fn query_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(wfe_id): Path<Uuid>,
 ) -> Result<Json<wf_wfe::executor::WfeView>, AppError> {
     let actor = extract_actor(&headers)?;
-    s.executor.query(wfe_id, &actor).await.map(Json).map_err(AppError::from)
+    s.executor
+        .query(wfe_id, &actor)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 async fn possible_actions(
@@ -98,7 +118,11 @@ async fn possible_actions(
     Path(wfe_id): Path<Uuid>,
 ) -> Result<Json<Vec<String>>, AppError> {
     let actor = extract_actor(&headers)?;
-    s.executor.possible_actions(wfe_id, &actor).await.map(Json).map_err(AppError::from)
+    s.executor
+        .possible_actions(wfe_id, &actor)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
 }
 
 async fn list_wfe(
@@ -106,7 +130,14 @@ async fn list_wfe(
     headers: HeaderMap,
 ) -> Result<Json<Vec<wf_wfe::models::WfeRow>>, AppError> {
     let actor = extract_actor(&headers)?;
-    wf_wfe::repo::wfe::list_by_tenant(&s.pool, actor.orgu_id)
+    // WOR-5 fix: orgu_id tenant DEĞİLDİR — orgtnt_id org katmanından çözülür
+    let orgtnt_id = s
+        .executor
+        .org
+        .orgtnt_for_orgu(actor.orgu_id)
+        .await
+        .map_err(AppError::from)?;
+    wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id)
         .await
         .map(Json)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))

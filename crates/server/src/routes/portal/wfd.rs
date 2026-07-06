@@ -1,3 +1,7 @@
+//! Portal WFD endpoint'leri — başlatılabilir WFD listesi + başlatma (v2.2).
+
+use super::jwt::PortalActor;
+use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -7,32 +11,29 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use crate::{error::AppError, state::AppState};
-use super::jwt::PortalActor;
-use wfe_core::{
-    ports::WFES,
-    types::{actor::Actor, dynctx::DynCtx, wfah::Wfah, wfe::WfeStatus},
-    engine::c_a_resolver::actor_in_c_a,
-};
+use wfe_core::types::actor::Actor;
+use wfe_core::types::wfah::Wfah;
+use wfe_core::v22::matcher::{authorize, MatchEnv};
+use wfe_core::v22::ports::WfdStore;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/",              get(list_wfds))
+        .route("/", get(list_wfds))
         .route("/:wfd_id/start", post(start_wfd))
         .with_state(state)
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct WfdMetaRow {
-    wfd_id:  Uuid,
-    name:    String,
+    wfd_id: Uuid,
+    name: String,
     version: i32,
 }
 
 #[derive(Debug, Serialize)]
 struct WfdListItem {
-    id:      Uuid,
-    name:    String,
+    id: Uuid,
+    name: String,
     version: i32,
 }
 
@@ -44,7 +45,7 @@ async fn list_wfds(
         "SELECT DISTINCT ON (name) wfd_id, name, version
          FROM wf.wfd_meta
          WHERE orgtnt_id = $1 AND is_active = true
-         ORDER BY name, version DESC"
+         ORDER BY name, version DESC",
     )
     .bind(actor.orgtnt_id)
     .fetch_all(&s.pool)
@@ -54,31 +55,26 @@ async fn list_wfds(
     let portal_actor = Actor {
         orgu_id: actor.orgu_id,
         user_id: actor.user_id,
-        role:    actor.role.clone(),
+        role: actor.role.clone(),
     };
+    let empty_ctx = serde_json::json!({});
+    let empty_wfah = Wfah::empty();
 
     let mut result = Vec::new();
     for meta in metas {
-        let wfd = s.executor.wfd
-            .fetch(meta.wfd_id, meta.version as u32)
-            .await
-            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
-
-        let dummy_wfes = WFES {
-            wfe_id:      Uuid::nil(),
-            dynctx:      DynCtx::empty(),
-            wfah:        Wfah::empty(),
-            status:      WfeStatus::Active,
-            orgtnt_id:   actor.orgtnt_id,
-            wfd_id:      meta.wfd_id,
-            wfd_version: meta.version as u32,
-            current_c_a: vec![],
-            end_response: None,
+        // Eski formatta kalmış WFD'ler v2.2 kapısını geçemez — listeden düşer
+        let Ok(wfd) = s.wfd.fetch(meta.wfd_id, meta.version).await else {
+            continue;
         };
 
         let mut can_start = false;
         for rule in &wfd.start {
-            if actor_in_c_a(&rule.c_a, &portal_actor, &dummy_wfes, &*s.executor.org)
+            let env = MatchEnv {
+                ctx: &empty_ctx,
+                wfah: &empty_wfah,
+                orgtnt_id: actor.orgtnt_id,
+            };
+            if authorize(&rule.c_a, &portal_actor, env, &*s.executor.org)
                 .await
                 .unwrap_or(false)
             {
@@ -89,8 +85,8 @@ async fn list_wfds(
 
         if can_start {
             result.push(WfdListItem {
-                id:      meta.wfd_id,
-                name:    meta.name,
+                id: meta.wfd_id,
+                name: meta.name,
                 version: meta.version,
             });
         }
@@ -108,6 +104,7 @@ struct StartRequest {
 #[derive(Serialize)]
 struct StartResponse {
     wfe_id: Uuid,
+    current_node: Option<String>,
 }
 
 async fn start_wfd(
@@ -119,7 +116,7 @@ async fn start_wfd(
     let version: i32 = sqlx::query_scalar(
         "SELECT version FROM wf.wfd_meta
          WHERE wfd_id = $1 AND is_active = true AND orgtnt_id = $2
-         ORDER BY version DESC LIMIT 1"
+         ORDER BY version DESC LIMIT 1",
     )
     .bind(wfd_id)
     .bind(actor.orgtnt_id)
@@ -131,13 +128,17 @@ async fn start_wfd(
     let portal_actor = Actor {
         orgu_id: actor.orgu_id,
         user_id: actor.user_id,
-        role:    actor.role.clone(),
+        role: actor.role.clone(),
     };
 
-    let result = s.executor
-        .start(wfd_id, version as u32, &portal_actor, &body.initial_context)
+    let result = s
+        .executor
+        .start(wfd_id, version, &portal_actor, &body.initial_context)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::BAD_REQUEST))?;
 
-    Ok(Json(StartResponse { wfe_id: result.wfe_id }))
+    Ok(Json(StartResponse {
+        wfe_id: result.wfe_id,
+        current_node: result.current_node,
+    }))
 }

@@ -1,32 +1,51 @@
-use std::sync::Arc;
+//! Simülasyon endpoint'leri — editör WFD'yi kaydetmeden dener.
+//! v2.2: Engine saf olduğundan store yok; SimState istemciyle gidip gelir.
+//! Claim akışı simülasyonda atlanır (apply öncesi state aktöre atanır).
+
+use crate::{error::AppError, state::AppState};
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 use uuid::Uuid;
-use wfe_core::types::{actor::Actor, wfd::WFD};
-use wf_wfe::{
-    OrgAdapter, WfeExecutor,
-    sim::{
-        SimState,
-        inline_wfd_port::InlineWfdPort,
-        in_memory_wfe_port::InMemoryWfePort,
-    },
-};
-use crate::{error::AppError, state::AppState};
+use wf_wfe::{sim::SimState, LiveAutoexecRunner, OrgAdapter};
+use wfe_core::types::actor::Actor;
+use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::v22::pipeline::Engine;
+use wfe_core::validator;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/start",            post(sim_start))
-        .route("/apply",            post(sim_apply))
+        .route("/start", post(sim_start))
+        .route("/apply", post(sim_apply))
         .route("/possible-actions", post(sim_possible_actions))
         .with_state(state)
+}
+
+fn parse_and_validate(wfd_json: Value) -> Result<Wfd, AppError> {
+    let wfd = Wfd::from_value(wfd_json)
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    let report = validator::validate(&wfd);
+    if !report.is_valid() {
+        let summary = report
+            .errors
+            .iter()
+            .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError(
+            format!("WFD geçersiz: {summary}"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    Ok(wfd)
 }
 
 // ── /start ──────────────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct SimStartBody {
-    wfd:   WFD,
+    wfd: Value,
     actor: Actor,
     #[serde(default)]
     input: Value,
@@ -34,7 +53,7 @@ struct SimStartBody {
 
 #[derive(serde::Serialize)]
 struct SimStartResponse {
-    sim_state:        SimState,
+    sim_state: SimState,
     possible_actions: Vec<String>,
 }
 
@@ -42,33 +61,26 @@ async fn sim_start(
     State(s): State<AppState>,
     Json(body): Json<SimStartBody>,
 ) -> Result<Json<SimStartResponse>, AppError> {
-    let wfd      = body.wfd;
-    let org      = Arc::new(OrgAdapter::new(s.pool.clone()));
-    let wfd_port = Arc::new(InlineWfdPort::new(wfd.clone()));
-    let wfe_port = Arc::new(InMemoryWfePort::new());
-    let executor = WfeExecutor::new(org.clone(), wfd_port, wfe_port.clone());
+    let wfd = parse_and_validate(body.wfd)?;
+    let org = Arc::new(OrgAdapter::new(s.pool.clone()));
+    let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
+    let engine = Engine { org: &*org, exec: &runner };
 
-    let result = executor
-        .start(Uuid::nil(), 0, &body.actor, &body.input)
+    let orgtnt_id = wfe_core::OrgPort::orgtnt_for_orgu(&*org, body.actor.orgu_id)
         .await
         .map_err(AppError::from)?;
 
-    let wfes = wfe_port
-        .get(result.wfe_id)
-        .ok_or_else(|| AppError("sim state missing after start".into(), StatusCode::INTERNAL_SERVER_ERROR))?;
-    let sim_state = SimState::from_wfes(&wfes);
+    let new = engine
+        .start(&wfd, &body.actor, orgtnt_id, &body.input, Uuid::new_v4())
+        .await
+        .map_err(AppError::from)?;
+    let sim_state = SimState::from_new_wfe(&new);
 
-    let possible_actions = if sim_state.status == wfe_core::types::wfe::WfeStatus::Terminal {
-        vec![]
-    } else {
-        let wfd_port2 = Arc::new(InlineWfdPort::new(wfd));
-        let wfe_port2 = Arc::new(InMemoryWfePort::seeded(wfes));
-        let executor2 = WfeExecutor::new(org, wfd_port2, wfe_port2);
-        executor2
-            .possible_actions(result.wfe_id, &body.actor)
-            .await
-            .map_err(AppError::from)?
-    };
+    let wfes = sim_state.to_wfes(Some(body.actor.user_id));
+    let possible_actions = engine
+        .possible_actions(&wfd, &wfes, &body.actor)
+        .await
+        .map_err(AppError::from)?;
 
     Ok(Json(SimStartResponse { sim_state, possible_actions }))
 }
@@ -77,19 +89,19 @@ async fn sim_start(
 
 #[derive(Deserialize)]
 struct SimApplyBody {
-    wfd:       WFD,
+    wfd: Value,
     sim_state: SimState,
-    actor:     Actor,
-    action:    String,
+    actor: Actor,
+    action: String,
     #[serde(default)]
-    input:     Value,
+    input: Value,
 }
 
 #[derive(serde::Serialize)]
 struct SimApplyResponse {
-    sim_state:        SimState,
-    terminal:         bool,
-    end_response:     Option<Value>,
+    sim_state: SimState,
+    terminal: bool,
+    end_response: Option<Value>,
     possible_actions: Vec<String>,
 }
 
@@ -97,41 +109,36 @@ async fn sim_apply(
     State(s): State<AppState>,
     Json(body): Json<SimApplyBody>,
 ) -> Result<Json<SimApplyResponse>, AppError> {
-    let wfe_id       = body.sim_state.wfe_id;
-    let wfd          = body.wfd;
-    let initial_wfes = body.sim_state.into_wfes();
+    let wfd = parse_and_validate(body.wfd)?;
+    let org = Arc::new(OrgAdapter::new(s.pool.clone()));
+    let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
+    let engine = Engine { org: &*org, exec: &runner };
 
-    let org      = Arc::new(OrgAdapter::new(s.pool.clone()));
-    let wfd_port = Arc::new(InlineWfdPort::new(wfd.clone()));
-    let wfe_port = Arc::new(InMemoryWfePort::seeded(initial_wfes));
-    let executor = WfeExecutor::new(org.clone(), wfd_port, wfe_port.clone());
+    let mut sim_state = body.sim_state;
+    // simülasyon claim'i atlar — state uygulanmadan önce aktöre atanır
+    let wfes = sim_state.to_wfes(Some(body.actor.user_id));
 
-    let result = executor
-        .apply(wfe_id, &body.actor, &body.action, &body.input)
+    let commit = engine
+        .apply(&wfd, &wfes, &body.actor, &body.action, &body.input)
         .await
         .map_err(AppError::from)?;
+    sim_state.apply_commit(&commit);
 
-    let wfes = wfe_port
-        .get(wfe_id)
-        .ok_or_else(|| AppError("sim state missing after apply".into(), StatusCode::INTERNAL_SERVER_ERROR))?;
-    let sim_state = SimState::from_wfes(&wfes);
-
-    let possible_actions = if result.terminal {
+    let terminal = sim_state.status == wfe_core::types::wfe::WfeStatus::Terminal;
+    let possible_actions = if terminal {
         vec![]
     } else {
-        let wfd_port2 = Arc::new(InlineWfdPort::new(wfd));
-        let wfe_port2 = Arc::new(InMemoryWfePort::seeded(wfes));
-        let executor2 = WfeExecutor::new(org, wfd_port2, wfe_port2);
-        executor2
-            .possible_actions(wfe_id, &body.actor)
+        let wfes = sim_state.to_wfes(Some(body.actor.user_id));
+        engine
+            .possible_actions(&wfd, &wfes, &body.actor)
             .await
             .map_err(AppError::from)?
     };
 
     Ok(Json(SimApplyResponse {
+        end_response: sim_state.end_response.clone(),
         sim_state,
-        terminal:         result.terminal,
-        end_response:     result.end_response,
+        terminal,
         possible_actions,
     }))
 }
@@ -140,25 +147,23 @@ async fn sim_apply(
 
 #[derive(Deserialize)]
 struct SimPossibleActionsBody {
-    wfd:       WFD,
+    wfd: Value,
     sim_state: SimState,
-    actor:     Actor,
+    actor: Actor,
 }
 
 async fn sim_possible_actions(
     State(s): State<AppState>,
     Json(body): Json<SimPossibleActionsBody>,
 ) -> Result<Json<Vec<String>>, AppError> {
-    let wfe_id       = body.sim_state.wfe_id;
-    let initial_wfes = body.sim_state.into_wfes();
+    let wfd = parse_and_validate(body.wfd)?;
+    let org = Arc::new(OrgAdapter::new(s.pool.clone()));
+    let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
+    let engine = Engine { org: &*org, exec: &runner };
 
-    let org      = Arc::new(OrgAdapter::new(s.pool.clone()));
-    let wfd_port = Arc::new(InlineWfdPort::new(body.wfd));
-    let wfe_port = Arc::new(InMemoryWfePort::seeded(initial_wfes));
-    let executor = WfeExecutor::new(org, wfd_port, wfe_port);
-
-    executor
-        .possible_actions(wfe_id, &body.actor)
+    let wfes = body.sim_state.to_wfes(Some(body.actor.user_id));
+    engine
+        .possible_actions(&wfd, &wfes, &body.actor)
         .await
         .map(Json)
         .map_err(AppError::from)

@@ -14,11 +14,16 @@ impl IntoResponse for AppError {
 impl From<EngineError> for AppError {
     fn from(e: EngineError) -> Self {
         let status = match &e {
-            EngineError::PermissionDenied(_)   => StatusCode::FORBIDDEN,
-            EngineError::TransitionNotFound(_) => StatusCode::BAD_REQUEST,
-            EngineError::WfeTerminal           => StatusCode::CONFLICT,
-            EngineError::StartNotEligible      => StatusCode::FORBIDDEN,
-            _                                  => StatusCode::INTERNAL_SERVER_ERROR,
+            EngineError::PermissionDenied(_)      => StatusCode::FORBIDDEN,
+            EngineError::TransitionNotFound(_)    => StatusCode::BAD_REQUEST,
+            EngineError::WfeTerminal              => StatusCode::CONFLICT,
+            EngineError::StartNotEligible         => StatusCode::FORBIDDEN,
+            EngineError::NotClaimed               => StatusCode::FORBIDDEN,
+            EngineError::NotOwner                 => StatusCode::FORBIDDEN,
+            EngineError::InvalidInput(_)          => StatusCode::BAD_REQUEST,
+            EngineError::UnsupportedWfdVersion(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            EngineError::InvalidWfd(_)            => StatusCode::UNPROCESSABLE_ENTITY,
+            _                                     => StatusCode::INTERNAL_SERVER_ERROR,
         };
         AppError(e.to_string(), status)
     }

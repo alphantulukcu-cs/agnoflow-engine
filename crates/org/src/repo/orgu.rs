@@ -8,15 +8,17 @@ const SEL: &str =
      (o.is_active AND oo.is_active) AS is_active,
      o.created_at, o.updated_at";
 
-pub async fn list_by_tree(pool: &PgPool, orgt_id: Uuid) -> Result<Vec<Orgu>, OrgError> {
+pub async fn list_by_tree(pool: &PgPool, orgt_id: Uuid, limit: i64, offset: i64) -> Result<Vec<Orgu>, OrgError> {
     sqlx::query_as::<_, Orgu>(&format!(
         "SELECT {SEL}
          FROM org.orgu o
          JOIN org.orgt_orgu oo ON o.orgu_id = oo.orgu_id
          WHERE oo.orgt_id = $1 AND o.is_active = true AND oo.is_active = true
-         ORDER BY oo.path"
+         ORDER BY oo.path LIMIT $2 OFFSET $3"
     ))
     .bind(orgt_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)

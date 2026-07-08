@@ -6,46 +6,52 @@ use crate::{
     traversal::{executor, parser},
 };
 
-pub async fn list_users(pool: &PgPool, orgtnt_id: Uuid) -> Result<Vec<User>, OrgError> {
+pub async fn list_users(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64) -> Result<Vec<User>, OrgError> {
     sqlx::query_as::<_, User>(
         "SELECT u_id, orgtnt_id, username, full_name, email, is_active, created_at
          FROM org.u
          WHERE orgtnt_id = $1 AND is_active = true
-         ORDER BY full_name, username"
+         ORDER BY full_name, username LIMIT $2 OFFSET $3"
     )
     .bind(orgtnt_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)
 }
 
-pub async fn list_roles(pool: &PgPool, orgtnt_id: Uuid) -> Result<Vec<Role>, OrgError> {
+pub async fn list_roles(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64) -> Result<Vec<Role>, OrgError> {
     sqlx::query_as::<_, Role>(
         "SELECT r_id, orgtnt_id, name, display_name, is_active, created_at
          FROM org.r
          WHERE orgtnt_id = $1 AND is_active = true
-         ORDER BY display_name, name"
+         ORDER BY display_name, name LIMIT $2 OFFSET $3"
     )
     .bind(orgtnt_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)
 }
 
-pub async fn list_user_orgus(pool: &PgPool, user_id: Uuid) -> Result<Vec<UserOrgu>, OrgError> {
+pub async fn list_user_orgus(pool: &PgPool, user_id: Uuid, limit: i64, offset: i64) -> Result<Vec<UserOrgu>, OrgError> {
     sqlx::query_as::<_, UserOrgu>(
         "SELECT u_orgu_id, orgtnt_id, u_id, orgu_id, is_primary, created_at
          FROM org.u_orgu
          WHERE u_id = $1
-         ORDER BY is_primary DESC, created_at"
+         ORDER BY is_primary DESC, created_at LIMIT $2 OFFSET $3"
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)
 }
 
-pub async fn list_user_roles(pool: &PgPool, user_id: Uuid) -> Result<Vec<UserRole>, OrgError> {
+pub async fn list_user_roles(pool: &PgPool, user_id: Uuid, limit: i64, offset: i64) -> Result<Vec<UserRole>, OrgError> {
     sqlx::query_as::<_, UserRole>(
         "SELECT ur.ur_id, ur.orgtnt_id, ur.u_id, ur.r_id, r.name AS role_name,
                 ur.orgu_id, ur.orgu_scope, ur.ur_type, ur.valid_from, ur.valid_until, ur.created_at
@@ -55,9 +61,11 @@ pub async fn list_user_roles(pool: &PgPool, user_id: Uuid) -> Result<Vec<UserRol
            AND ur.ur_type != 'excluded'
            AND (ur.valid_from IS NULL OR ur.valid_from <= now())
            AND (ur.valid_until IS NULL OR ur.valid_until > now())
-         ORDER BY r.name, ur.created_at"
+         ORDER BY r.name, ur.created_at LIMIT $2 OFFSET $3"
     )
     .bind(user_id)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)

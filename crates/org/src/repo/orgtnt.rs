@@ -3,11 +3,13 @@ use uuid::Uuid;
 use crate::{error::OrgError, models::Orgtnt};
 use chrono::Utc;
 
-pub async fn list(pool: &PgPool) -> Result<Vec<Orgtnt>, OrgError> {
+pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Orgtnt>, OrgError> {
     sqlx::query_as::<_, Orgtnt>(
         "SELECT orgtnt_id, name, code, is_active, created_at, updated_at
-         FROM org.orgtnt ORDER BY name"
+         FROM org.orgtnt ORDER BY name LIMIT $1 OFFSET $2"
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)

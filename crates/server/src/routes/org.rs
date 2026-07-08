@@ -24,10 +24,19 @@ pub fn router(pool: PgPool) -> Router {
         .with_state(pool)
 }
 
+#[derive(Deserialize)]
+struct PageQuery {
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 async fn list_orgtnt(
     State(pool): State<PgPool>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::Orgtnt>>, AppError> {
-    repo::orgtnt::list(&pool).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::orgtnt::list(&pool, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn get_orgtnt(
@@ -40,43 +49,61 @@ async fn get_orgtnt(
 async fn list_orgt_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::Orgt>>, AppError> {
-    repo::orgt::list_by_tenant(&pool, orgtnt_id).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::orgt::list_by_tenant(&pool, orgtnt_id, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn list_users_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::User>>, AppError> {
-    repo::user_role::list_users(&pool, orgtnt_id).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::user_role::list_users(&pool, orgtnt_id, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn list_roles_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::Role>>, AppError> {
-    repo::user_role::list_roles(&pool, orgtnt_id).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::user_role::list_roles(&pool, orgtnt_id, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn list_orgu_by_tree(
     State(pool): State<PgPool>,
     Path(orgt_id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::Orgu>>, AppError> {
-    repo::orgu::list_by_tree(&pool, orgt_id).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::orgu::list_by_tree(&pool, orgt_id, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn list_user_orgu(
     State(pool): State<PgPool>,
     Path(user_id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::UserOrgu>>, AppError> {
-    repo::user_role::list_user_orgus(&pool, user_id).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::user_role::list_user_orgus(&pool, user_id, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn list_user_roles(
     State(pool): State<PgPool>,
     Path(user_id): Path<Uuid>,
+    Query(page): Query<PageQuery>,
 ) -> Result<Json<Vec<wf_org::models::UserRole>>, AppError> {
-    repo::user_role::list_user_roles(&pool, user_id).await.map(Json).map_err(Into::into)
+    let limit = page.limit.unwrap_or(50).clamp(1, 200);
+    let offset = page.offset.unwrap_or(0).max(0);
+    repo::user_role::list_user_roles(&pool, user_id, limit, offset).await.map(Json).map_err(Into::into)
 }
 
 async fn get_orgu(

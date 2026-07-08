@@ -10,7 +10,7 @@ use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::MatchEnv;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, CommitOutcome, WfdStore, WfeStore};
-use wfe_core::v22::visibility::filter_dynctx;
+use wfe_core::v22::visibility::{can_view, filter_dynctx};
 use wfe_core::{EngineError, OrgPort};
 
 pub struct WfeExecutor {
@@ -174,10 +174,16 @@ impl WfeExecutor {
         })
     }
 
-    /// WFE görünümü — DynCtx `x-visibility` kurallarıyla filtrelenir (M13).
+    /// WFE görünümü — önce WFE-seviyesi VIEW kapısı (owner / node c_a / listable,
+    /// spec Terminology VISIBILITY+LISTABLE), sonra DynCtx `x-visibility` field
+    /// filtrelemesi (M13). Kapı geçilmezse WFE'nin varlığı bile sızmaz.
     pub async fn query(&self, wfe_id: Uuid, viewer: &Actor) -> Result<WfeView, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+
+        if !can_view(&wfd, &wfes, viewer, &*self.org).await? {
+            return Err(EngineError::Unauthorized);
+        }
 
         let ctx = wfes.dynctx.as_value();
         let env = MatchEnv {

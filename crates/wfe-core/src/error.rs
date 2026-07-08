@@ -12,6 +12,8 @@ pub enum EngineError {
     NotClaimed,
     #[error("actor is not the assignment owner of this wfe")]
     NotOwner,
+    #[error("actor is not authorized to view this wfe")]
+    Unauthorized,
     #[error("WFD.NoConditionMatched: no wft condition matched and no default given")]
     NoConditionMatched,
     #[error("invalid action input: {0}")]

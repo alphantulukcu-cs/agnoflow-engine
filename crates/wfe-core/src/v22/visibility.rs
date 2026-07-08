@@ -13,8 +13,10 @@
 use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::Actor;
-use crate::types::wfd_v22::{CandidateActor, COrgu};
+use crate::types::wfd_v22::{CandidateActor, COrgu, Wfd};
+use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize, MatchEnv};
+use crate::v22::ports::Wfes;
 use crate::v22::resolver::resolve_c_orgu;
 use serde::Deserialize;
 use serde_json::Value;
@@ -105,6 +107,70 @@ pub async fn filter_dynctx(
         out.insert(key.clone(), value.clone());
     }
     Ok(Value::Object(out))
+}
+
+/// §4/L — WFE-seviyesi VIEW kapısı (spec Terminology VISIBILITY/LISTABLE):
+/// bir WFE şu üç durumdan biri doğruysa görüntülenebilir (OR):
+///   (a) viewer sahibi mi (`assigned_to == viewer.user_id`)
+///   (b) viewer aktif node'un c_a'sına (§3) authorize mi
+///   (c) viewer `wfd.listable[]` kurallarından birine authorize VE kuralın
+///       `when` guard'ı (varsa) staged ctx üzerinde true mü
+/// `visible`/`filter_dynctx`'ten AYRIDIR: onlar field-level x-visibility'dir,
+/// bu fonksiyon WFE'nin bütünüyle görünür olup olmadığını belirler.
+pub async fn can_view(
+    wfd: &Wfd,
+    wfes: &Wfes,
+    viewer: &Actor,
+    org: &dyn OrgPort,
+) -> Result<bool, EngineError> {
+    // (a) sahiplik
+    if wfes.assigned_to == Some(viewer.user_id) {
+        return Ok(true);
+    }
+
+    let ctx = wfes.dynctx.as_value();
+
+    // (b) aktif node'un c_a'sı (§3)
+    if let Some(node_key) = wfes.current_node.as_deref() {
+        if let Some(node) = wfd.nodes.get(node_key) {
+            let env = MatchEnv {
+                ctx,
+                wfah: &wfes.wfah,
+                orgtnt_id: wfes.orgtnt_id,
+            };
+            if authorize(&node.c_a, viewer, env, org).await? {
+                return Ok(true);
+            }
+        }
+    }
+
+    // (c) wfd.listable[] grant'i — c_a eşleşir VE when (varsa) true
+    for rule in &wfd.listable {
+        let env = MatchEnv {
+            ctx,
+            wfah: &wfes.wfah,
+            orgtnt_id: wfes.orgtnt_id,
+        };
+        if !authorize(&rule.c_a, viewer, env, org).await? {
+            continue;
+        }
+        let when_ok = match &rule.when {
+            None => true,
+            Some(expr) => {
+                let eval_env = EvalEnv::new(ctx)
+                    .with_wfah(&wfes.wfah)
+                    .with_node(wfes.current_node.as_deref())
+                    .with_actor(viewer)
+                    .with_wfe_id(wfes.wfe_id);
+                evaluate_bool(expr, &eval_env)?
+            }
+        };
+        if when_ok {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 #[cfg(test)]

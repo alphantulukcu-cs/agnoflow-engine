@@ -12,8 +12,8 @@ use wfe_core::error::EngineError;
 use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
-use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, Wfd};
+use wfe_core::types::wfah::{Wfah, WfahEntry};
+use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, EscalationStep, Wfd, Wft};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, CommitOutcome, ExecEnv, ExecFailure, Wfes};
@@ -578,6 +578,50 @@ async fn fired_escalation_step_does_not_refire() {
         "ateşlenen adım tekrar due olmamalı");
 }
 
+// #4 — çok-adımlı aynı-node escalation: her adımın `after`'ı NODE GİRİŞİNDEN ölçülür,
+// bir önceki adımın marker'ından değil. Adım 0 (P3D), node'a girişten 3 gün SONRA
+// ateşlenmiş olsa bile adım 1 (P5D) yine node girişinden +5 günde due olmalı (+8'de değil).
+#[tokio::test]
+async fn multi_step_escalation_measures_after_from_node_entry() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+
+    // Golden'a creditAnalyst node'una ikinci bir escalation adımı (P5D) ekle.
+    let mut wfd = golden();
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P5D".into(),
+            wfes_effects: None,
+            wft: Wft::Node { node: "self__branchManager".into() },
+        });
+
+    let t0 = Utc::now();
+    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    // Kontrollü WFAH: node girişi T0; adım 0 marker'ı T0+3g (gün sonra ateşlendi).
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    wfes.wfah = Wfah(vec![
+        WfahEntry { seq: 1, action: "start:start_branch_clerk".into(), actor: system.clone(), input: None, applied_at: t0 },
+        WfahEntry { seq: 2, action: "escalate:self__creditAnalyst:0".into(), actor: system.clone(), input: None, applied_at: t0 + Duration::days(3) },
+    ]);
+
+    // Adım 0 ateşlendi; adım 1 (P5D) node girişinden +4 günde henüz due DEĞİL.
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(4)).unwrap(),
+        None,
+        "adım 1 node girişinden +5g'de due olmalı, +4g'de değil",
+    );
+    // Node girişinden +5 gün + 1sn: adım 1 due (marker'dan ölçülseydi +8g olurdu).
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(5) + Duration::seconds(1)).unwrap(),
+        Some(1),
+        "adım 1'in `after`'ı NODE GİRİŞİNDEN ölçülmeli (marker'dan değil)",
+    );
+}
+
 // ================================================================ root timeout (M5)
 
 #[tokio::test]
@@ -594,8 +638,9 @@ async fn root_timeout_fires_engine_defined_fail() {
     assert!(engine.root_timeout_due(&wfd, &wfes, now).unwrap());
 
     let commit = engine.fire_root_timeout(&wfd, &wfes, now).unwrap();
-    let CommitOutcome::Terminal { end_response } = &commit.outcome else {
-        panic!("terminal bekleniyordu");
+    // Root timeout başarılı Terminal DEĞİL, engine-defined Failed'dir (§5) → WFE error durumu.
+    let CommitOutcome::Failed { end_response } = &commit.outcome else {
+        panic!("Failed (engine fail) bekleniyordu");
     };
     assert_eq!(end_response["error"], json!("WFD.Timeout"));
     assert_eq!(commit.wfah_entries[0].action, "timeout:root");

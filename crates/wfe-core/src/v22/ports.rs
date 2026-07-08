@@ -34,6 +34,9 @@ pub struct Wfes {
 pub enum CommitOutcome {
     MoveTo { node: String },
     Terminal { end_response: Value },
+    /// Engine-defined fail (§5 root timeout vb.) — WFE `error` durumuna alınır,
+    /// başarılı `Terminal` sonlanmasından ayrıdır.
+    Failed { end_response: Value },
 }
 
 /// Tek transaction'da persist edilecek transition sonucu (M8).

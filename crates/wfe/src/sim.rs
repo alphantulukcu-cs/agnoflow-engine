@@ -73,5 +73,8 @@ fn outcome_parts(
         CommitOutcome::Terminal { end_response } => {
             (WfeStatus::Terminal, None, Some(end_response.clone()))
         }
+        CommitOutcome::Failed { end_response } => {
+            (WfeStatus::Error, None, Some(end_response.clone()))
+        }
     }
 }

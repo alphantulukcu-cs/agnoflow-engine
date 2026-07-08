@@ -380,7 +380,18 @@ impl<'a> Engine<'a> {
         let Some(node) = wfd.nodes.get(node_key) else {
             return Ok(None);
         };
-        let Some(entered_at) = wfes.wfah.entries().last().map(|e| e.applied_at) else {
+        // Node giriş zamanı = current_node'a taşınmadan sonraki son insan/sistem eylemi;
+        // escalation marker'ları HARİÇ tutulur, aksi halde her adım bir öncekinin
+        // marker'ından ölçülür ve N≥1 adımların `after`'ı kayar (spec: hepsi node
+        // girişinden ölçülür).
+        let Some(entered_at) = wfes
+            .wfah
+            .entries()
+            .iter()
+            .filter(|e| !e.action.starts_with("escalate:"))
+            .last()
+            .map(|e| e.applied_at)
+        else {
             return Ok(None);
         };
         for (idx, step) in node.escalation.iter().enumerate() {
@@ -511,7 +522,7 @@ impl<'a> Engine<'a> {
                 input: Some(json!({"timeout": wfd.timeout})),
                 applied_at: now,
             }],
-            outcome: CommitOutcome::Terminal {
+            outcome: CommitOutcome::Failed {
                 end_response: json!({
                     "error": "WFD.Timeout",
                     "message": "WFD kök zaman aşımı doldu",

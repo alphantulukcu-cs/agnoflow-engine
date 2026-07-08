@@ -123,6 +123,7 @@ impl WfeStore for WfeAdapter {
         let (status, current_node, end_response) = match &new.outcome {
             CommitOutcome::MoveTo { node } => ("active", Some(node.as_str()), None),
             CommitOutcome::Terminal { end_response } => ("terminal", None, Some(end_response)),
+            CommitOutcome::Failed { end_response } => ("error", None, Some(end_response)),
         };
         let c_a_json = serde_json::to_value(&new.resolved_c_a).map_err(db_err)?;
 
@@ -194,6 +195,21 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'terminal', current_node = NULL, current_c_a = '[]'::jsonb,
+                         claimed_by = NULL, end_response = $1, updated_at = now()
+                     WHERE wfe_id = $2 AND orgtnt_id = $3",
+                )
+                .bind(end_response)
+                .bind(commit.wfe_id)
+                .bind(commit.orgtnt_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            }
+            CommitOutcome::Failed { end_response } => {
+                // Engine-defined fail (§5): terminal DEĞİL, `error` durumu.
+                sqlx::query(
+                    "UPDATE wf.wfe
+                     SET status = 'error', current_node = NULL, current_c_a = '[]'::jsonb,
                          claimed_by = NULL, end_response = $1, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )

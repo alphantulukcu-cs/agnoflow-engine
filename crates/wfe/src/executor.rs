@@ -97,6 +97,7 @@ impl WfeExecutor {
         let (terminal, current_node, end_response) = match &new.outcome {
             CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
             CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
+            CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
         };
         Ok(WfeStartResult {
             wfe_id,
@@ -123,6 +124,7 @@ impl WfeExecutor {
         let (terminal, current_node, end_response) = match &commit.outcome {
             CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
             CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
+            CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
         };
         Ok(WfeApplyResult {
             wfe_id,

@@ -756,9 +756,18 @@ impl<'a> Engine<'a> {
                 let node = wfd.nodes.get(&node_key).ok_or_else(|| {
                     EngineError::InvalidWfd(format!("wft hedefi bilinmeyen node '{node_key}'"))
                 })?;
-                let resolved = self
+                let mut resolved = self
                     .resolve_candidates(&node.c_a, &staged, wfah, actor, orgtnt_id)
                     .await?;
+                // WOR-44: wfd.listable[] grants union into the pool cache too (VIEW-only;
+                // `when` guards are ignored here — over-inclusive cache is acceptable since
+                // claim/act stay matcher-gated on the real rule).
+                for listable in &wfd.listable {
+                    let mut extra = self
+                        .resolve_candidates(&listable.c_a, &staged, wfah, actor, orgtnt_id)
+                        .await?;
+                    resolved.append(&mut extra);
+                }
                 Ok((CommitOutcome::MoveTo { node: node_key }, resolved, staged))
             }
             Target::Terminal(terminal_id) => {
@@ -799,8 +808,14 @@ impl<'a> Engine<'a> {
         }
     }
 
-    /// Yeni node'un c_a'sını (orgu × rol) aday listesine çözer — pool cache'i.
-    /// c_u-only node'larda liste boş kalır; claim yetkisi matcher ile runtime'da doğrulanır.
+    /// Yeni node'un c_a'sını (orgu × rol, orgu × user) aday listesine çözer —
+    /// pool cache'i (WOR-44). c_r girdileri role-only ResolvedCandidate, c_u
+    /// girdileri user-only ResolvedCandidate üretir (role boş string).
+    /// Kimlik kanalı matcher.rs (§3.3) ile birebir: c_u önce UUID string
+    /// olarak parse edilir (user_id), parse başarısızsa ident olarak saklanır
+    /// (user_ident) — pool sorgusu actor'ün kendi ident'ini org.user_ident ile
+    /// çözüp aynı kanaldan eşler. Claim yetkisi HER ZAMAN matcher ile
+    /// runtime'da yeniden doğrulanır; bu cache yalnızca liste görünürlüğü içindir.
     async fn resolve_candidates(
         &self,
         rule: &CandidateActor,
@@ -818,6 +833,24 @@ impl<'a> Engine<'a> {
                     out.push(ResolvedCandidate {
                         orgu_id: unit.orgu_id,
                         role: role.clone(),
+                        user_id: None,
+                        user_ident: None,
+                    });
+                }
+            }
+        }
+        if let Some(users) = &rule.c_u {
+            for unit in &units {
+                for u in users {
+                    let (user_id, user_ident) = match Uuid::parse_str(u) {
+                        Ok(uuid) => (Some(uuid), None),
+                        Err(_) => (None, Some(u.clone())),
+                    };
+                    out.push(ResolvedCandidate {
+                        orgu_id: unit.orgu_id,
+                        role: String::new(),
+                        user_id,
+                        user_ident,
                     });
                 }
             }
@@ -945,4 +978,146 @@ fn validate_start_input(input: &Value, context_schema: &Value) -> Result<(), Eng
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! WOR-44: resolve_candidates artık c_r YANINDA c_u için de aday üretmeli
+    //! (pool cache'ine önceden hiç girmeyen c_u-only node'lar için).
+    use super::*;
+    use crate::types::actor::OrgUnit;
+    use crate::types::wfd_v22::COrgu;
+    use async_trait::async_trait;
+
+    struct MockOrg;
+
+    #[async_trait]
+    impl OrgPort for MockOrg {
+        async fn resolve_c_orgu(
+            &self,
+            anchor: Uuid,
+            _expr: &str,
+            _orgtnt: Uuid,
+        ) -> Result<Vec<OrgUnit>, EngineError> {
+            Ok(vec![OrgUnit {
+                orgu_id: anchor,
+                orgu_type: json!({"type": "branch"}),
+                path: "1".into(),
+            }])
+        }
+        async fn check_user_role(&self, _: Uuid, _: Uuid, _: &str) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+        async fn orgtnt_for_orgu(&self, _: Uuid) -> Result<Uuid, EngineError> {
+            Ok(Uuid::nil())
+        }
+    }
+
+    struct DummyRunner;
+
+    #[async_trait]
+    impl AutoexecRunner for DummyRunner {
+        async fn run(&self, _def: &AutoexecDef, _env: &ExecEnv) -> Result<Value, ExecFailure> {
+            unimplemented!("resolve_candidates testlerinde autoexec çalışmaz")
+        }
+    }
+
+    fn rule(c_r: Option<Vec<&str>>, c_u: Option<Vec<&str>>) -> CandidateActor {
+        CandidateActor {
+            c_orgu: COrgu::Selector("self".into()),
+            c_r: c_r.map(|v| v.into_iter().map(String::from).collect()),
+            c_u: c_u.map(|v| v.into_iter().map(String::from).collect()),
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_candidates_still_emits_role_candidates() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = Engine { org: &org, exec: &runner };
+        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let wfah = Wfah::empty();
+
+        let out = engine
+            .resolve_candidates(&rule(Some(vec!["branchClerk"]), None), &json!({}), &wfah, &actor, Uuid::nil())
+            .await
+            .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].orgu_id, actor.orgu_id);
+        assert_eq!(out[0].role, "branchClerk");
+        assert_eq!(out[0].user_id, None);
+        assert_eq!(out[0].user_ident, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_candidates_emits_user_candidate_for_uuid_c_u() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = Engine { org: &org, exec: &runner };
+        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let wfah = Wfah::empty();
+        let target_user = Uuid::new_v4();
+        let target_user_str = target_user.to_string();
+
+        let out = engine
+            .resolve_candidates(
+                &rule(None, Some(vec![target_user_str.as_str()])),
+                &json!({}),
+                &wfah,
+                &actor,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].orgu_id, actor.orgu_id);
+        assert_eq!(out[0].role, "");
+        assert_eq!(out[0].user_id, Some(target_user));
+        assert_eq!(out[0].user_ident, None);
+    }
+
+    #[tokio::test]
+    async fn resolve_candidates_emits_ident_candidate_for_non_uuid_c_u() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = Engine { org: &org, exec: &runner };
+        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let wfah = Wfah::empty();
+
+        let out = engine
+            .resolve_candidates(&rule(None, Some(vec!["jdoe"])), &json!({}), &wfah, &actor, Uuid::nil())
+            .await
+            .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].role, "");
+        assert_eq!(out[0].user_id, None);
+        assert_eq!(out[0].user_ident.as_deref(), Some("jdoe"));
+    }
+
+    #[tokio::test]
+    async fn resolve_candidates_unions_role_and_user_entries() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = Engine { org: &org, exec: &runner };
+        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let wfah = Wfah::empty();
+
+        let out = engine
+            .resolve_candidates(
+                &rule(Some(vec!["creditAnalyst"]), Some(vec!["jdoe"])),
+                &json!({}),
+                &wfah,
+                &actor,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().any(|c| c.role == "creditAnalyst" && c.user_id.is_none() && c.user_ident.is_none()));
+        assert!(out.iter().any(|c| c.role.is_empty() && c.user_ident.as_deref() == Some("jdoe")));
+    }
 }

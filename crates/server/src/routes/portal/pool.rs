@@ -48,10 +48,33 @@ async fn list_pool(
     State(s): State<AppState>,
     actor: PortalActor,
 ) -> Result<Json<Vec<PoolTask>>, AppError> {
-    let ca_filter = serde_json::json!([{
+    // WOR-44: pool = role match OR user match (c_u-resolved candidates,
+    // including listable[] grants folded into current_c_a) OR owner match
+    // (already claimed by this actor). role/user checks are containment on
+    // the denormalized current_c_a cache; owner check is on claimed_by.
+    let role_filter = serde_json::json!([{
         "orgu_id": actor.orgu_id.to_string(),
         "role":    actor.role
     }]);
+    let user_filter = serde_json::json!([{
+        "orgu_id": actor.orgu_id.to_string(),
+        "user_id": actor.user_id.to_string()
+    }]);
+    // c_u can also be a non-UUID identifier (username) — mirror matcher.rs's
+    // identity channel by resolving the actor's own ident, if any exists.
+    let ident_filter = s
+        .executor
+        .org
+        .user_ident(actor.user_id)
+        .await
+        .map_err(AppError::from)?
+        .map(|ident| {
+            serde_json::json!([{
+                "orgu_id":    actor.orgu_id.to_string(),
+                "user_ident": ident
+            }])
+        });
+    let owner_filter = serde_json::json!({ "user_id": actor.user_id.to_string() });
 
     let tasks = sqlx::query_as::<_, PoolTask>(
         "SELECT e.wfe_id       AS id,
@@ -66,11 +89,19 @@ async fn list_pool(
            ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
          WHERE e.status     = 'active'
            AND e.orgtnt_id  = $1
-           AND e.current_c_a @> $2::jsonb
+           AND (
+                 e.current_c_a @> $2::jsonb
+              OR e.current_c_a @> $3::jsonb
+              OR ($4::jsonb IS NOT NULL AND e.current_c_a @> $4::jsonb)
+              OR e.claimed_by @> $5::jsonb
+           )
          ORDER BY e.created_at DESC",
     )
     .bind(actor.orgtnt_id)
-    .bind(ca_filter)
+    .bind(role_filter)
+    .bind(user_filter)
+    .bind(ident_filter)
+    .bind(owner_filter)
     .fetch_all(&s.pool)
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;

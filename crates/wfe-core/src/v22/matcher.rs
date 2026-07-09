@@ -7,8 +7,8 @@
 //!         OR (rule.c_u var ve actor.user ∈ rule.c_u) )   # rol-agnostik
 //! ```
 //!
-//! Verilmeyen alan false'dur (wildcard değil). Bu matcher node c_a, start[].c_a,
-//! transition ek-kısıt c_a ve listable[].c_a için AYNIDIR.
+//! Verilmeyen alan false'dur (wildcard değil). Bu matcher node c_a, start `from`
+//! node'unun c_a'sı, transition ek-kısıt c_a ve listable[].c_a için AYNIDIR.
 
 use crate::error::EngineError;
 use crate::ports::OrgPort;

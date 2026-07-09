@@ -50,7 +50,7 @@ match(rule, actor, wfe) :=
 
 - Verilmeyen alan false'dur (wildcard değil). Şema c_r/c_u'dan en az birini zorunlu kılar.
 - c_u match'i rol-agnostiktir; ACT yine exact `(ORGU,(U,R))` tuple ile kaydedilir.
-- Bu matcher node `c_a`, `start[].c_a`, transition ek-kısıt `c_a` ve `listable[].c_a` için AYNIDIR.
+- Bu matcher node `c_a` (start node dahil — bkz. §"Symmetric start"), transition ek-kısıt `c_a` ve `listable[].c_a` için AYNIDIR.
 
 ## 4. Visibility Matcher — AYRI Fonksiyon, OR Semantiği
 
@@ -99,3 +99,20 @@ v2.1 ile aynı: escalation zamanlayıcısı node-giriş anından başlar (WFAH't
 
 - Tanınmayan `wfd_version` = yükleme reddi. Root'ta bilinmeyen alan yasak.
 - Çalışan WFE'ler başladıkları WFD (id+version)'a sabitlenir; kural değişikliği yeni WFD versiyonu doğurur — node slug'ları bu sayede WFE ömrü boyunca kararlıdır. Versiyon-aşırı metrikler `label` üzerinden agregat edilmelidir.
+
+## Symmetric start (v2.2)
+
+`start[]` artık `transitions[]` ile simetriktir: `{ id, from, action:"start", wfes_effects?, trigger?, wft }`. `c_a` startRule'dan kaldırılmıştır; `start[].from` ile referans edilen `nodes` girdisinin `c_a`'sı taşır. Start-node kimliği türetilmiştir — node'un kendisinde `kind` alanı YOKTUR; bir node, sadece bir `start[].from` tarafından referans edilerek start node olur.
+
+| # | Kural |
+|---|------|
+| V1 | `start[].from`, `nodes` içinde var olan bir node'a referans vermelidir. |
+| V2 | Herhangi bir `start[].from` tarafından referans edilen node, HİÇBİR transition veya start'ın `wft` hedefi OLMAMALIDIR — start havuzları yalnızca giriş noktasıdır, yeniden girilemez. |
+| V3 | Bir start node `escalation` TAŞIYAMAZ (orada bekleyen yoktur). |
+| V4 | `start[].action`, rezerve sabit `"start"` olmalıdır. |
+| V5 | Rezerve `"start"` aksiyonu `actions{}` içinde TANIMLANMAMALIDIR. |
+| V6 | En az bir `start` girdisi olmalıdır (mevcut `minItems: 1`). |
+
+**Runtime resolution:** Actor rezerve `start` aksiyonunu çağırır → her aday start node'un `c_a`'sına karşı eşleştirilir → eşleşen node efektif `from` olur → o start rule'ın `wfes_effects`/`trigger`'ı çalışır → WFE `wft`'e iner. Transition seçimiyle (`from` + `action`) birebir aynı mekanik.
+
+Lifecycle notu: transition'larda `node.c_a` WFE'yi o an elinde tutan owner'dır; bir start node'da `c_a` kimin *başlatabileceğidir*. Aynı eşleştirme mekaniği, farklı lifecycle anlamı (henüz WFE yok).

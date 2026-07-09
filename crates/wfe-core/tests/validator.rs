@@ -265,3 +265,58 @@ fn wft_condition_with_neither_target_is_error() {
         .remove("node");
     assert!(has_error(&validate_value(v), "wft_target"));
 }
+
+// ---- V1–V6 simetrik start ----
+
+#[test]
+fn start_from_unknown_node_is_error() {
+    // V1
+    let mut v = fixture_value();
+    v["start"][0]["from"] = json!("type_branch__ghost");
+    assert!(has_error(&validate_value(v), "cross_ref"));
+}
+
+#[test]
+fn start_node_as_wft_target_is_error() {
+    // V2 — bir escalation start node'unu hedeflerse ihlal
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
+        json!({"node": "type_branch__branchClerk"});
+    assert!(has_error(&validate_value(v), "start_target"));
+}
+
+#[test]
+fn start_node_with_escalation_is_error() {
+    // V3
+    let mut v = fixture_value();
+    v["nodes"]["type_branch__branchClerk"]["escalation"] = json!([
+        {"after": "P1D", "wft": {"node": "self__creditAnalyst"}}
+    ]);
+    assert!(has_error(&validate_value(v), "start_escalation"));
+}
+
+#[test]
+fn start_action_not_start_is_error() {
+    // V4
+    let mut v = fixture_value();
+    v["start"][0]["action"] = json!("begin");
+    assert!(has_error(&validate_value(v), "start_action"));
+}
+
+#[test]
+fn reserved_start_action_in_actions_is_error() {
+    // V5
+    let mut v = fixture_value();
+    v["actions"]["start"] = v["actions"]["manager_decide"].clone();
+    assert!(has_error(&validate_value(v), "reserved_action"));
+}
+
+#[test]
+fn golden_start_is_symmetric_from_action() {
+    // V1/V4 pozitif: golden fixture yeni şekilde temiz geçer
+    let v = fixture_value();
+    assert_eq!(v["start"][0]["from"], json!("type_branch__branchClerk"));
+    assert_eq!(v["start"][0]["action"], json!("start"));
+    assert!(v["start"][0].get("c_a").is_none(), "start artık c_a taşımamalı");
+    assert!(validate_value(v).errors.is_empty());
+}

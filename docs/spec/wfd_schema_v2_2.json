@@ -857,27 +857,20 @@
     "startRule": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "id",
-        "c_a",
-        "wft"
-      ],
+      "required": ["id", "from", "action", "wft"],
       "properties": {
-        "id": {
-          "$ref": "#/$defs/idName"
+        "id": { "$ref": "#/$defs/idName" },
+        "from": {
+          "$ref": "#/$defs/idName",
+          "description": "Bu start kuralinin giris node id'si (nodes katalogunda; initiator c_a'sini tasir). Tekil — her initiator havuzu ayri start kurali."
         },
-        "c_a": {
-          "$ref": "#/$defs/candidateActor"
+        "action": {
+          "const": "start",
+          "description": "Rezerve aksiyon. Her zaman \"start\". actions{} icinde tanimlanamaz (custom validator V5)."
         },
-        "wfes_effects": {
-          "$ref": "#/$defs/wfesEffects"
-        },
-        "trigger": {
-          "$ref": "#/$defs/triggerList"
-        },
-        "wft": {
-          "$ref": "#/$defs/wft"
-        }
+        "wfes_effects": { "$ref": "#/$defs/wfesEffects" },
+        "trigger": { "$ref": "#/$defs/triggerList" },
+        "wft": { "$ref": "#/$defs/wft" }
       }
     },
     "transition": {

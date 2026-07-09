@@ -116,7 +116,7 @@ pub async fn resolve_orgu(
     let orgt_id = super::orgu::get_orgt_id(pool, anchor_orgu_id).await?;
     let pipeline = parser::parse(expr)
         .map_err(|e| OrgError::BadRequest(e.to_string()))?;
-    let orgus = executor::execute(pool, anchor_orgu_id, orgt_id, &pipeline).await?;
+    let orgus = executor::execute(pool, anchor_orgu_id, orgt_id, orgtnt_id, &pipeline).await?;
     Ok(orgus.into_iter().map(OrgUnit::from).collect())
 }
 

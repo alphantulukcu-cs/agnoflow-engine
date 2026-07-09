@@ -81,6 +81,13 @@ sidecar dokümandan bağımsız eşlenebilir.
 - Round-trip (`import(export(x)) == x`) hem doküman hem görsel yerleşimi korur.
 - Gerekçe: tek temiz format + kullanıcının elle düzenlediği görsel korunur.
 
+## Simetrik Start (v2.2 — `from` + `action:"start"`)
+
+**Karar:** v2.2 `start` `transitions` ile simetrik hale getirildi: `{ id, from, action:"start", wfes_effects?, trigger?, wft }`. `c_a` startRule'dan kaldırıldı; artık `start[].from` ile referans edilen bir `nodes` girdisinde durur. Start-node kimliği `start[].from` referansından TÜRETİLİR — node'a ayrı bir `kind` alanı eklenmedi (dual source-of-truth riski nedeniyle reddedildi). `wfd_version` yerinde kaldı (`"2.2"`); v2.3'e geçilmedi çünkü v2.2 henüz aktif geliştirmede, dış tüketici yok, tek örnek dosya var.
+
+- Eski (bu değişiklikten önceki v2.2): `startRule = { id, c_a(inline), wfes_effects?, trigger?, wft }` — `from`/`action` yoktu, `c_a` node'a değil doğrudan startRule'a bağlıydı.
+- Yeni: `c_a` node'da; `startRule.c_a` alanı SİLİNDİ.
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

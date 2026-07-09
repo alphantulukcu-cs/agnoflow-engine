@@ -132,7 +132,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
-        wfah: Wfah::empty().push("start:start_branch_clerk".into(), system, None),
+        wfah: Wfah::empty().push("start".into(), system, None),
         status: WfeStatus::Active,
         current_node: Some(node.into()),
         assigned_to: assigned,
@@ -161,7 +161,7 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
     // initiated_by = $actor gerçek aktörle çözülmeli
     assert_eq!(new.initial_dynctx["initiated_by"]["role"], json!("branchClerk"));
     assert_eq!(new.initial_dynctx["applicant"]["name"], json!("Ayşe Yılmaz"));
-    assert_eq!(new.wfah_entries[0].action, "start:start_branch_clerk");
+    assert_eq!(new.wfah_entries[0].action, "start");
     assert!(new.resolved_c_a.iter().any(|c| c.role == "creditAnalyst"));
 }
 
@@ -604,7 +604,7 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
     // Kontrollü WFAH: node girişi T0; adım 0 marker'ı T0+3g (gün sonra ateşlendi).
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
     wfes.wfah = Wfah(vec![
-        WfahEntry { seq: 1, action: "start:start_branch_clerk".into(), actor: system.clone(), input: None, applied_at: t0 },
+        WfahEntry { seq: 1, action: "start".into(), actor: system.clone(), input: None, applied_at: t0 },
         WfahEntry { seq: 2, action: "escalate:self__creditAnalyst:0".into(), actor: system.clone(), input: None, applied_at: t0 + Duration::days(3) },
     ]);
 

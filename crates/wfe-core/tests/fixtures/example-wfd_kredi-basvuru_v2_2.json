@@ -145,17 +145,23 @@
           "creditDeptManager"
         ]
       }
-    }
-  },
-  "start": [
-    {
-      "id": "start_branch_clerk",
+    },
+    "type_branch__branchClerk": {
+      "label": "Şube Memuru",
+      "description": "Başvuruyu başlatan şube memuru havuzu.",
       "c_a": {
         "c_orgu": "*:[type:branch]",
         "c_r": [
           "branchClerk"
         ]
-      },
+      }
+    }
+  },
+  "start": [
+    {
+      "id": "start__type_branch__branchClerk",
+      "from": "type_branch__branchClerk",
+      "action": "start",
       "wfes_effects": {
         "set": {
           "initiated_by": "$actor"

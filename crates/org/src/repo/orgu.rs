@@ -48,3 +48,14 @@ pub async fn get_orgt_id(pool: &PgPool, orgu_id: Uuid) -> Result<Uuid, OrgError>
     .await?
     .ok_or_else(|| OrgError::NotFound(format!("orgu {orgu_id}")))
 }
+
+/// Anchor'ın tenant'ı — global tip selektörü (*:[...]) tenant genelinde çözülür.
+pub async fn get_orgtnt_id(pool: &PgPool, orgu_id: Uuid) -> Result<Uuid, OrgError> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT orgtnt_id FROM org.orgt_orgu WHERE orgu_id = $1 LIMIT 1"
+    )
+    .bind(orgu_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| OrgError::NotFound(format!("orgu {orgu_id}")))
+}

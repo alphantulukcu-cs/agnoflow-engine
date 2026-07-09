@@ -341,8 +341,10 @@ pub struct WftCondition {
 #[serde(deny_unknown_fields)]
 pub struct StartRule {
     pub id: String,
-    /// v2.2: TEK kural.
-    pub c_a: CandidateActor,
+    /// v2.2 simetrik start: giriş node id'si (nodes katalogunda; initiator c_a'sını taşır). Tekil.
+    pub from: String,
+    /// Rezerve sabit "start".
+    pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

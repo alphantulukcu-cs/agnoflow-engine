@@ -14,7 +14,7 @@ fn golden_fixture_parses_losslessly() {
     let wfd = golden();
     assert_eq!(wfd.wfd_version, "2.2");
     assert_eq!(wfd.id, "kredi-basvuru-v2");
-    assert_eq!(wfd.nodes.len(), 3);
+    assert_eq!(wfd.nodes.len(), 4); // 3 state + 1 simetrik start node (type_branch__branchClerk)
     assert_eq!(wfd.start.len(), 1);
     assert_eq!(wfd.transitions.len(), 2);
     assert_eq!(wfd.terminals.len(), 2);
@@ -80,10 +80,21 @@ fn unknown_root_field_is_rejected() {
 #[test]
 fn deprecated_multi_rule_c_a_array_is_rejected() {
     let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
-    // start[0].c_a'yı eski array formuna çevir — v2.2 tek kural (obje) ister
-    let ca = v["start"][0]["c_a"].clone();
-    v["start"][0]["c_a"] = serde_json::json!([ca]);
+    // node c_a'sını eski array formuna çevir — v2.2 tek kural (obje) ister
+    let ca = v["nodes"]["self__creditAnalyst"]["c_a"].clone();
+    v["nodes"]["self__creditAnalyst"]["c_a"] = serde_json::json!([ca]);
     assert!(Wfd::from_value(v).is_err(), "eski çok-kurallı c_a array'i reddedilmeli (M10)");
+}
+
+#[test]
+fn legacy_inline_c_a_start_is_rejected() {
+    // Eski simetrik-öncesi start: from/action yok, c_a inline → deny_unknown_fields + eksik alan
+    let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let obj = v["start"][0].as_object_mut().unwrap();
+    obj.remove("from");
+    obj.remove("action");
+    obj.insert("c_a".into(), serde_json::json!({"c_orgu": "self", "c_r": ["branchClerk"]}));
+    assert!(Wfd::from_value(v).is_err(), "eski inline-c_a start reddedilmeli");
 }
 
 #[test]

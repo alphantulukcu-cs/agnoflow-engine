@@ -69,12 +69,16 @@ async fn list_wfds(
 
         let mut can_start = false;
         for rule in &wfd.start {
+            // Simetrik start: initiator yetkisi `from` node'unun c_a'sında.
+            let Some(node) = wfd.nodes.get(&rule.from) else {
+                continue;
+            };
             let env = MatchEnv {
                 ctx: &empty_ctx,
                 wfah: &empty_wfah,
                 orgtnt_id: actor.orgtnt_id,
             };
-            if authorize(&rule.c_a, &portal_actor, env, &*s.executor.org)
+            if authorize(&node.c_a, &portal_actor, env, &*s.executor.org)
                 .await
                 .unwrap_or(false)
             {

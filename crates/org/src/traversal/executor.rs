@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::postgres::PgArguments;
 use sqlx::{Arguments, PgPool};
@@ -24,27 +24,60 @@ const SEL: &str =
      m.is_active, m.created_at, m.updated_at";
 
 pub async fn execute(
-    pool:     &PgPool,
-    anchor:   Uuid,
-    orgt_id:  Uuid,
-    pipeline: &Pipeline,
+    pool:      &PgPool,
+    anchor:    Uuid,
+    orgt_id:   Uuid,
+    orgtnt_id: Uuid,
+    pipeline:  &Pipeline,
 ) -> Result<Vec<Orgu>, OrgError> {
-    let mut current_ids: Vec<Uuid> = vec![anchor];
-
-    if pipeline.steps.is_empty() {
-        return fetch_by_ids(pool, &current_ids, orgt_id).await;
+    // "*:[filter]" ilk adımsa: tenant genelinde KAYNAK kümeyi çöz (anchor kullanılmaz),
+    // sonra kalan adımları her ağaç (orgt_id) için ayrı uygula ve birleştir.
+    // Böylece "*:[type:sube].parent" = tüm şube'lerin parentları (bütün olası sonuçlar).
+    if let Some(Step::GlobalType(filter)) = pipeline.steps.first() {
+        let seed = fetch_global_type(pool, orgtnt_id, filter).await?;
+        let rest = &pipeline.steps[1..];
+        if rest.is_empty() {
+            return Ok(dedup_orgus(seed));
+        }
+        let mut by_tree: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+        for o in &seed {
+            by_tree.entry(o.orgt_id).or_default().push(o.orgu_id);
+        }
+        let mut out: Vec<Orgu> = Vec::new();
+        for (tree, ids) in by_tree {
+            out.extend(run_steps(pool, ids, tree, rest).await?);
+        }
+        return Ok(dedup_orgus(out));
     }
 
+    run_steps(pool, vec![anchor], orgt_id, &pipeline.steps).await
+}
+
+/// Verilen başlangıç id kümesine adımları sırayla uygular (tek ağaç = orgt_id bağlamında).
+async fn run_steps(
+    pool:    &PgPool,
+    initial: Vec<Uuid>,
+    orgt_id: Uuid,
+    steps:   &[Step],
+) -> Result<Vec<Orgu>, OrgError> {
+    if steps.is_empty() {
+        return fetch_by_ids(pool, &initial, orgt_id).await;
+    }
+    let mut current_ids = initial;
     let mut last_result: Vec<Orgu> = vec![];
-    for step in &pipeline.steps {
+    for step in steps {
         last_result = execute_step(pool, &current_ids, orgt_id, step).await?;
         current_ids = dedup_ids(&last_result);
         if current_ids.is_empty() {
             return Ok(vec![]);
         }
     }
-
     Ok(last_result)
+}
+
+fn dedup_orgus(rows: Vec<Orgu>) -> Vec<Orgu> {
+    let mut seen = HashSet::new();
+    rows.into_iter().filter(|r| seen.insert(r.orgu_id)).collect()
 }
 
 fn dedup_ids(rows: &[Orgu]) -> Vec<Uuid> {
@@ -70,6 +103,38 @@ async fn fetch_by_ids(
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)
+}
+
+// `*:[filter]` — tenant genelinde (tüm ağaçlar), tipe göre eşleşen ORGU ÜYELİKLERİ. Anchor
+// kullanılmaz. Zincirleme (`.parent` vb.) için her üyeliğin tree'si (orgt_id) korunur; bu yüzden
+// DISTINCT YOK — dedup çağırana aittir (standalone kullanımda `dedup_orgus`, orgu_id'ye göre).
+// resolve_orgu'nun `*:` özel-case'iyle (resolve_global_type) aynı eşleşme semantiği.
+async fn fetch_global_type(
+    pool:      &PgPool,
+    orgtnt_id: Uuid,
+    filter:    &FilterExpr,
+) -> Result<Vec<Orgu>, OrgError> {
+    let mut idx = 2usize; // $1 = orgtnt_id
+    let (fsql, bindings) = filter_sql(filter, &mut idx);
+    let sql = format!(
+        "SELECT m.orgu_id, oo.orgtnt_id, oo.orgt_id, oo.parent_orgu_id, \
+             oo.path::text AS path, m.orgu_type, m.name, m.metadata, \
+             (m.is_active AND oo.is_active) AS is_active, m.created_at, m.updated_at \
+         FROM org.orgu m \
+         JOIN org.orgt_orgu oo ON m.orgu_id = oo.orgu_id \
+         WHERE oo.orgtnt_id = $1 AND m.is_active = true AND oo.is_active = true \
+           AND (m.orgu_type ? '*' OR {fsql})"
+    );
+    let mut args = PgArguments::default();
+    args.add(orgtnt_id);
+    for (k, v) in bindings {
+        args.add(k);
+        args.add(v);
+    }
+    sqlx::query_as_with::<_, Orgu, _>(&sql, args)
+        .fetch_all(pool)
+        .await
+        .map_err(OrgError::Database)
 }
 
 fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<(String, String)>) {
@@ -280,5 +345,10 @@ async fn execute_step(
             );
             run_filtered(pool, sql, ids, orgt_id, bindings).await
         }
+
+        // `execute` bunu döngüden önce yakalar; buraya düşmemeli.
+        Step::GlobalType(_) => Err(OrgError::BadRequest(
+            "global tip selektörü execute() içinde ele alınmalı".into(),
+        )),
     }
 }

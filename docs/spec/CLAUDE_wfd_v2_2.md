@@ -21,6 +21,7 @@ Detay gerektiğinde bu dosyaları oku; içeriklerini buraya kopyalama.
 - node key = slug(c_a) (runtime-semantics §2a), `label` = UI ismi; aynı canonical c_a ikinci node'da OLAMAZ
 - claim/assignment node'u değiştirmeyen runtime metadata
 - transition: `from` (slug/array) + `action`; `when` sadece ek veri guard'ı; aynı (node,action) = ilk-match
+- **start artık transition ile simetrik** (amended v2.2 in place): `{ id, from, action:"start", wfes_effects?, trigger?, wft }`; `c_a` startRule'da DEĞİL, `start[].from` ile referans edilen node'da; start-node kimliği referanstan türetilir (node'da `kind` alanı yok)
 - wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`
 - trigger: `use` + `when?`/`required?`(true)/`retry[]?`/`catch?`; catch routing yapmaz
 - tek exec namespace `$exec.result.*`; pipeline atomik; hata isimleri `WFD.*`

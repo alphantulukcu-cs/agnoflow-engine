@@ -17,22 +17,18 @@ ALTER TABLE wf.wfe ADD COLUMN IF NOT EXISTS current_node TEXT;
 COMMENT ON COLUMN wf.wfe.current_node IS
     'v2.2 Named Nodes: aktif WFE''nin beklediği node slug''ı; terminal''de NULL';
 
--- Eski format seed'ler (kart_limiti_artisi, kredi_basvuru v2)
+-- Eski format WFD'ler v2.2 altında parse edilemez. UI listesi sadece
+-- fetch edilebilir v2.2 kayıtları göstermeli; bu yüzden mevcut tüm aktif
+-- kayıtları kapatıp aşağıdaki v2.2 seed'i aktif bırakıyoruz.
 UPDATE wf.wfd_meta
 SET is_active = false
-WHERE wfd_id IN (
-    'c4f2a8e1-3b6d-4a9f-8c7e-1d5f0b2e6a3c',
-    '0ba295fa-5c40-4254-a013-0577aa83a863'
-);
+WHERE wfd_id <> '7a2e4c90-11d4-4b7e-9f3a-52c8e01b6f2d';
 
 -- Eski format WFD'lere bağlı aktif WFE'ler v2.2 altında yürütülemez
 UPDATE wf.wfe
 SET status = 'error', updated_at = now()
 WHERE status = 'active'
-  AND wfd_id IN (
-    'c4f2a8e1-3b6d-4a9f-8c7e-1d5f0b2e6a3c',
-    '0ba295fa-5c40-4254-a013-0577aa83a863'
-);
+  AND wfd_id <> '7a2e4c90-11d4-4b7e-9f3a-52c8e01b6f2d';
 
 -- v2.2 golden fixture seed'i (QNB_TR tenant'ı)
 INSERT INTO wf.wfd_meta (wfd_id, orgtnt_id, name, version, s3_key, is_active)

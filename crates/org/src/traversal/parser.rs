@@ -37,6 +37,10 @@ pub enum Step {
     DownT(FilterExpr),
     Ancestors,
     AncestorsT(FilterExpr),
+    /// `*:[filter]` — anchor'dan BAĞIMSIZ, tenant genelinde tipe göre KAYNAK küme.
+    /// Pipeline'ın ilk adımı olarak gelir; ardından normal adımlarla zincirlenebilir
+    /// (ör. `*:[type:sube].parent` = tüm şube'lerin parentları).
+    GlobalType(FilterExpr),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,6 +55,32 @@ pub enum ParseError {
 
 pub fn parse(expr: &str) -> Result<Pipeline, ParseError> {
     let expr = expr.trim();
+
+    // Global tip selektörü: "*:[filter]" — "self" köküne bağlı DEĞİL, tenant genelinde bir
+    // KAYNAK küme. İlk adım olur; ardından normal adımlarla zincirlenebilir
+    // (ör. "*:[type:sube].parent" = tüm şube'lerin parentları).
+    if let Some(after) = expr.strip_prefix("*:") {
+        if !after.starts_with('[') {
+            return Err(ParseError::InvalidFilter(
+                format!("global tip selektörü '[filter]' bekliyor: {expr}"),
+            ));
+        }
+        let close = after
+            .find(']')
+            .ok_or_else(|| ParseError::InvalidFilter(format!("kapanmayan '[': {expr}")))?;
+        let filter = parse_filter_expr(&after[1..close])?;
+        let mut steps = vec![Step::GlobalType(filter)];
+        let remainder = &after[close + 1..];
+        if !remainder.is_empty() {
+            let rest = remainder
+                .strip_prefix('.')
+                .ok_or_else(|| ParseError::UnknownStep(remainder.to_string()))?;
+            for tok in split_tokens(rest) {
+                steps.push(parse_step(tok)?);
+            }
+        }
+        return Ok(Pipeline { steps });
+    }
 
     let rest = expr
         .strip_prefix("self")
@@ -418,6 +448,35 @@ mod tests {
                 Step::Siblings,
                 Step::ChildrenT(FilterExpr::And(vec![kleaf("special", "kredi"), leaf("sube")])),
             ]
+        );
+    }
+
+    #[test]
+    fn test_global_type() {
+        // *:[type:sube] — tenant genelinde tip selektörü, tek adım.
+        assert_eq!(steps("*:[type:sube]"), vec![Step::GlobalType(leaf("sube"))]);
+        assert_eq!(steps("*:[sube]"), vec![Step::GlobalType(leaf("sube"))]);
+        assert_eq!(
+            steps("*:[type:sube || type:ilce]"),
+            vec![Step::GlobalType(FilterExpr::Or(vec![leaf("sube"), leaf("ilce")]))]
+        );
+    }
+
+    #[test]
+    fn test_global_type_missing_bracket_rejected() {
+        assert!(matches!(parse("*:type:sube"), Err(ParseError::InvalidFilter(_))));
+    }
+
+    #[test]
+    fn test_global_type_chained() {
+        // *:[type:sube].parent = tüm şube'lerin parentları (global kaynak + zincir)
+        assert_eq!(
+            steps("*:[type:sube].parent"),
+            vec![Step::GlobalType(leaf("sube")), Step::Parent]
+        );
+        assert_eq!(
+            steps("*:[type:sube].children[il]"),
+            vec![Step::GlobalType(leaf("sube")), Step::ChildrenT(leaf("il"))]
         );
     }
 }

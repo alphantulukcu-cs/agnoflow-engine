@@ -69,7 +69,7 @@ Yeni (v2.2):
 
 - Tek elemanlı array → objeye indirgenir (mekanik dönüşüm).
 - ÇOK elemanlı array → tasarım kararı gerektirir: iki ayrı node'a bölünür veya ikincisi `listable` kaydına iner. Otomatik dönüştürülmez; migration aracı bu durumda İNSAN ONAYI istemelidir.
-- Uygulandığı yerler: `nodes.*.c_a`, `start[].c_a`, `transitions[].c_a` (ek kısıt), `listable[].c_a`.
+- Uygulandığı yerler: `nodes.*.c_a` (start node dahil — bkz. M15), `transitions[].c_a` (ek kısıt), `listable[].c_a`.
 - Engine matcher: `resolved(c_orgu) AND (rol_match OR user_match)`; yok = false; c_u rol-agnostik. `any()` döngüsü silinir.
 
 ## M11. Node Kimliği = slug(c_a), İsim = `label` (v2.2)
@@ -92,6 +92,12 @@ Yeni (v2.2):
 `wfd_version: "2.2"` zorunlu; tanınmayan versiyon = yükleme reddi. `expression_language` default `"zen@1"`.
 
 ---
+
+## M15. Start Simetrik Hale Geldi — `from` + `action:"start"` (v2.2 — amended in place)
+
+Öncesi: `startRule = { id, c_a(inline), wfes_effects?, trigger?, wft }` — `from`/`action` yoktu, `c_a` doğrudan startRule üzerinde (node'a bağlı değil).
+
+Sonrası: `startRule = { id, from, action:"start", wfes_effects?, trigger?, wft }` — her start rule, `from` ile `nodes` kataloğundaki bir girdiye referans verir; o node `c_a`'yı taşır (transition'daki `node.c_a` ile aynı yer). `action` rezerve sabit `"start"`'tır ve `actions{}` içinde tanımlanamaz. Start node kimliği `start[].from` referansından türetilir; node'a `kind` alanı eklenmedi. `wfd_version` `"2.2"` kalır (amend in place, v2.3 yok).
 
 ## Editor (React Flow) Eşlemesi
 

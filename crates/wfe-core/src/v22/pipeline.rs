@@ -70,8 +70,12 @@ impl<'a> Engine<'a> {
         // Actor'ün başlatabildiği ilk kural
         let mut rule = None;
         for r in &wfd.start {
+            // Simetrik start: initiator yetkisi `from` node'unun c_a'sında yaşar.
+            let node = wfd.nodes.get(&r.from).ok_or_else(|| {
+                EngineError::InvalidWfd(format!("start.from bilinmeyen node: '{}'", r.from))
+            })?;
             let env = MatchEnv { ctx: &empty_ctx, wfah: &empty_wfah, orgtnt_id };
-            if authorize(&r.c_a, actor, env, self.org).await? {
+            if authorize(&node.c_a, actor, env, self.org).await? {
                 rule = Some(r);
                 break;
             }
@@ -104,7 +108,10 @@ impl<'a> Engine<'a> {
 
         wfah_entries.push(WfahEntry {
             seq,
-            action: format!("start:{}", rule.id),
+            // Rezerve action adı "start" — transition'lar gibi düz action adını yazar (rule.id
+            // DEĞİL). Böylece `c_orgu` WFAH anchor'ı (from.wfah = "start") hangi start kuralı
+            // fire ederse etsin initiator'a çözülür.
+            action: rule.action.clone(),
             actor: actor.clone(),
             input: Some(input.clone()),
             applied_at: now,

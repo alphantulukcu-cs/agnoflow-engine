@@ -87,7 +87,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
-        wfah: Wfah::empty().push("start:start_branch_clerk".into(), system, None),
+        wfah: Wfah::empty().push("start".into(), system, None),
         status: WfeStatus::Active,
         current_node: Some(node.into()),
         assigned_to: assigned,

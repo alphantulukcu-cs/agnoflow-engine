@@ -105,6 +105,26 @@ WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, 
 
 ---
 
+## START (v2.2 — TRANSITION İLE SİMETRİK)
+
+```json
+{
+  "id": "start__type_branch__branchClerk",
+  "from": "type_branch__branchClerk",
+  "action": "start",
+  "wfes_effects": { "set": { "initiated_by": "$actor" } },
+  "wft": { "node": "self__creditAnalyst" }
+}
+```
+
+- `from`: WFE'yi başlatabilecek adayların havuzunu tutan bir **start node** slug'ı (tekil, array değil) — `nodes` kataloğundaki normal bir node.
+- `action`: rezerve sabit `"start"`; `actions{}` içinde tanımlanamaz.
+- **Start node = referans ile türetilmiş kimlik.** Node'un kendisinde `kind` alanı YOKTUR; bir node sadece `start[].from` tarafından işaret edildiği için start node'dur. `c_a` (kim başlatabilir) o node'un üzerinde durur — TRANSITION'daki `node.c_a` (kim owner) ile aynı yerdedir, artık startRule üzerinde inline DEĞİLDİR.
+- Start node, hiçbir transition/start'ın `wft` hedefi olamaz (giriş-only, yeniden girilemez) ve `escalation` taşıyamaz.
+- `wfes_effects`/`trigger`/`wft` start EDGE'inde kalır (node'da asla).
+
+---
+
 ## WFT / TRIGGER / AUTOEXEC / PIPELINE
 
 v2.1 ile aynıdır:
@@ -170,6 +190,7 @@ Claim/owner/ACT semantiği öncekiyle aynıdır (unassigned: C_A görür+claim e
 c_a array formu ("c_a": [ {...} ]) ve kurallar-arasi OR semantigi
 elle yazilmis node isimleri (key slug'dan turetilir; insan ismi 'label'dadir)
 x-visibility icinde alanlar-arasi AND varsayimi
+startRule.c_a inline formu ve from/action eksikligi (c_a artik start node'da; amended v2.2 in place)
 $ctx.status state konvansiyonu, wft.c_a inline form, $exec.response.*   (v2.1'den devam)
 terminal:true, {ctx:...}, {ref:...}, _step_<action>, c_a[].from          (v1/v2'den devam)
 ```

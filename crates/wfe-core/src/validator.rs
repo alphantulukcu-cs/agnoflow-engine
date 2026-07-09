@@ -46,6 +46,7 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_uniqueness(wfd, &mut report);
     check_slugs(wfd, &mut report);
     check_cross_refs(wfd, &mut report);
+    check_start_rules(wfd, &mut report);
     check_wft_conditions(wfd, &mut report);
     check_graph(wfd, &mut report);
     check_expressions(wfd, &mut report);
@@ -248,6 +249,85 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
     out
 }
 
+// ---- V1–V6: simetrik start kuralları (spec runtime-semantics) ----
+
+fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
+    // V6: en az 1 start
+    if wfd.start.is_empty() {
+        report.error(
+            "start_required",
+            "start".into(),
+            "en az bir start kuralı gerekli".into(),
+        );
+    }
+    // V5: "start" rezerve aksiyondur — actions{} içinde OLAMAZ
+    if wfd.actions.contains_key("start") {
+        report.error(
+            "reserved_action",
+            "actions[start]".into(),
+            "'start' rezerve aksiyondur — actions{} içinde tanımlanamaz".into(),
+        );
+    }
+    // V2 için: tüm wft NODE hedeflerini topla (transition + start + escalation)
+    fn add_node_targets<'a>(wft: &'a Wft, set: &mut HashSet<&'a str>) {
+        for (kind, tgt) in wft_targets(wft) {
+            if let TargetKind::Node = kind {
+                set.insert(tgt);
+            }
+        }
+    }
+    let mut wft_node_targets: HashSet<&str> = HashSet::new();
+    for t in &wfd.transitions {
+        add_node_targets(&t.wft, &mut wft_node_targets);
+    }
+    for s in &wfd.start {
+        add_node_targets(&s.wft, &mut wft_node_targets);
+    }
+    for node in wfd.nodes.values() {
+        for esc in &node.escalation {
+            add_node_targets(&esc.wft, &mut wft_node_targets);
+        }
+    }
+
+    for s in &wfd.start {
+        let path = format!("start[{}]", s.id);
+        // V4: action == "start"
+        if s.action != "start" {
+            report.error(
+                "start_action",
+                format!("{path}.action"),
+                format!("start.action '{}' — rezerve sabit \"start\" olmalı", s.action),
+            );
+        }
+        // V1: from var olan bir node'a işaret etmeli
+        match wfd.nodes.get(&s.from) {
+            None => report.error(
+                "cross_ref",
+                format!("{path}.from"),
+                format!("start.from bilinmeyen node '{}'", s.from),
+            ),
+            Some(node) => {
+                // V3: start node escalation taşıyamaz (giriş-only)
+                if !node.escalation.is_empty() {
+                    report.error(
+                        "start_escalation",
+                        format!("nodes[{}].escalation", s.from),
+                        format!("start node '{}' escalation taşıyamaz (giriş-only)", s.from),
+                    );
+                }
+            }
+        }
+        // V2: start.from node HİÇBİR wft.node hedefi olamaz (yalnızca giriş)
+        if wft_node_targets.contains(s.from.as_str()) {
+            report.error(
+                "start_target",
+                format!("{path}.from"),
+                format!("start node '{}' bir wft hedefi olamaz (yalnızca giriş)", s.from),
+            );
+        }
+    }
+}
+
 // ---- M3: wft.conditions hedef tekilliği ----
 
 fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
@@ -320,6 +400,9 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
     }
 
     for s in &wfd.start {
+        // Simetrik start: `from` node bir KAYNAKtır — hiçbir wft hedefi olmasa da
+        // (V2 zaten yasaklar) erişilebilir sayılır, dead-node uyarısı vermemeli.
+        reached_nodes.insert(s.from.clone());
         absorb(
             wft_targets(&s.wft),
             &mut reached_nodes,
@@ -371,7 +454,12 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
     }
 
     // çıkışsız node: ne transition kaynağı ne escalation'ı var
+    // (start node'unun çıkışı start kuralının wft'sidir — no_exit muaf)
+    let start_from: HashSet<&str> = wfd.start.iter().map(|s| s.from.as_str()).collect();
     for (key, node) in &wfd.nodes {
+        if start_from.contains(key.as_str()) {
+            continue;
+        }
         let has_transition = wfd.transitions.iter().any(|t| t.from.contains(key));
         if !has_transition && node.escalation.is_empty() {
             report.error(

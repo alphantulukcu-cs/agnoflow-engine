@@ -8,6 +8,8 @@ pub enum WfdError {
     Storage(String),
     #[error("invalid wfd json: {0}")]
     InvalidJson(String),
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
 }

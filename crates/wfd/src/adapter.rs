@@ -67,8 +67,144 @@ impl WfdAdapter {
             .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
-        repo::insert(&self.pool, wfd_id, orgtnt_id, name, version, &key).await?;
+        repo::insert(
+            &self.pool, wfd_id, orgtnt_id, name, version, &key,
+            "published", None, &[], "admin",
+        ).await?;
         Ok((wfd_id, version))
+    }
+
+    /// slug: isimden basit, güvenli bir id üretir (draft iskeleti için).
+    fn slug(name: &str) -> String {
+        let s: String = name.trim().to_lowercase().chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let s = s.trim_matches('_').to_string();
+        if s.is_empty() { "wfd".into() } else { s }
+    }
+
+    /// Yeni draft oluşturur. İskelet JSON verilmezse minimal v2.2 taslağı yazılır.
+    /// Validasyon YOK. Tek-draft ihlalinde WfdError::Conflict.
+    pub async fn create_draft(
+        &self,
+        orgtnt_id:   Uuid,
+        name:        &str,
+        description: Option<&str>,
+        tags:        &[String],
+        wfd_json:    Option<&Value>,
+    ) -> Result<(Uuid, i32), crate::error::WfdError> {
+        let version = repo::next_version(&self.pool, orgtnt_id, name).await?;
+        let wfd_id = Uuid::new_v4();
+        let key = storage::s3_key(wfd_id, version);
+
+        let skeleton = serde_json::json!({
+            "wfd_version": "2.2",
+            "id": Self::slug(name),
+            "name": name,
+            "description": description.unwrap_or(""),
+            "nodes": [],
+            "transitions": [],
+        });
+        let doc = wfd_json.unwrap_or(&skeleton);
+        let bytes = serde_json::to_vec(doc)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        self.storage.write(&key, bytes).await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
+
+        repo::insert(
+            &self.pool, wfd_id, orgtnt_id, name, version, &key,
+            "draft", description, tags, "admin",
+        ).await?;
+        Ok((wfd_id, version))
+    }
+
+    /// Draft'ın ham JSON'unu döner (Wfd parse ETMEZ — eksik/geçersiz olabilir).
+    pub async fn fetch_draft_json(&self, wfd_id: Uuid, version: i32)
+        -> Result<Value, crate::error::WfdError>
+    {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        if meta.status != "draft" {
+            return Err(crate::error::WfdError::Conflict(
+                format!("{wfd_id} v{version} draft değil (status={})", meta.status)));
+        }
+        let bytes = self.storage.read(&meta.s3_key).await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
+            .to_bytes();
+        serde_json::from_slice(&bytes)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))
+    }
+
+    /// Draft JSON + metadata'yı overwrite eder. Validasyon YOK. Cache invalidate.
+    pub async fn save_draft(
+        &self,
+        wfd_id:      Uuid,
+        version:     i32,
+        wfd_json:    &Value,
+        description: Option<&str>,
+        tags:        &[String],
+    ) -> Result<(), crate::error::WfdError> {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        if meta.status != "draft" {
+            return Err(crate::error::WfdError::Conflict(
+                format!("{wfd_id} v{version} draft değil")));
+        }
+        let bytes = serde_json::to_vec(wfd_json)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        self.storage.write(&meta.s3_key, bytes).await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
+        repo::update_draft(&self.pool, wfd_id, version, description, tags).await?;
+        self.cache.write().await.remove(&(wfd_id, version));
+        Ok(())
+    }
+
+    /// Draft'ı yayınlar: tam v2.2 validator, geçerse status='published'.
+    /// Geçmezse InvalidJson(validator özeti) döner, draft kalır.
+    pub async fn publish_draft(&self, wfd_id: Uuid, version: i32)
+        -> Result<(), crate::error::WfdError>
+    {
+        let json = self.fetch_draft_json(wfd_id, version).await?;
+        let wfd = Wfd::from_value(json)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        let report = validator::validate(&wfd);
+        if !report.is_valid() {
+            let summary = report.errors.iter()
+                .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
+                .collect::<Vec<_>>().join("; ");
+            return Err(crate::error::WfdError::InvalidJson(format!("validator: {summary}")));
+        }
+        repo::set_published(&self.pool, wfd_id, version).await?;
+        self.cache.write().await.remove(&(wfd_id, version));
+        Ok(())
+    }
+
+    /// Published bir versiyonu edit'e açar: JSON'unu kopyalayıp yeni draft (max+1) yaratır.
+    pub async fn new_draft_from(&self, src_id: Uuid, src_version: i32)
+        -> Result<(Uuid, i32), crate::error::WfdError>
+    {
+        let src = repo::get_meta_any(&self.pool, src_id, src_version).await?;
+        let bytes = self.storage.read(&src.s3_key).await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
+            .to_bytes();
+        let json: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        self.create_draft(
+            src.orgtnt_id, &src.name, src.description.as_deref(), &src.tags, Some(&json),
+        ).await
+    }
+
+    /// Draft'ı iskarta eder (JSON + satır). Published dokunulmaz.
+    pub async fn delete_draft(&self, wfd_id: Uuid, version: i32)
+        -> Result<(), crate::error::WfdError>
+    {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        if meta.status != "draft" {
+            return Err(crate::error::WfdError::Conflict(
+                format!("{wfd_id} v{version} draft değil")));
+        }
+        let _ = self.storage.delete(&meta.s3_key).await;
+        repo::delete_draft(&self.pool, wfd_id, version).await?;
+        self.cache.write().await.remove(&(wfd_id, version));
+        Ok(())
     }
 }
 
@@ -100,5 +236,17 @@ impl WfdStore for WfdAdapter {
         }
         cache.insert((wfd_id, version), wfd.clone());
         Ok(wfd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WfdAdapter;
+
+    #[test]
+    fn slug_lowercases_and_replaces_non_alnum() {
+        assert_eq!(WfdAdapter::slug("Kredi Başvuru!"), "kredi_ba_vuru");
+        assert_eq!(WfdAdapter::slug("  "), "wfd");
+        assert_eq!(WfdAdapter::slug("A-B_C"), "a_b_c");
     }
 }

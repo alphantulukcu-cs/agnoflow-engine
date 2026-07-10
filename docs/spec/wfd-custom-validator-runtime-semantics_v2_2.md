@@ -8,6 +8,13 @@
 
 v2.1 ile aynı: `from`→nodes, `action`→actions, `trigger[].use`→autoexec, tüm `wft.node/terminal` (conditions, default, escalation dahil)→nodes/terminals. Unique: node key'leri, `start[].id`, `transitions[].id`, `terminals[].id`, action/autoexec key'leri; node ve terminal id'leri global namespace'te çakışmaz.
 
+`terminals[].id` ek olarak **case-insensitive unique** olmak zorunda ("Start" ile "sTaRT"
+aynı isim sayılır — bkz. DECISIONS_v2_2.md "Terminal id = kullanıcı adı"). Editör terminal
+id'yi kullanıcının girdiği isimden üretir (`assignTerminalKeys`), bu yüzden case-insensitive
+uniqueness authoring-time'da zaten sağlanır; validator bunu editör-dışı üretilen dokümanlar
+için de kesin kural olarak uygular. Runtime lookup (`wft.terminal` çözümü, §7 pipeline)
+case-sensitive exact-match'tir — case-insensitivity SADECE bu uniqueness kuralı için geçerli.
+
 ## 2. Node Identity Validation (v2.2)
 
 ### 2a. Canonical Slug Algoritması

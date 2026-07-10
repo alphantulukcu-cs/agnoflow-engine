@@ -28,6 +28,17 @@ impl WfdAdapter {
         }
     }
 
+    /// Validator raporunu tek satırlık InvalidJson hatasına çevirir.
+    fn validation_error(report: &validator::ValidationReport) -> crate::error::WfdError {
+        let summary = report
+            .errors
+            .iter()
+            .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        crate::error::WfdError::InvalidJson(format!("validator: {summary}"))
+    }
+
     /// Upload a new WFD — v2.2 yükleme kapısı (M14) + custom validator,
     /// sonra JSON OpenDAL'a, metadata PostgreSQL'e.
     pub async fn upload(
@@ -40,15 +51,7 @@ impl WfdAdapter {
 
         let report = validator::validate(&wfd);
         if !report.is_valid() {
-            let summary = report
-                .errors
-                .iter()
-                .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::WfdError::InvalidJson(format!(
-                "validator: {summary}"
-            )));
+            return Err(Self::validation_error(&report));
         }
 
         let name = if wfd.name.trim().is_empty() {
@@ -69,6 +72,7 @@ impl WfdAdapter {
 
         repo::insert(
             &self.pool, wfd_id, orgtnt_id, name, version, &key,
+            // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
             "published", None, &[], "admin",
         ).await?;
         Ok((wfd_id, version))
@@ -113,6 +117,7 @@ impl WfdAdapter {
 
         repo::insert(
             &self.pool, wfd_id, orgtnt_id, name, version, &key,
+            // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
             "draft", description, tags, "admin",
         ).await?;
         Ok((wfd_id, version))
@@ -150,9 +155,11 @@ impl WfdAdapter {
         }
         let bytes = serde_json::to_vec(wfd_json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        // DB status-gate'i ÖNCE koş: satırın hâlâ draft olduğunu atomik doğrular.
+        // Eşzamanlı bir publish araya girerse artık immutable JSON'a dokunmayız.
+        repo::update_draft(&self.pool, wfd_id, version, description, tags).await?;
         self.storage.write(&meta.s3_key, bytes).await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
-        repo::update_draft(&self.pool, wfd_id, version, description, tags).await?;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
     }
@@ -167,10 +174,7 @@ impl WfdAdapter {
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         let report = validator::validate(&wfd);
         if !report.is_valid() {
-            let summary = report.errors.iter()
-                .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
-                .collect::<Vec<_>>().join("; ");
-            return Err(crate::error::WfdError::InvalidJson(format!("validator: {summary}")));
+            return Err(Self::validation_error(&report));
         }
         repo::set_published(&self.pool, wfd_id, version).await?;
         self.cache.write().await.remove(&(wfd_id, version));
@@ -182,6 +186,10 @@ impl WfdAdapter {
         -> Result<(Uuid, i32), crate::error::WfdError>
     {
         let src = repo::get_meta_any(&self.pool, src_id, src_version).await?;
+        if src.status != "published" {
+            return Err(crate::error::WfdError::Conflict(
+                format!("{src_id} v{src_version} published değil")));
+        }
         let bytes = self.storage.read(&src.s3_key).await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
             .to_bytes();
@@ -201,8 +209,10 @@ impl WfdAdapter {
             return Err(crate::error::WfdError::Conflict(
                 format!("{wfd_id} v{version} draft değil")));
         }
-        let _ = self.storage.delete(&meta.s3_key).await;
+        // DB status-gate'i ÖNCE koş; ancak satır silinirse (hâlâ draft'tı)
+        // storage'ı best-effort temizle. Eşzamanlı publish JSON'u korur.
         repo::delete_draft(&self.pool, wfd_id, version).await?;
+        let _ = self.storage.delete(&meta.s3_key).await;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
     }

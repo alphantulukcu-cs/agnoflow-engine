@@ -28,9 +28,9 @@ pub async fn insert(
     .bind(status).bind(description).bind(tags).bind(owner)
     .fetch_one(pool)
     .await
-    .map_err(|e| match e.as_database_error().and_then(|d| d.code()) {
-        // 23505 = unique_violation → tek-draft index ihlali
-        Some(code) if code == "23505" =>
+    .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {
+        // tek-draft kısmi-unique index ihlali (versiyon unique'i buraya düşmez)
+        Some("wfd_single_draft") =>
             WfdError::Conflict(format!("{name}: açık draft zaten var")),
         _ => WfdError::Database(e),
     })?;
@@ -38,10 +38,11 @@ pub async fn insert(
 }
 
 /// Yalnızca published (is_active) satırı döner — mevcut çalıştırma yolu.
+/// status='published' filtresi draft'ların engine'de koşmasını engeller.
 pub async fn get_meta(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<WfdMeta, WfdError> {
     sqlx::query_as::<_, WfdMeta>(
         &format!("SELECT {COLS} FROM wf.wfd_meta \
-                  WHERE wfd_id=$1 AND version=$2 AND is_active=true")
+                  WHERE wfd_id=$1 AND version=$2 AND is_active=true AND status='published'")
     )
     .bind(wfd_id).bind(version)
     .fetch_optional(pool).await?

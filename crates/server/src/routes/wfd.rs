@@ -14,6 +14,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", post(upload_wfd).get(list_wfd))
         .route("/validate", post(validate_wfd))
+        .route("/usage-summary", get(usage_summary))
         .route("/draft", post(create_draft))
         .route("/draft/:id/:version", get(get_draft).put(save_draft).delete(delete_draft))
         .route("/draft/:id/:version/publish", post(publish_draft))
@@ -204,6 +205,28 @@ async fn wfe_usage(
         "error": error,
         "total": active + terminal + error,
     })))
+}
+
+/// Tenant genelinde wfd_id başına anlık aktif WFE sayısı — dashboard özeti için
+/// tek istekte tüm sayımları döner (satır başına /usage çağırmaya gerek kalmaz).
+async fn usage_summary(
+    State(s): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<Value>, AppError> {
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT wfd_id, count(*)::bigint FROM wf.wfe \
+         WHERE orgtnt_id = $1 AND status = 'active' GROUP BY wfd_id",
+    )
+    .bind(q.orgtnt_id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    let arr: Vec<Value> = rows
+        .into_iter()
+        .map(|(wfd_id, active)| serde_json::json!({ "wfd_id": wfd_id, "active": active }))
+        .collect();
+    Ok(Json(serde_json::json!(arr)))
 }
 
 /// WfdError → HTTP kodu eşlemesi.

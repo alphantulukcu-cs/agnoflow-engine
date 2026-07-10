@@ -6,14 +6,23 @@ use async_trait::async_trait;
 use reqwest::{Client, Method};
 use serde_json::{json, Map, Value};
 use sqlx::{Column, PgPool, Row};
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use uuid::Uuid;
 use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType};
 use wfe_core::v22::eval::{evaluate_value, EvalEnv};
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv, ExecFailure};
 
+use crate::db::run::RunHandle;
+use crate::db::{self, DbConfig, DbDriver};
+
 pub struct LiveAutoexecRunner {
     client: Client,
     pool: Option<PgPool>,
+    // (connection_id, updated_at_epoch) → çalıştırılabilir handle önbelleği
+    registry: Mutex<HashMap<Uuid, (i64, Arc<RunHandle>)>>,
 }
 
 impl LiveAutoexecRunner {
@@ -21,6 +30,7 @@ impl LiveAutoexecRunner {
         Self {
             client: Client::new(),
             pool,
+            registry: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -88,6 +98,13 @@ impl LiveAutoexecRunner {
     }
 
     async fn run_sql(&self, def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure> {
+        // Faz 2: config.connection verilmişse o bağlantıya bağlan
+        if let Some(conn_id) = def.config.get("connection").and_then(Value::as_str) {
+            if !conn_id.is_empty() {
+                return self.run_sql_on_connection(conn_id, def, env).await;
+            }
+        }
+
         let pool = self
             .pool
             .as_ref()
@@ -153,6 +170,96 @@ impl LiveAutoexecRunner {
             1 => out.into_iter().next().unwrap(),
             _ => json!({ "rows": out }),
         })
+    }
+
+    async fn run_sql_on_connection(
+        &self,
+        conn_id: &str,
+        def: &AutoexecDef,
+        env: &ExecEnv,
+    ) -> Result<Value, ExecFailure> {
+        let id = Uuid::parse_str(conn_id)
+            .map_err(|_| ExecFailure::failed(format!("geçersiz connection id: {conn_id}")))?;
+        let meta_pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| ExecFailure::failed("connection çözümü için meta havuzu yok"))?;
+
+        // Bağlantı satırını oku (updated_at ile önbellek anahtarı)
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                Option<String>,
+                Option<i32>,
+                Option<String>,
+                Option<String>,
+                Value,
+                Option<Vec<u8>>,
+                chrono::DateTime<chrono::Utc>,
+            ),
+        >(
+            "SELECT driver, mode, host, port, database, username, options, secret_enc, updated_at \
+             FROM wf.db_connection WHERE id = $1 AND is_active = true",
+        )
+        .bind(id)
+        .fetch_optional(meta_pool)
+        .await
+        .map_err(|e| ExecFailure::failed(format!("connection okunamadı: {e}")))?
+        .ok_or_else(|| ExecFailure::failed(format!("connection bulunamadı: {conn_id}")))?;
+
+        let updated = row.8.timestamp();
+        let handle = {
+            let mut reg = self.registry.lock().await;
+            match reg.get(&id) {
+                Some((ts, h)) if *ts == updated => h.clone(),
+                _ => {
+                    let driver = DbDriver::parse(&row.0)
+                        .ok_or_else(|| ExecFailure::failed("geçersiz driver"))?;
+                    let secret = match &row.7 {
+                        Some(b) => Some(
+                            db::crypto::decrypt(b)
+                                .map_err(|e| ExecFailure::failed(format!("secret çözülemedi: {e}")))?,
+                        ),
+                        None => None,
+                    };
+                    let cfg = DbConfig {
+                        driver,
+                        mode: row.1.clone(),
+                        host: row.2.clone(),
+                        port: row.3,
+                        database: row.4.clone(),
+                        username: row.5.clone(),
+                        secret,
+                        options: row.6.clone(),
+                    };
+                    let h = Arc::new(
+                        db::run::connect(&cfg)
+                            .await
+                            .map_err(|e| ExecFailure::failed(format!("bağlanılamadı: {e}")))?,
+                    );
+                    reg.insert(id, (updated, h.clone()));
+                    h
+                }
+            }
+        };
+
+        let query = def
+            .config
+            .get("query")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ExecFailure::failed("sql config'te query yok"))?;
+        let params = def
+            .config
+            .get("params")
+            .map(|p| resolve_config_value(p, env))
+            .unwrap_or(json!({}));
+        let empty = Map::new();
+        let params_map = params.as_object().unwrap_or(&empty);
+        db::run::run_query(&handle, query, params_map)
+            .await
+            .map_err(|e| ExecFailure::failed(format!("sql hatası: {e}")))
     }
 }
 

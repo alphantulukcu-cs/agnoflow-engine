@@ -44,7 +44,7 @@ async fn list_wfds(
     let metas = sqlx::query_as::<_, WfdMetaRow>(
         "SELECT DISTINCT ON (name) wfd_id, name, version
          FROM wf.wfd_meta
-         WHERE orgtnt_id = $1 AND is_active = true
+         WHERE orgtnt_id = $1 AND is_active = true AND status = 'published'
          ORDER BY name, version DESC",
     )
     .bind(actor.orgtnt_id)
@@ -119,7 +119,7 @@ async fn start_wfd(
 ) -> Result<Json<StartResponse>, AppError> {
     let version: i32 = sqlx::query_scalar(
         "SELECT version FROM wf.wfd_meta
-         WHERE wfd_id = $1 AND is_active = true AND orgtnt_id = $2
+         WHERE wfd_id = $1 AND is_active = true AND status = 'published' AND orgtnt_id = $2
          ORDER BY version DESC LIMIT 1",
     )
     .bind(wfd_id)

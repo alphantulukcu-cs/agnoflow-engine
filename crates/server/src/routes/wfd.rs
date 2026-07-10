@@ -14,7 +14,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", post(upload_wfd).get(list_wfd))
         .route("/validate", post(validate_wfd))
+        .route("/draft", post(create_draft))
+        .route("/draft/:id/:version", get(get_draft).put(save_draft).delete(delete_draft))
+        .route("/draft/:id/:version/publish", post(publish_draft))
         .route("/:id/:version", get(get_wfd))
+        .route("/:id/:version/new-draft", post(new_draft))
         .with_state(state)
 }
 
@@ -88,4 +92,93 @@ async fn get_wfd(
         .await
         .map(Json)
         .map_err(|e| AppError(e.to_string(), StatusCode::NOT_FOUND))
+}
+
+#[derive(Deserialize)]
+struct CreateDraftBody {
+    orgtnt_id:   Uuid,
+    name:        String,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tags:        Vec<String>,
+    /// Editörün ürettiği başlangıç dokümanı; yoksa engine iskelet yazar.
+    #[serde(default)]
+    wfd:         Option<Value>,
+}
+
+async fn create_draft(
+    State(s): State<AppState>,
+    Json(b): Json<CreateDraftBody>,
+) -> Result<Json<Value>, AppError> {
+    let (wfd_id, version) = s.wfd
+        .create_draft(b.orgtnt_id, &b.name, b.description.as_deref(), &b.tags, b.wfd.as_ref())
+        .await
+        .map_err(map_wfd_err)?;
+    Ok(Json(serde_json::json!({ "wfd_id": wfd_id, "version": version })))
+}
+
+async fn get_draft(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    s.wfd.fetch_draft_json(id, ver).await.map(Json).map_err(map_wfd_err)
+}
+
+#[derive(Deserialize)]
+struct SaveDraftBody {
+    wfd:         Value,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    tags:        Vec<String>,
+}
+
+async fn save_draft(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+    Json(b): Json<SaveDraftBody>,
+) -> Result<StatusCode, AppError> {
+    s.wfd.save_draft(id, ver, &b.wfd, b.description.as_deref(), &b.tags)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(map_wfd_err)
+}
+
+async fn publish_draft(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    s.wfd.publish_draft(id, ver).await
+        .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "published" })))
+        .map_err(map_wfd_err)
+}
+
+async fn delete_draft(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<StatusCode, AppError> {
+    s.wfd.delete_draft(id, ver).await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(map_wfd_err)
+}
+
+async fn new_draft(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    let (wfd_id, version) = s.wfd.new_draft_from(id, ver).await.map_err(map_wfd_err)?;
+    Ok(Json(serde_json::json!({ "wfd_id": wfd_id, "version": version })))
+}
+
+/// WfdError → HTTP kodu eşlemesi.
+fn map_wfd_err(e: wf_wfd::error::WfdError) -> AppError {
+    use wf_wfd::error::WfdError as E;
+    let code = match e {
+        E::NotFound(_)    => StatusCode::NOT_FOUND,
+        E::Conflict(_)    => StatusCode::CONFLICT,
+        E::InvalidJson(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        _                 => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    AppError(e.to_string(), code)
 }

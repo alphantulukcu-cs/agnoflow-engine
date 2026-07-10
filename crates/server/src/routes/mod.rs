@@ -1,4 +1,5 @@
 pub mod autoexec;
+pub mod db;
 pub mod org;
 pub mod portal;
 pub mod simulate;

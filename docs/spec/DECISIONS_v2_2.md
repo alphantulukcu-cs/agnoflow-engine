@@ -101,6 +101,35 @@ sidecar dokümandan bağımsız eşlenebilir.
 - **WOR-16:** OrgAdapter'ın inline `orgtnt_for_orgu` SQL'i korundu (tek sorgu,
   repo'ya taşıma davranış değiştirmiyor) — istenirse ayrı refactor.
 
+## Terminal id = kullanıcı adı (case-insensitive unique)
+
+**Sorun:** Editör terminal'lere `step-<uuid>` biçiminde otomatik id veriyordu; kullanıcının
+UI'da girdiği `label` export'a hiç yansımıyordu (`useExport.ts` terminal id'yi `label`'dan
+bağımsız, internal step id'den üretiyordu). Sonuç: WFD JSON'da terminal id'leri anlamsız
+UUID'ler, isimler kayıp.
+
+**Karar:** Terminal export id'si artık **doğrudan kullanıcının girdiği `label`** (trim
+dışında dönüştürülmez — node key'lerdeki `slug(c_a)` mekanizmasının aksine terminal id'nin
+engine tarafında charset/format kısıtı yok, sadece uniqueness). Terminal isimleri
+**case-insensitive unique olmak zorunda** ("Start" ile "sTaRT" aynı isim sayılır):
+
+- Editör: `assignTerminalKeys()` (src/utils/v22.ts) her export'ta `internalId → label` eşlemesi
+  kurar; case-insensitive çakışma veya boş label varsa **throw** eder (export bloklanır) —
+  node'lardaki `_<fnv1a16>` collision-suffix mekanizmasının aksine burada sessiz çözüm YOK,
+  kullanıcı ismi değiştirmek zorunda. `PropertiesPanel`'de canlı uyarı (`findTerminalLabelCollision`).
+- Internal step id (uuid, ReactFlow/flows/positions için) DEĞİŞMEDİ — sadece export-time
+  id hesaplaması ayrıştırıldı (CaGroup node key'lerinin `nodeKeyOf` deseniyle aynı).
+- Import: yeni-şema dosyalarda (`terminal.id` insan-okunur) `label = terminal.id`. Eski
+  `step-<uuid>` id'li dosyalarda geriye uyumluluk için `label`, `wfe_end_response.status`'tan
+  çıkarılır (önceki davranış korunur).
+- Backend (`wfe-core/src/validator.rs::check_uniqueness`): terminal id'leri artık
+  case-insensitive de karşılaştırılır — editör dışı üretilen WFD JSON'ları da korur (spec
+  kaynaklı, sadece UI-side guard değil). Runtime lookup (`pipeline.rs::resolve_wft`)
+  case-sensitive exact-match olarak DEĞİŞMEDİ — case-insensitivity yalnızca authoring-time
+  uniqueness kuralı.
+- Golden fixture (`example-wfd_kredi-basvuru_v2_2.json`) değişmedi — `terminal_approved` /
+  `terminal_rejected` zaten case-insensitive unique.
+
 ## Kapsam notları
 
 - WOR-26 / WOR-29 / WOR-30 (editör kararları) yukarıda kayıt altına alındı; kod

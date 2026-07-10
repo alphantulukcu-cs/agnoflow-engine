@@ -81,6 +81,7 @@ fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
         }
     }
     let mut terminal_ids = HashSet::new();
+    let mut terminal_ids_ci: HashMap<String, &str> = HashMap::new();
     for (i, t) in wfd.terminals.iter().enumerate() {
         if !terminal_ids.insert(t.id.clone()) {
             report.error(
@@ -88,6 +89,21 @@ fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
                 format!("terminals[{i}]"),
                 format!("terminal id '{}' birden fazla kez tanımlı", t.id),
             );
+        }
+        // Terminal id'leri case-insensitive unique olmak zorunda (editor id = kullanıcı
+        // adı; "Start" ile "sTaRT" aynı isim sayılır).
+        let lower = t.id.to_lowercase();
+        if let Some(prev) = terminal_ids_ci.insert(lower, &t.id) {
+            if prev != t.id {
+                report.error(
+                    "unique",
+                    format!("terminals[{i}]"),
+                    format!(
+                        "terminal id '{}' ile '{}' büyük/küçük harf farkı hariç aynı",
+                        t.id, prev
+                    ),
+                );
+            }
         }
     }
     // node ve terminal id'leri global namespace'te çakışamaz

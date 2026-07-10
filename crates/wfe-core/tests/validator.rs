@@ -95,6 +95,16 @@ fn node_key_colliding_with_terminal_id_is_error() {
     assert!(has_error(&validate_value(v), "unique"));
 }
 
+#[test]
+fn terminal_ids_differing_only_by_case_is_error() {
+    let mut v = fixture_value();
+    // "terminal_approved" ile "Terminal_Approved" — sadece case farklı, aynı isim sayılır
+    v["terminals"][1]["id"] = json!("Terminal_Approved");
+    v["transitions"][1]["wft"]["default"]["terminal"] = json!("Terminal_Approved");
+    let report = validate_value(v);
+    assert!(has_error(&report, "unique"), "hatalar: {:#?}", report.errors);
+}
+
 // ---- §2b slug / canonical uniqueness ----
 
 #[test]

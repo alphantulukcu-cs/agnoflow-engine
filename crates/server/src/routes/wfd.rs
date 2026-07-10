@@ -130,8 +130,9 @@ struct SaveDraftBody {
     wfd:         Value,
     #[serde(default)]
     description: Option<String>,
+    /// Verilmezse (None) mevcut tags korunur; boş `[]` gönderilirse temizlenir.
     #[serde(default)]
-    tags:        Vec<String>,
+    tags:        Option<Vec<String>>,
 }
 
 async fn save_draft(
@@ -139,7 +140,7 @@ async fn save_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
     Json(b): Json<SaveDraftBody>,
 ) -> Result<StatusCode, AppError> {
-    s.wfd.save_draft(id, ver, &b.wfd, b.description.as_deref(), &b.tags)
+    s.wfd.save_draft(id, ver, &b.wfd, b.description.as_deref(), b.tags.as_deref())
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(map_wfd_err)

@@ -146,7 +146,7 @@ impl WfdAdapter {
         version:     i32,
         wfd_json:    &Value,
         description: Option<&str>,
-        tags:        &[String],
+        tags:        Option<&[String]>,
     ) -> Result<(), crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "draft" {

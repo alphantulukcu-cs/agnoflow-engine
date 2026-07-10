@@ -155,3 +155,98 @@ async fn resolve_global_type(
         .map(|(orgu_id, orgu_type, path)| OrgUnit { orgu_id, orgu_type, path })
         .collect())
 }
+
+// ── Simülasyon playground: aktör oluşturma (WOR sim) ────────────────────────
+// Bu fonksiyonlar yalnızca sim/dev senaryosu içindir: kritere uygun hazır aktör
+// yoksa UI'dan (orgu_id + rol) eşleşen bir aktör üretmeye izin verir.
+
+/// Yeni kullanıcı ekler. (orgtnt_id, username) benzersizdir → varsa hata döner.
+pub async fn create_user(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    username: &str,
+    full_name: &str,
+    email: Option<&str>,
+) -> Result<User, OrgError> {
+    sqlx::query_as::<_, User>(
+        "INSERT INTO org.u (orgtnt_id, username, full_name, email)
+         VALUES ($1, $2, $3, $4)
+         RETURNING u_id, orgtnt_id, username, full_name, email, is_active, created_at",
+    )
+    .bind(orgtnt_id)
+    .bind(username)
+    .bind(full_name)
+    .bind(email)
+    .fetch_one(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
+/// Rolü ada göre bulur; yoksa oluşturur (display_name = name).
+pub async fn ensure_role(pool: &PgPool, orgtnt_id: Uuid, name: &str) -> Result<Role, OrgError> {
+    if let Some(r) = sqlx::query_as::<_, Role>(
+        "SELECT r_id, orgtnt_id, name, display_name, is_active, created_at
+         FROM org.r WHERE orgtnt_id = $1 AND name = $2",
+    )
+    .bind(orgtnt_id)
+    .bind(name)
+    .fetch_optional(pool)
+    .await
+    .map_err(OrgError::Database)?
+    {
+        return Ok(r);
+    }
+    sqlx::query_as::<_, Role>(
+        "INSERT INTO org.r (orgtnt_id, name, display_name)
+         VALUES ($1, $2, $2)
+         RETURNING r_id, orgtnt_id, name, display_name, is_active, created_at",
+    )
+    .bind(orgtnt_id)
+    .bind(name)
+    .fetch_one(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
+/// (kullanıcı, birim, rol) atamasını garantiler: u_orgu üyeliği + granted ur satırı.
+/// İdempotent — aynı atama tekrar çağrılırsa yeni satır eklenmez.
+pub async fn grant_assignment(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    u_id: Uuid,
+    orgu_id: Uuid,
+    role_name: &str,
+) -> Result<(), OrgError> {
+    let role = ensure_role(pool, orgtnt_id, role_name).await?;
+
+    sqlx::query(
+        "INSERT INTO org.u_orgu (orgtnt_id, u_id, orgu_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (u_id, orgu_id) DO NOTHING",
+    )
+    .bind(orgtnt_id)
+    .bind(u_id)
+    .bind(orgu_id)
+    .execute(pool)
+    .await
+    .map_err(OrgError::Database)?;
+
+    sqlx::query(
+        "INSERT INTO org.ur (orgtnt_id, u_id, r_id, orgu_id, ur_type)
+         SELECT $1, $2, $3, $4, 'granted'
+         WHERE NOT EXISTS (
+             SELECT 1 FROM org.ur
+             WHERE orgtnt_id = $1 AND u_id = $2 AND r_id = $3
+               AND orgu_id = $4 AND ur_type = 'granted'
+         )",
+    )
+    .bind(orgtnt_id)
+    .bind(u_id)
+    .bind(role.r_id)
+    .bind(orgu_id)
+    .execute(pool)
+    .await
+    .map_err(OrgError::Database)?;
+
+    Ok(())
+}

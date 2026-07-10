@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -14,9 +14,10 @@ pub fn router(pool: PgPool) -> Router {
         .route("/orgtnt",            get(list_orgtnt))
         .route("/orgtnt/:id",        get(get_orgtnt))
         .route("/orgtnt/:id/orgt",   get(list_orgt_by_tenant))
-        .route("/orgtnt/:id/users",  get(list_users_by_tenant))
+        .route("/orgtnt/:id/users",  get(list_users_by_tenant).post(create_user))
         .route("/orgtnt/:id/roles",  get(list_roles_by_tenant))
         .route("/orgtnt/:id/actors", get(list_actors))
+        .route("/orgtnt/:id/assignments", post(create_assignment))
         .route("/orgt/:id/orgu",     get(list_orgu_by_tree))
         .route("/users/:id/orgu",    get(list_user_orgu))
         .route("/users/:id/roles",   get(list_user_roles))
@@ -83,28 +84,85 @@ async fn list_roles_by_tenant(
 struct ActorRow {
     user_id:   Uuid,
     full_name: String,
+    username:  String,
+    email:     Option<String>,
     orgu_id:   Uuid,
     orgu_name: String,
     role:      String,
 }
+
+const ACTOR_SELECT: &str =
+    "SELECT u.u_id AS user_id, u.full_name, u.username, u.email,
+            o.orgu_id, o.name AS orgu_name, r.name AS role
+     FROM org.ur ur
+     JOIN org.u u  ON ur.u_id = u.u_id
+     JOIN org.orgu o ON ur.orgu_id = o.orgu_id
+     JOIN org.r r  ON ur.r_id = r.r_id
+     WHERE ur.orgtnt_id = $1
+       AND ur.ur_type <> 'excluded'
+       AND u.is_active = true AND r.is_active = true";
 
 async fn list_actors(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
 ) -> Result<Json<Vec<ActorRow>>, AppError> {
     sqlx::query_as::<_, ActorRow>(
-        "SELECT u.u_id AS user_id, u.full_name, o.orgu_id, o.name AS orgu_name, r.name AS role
-         FROM org.ur ur
-         JOIN org.u u  ON ur.u_id = u.u_id
-         JOIN org.orgu o ON ur.orgu_id = o.orgu_id
-         JOIN org.r r  ON ur.r_id = r.r_id
-         WHERE ur.orgtnt_id = $1
-           AND ur.ur_type <> 'excluded'
-           AND u.is_active = true AND r.is_active = true
-         ORDER BY o.name, u.full_name, r.name",
+        &format!("{ACTOR_SELECT} ORDER BY o.name, u.full_name, r.name"),
     )
     .bind(orgtnt_id)
     .fetch_all(&pool)
+    .await
+    .map(Json)
+    .map_err(|e| AppError(e.to_string(), axum::http::StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Sim playground: yeni kullanıcı ekle.
+#[derive(Deserialize)]
+struct CreateUserBody {
+    username:  String,
+    full_name: String,
+    email:     Option<String>,
+}
+
+async fn create_user(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<CreateUserBody>,
+) -> Result<Json<wf_org::models::User>, AppError> {
+    repo::user_role::create_user(
+        &pool, orgtnt_id, &body.username, &body.full_name, body.email.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(Into::into)
+}
+
+/// Sim playground: (kullanıcı, birim, rol) atamasını garantiler → dönüşte hazır aktör satırı.
+/// Kritere uygun aktör yoksa UI bununla bir aktör üretir.
+#[derive(Deserialize)]
+struct AssignBody {
+    u_id:      Uuid,
+    orgu_id:   Uuid,
+    role_name: String,
+}
+
+async fn create_assignment(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<AssignBody>,
+) -> Result<Json<ActorRow>, AppError> {
+    repo::user_role::grant_assignment(&pool, orgtnt_id, body.u_id, body.orgu_id, &body.role_name)
+        .await
+        .map_err(AppError::from)?;
+
+    sqlx::query_as::<_, ActorRow>(
+        &format!("{ACTOR_SELECT} AND u.u_id = $2 AND o.orgu_id = $3 AND r.name = $4 LIMIT 1"),
+    )
+    .bind(orgtnt_id)
+    .bind(body.u_id)
+    .bind(body.orgu_id)
+    .bind(&body.role_name)
+    .fetch_one(&pool)
     .await
     .map(Json)
     .map_err(|e| AppError(e.to_string(), axum::http::StatusCode::INTERNAL_SERVER_ERROR))

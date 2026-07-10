@@ -181,9 +181,9 @@ fn my_row_json(row: &sqlx::mysql::MySqlRow) -> Value {
     let mut obj = Map::new();
     for col in row.columns() {
         let n = col.name();
-        // MySQL'de TINYINT(1) bool olarak da okunabilir; JSON kolonları Value'dur.
+        // DİKKAT: sqlx-mysql bool decode'u TÜM int tiplerini kabul eder (0/1'e indirger)
+        // — bool bu yüzden sayısal zincirin SONUNDA denenir (TINYINT(1) zaten i8 yakalar).
         let val: Value = row.try_get::<Value, _>(n)
-            .or_else(|_| row.try_get::<bool, _>(n).map(Value::from))
             .or_else(|_| row.try_get::<i8, _>(n).map(Value::from))
             .or_else(|_| row.try_get::<i16, _>(n).map(Value::from))
             .or_else(|_| row.try_get::<i32, _>(n).map(Value::from))
@@ -192,6 +192,7 @@ fn my_row_json(row: &sqlx::mysql::MySqlRow) -> Value {
             .or_else(|_| row.try_get::<f32, _>(n).map(|f| Value::from(f as f64)))
             .or_else(|_| row.try_get::<f64, _>(n).map(Value::from))
             .or_else(|_| row.try_get::<rust_decimal::Decimal, _>(n).map(decimal_json))
+            .or_else(|_| row.try_get::<bool, _>(n).map(Value::from))
             .or_else(|_| row.try_get::<chrono::DateTime<chrono::Utc>, _>(n).map(|t| Value::from(t.to_rfc3339())))
             .or_else(|_| row.try_get::<chrono::NaiveDateTime, _>(n).map(|t| Value::from(t.to_string())))
             .or_else(|_| row.try_get::<chrono::NaiveDate, _>(n).map(|t| Value::from(t.to_string())))

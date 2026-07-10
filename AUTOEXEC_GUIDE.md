@@ -1,391 +1,137 @@
-# Autoexec Nodes Implementation Guide
+# Autoexec Rehberi (WFD v2.2)
 
-## Overview
+Autoexec'ler insan etkileşimi gerektirmeyen otomatik adımlardır: **REST**, **SQL**, **CALC**.
+v2.2'de root `autoexec` kataloğunda tanımlanır, transition'lardan `trigger[].use` ile
+referans edilir. Çalıştırma `crates/wfe/src/runner.rs` (`LiveAutoexecRunner`),
+DB bağlantı katmanı `crates/wfe/src/db/` altındadır.
 
-Autoexec nodes are automatic workflow execution steps that don't require human interaction. They execute when their `when` condition is true and automatically advance the workflow based on their results. This system supports three types of autoexec nodes: **REST**, **SQL**, and **CALC**.
-
-## Architecture
-
-### Module Structure
-
-```
-crates/wfe/src/autoexec/
-├── mod.rs              # Main module, AutoexecExecutor orchestrator
-├── error.rs            # Error types for autoexec operations
-├── schema.rs           # Input/output schema validation and mapping
-├── rest.rs             # REST HTTP executor
-├── sql.rs              # SQL database executor
-├── calc.rs             # Expression calculator executor
-└── tests.rs            # Comprehensive unit tests
-```
-
-### Key Components
-
-1. **AutoexecExecutor** - Routes execution to the appropriate handler based on autoexec type
-2. **SchemaValidator** - Validates and maps input/output parameters according to JSON schemas
-3. **RestExecutor** - Handles HTTP requests (GET, POST, PUT, DELETE)
-4. **SqlExecutor** - Executes SQL queries against databases
-5. **CalcExecutor** - Evaluates mathematical and boolean expressions
-
-## Autoexec Types
-
-### 1. REST Autoexec
-
-Makes HTTP requests and maps responses back to workflow context.
-
-**Configuration Schema:**
 ```json
-{
-  "type": "rest",
-  "method": "GET|POST|PUT|DELETE",
-  "url": "https://api.example.com/endpoint",
-  "params": {
-    "param_key": { "ref": "$ctx.context.field" }
-  },
-  "result": {
-    "output_field": "$.response.path.to.value"
-  }
-}
-```
-
-**Example:**
-```json
-{
-  "id": "auto_tc_verify",
-  "when": "$wfah.some(# .action == \"Başvur\")",
-  "autoexec": {
+"autoexec": {
+  "kredi_skoru_getir": {
     "type": "rest",
-    "method": "GET",
-    "url": "https://api.internal/tc-verify",
-    "params": {
-      "tckn": { "ref": "$ctx.basvuran.user" }
-    },
-    "result": {
-      "tc_gecerli": "$.valid"
-    }
-  },
-  "wfes_effects": {
-    "set": {
-      "tc_gecerli": "$exec.result.tc_gecerli"
-    }
-  },
-  "wft": {
-    "c_a": []
+    "description": "Kredi skorunu dış servisten getirir.",
+    "timeout_seconds": 10,
+    "config": { ... },
+    "wfes_effects": { "set": { "credit_score": "$exec.result.score" } }
   }
 }
 ```
 
-**Parameter Mapping:**
-- `{ "ref": "$ctx.field.path" }` - Reference to context value
-- `{ "ctx": "field.path" }` - Shorthand context reference
-- Literal values - Any JSON literal
+Ortak kurallar:
+- `timeout_seconds` (varsayılan 60) pipeline tarafından uygulanır; aşımı `WFD.Timeout`.
+- Başarılı sonuç TEK namespace ile okunur: **`$exec.result.*`** (`wfes_effects.set` içinde).
+  `$exec.response.*` v2.2'de KALDIRILDI (M7) — validator hata verir.
+- Config değerlerindeki `$`-string'ler çalıştırma anında çözülür:
+  `$ctx.path.to.field`, `$wfe_id`, `$actor`, `$node`, `$timestamp`.
+- Hata `WFD.AutoexecFailed` üretir; trigger'daki `retry` / `catch` ile eşleşir.
 
-**Output Mapping (JSONPath):**
-- `"$.field"` - Root-level field
-- `"$.data.user.id"` - Nested path
-- `"$.array[0]"` - Array element
+## REST (`type: "rest"`)
 
-### 2. SQL Autoexec
-
-Executes SQL queries and returns results as JSON.
-
-**Configuration Schema:**
 ```json
-{
-  "type": "sql",
-  "database_type": "postgres|mysql|sqlite",
-  "query": "SELECT * FROM users WHERE id = :user_id",
-  "params": {
-    "user_id": { "ref": "$ctx.user.id" }
-  },
-  "result": {
-    "user_name": "$.name",
-    "user_email": "$.email"
-  }
+"config": {
+  "method": "GET|POST|PUT|PATCH|DELETE",
+  "url": "https://api.example.com/endpoint",
+  "params":  { "tckid": "$ctx.applicant.tckid" },          // query string
+  "headers": { "X-Trace-Id": "$wfe_id" },                  // opsiyonel
+  "auth": { "type": "bearer", "token": "$ctx.api_token" }, // opsiyonel, aşağıya bak
+  "body":  { "alan": "$ctx.x" },                           // JSON gövde
+  "form":  { "grant_type": "client_credentials" }          // x-www-form-urlencoded
 }
 ```
 
-**Example:**
+- `auth` kısayolları (en son uygulanır, aynı header'ı ezer):
+  - `{"type":"bearer","token":"..."}` → `Authorization: Bearer ...`
+  - `{"type":"basic","username":"...","password":"..."}` → `Authorization: Basic ...`
+  - `{"type":"api_key","header":"X-API-Key","value":"..."}` (header varsayılanı `X-API-Key`)
+- `form` verilirse `body` yok sayılır; `form` yoksa `body` JSON olarak gönderilir.
+- 2xx dışı yanıt: hata mesajına yanıt gövdesinin ilk 500 karakteri eklenir.
+- JSON olmayan 2xx yanıt: `{"body": "<ham metin>"}` olarak döner
+  (`$exec.result.body`); boş gövde `{}` döner.
+
+## SQL (`type: "sql"`)
+
 ```json
-{
-  "id": "auto_fetch_user",
-  "when": "$user_id != null",
-  "autoexec": {
-    "type": "sql",
-    "database_type": "postgres",
-    "query": "SELECT name, email, status FROM users WHERE id = :user_id",
-    "params": {
-      "user_id": { "ref": "$ctx.user.id" }
-    },
-    "result": {
-      "user_name": "$.name",
-      "user_email": "$.email",
-      "user_status": "$.status"
-    }
-  },
-  "wfes_effects": {
-    "set": {
-      "user_name": "$exec.result.user_name",
-      "user_email": "$exec.result.user_email"
-    }
-  },
-  "wft": {
-    "c_a": []
-  }
+"config": {
+  "connection": "<db_connection uuid>",   // opsiyonel; yoksa engine'in kendi Postgres'i
+  "query": "SELECT ad, skor FROM musteri WHERE id = :kim",
+  "params": { "kim": "$ctx.musteri_id" }
 }
 ```
 
-**Supported Databases:**
-- PostgreSQL (fully implemented)
-- MySQL (framework ready)
-- SQLite (framework ready)
+- **Parametreler**: `:ad` yer tutucuları metin sırasında sürücüye özel işarete çevrilir
+  (`$1` pg / `?` mysql-sqlite / `@P1` mssql). String literal içindeki `:x` ve
+  Postgres `::cast` dokunulmaz. Aynı isim birden çok kez kullanılabilir.
+- **Sonuç**: tek satır → düz obje (`$exec.result.kolon`), 0 veya çoklu satır →
+  `{"rows": [...]}` (`$exec.result.rows`).
+- **Tip haritası**: int2/4/8, unsigned, float4/8, numeric/decimal, bool, uuid,
+  date/time/timestamp(tz) (RFC3339/ISO string), json(b), text → JSON karşılıkları.
+- **Bağlantılar** (`wf.db_connection`, AES-256-GCM şifreli secret; `/db/connections` API):
 
-**Query Parameters:**
-- Use `:param_name` syntax for parameter substitution
-- Parameters are automatically escaped
+| Driver adı | Wire protokolü | Varsayılan port |
+|---|---|---|
+| `postgres` | Postgres | 5432 |
+| `cockroachdb` | Postgres | 26257 |
+| `redshift` | Postgres | 5439 |
+| `timescaledb` | Postgres | 5432 |
+| `mysql` | MySQL | 3306 |
+| `mariadb` | MySQL | 3306 |
+| `tidb` | MySQL | 4000 |
+| `mssql` / `sqlserver` | TDS (tiberius) | 1433 |
+| `sqlite` | dosya | — (`database` = dosya yolu) |
 
-### 3. CALC Autoexec
+  `mode: "fields"` (host/port/database/username/parola) veya `mode: "uri"`
+  (secret = tam bağlantı dizesi; mssql'de ADO formatı). SQLite'ta `fields` modunda
+  yalnızca `database` (engine'in erişebildiği dosya yolu) gerekir.
+- Bağlantı handle'ları `(id, updated_at)` anahtarıyla önbelleklenir; bağlantı
+  güncellenince otomatik tazelenir.
 
-Evaluates mathematical and boolean expressions using ZEN syntax.
+## CALC (`type: "calc"`)
 
-**Configuration Schema:**
 ```json
-{
-  "type": "calc",
+"config": {
   "expressions": {
-    "output_field": "ctx.field1 + ctx.field2",
-    "bool_field": "ctx.amount > 1000 and ctx.status == 'active'"
+    "within_limit": "$ctx.credit_score >= 700 and $ctx.credit_info.amount_requested <= 50000"
   }
 }
 ```
 
-**Example:**
-```json
-{
-  "id": "auto_calc_eligibility",
-  "when": "$kredi_notu > 0",
-  "autoexec": {
-    "type": "calc",
-    "expressions": {
-      "limit_uygun": "ctx.kredi_notu >= 600 and ctx.miktar <= 500000"
-    }
-  },
-  "wfes_effects": {
-    "set": {
-      "limit_uygun": "$exec.result.limit_uygun"
-    }
-  },
-  "wft": {
-    "c_a": [
-      {
-        "c_orgu": { "from": "$ctx._step_Başvur.actor.orgu", "traverse": "parent" },
-        "c_r": ["subeMuduru"]
-      }
-    ]
-  }
-}
-```
+- zen-expression sözdizimi; `$ctx.* $wfah $node $actor $timestamp $wfe_id` namespace'leri.
+- Not: `count()` yok, `len()` var.
+- Her anahtar sonucu `$exec.result.<anahtar>` olarak okunur.
 
-**Expression Syntax (ZEN-based):**
-- Variables: `ctx.fieldname` (converted to `$fieldname`)
-- Operators: `+`, `-`, `*`, `/`, `>`, `<`, `>=`, `<=`, `==`, `!=`
-- Logical: `and`, `or`, `!` (converted to `&&`, `||`)
-- Parentheses: `(expr1 + expr2) * expr3`
+## Editörde (WFD-EDITOR)
 
-## Integration with Effects
+- Auto step → **Config** modalı: REST'te method/url/auth/headers/params/body(JSON|form),
+  SQL'de bağlantı seçimi + query + params, CALC'ta expressions.
+- **Sonuç → ctx** tablosu üç tipte de `wfes_effects.set`'i düzenler
+  (`ctx_field` ← `$exec.result.alan`). Eski `config.result` alanı engine tarafından
+  OKUNMAZ; yalnızca eski dokümanların round-trip'i için korunur.
+- **Test** modalı `/autoexec/test`'e gönderir (baseUrl Çalıştırma ayarlarından);
+  yanıt `request_info` (çözülmüş config) + `result`/`error` gösterir.
+- DB bağlantıları Çalıştırma sekmesi → "Veritabanı bağlantıları" bölümünden yönetilir.
 
-### Accessing Autoexec Results
-
-Autoexec results are automatically merged into the context under `_exec.result.*` and can be referenced in `wfes_effects`:
-
-```json
-"wfes_effects": {
-  "set": {
-    "status": "$exec.result.status",
-    "user_data": "$exec.result.user_info"
-  }
-}
-```
-
-### Effect Value Syntax
-
-Special syntax for referencing autoexec results:
+## /autoexec/test
 
 ```
-$exec.result.field_name       - Direct field reference
-$exec.result.nested.path      - Nested field reference
+POST /autoexec/test
+{ "autoexec": { "type": "...", "config": { ... }, "timeout_seconds"?: n }, "dynctx": { ... } }
+→ { "success": bool, "result"?: ..., "error"?: "WFD.X: mesaj", "request_info": <çözülmüş config> }
 ```
 
-This syntax is supported in all effect value contexts (set/append).
+SQL/REST çalıştırma hatası `success:false` ile HTTP 200 döner; bozuk tanım 422.
 
-## Execution Flow
-
-1. **Evaluation** - Check `when` condition against current WFES
-2. **Execution** - Execute autoexec node based on type
-3. **Result Mapping** - Extract and map results using output schema
-4. **Effects** - Apply `wfes_effects` with access to autoexec results
-5. **Persistence** - Save updated context
-6. **WFT Resolution** - Determine next candidates or terminal state
-
-## Error Handling
-
-### Error Types
-
-- **SchemaValidationFailed** - Input/output schema validation error
-- **RestRequestFailed** - HTTP request failed
-- **SqlExecutionFailed** - SQL query execution failed
-- **DatabaseConnectionFailed** - Database connection unavailable
-- **ExpressionEvaluationFailed** - CALC expression evaluation error
-- **InvalidConfiguration** - Missing or malformed autoexec configuration
-- **ParameterMappingFailed** - Failed to resolve parameter value
-- **ResultMappingFailed** - Failed to extract result value
-
-### Error Propagation
-
-Autoexec errors are logged and returned as `EngineError::Autoexec`, which prevents further workflow execution until resolved.
-
-## Best Practices
-
-### 1. Parameter Mapping
-
-Always validate that context fields exist before referencing:
-```json
-{
-  "params": {
-    "user_id": { "ref": "$ctx.user.id" }
-  }
-}
-```
-
-### 2. Output Schema
-
-Design output mappings to handle both single and multiple results:
-```json
-{
-  "result": {
-    "primary_id": "$.id",
-    "primary_name": "$.name"
-  }
-}
-```
-
-### 3. Conditional Routing
-
-Use CALC nodes to determine routing before expensive REST/SQL calls:
-```json
-{
-  "when": "$amount > 1000",
-  "autoexec": { "type": "calc", ... }
-}
-```
-
-### 4. Idempotency
-
-Make autoexec nodes idempotent where possible - they may be retried:
-- Use unique identifiers in requests
-- Include deduplication in SQL queries
-- Avoid side effects in CALC expressions
-
-### 5. Monitoring
-
-Log autoexec execution for debugging:
-- All autoexec results are captured in WFAH
-- Failed autoexec returns detailed error messages
-- Context changes are persisted atomically
-
-## Configuration Examples
-
-### Real-world: Credit Application Workflow
-
-```json
-{
-  "id": "kredi-basvuru",
-  "transitions": [
-    {
-      "id": "auto_tc_verify",
-      "when": "some($wfah, # .action == \"Başvur\")",
-      "autoexec": {
-        "type": "rest",
-        "method": "GET",
-        "url": "https://identity-service/verify/{{tc_number}}",
-        "params": {
-          "tc_number": { "ref": "$ctx.applicant.tc_number" }
-        },
-        "result": {
-          "verified": "$.is_valid"
-        }
-      },
-      "wfes_effects": {
-        "set": {
-          "tc_verified": "$exec.result.verified"
-        }
-      }
-    },
-    {
-      "id": "auto_credit_check",
-      "when": "$tc_verified == true",
-      "autoexec": {
-        "type": "sql",
-        "database_type": "postgres",
-        "query": "SELECT credit_score, limit FROM credit_bureau WHERE person_id = :pid",
-        "params": {
-          "pid": { "ref": "$ctx.applicant.person_id" }
-        },
-        "result": {
-          "score": "$.credit_score",
-          "available_limit": "$.limit"
-        }
-      },
-      "wfes_effects": {
-        "set": {
-          "credit_score": "$exec.result.score"
-        }
-      }
-    },
-    {
-      "id": "auto_eligibility",
-      "when": "$credit_score > 0",
-      "autoexec": {
-        "type": "calc",
-        "expressions": {
-          "is_eligible": "ctx.credit_score >= 600 and ctx.requested_amount <= ctx.available_limit"
-        }
-      },
-      "wfes_effects": {
-        "set": {
-          "eligible": "$exec.result.is_eligible"
-        }
-      }
-    }
-  ]
-}
-```
-
-## Testing
-
-The autoexec system includes comprehensive unit tests:
+## Testler
 
 ```bash
-# Run all autoexec tests
-cargo test -p wf-wfe --lib autoexec
-
-# Run specific test suite
-cargo test -p wf-wfe --lib autoexec::tests::schema_validator
+cargo test -p wf-wfe --lib          # bind_params, sqlite in-memory, auth, calc birimleri
+cargo test --workspace              # tamamı
 ```
 
-Test coverage includes:
-- Schema validation and mapping
-- Input parameter resolution
-- Output extraction via JSONPath
-- Type conversions
-- Error handling
+Canlı doğrulama: `docs/superpowers/notes/2026-07-11-autoexec-completion.md`.
 
-## Future Enhancements
+## Bilinen sınırlar / gelecek
 
-- [ ] Support for GraphQL queries (GraphQL executor)
-- [ ] Native support for MySQL and SQLite
-- [ ] Request signing (OAuth, AWS Signature)
-- [ ] Response caching and retry mechanisms
-- [ ] Template expressions in URLs and queries
-- [ ] Multi-step sequential autoexec chains
-- [ ] Parallel autoexec execution with join semantics
+- `python` / `lambda` tipleri tanımda var, çalıştırma desteklenmiyor (açık hata döner).
+- Oracle bilinçli olarak eklenmedi (native client bağımlılığı); MongoDB/Redis SQL değil.
+- MSSQL canlı ortamda smoke-test edilmedi (tiberius yolu birim + tip seviyesinde hazır).
+- OAuth2 client-credentials akışı, yanıt cache'i, GraphQL executor — gelecek.

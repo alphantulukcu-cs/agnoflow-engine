@@ -85,10 +85,15 @@ pub async fn next_version(pool: &PgPool, orgtnt_id: Uuid, name: &str) -> Result<
 /// Draft metadata günceller (JSON storage'da; burada sadece meta + updated_at).
 pub async fn update_draft(
     pool: &PgPool, wfd_id: Uuid, version: i32,
-    description: Option<&str>, tags: &[String],
+    description: Option<&str>, tags: Option<&[String]>,
 ) -> Result<(), WfdError> {
+    // COALESCE: verilmeyen alan (NULL) mevcut değeri korur — editör kaydı
+    // yalnızca JSON gönderdiğinden create'te girilen description/tags silinmez.
     let n = sqlx::query(
-        "UPDATE wf.wfd_meta SET description=$3, tags=$4, updated_at=now() \
+        "UPDATE wf.wfd_meta \
+         SET description = COALESCE($3, description), \
+             tags = COALESCE($4, tags), \
+             updated_at = now() \
          WHERE wfd_id=$1 AND version=$2 AND status='draft'"
     )
     .bind(wfd_id).bind(version).bind(description).bind(tags)

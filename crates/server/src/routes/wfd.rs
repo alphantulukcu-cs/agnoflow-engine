@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/draft/:id/:version/publish", post(publish_draft))
         .route("/:id/:version", get(get_wfd))
         .route("/:id/:version/new-draft", post(new_draft))
+        .route("/:id/:version/usage", get(wfe_usage))
         .with_state(state)
 }
 
@@ -170,6 +171,39 @@ async fn new_draft(
 ) -> Result<Json<Value>, AppError> {
     let (wfd_id, version) = s.wfd.new_draft_from(id, ver).await.map_err(map_wfd_err)?;
     Ok(Json(serde_json::json!({ "wfd_id": wfd_id, "version": version })))
+}
+
+/// Bu published versiyonu kullanan WFE örneklerinin durum dağılımı.
+/// `active` = anlık çalışan örnek sayısı.
+async fn wfe_usage(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, count(*)::bigint FROM wf.wfe \
+         WHERE wfd_id = $1 AND wfd_version = $2 GROUP BY status",
+    )
+    .bind(id)
+    .bind(ver)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    let (mut active, mut terminal, mut error) = (0i64, 0i64, 0i64);
+    for (status, n) in rows {
+        match status.as_str() {
+            "active" => active = n,
+            "terminal" => terminal = n,
+            "error" => error = n,
+            _ => {}
+        }
+    }
+    Ok(Json(serde_json::json!({
+        "active": active,
+        "terminal": terminal,
+        "error": error,
+        "total": active + terminal + error,
+    })))
 }
 
 /// WfdError → HTTP kodu eşlemesi.

@@ -15,7 +15,13 @@ chrono         = { workspace = true }
 async-trait    = { workspace = true }
 tracing        = { workspace = true }
 reqwest        = { version = "0.11", features = ["json"] }
+tokio          = { workspace = true }
 zen-expression = { workspace = true }
+tiberius       = { workspace = true }
+tokio-util     = { workspace = true }
+aes-gcm        = { workspace = true }
+rand           = { workspace = true }
+base64         = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

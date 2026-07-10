@@ -686,7 +686,7 @@ Expected: `409` (artık draft değil).
 - [ ] **Step 9: new-draft — published'dan yeni versiyon**
 
 Run: `curl -s -X POST localhost:$PORT/wfd/$WID/$VER/new-draft`
-Expected: `{"wfd_id":"<yeni-uuid>","version":2}`.
+Expected: `{"wfd_id":"<yeni-uuid>","version":2}`. Bu YENİ `wfd_id`'yi `$WID2` değişkenine al (new-draft taze bir wfd_id üretir; `$WID` değildir).
 
 - [ ] **Step 10: Liste yeni alanları içeriyor**
 
@@ -695,8 +695,8 @@ Expected: her öğede `status` (`draft`/`published`), `description`, `tags`, `ow
 
 - [ ] **Step 11: Draft iskarta**
 
-Run: `curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:$PORT/wfd/draft/$WID/2`
-Expected: `204`; ardından `GET /wfd/draft/$WID/2` → 404.
+Run: `curl -s -o /dev/null -w '%{http_code}\n' -X DELETE localhost:$PORT/wfd/draft/$WID2/2`
+Expected: `204`; ardından `GET /wfd/draft/$WID2/2` → 404. (new-draft taze `wfd_id` ürettiği için `$WID` değil `$WID2` kullanılır.)
 
 - [ ] **Step 12: Temizlik**
 

@@ -5,8 +5,9 @@ resolver = "2"
 [workspace.dependencies]
 axum               = "0.7"
 tokio              = { version = "1", features = ["full"] }
-sqlx               = { version = "0.7", features = ["postgres", "mysql", "runtime-tokio-rustls", "uuid", "chrono", "json"] }
-tiberius           = { version = "0.12", default-features = false, features = ["rustls", "chrono"] }
+sqlx               = { version = "0.7", features = ["postgres", "mysql", "sqlite", "runtime-tokio-rustls", "uuid", "chrono", "json", "rust_decimal"] }
+tiberius           = { version = "0.12", default-features = false, features = ["rustls", "chrono", "rust_decimal", "tds73"] }
+rust_decimal       = "1"
 tokio-util         = { version = "0.7", features = ["compat"] }
 aes-gcm            = "0.10"
 rand               = "0.8"

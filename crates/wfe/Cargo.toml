@@ -18,6 +18,7 @@ reqwest        = { version = "0.11", features = ["json"] }
 tokio          = { workspace = true }
 zen-expression = { workspace = true }
 tiberius       = { workspace = true }
+rust_decimal   = { workspace = true }
 tokio-util     = { workspace = true }
 aes-gcm        = { workspace = true }
 rand           = { workspace = true }

@@ -1,22 +1,9 @@
 //! Sürücü-özel bağlantı testi. fields modu bileşenlerden URI kurar; uri modu
 //! secret'ı doğrudan bağlantı dizesi olarak kullanır.
-use super::{DbConfig, DbDriver, DbError};
+use super::{sqlite_uri, sqlx_uri, DbConfig, DbDriver, DbError};
 
 fn field<'a>(o: &'a serde_json::Value, k: &str) -> Option<&'a str> {
     o.get(k).and_then(|v| v.as_str())
-}
-
-/// fields modundan sqlx bağlantı dizesi (postgres/mysql).
-fn sqlx_uri(cfg: &DbConfig, scheme: &str, default_port: i32) -> String {
-    if cfg.mode == "uri" {
-        return cfg.secret.clone().unwrap_or_default();
-    }
-    let host = cfg.host.as_deref().unwrap_or("localhost");
-    let port = cfg.port.unwrap_or(default_port);
-    let db = cfg.database.as_deref().unwrap_or("");
-    let user = cfg.username.as_deref().unwrap_or("");
-    let pass = cfg.secret.as_deref().unwrap_or("");
-    format!("{scheme}://{user}:{pass}@{host}:{port}/{db}")
 }
 
 pub async fn test(cfg: &DbConfig) -> Result<(), DbError> {
@@ -24,7 +11,19 @@ pub async fn test(cfg: &DbConfig) -> Result<(), DbError> {
         DbDriver::Postgres => test_sqlx_pg(cfg).await,
         DbDriver::Mysql => test_sqlx_my(cfg).await,
         DbDriver::Mssql => test_mssql(cfg).await,
+        DbDriver::Sqlite => test_sqlx_lite(cfg).await,
     }
+}
+
+async fn test_sqlx_lite(cfg: &DbConfig) -> Result<(), DbError> {
+    use sqlx::sqlite::SqlitePoolOptions;
+    let uri = sqlite_uri(cfg);
+    let pool = SqlitePoolOptions::new().max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(8))
+        .connect(&uri).await.map_err(|e| DbError(e.to_string()))?;
+    sqlx::query("SELECT 1").execute(&pool).await.map_err(|e| DbError(e.to_string()))?;
+    pool.close().await;
+    Ok(())
 }
 
 async fn test_sqlx_pg(cfg: &DbConfig) -> Result<(), DbError> {

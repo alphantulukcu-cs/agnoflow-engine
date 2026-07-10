@@ -30,6 +30,8 @@ pub struct TestAutoexecResponse {
     success: bool,
     result: Option<Value>,
     error: Option<String>,
+    /// $-string'leri dynctx ile çözülmüş config — editörde "ne gönderildi" görünümü.
+    request_info: Option<Value>,
 }
 
 async fn test_autoexec(
@@ -55,22 +57,26 @@ async fn test_autoexec(
         },
     };
 
+    let request_info = Some(wf_wfe::runner::resolved_config(&def, &env));
     let timeout = std::time::Duration::from_secs(def.timeout_seconds as u64);
     match tokio::time::timeout(timeout, runner.run(&def, &env)).await {
         Ok(Ok(result)) => Ok(Json(TestAutoexecResponse {
             success: true,
             result: Some(result),
             error: None,
+            request_info,
         })),
         Ok(Err(f)) => Ok(Json(TestAutoexecResponse {
             success: false,
             result: None,
             error: Some(format!("{}: {}", f.error, f.message)),
+            request_info,
         })),
         Err(_) => Ok(Json(TestAutoexecResponse {
             success: false,
             result: None,
             error: Some("WFD.Timeout: timeout_seconds aşıldı".into()),
+            request_info,
         })),
     }
 }

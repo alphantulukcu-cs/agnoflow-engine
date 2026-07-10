@@ -5,7 +5,7 @@
 use async_trait::async_trait;
 use reqwest::{Client, Method};
 use serde_json::{json, Map, Value};
-use sqlx::{Column, PgPool, Row};
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -69,6 +69,15 @@ impl LiveAutoexecRunner {
             .config
             .get("body")
             .map(|b| resolve_config_value(b, env));
+        let form = def
+            .config
+            .get("form")
+            .map(|f| resolve_config_value(f, env));
+        let headers = def
+            .config
+            .get("headers")
+            .map(|h| resolve_config_value(h, env))
+            .unwrap_or(Value::Null);
 
         let mut request = self.client.request(method.clone(), url);
         if let Value::Object(map) = &params {
@@ -78,7 +87,19 @@ impl LiveAutoexecRunner {
                 .collect();
             request = request.query(&query);
         }
-        if let Some(body) = body {
+        if let Value::Object(map) = &headers {
+            for (k, v) in map {
+                request = request.header(k, value_to_string(v));
+            }
+        }
+        request = apply_auth(request, &def.config, env)?;
+        if let Some(Value::Object(map)) = &form {
+            let pairs: Vec<(String, String)> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), value_to_string(v)))
+                .collect();
+            request = request.form(&pairs);
+        } else if let Some(body) = body {
             request = request.json(&body);
         }
 
@@ -88,13 +109,19 @@ impl LiveAutoexecRunner {
             .map_err(|e| ExecFailure::failed(format!("HTTP isteği başarısız: {e}")))?;
 
         let status = response.status();
+        let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ExecFailure::failed(format!("HTTP {status}")));
+            let snippet: String = text.chars().take(500).collect();
+            return Err(ExecFailure::failed(if snippet.is_empty() {
+                format!("HTTP {status}")
+            } else {
+                format!("HTTP {status}: {snippet}")
+            }));
         }
-        response
-            .json::<Value>()
-            .await
-            .or(Ok(json!({})))
+        // JSON yanıt → doğrudan result; değilse ham gövde $exec.result.body altında
+        Ok(serde_json::from_str::<Value>(&text).unwrap_or_else(|_| {
+            if text.is_empty() { json!({}) } else { json!({ "body": text }) }
+        }))
     }
 
     async fn run_sql(&self, def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure> {
@@ -105,6 +132,7 @@ impl LiveAutoexecRunner {
             }
         }
 
+        // Varsayılan: engine'in kendi Postgres havuzu (db::run ile aynı yol)
         let pool = self
             .pool
             .as_ref()
@@ -119,57 +147,11 @@ impl LiveAutoexecRunner {
             .get("params")
             .map(|p| resolve_config_value(p, env))
             .unwrap_or(json!({}));
-
-        // :name parametrelerini sıralı $n bind'lerine çevir
-        let mut bound: Vec<Value> = Vec::new();
-        let mut sql = query.to_string();
-        if let Value::Object(map) = &params {
-            for (name, value) in map {
-                let placeholder = format!(":{name}");
-                if sql.contains(&placeholder) {
-                    bound.push(value.clone());
-                    sql = sql.replace(&placeholder, &format!("${}", bound.len()));
-                }
-            }
-        }
-
-        let mut q = sqlx::query(&sql);
-        for value in &bound {
-            q = match value {
-                Value::Number(n) if n.is_i64() => q.bind(n.as_i64()),
-                Value::Number(n) => q.bind(n.as_f64()),
-                Value::Bool(b) => q.bind(*b),
-                Value::String(s) => q.bind(s.clone()),
-                other => q.bind(other.clone()),
-            };
-        }
-
-        let rows = q
-            .fetch_all(pool)
+        let empty = Map::new();
+        let params_map = params.as_object().unwrap_or(&empty);
+        db::run::run_query(&RunHandle::Pg(pool.clone()), query, params_map)
             .await
-            .map_err(|e| ExecFailure::failed(format!("sql hatası: {e}")))?;
-
-        let mut out = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let mut obj = Map::new();
-            for column in row.columns() {
-                let value: Value = row
-                    .try_get::<Value, _>(column.name())
-                    .or_else(|_| row.try_get::<String, _>(column.name()).map(Value::from))
-                    .or_else(|_| row.try_get::<i64, _>(column.name()).map(Value::from))
-                    .or_else(|_| row.try_get::<f64, _>(column.name()).map(Value::from))
-                    .or_else(|_| row.try_get::<bool, _>(column.name()).map(Value::from))
-                    .unwrap_or(Value::Null);
-                obj.insert(column.name().to_string(), value);
-            }
-            out.push(Value::Object(obj));
-        }
-
-        // Tek satır → obje ($exec.result.field erişimi için), çoklu → {rows: [...]}
-        Ok(match out.len() {
-            1 => out.into_iter().next().unwrap(),
-            _ => json!({ "rows": out }),
-        })
+            .map_err(|e| ExecFailure::failed(format!("sql hatası: {e}")))
     }
 
     async fn run_sql_on_connection(
@@ -287,6 +269,37 @@ fn run_calc(def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure> {
     Ok(Value::Object(result))
 }
 
+/// REST auth kısayolu: config.auth {"type": "bearer"|"basic"|"api_key", ...}.
+/// headers ile birlikte kullanılabilir; auth en son uygulanır (aynı header'ı ezer).
+fn apply_auth(
+    request: reqwest::RequestBuilder,
+    config: &Value,
+    env: &ExecEnv,
+) -> Result<reqwest::RequestBuilder, ExecFailure> {
+    let Some(auth) = config.get("auth") else { return Ok(request) };
+    let auth = resolve_config_value(auth, env);
+    let kind = auth.get("type").and_then(Value::as_str).unwrap_or("");
+    let get = |k: &str| auth.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    match kind {
+        "" | "none" => Ok(request),
+        "bearer" => Ok(request.bearer_auth(get("token"))),
+        "basic" => {
+            let password = auth.get("password").and_then(Value::as_str);
+            Ok(request.basic_auth(get("username"), password))
+        }
+        "api_key" => {
+            let header = auth.get("header").and_then(Value::as_str).unwrap_or("X-API-Key");
+            Ok(request.header(header, get("value")))
+        }
+        other => Err(ExecFailure::failed(format!("geçersiz auth tipi: {other}"))),
+    }
+}
+
+/// Test endpoint'i için: config'in $-string'leri çözülmüş hali (request_info).
+pub fn resolved_config(def: &AutoexecDef, env: &ExecEnv) -> Value {
+    resolve_config_value(&def.config, env)
+}
+
 /// Config değerlerindeki $-string'leri çözer ($ctx.*, $wfe_id, $actor, $node, $timestamp).
 fn resolve_config_value(raw: &Value, env: &ExecEnv) -> Value {
     match raw {
@@ -378,6 +391,31 @@ mod tests {
         .unwrap();
         let err = runner.run(&def, &env(json!({}))).await.unwrap_err();
         assert_eq!(err.error, "WFD.AutoexecFailed");
+    }
+
+    #[test]
+    fn auth_bearer_and_api_key_set_headers() {
+        let client = Client::new();
+        let e = env(json!({"tok": "abc"}));
+
+        let req = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "bearer", "token": "$ctx.tok"}}), &e)
+            .unwrap().build().unwrap();
+        assert_eq!(req.headers()["authorization"], "Bearer abc");
+
+        let req = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "api_key", "value": "k1"}}), &e)
+            .unwrap().build().unwrap();
+        assert_eq!(req.headers()["x-api-key"], "k1");
+
+        let req = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "basic", "username": "u", "password": "p"}}), &e)
+            .unwrap().build().unwrap();
+        assert!(req.headers()["authorization"].to_str().unwrap().starts_with("Basic "));
+
+        let err = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "oauth9"}}), &e).unwrap_err();
+        assert!(err.message.contains("geçersiz auth tipi"));
+
+        // auth yoksa dokunulmaz
+        let req = apply_auth(client.get("http://x/"), &json!({}), &e).unwrap().build().unwrap();
+        assert!(req.headers().get("authorization").is_none());
     }
 
     #[test]

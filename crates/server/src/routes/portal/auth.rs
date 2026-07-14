@@ -1,44 +1,42 @@
 // workflow-engine/crates/server/src/routes/portal/auth.rs
 
+use super::jwt::{encode_jwt, PortalActor};
+use crate::{error::AppError, state::AppState};
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
-use crate::{error::AppError, state::AppState};
-use super::jwt::{encode_jwt, PortalActor};
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/login", post(login))
-        .with_state(state)
+    Router::new().route("/login", post(login)).with_state(state)
 }
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
-    pub role:     String,
-    pub orgu_id:  Uuid,
+    pub role: String,
+    pub orgu_id: Uuid,
 }
 
 #[derive(Serialize)]
 pub struct LoginUser {
-    pub id:        Uuid,
+    pub id: Uuid,
     pub full_name: String,
-    pub role:      String,
-    pub orgu_id:   Uuid,
+    pub role: String,
+    pub orgu_id: Uuid,
 }
 
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub token: String,
-    pub user:  LoginUser,
+    pub user: LoginUser,
 }
 
 #[derive(FromRow)]
 struct UserRow {
-    u_id:          Uuid,
-    full_name:     String,
+    u_id: Uuid,
+    full_name: String,
     password_hash: Option<String>,
 }
 
@@ -51,22 +49,33 @@ async fn login(
         "SELECT u_id, full_name, password_hash
          FROM org.u
          WHERE username = $1 AND is_active = true
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(&body.username)
     .fetch_optional(&s.pool)
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
-    .ok_or_else(|| AppError("Kullanıcı adı veya şifre hatalı.".into(), StatusCode::UNAUTHORIZED))?;
+    .ok_or_else(|| {
+        AppError(
+            "Kullanıcı adı veya şifre hatalı.".into(),
+            StatusCode::UNAUTHORIZED,
+        )
+    })?;
 
     // 2. Verify password
-    let hash = row.password_hash
-        .as_deref()
-        .ok_or_else(|| AppError("Kullanıcı adı veya şifre hatalı.".into(), StatusCode::UNAUTHORIZED))?;
+    let hash = row.password_hash.as_deref().ok_or_else(|| {
+        AppError(
+            "Kullanıcı adı veya şifre hatalı.".into(),
+            StatusCode::UNAUTHORIZED,
+        )
+    })?;
     let ok = bcrypt::verify(&body.password, hash)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     if !ok {
-        return Err(AppError("Kullanıcı adı veya şifre hatalı.".into(), StatusCode::UNAUTHORIZED));
+        return Err(AppError(
+            "Kullanıcı adı veya şifre hatalı.".into(),
+            StatusCode::UNAUTHORIZED,
+        ));
     }
 
     // 3. Verify user is assigned to the requested orgu
@@ -74,7 +83,7 @@ async fn login(
         "SELECT EXISTS(
              SELECT 1 FROM org.u_orgu
              WHERE u_id = $1 AND orgu_id = $2
-         )"
+         )",
     )
     .bind(row.u_id)
     .bind(body.orgu_id)
@@ -83,18 +92,23 @@ async fn login(
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
     if !orgu_assigned {
-        return Err(AppError("Bu birim için yetkiniz yok.".into(), StatusCode::FORBIDDEN));
+        return Err(AppError(
+            "Bu birim için yetkiniz yok.".into(),
+            StatusCode::FORBIDDEN,
+        ));
     }
 
     // 4. Verify user has the requested role in that orgu
-    let has_role = wf_org::repo::user_role::check_user_role(
-        &s.pool, row.u_id, body.orgu_id, &body.role,
-    )
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    let has_role =
+        wf_org::repo::user_role::check_user_role(&s.pool, row.u_id, body.orgu_id, &body.role)
+            .await
+            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
     if !has_role {
-        return Err(AppError("Bu rol için yetkiniz yok.".into(), StatusCode::FORBIDDEN));
+        return Err(AppError(
+            "Bu rol için yetkiniz yok.".into(),
+            StatusCode::FORBIDDEN,
+        ));
     }
 
     // 5. Get orgtnt_id for the orgu
@@ -102,7 +116,7 @@ async fn login(
         "SELECT orgtnt_id FROM org.orgt_orgu
          WHERE orgu_id = $1 AND is_active = true
          ORDER BY created_at ASC
-         LIMIT 1"
+         LIMIT 1",
     )
     .bind(body.orgu_id)
     .fetch_optional(&s.pool)
@@ -112,9 +126,9 @@ async fn login(
 
     // 6. Issue JWT (8 hour TTL)
     let actor = PortalActor {
-        user_id:   row.u_id,
-        orgu_id:   body.orgu_id,
-        role:      body.role.clone(),
+        user_id: row.u_id,
+        orgu_id: body.orgu_id,
+        role: body.role.clone(),
         orgtnt_id,
     };
     let token = encode_jwt(&s.cfg.jwt_secret, &actor, 8)?;
@@ -122,10 +136,10 @@ async fn login(
     Ok(Json(LoginResponse {
         token,
         user: LoginUser {
-            id:        row.u_id,
+            id: row.u_id,
             full_name: row.full_name,
-            role:      body.role,
-            orgu_id:   body.orgu_id,
+            role: body.role,
+            orgu_id: body.orgu_id,
         },
     }))
 }

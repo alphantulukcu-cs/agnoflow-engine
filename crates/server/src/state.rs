@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use sqlx::PgPool;
-use wf_wfe::WfeExecutor;
+use std::sync::Arc;
 use wf_wfd::WfdAdapter;
+use wf_wfe::WfeExecutor;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub pool:     PgPool,
+    pub pool: PgPool,
     pub executor: Arc<WfeExecutor>,
-    pub wfd:      Arc<WfdAdapter>,
-    pub cfg:      Arc<crate::config::Config>,
+    pub wfd: Arc<WfdAdapter>,
+    pub cfg: Arc<crate::config::Config>,
 }

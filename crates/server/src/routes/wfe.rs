@@ -26,9 +26,18 @@ fn extract_actor(headers: &HeaderMap) -> Result<Actor, AppError> {
     let role = headers
         .get("x-actor-role")
         .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError("X-Actor-Role header required".into(), StatusCode::BAD_REQUEST))?
+        .ok_or_else(|| {
+            AppError(
+                "X-Actor-Role header required".into(),
+                StatusCode::BAD_REQUEST,
+            )
+        })?
         .to_string();
-    Ok(Actor { orgu_id, user_id, role })
+    Ok(Actor {
+        orgu_id,
+        user_id,
+        role,
+    })
 }
 
 fn parse_uuid_header(headers: &HeaderMap, name: &str) -> Result<Uuid, AppError> {

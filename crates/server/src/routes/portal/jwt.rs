@@ -1,5 +1,6 @@
 // workflow-engine/crates/server/src/routes/portal/jwt.rs
 
+use crate::{error::AppError, state::AppState};
 use axum::{
     async_trait,
     extract::FromRequestParts,
@@ -8,22 +9,21 @@ use axum::{
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::{error::AppError, state::AppState};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PortalClaims {
-    pub sub:       String,  // user_id
-    pub orgu_id:   String,
-    pub role:      String,
+    pub sub: String, // user_id
+    pub orgu_id: String,
+    pub role: String,
     pub orgtnt_id: String,
-    pub exp:       usize,
+    pub exp: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct PortalActor {
-    pub user_id:   Uuid,
-    pub orgu_id:   Uuid,
-    pub role:      String,
+    pub user_id: Uuid,
+    pub orgu_id: Uuid,
+    pub role: String,
     pub orgtnt_id: Uuid,
 }
 
@@ -35,9 +35,9 @@ pub fn encode_jwt(secret: &str, actor: &PortalActor, ttl_hours: u64) -> Result<S
         + ttl_hours * 3600) as usize;
 
     let claims = PortalClaims {
-        sub:       actor.user_id.to_string(),
-        orgu_id:   actor.orgu_id.to_string(),
-        role:      actor.role.clone(),
+        sub: actor.user_id.to_string(),
+        orgu_id: actor.orgu_id.to_string(),
+        role: actor.role.clone(),
         orgtnt_id: actor.orgtnt_id.to_string(),
         exp,
     };
@@ -47,7 +47,12 @@ pub fn encode_jwt(secret: &str, actor: &PortalActor, ttl_hours: u64) -> Result<S
         &claims,
         &EncodingKey::from_secret(secret.as_bytes()),
     )
-    .map_err(|e| AppError(format!("JWT encode: {e}"), StatusCode::INTERNAL_SERVER_ERROR))
+    .map_err(|e| {
+        AppError(
+            format!("JWT encode: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })
 }
 
 pub fn decode_jwt(secret: &str, token: &str) -> Result<PortalActor, AppError> {
@@ -60,11 +65,11 @@ pub fn decode_jwt(secret: &str, token: &str) -> Result<PortalActor, AppError> {
 
     let c = data.claims;
     Ok(PortalActor {
-        user_id:   Uuid::parse_str(&c.sub)
+        user_id: Uuid::parse_str(&c.sub)
             .map_err(|_| AppError("Bad token: sub".into(), StatusCode::UNAUTHORIZED))?,
-        orgu_id:   Uuid::parse_str(&c.orgu_id)
+        orgu_id: Uuid::parse_str(&c.orgu_id)
             .map_err(|_| AppError("Bad token: orgu_id".into(), StatusCode::UNAUTHORIZED))?,
-        role:      c.role,
+        role: c.role,
         orgtnt_id: Uuid::parse_str(&c.orgtnt_id)
             .map_err(|_| AppError("Bad token: orgtnt_id".into(), StatusCode::UNAUTHORIZED))?,
     })
@@ -84,7 +89,10 @@ impl FromRequestParts<AppState> for PortalActor {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .ok_or_else(|| {
-                AppError("Authorization: Bearer <token> required".into(), StatusCode::UNAUTHORIZED)
+                AppError(
+                    "Authorization: Bearer <token> required".into(),
+                    StatusCode::UNAUTHORIZED,
+                )
             })?;
 
         decode_jwt(&state.cfg.jwt_secret, token)
@@ -98,10 +106,10 @@ mod tests {
 
     fn test_actor() -> PortalActor {
         PortalActor {
-            user_id:    Uuid::new_v4(),
-            orgu_id:    Uuid::new_v4(),
-            role:       "clerk".into(),
-            orgtnt_id:  Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            orgu_id: Uuid::new_v4(),
+            role: "clerk".into(),
+            orgtnt_id: Uuid::new_v4(),
         }
     }
 

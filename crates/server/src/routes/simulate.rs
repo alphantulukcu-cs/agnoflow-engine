@@ -64,7 +64,10 @@ async fn sim_start(
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
-    let engine = Engine { org: &*org, exec: &runner };
+    let engine = Engine {
+        org: &*org,
+        exec: &runner,
+    };
 
     let orgtnt_id = wfe_core::OrgPort::orgtnt_for_orgu(&*org, body.actor.orgu_id)
         .await
@@ -82,7 +85,10 @@ async fn sim_start(
         .await
         .map_err(AppError::from)?;
 
-    Ok(Json(SimStartResponse { sim_state, possible_actions }))
+    Ok(Json(SimStartResponse {
+        sim_state,
+        possible_actions,
+    }))
 }
 
 // ── /apply ───────────────────────────────────────────────────────────────────
@@ -112,7 +118,10 @@ async fn sim_apply(
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
-    let engine = Engine { org: &*org, exec: &runner };
+    let engine = Engine {
+        org: &*org,
+        exec: &runner,
+    };
 
     let mut sim_state = body.sim_state;
     // simülasyon claim'i atlar — state uygulanmadan önce aktöre atanır
@@ -159,7 +168,10 @@ async fn sim_possible_actions(
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
-    let engine = Engine { org: &*org, exec: &runner };
+    let engine = Engine {
+        org: &*org,
+        exec: &runner,
+    };
 
     let wfes = body.sim_state.to_wfes(Some(body.actor.user_id));
     engine

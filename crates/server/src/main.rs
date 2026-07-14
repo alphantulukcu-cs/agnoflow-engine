@@ -101,10 +101,7 @@ async fn main() {
                         if provided == Some(key.as_str()) {
                             next.run(req).await
                         } else {
-                            (
-                                axum::http::StatusCode::UNAUTHORIZED,
-                                "X-Admin-Key required",
-                            )
+                            (axum::http::StatusCode::UNAUTHORIZED, "X-Admin-Key required")
                                 .into_response()
                         }
                     }
@@ -144,6 +141,12 @@ fn cors_layer(cfg: &config::Config) -> CorsLayer {
         .collect();
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ])
         .allow_headers(tower_http::cors::Any)
 }

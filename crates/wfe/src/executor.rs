@@ -240,4 +240,20 @@ impl WfeExecutor {
         }
         Ok(false)
     }
+
+    /// Tek WFE için bir sonraki escalation vadesi — dashboard insight'ı
+    /// (yaklaşan/geciken escalation'lar). `tick_timers`'ın salt-okunur hâli:
+    /// hiçbir şey ateşlemez/commit etmez.
+    pub async fn escalation_forecast(
+        &self,
+        wfe_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<wfe_core::v22::pipeline::EscalationForecast>, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        if wfes.status != WfeStatus::Active {
+            return Ok(None);
+        }
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        self.engine().next_escalation(&wfd, &wfes, now)
+    }
 }

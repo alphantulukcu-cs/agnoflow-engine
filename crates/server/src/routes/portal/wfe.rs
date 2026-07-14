@@ -160,7 +160,11 @@ async fn submit_action(
         .map_err(AppError::from)?;
 
     Ok(Json(ActionResponse {
-        wfe_status: if result.terminal { "terminal".into() } else { "active".into() },
+        wfe_status: if result.terminal {
+            "terminal".into()
+        } else {
+            "active".into()
+        },
         current_node: result.current_node,
         end_response: result.end_response,
     }))

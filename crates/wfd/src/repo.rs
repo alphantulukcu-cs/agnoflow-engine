@@ -4,6 +4,8 @@ use crate::{error::WfdError, models::WfdMeta};
 
 const COLS: &str = "wfd_id, orgtnt_id, name, version, s3_key, is_active, created_at, \
                     status, description, tags, owner, updated_at";
+const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
+                      m.status, m.description, m.tags, m.owner, m.updated_at";
 
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
 #[allow(clippy::too_many_arguments)]
@@ -100,6 +102,52 @@ pub async fn update_draft(
     .execute(pool).await?.rows_affected();
     if n == 0 { return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}"))); }
     Ok(())
+}
+
+/// Aynı tenant + workflow name grubundaki tüm versiyonların görünen metadata'sını günceller.
+/// WFD JSON immutable kalır; bu değerler katalog/detay ekranı için meta kaydından gelir.
+pub async fn update_group_metadata(
+    pool: &PgPool,
+    anchor_wfd_id: Uuid,
+    anchor_version: i32,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> Result<Vec<WfdMeta>, WfdError> {
+    let rows = sqlx::query_as::<_, WfdMeta>(&format!(
+        "WITH anchor AS (
+             SELECT orgtnt_id, name AS old_name
+             FROM wf.wfd_meta
+             WHERE wfd_id = $1 AND version = $2 AND is_active = true
+         ),
+         updated AS (
+             UPDATE wf.wfd_meta m
+             SET name = COALESCE($3, m.name),
+                 description = COALESCE($4, m.description),
+                 updated_at = now()
+             FROM anchor a
+             WHERE m.orgtnt_id = a.orgtnt_id
+               AND m.name = a.old_name
+               AND m.is_active = true
+             RETURNING {M_COLS}
+         )
+         SELECT {COLS} FROM updated ORDER BY version DESC"
+    ))
+    .bind(anchor_wfd_id)
+    .bind(anchor_version)
+    .bind(name)
+    .bind(description)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {
+        Some("wfd_meta_orgtnt_id_name_version_key") | Some("wfd_single_draft") =>
+            WfdError::Conflict("Bu isimde başka bir workflow zaten var".into()),
+        _ => WfdError::Database(e),
+    })?;
+
+    if rows.is_empty() {
+        return Err(WfdError::NotFound(format!("{anchor_wfd_id} v{anchor_version}")));
+    }
+    Ok(rows)
 }
 
 /// Draft'ı published yapar (publish sonrası). status flip + updated_at.

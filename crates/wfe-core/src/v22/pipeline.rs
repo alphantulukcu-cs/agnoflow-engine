@@ -51,6 +51,15 @@ pub enum ClaimCheck {
     NotEligible,
 }
 
+/// Node'un ilk ateşlenmemiş escalation adımı için giriş/vade bilgisi.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EscalationForecast {
+    pub step_idx: usize,
+    pub entered_at: DateTime<Utc>,
+    pub deadline: DateTime<Utc>,
+    pub overdue: bool,
+}
+
 impl<'a> Engine<'a> {
     // ---------------------------------------------------------------- start
 
@@ -369,15 +378,17 @@ impl<'a> Engine<'a> {
 
     // ------------------------------------------------------------ escalation
 
-    /// Süresi dolan ilk escalation adımının index'i (M6/§8).
-    /// Node'a giriş anı son WFAH kaydından türetilir; ateşlenen adımlar
-    /// `escalate:<node>:<idx>` WFAH kayıtlarıyla izlenir.
-    pub fn due_escalation(
+    /// Node'un henüz ateşlenmemiş ilk escalation adımı için giriş anı + vade
+    /// bilgisi — dashboard insight'ları (yaklaşan/geciken escalation) ve
+    /// `due_escalation` ortak temeli. Node'a giriş anı son WFAH kaydından
+    /// türetilir; ateşlenen adımlar `escalate:<node>:<idx>` WFAH kayıtlarıyla
+    /// izlenir.
+    pub fn next_escalation(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         now: DateTime<Utc>,
-    ) -> Result<Option<usize>, EngineError> {
+    ) -> Result<Option<EscalationForecast>, EngineError> {
         if wfes.status == WfeStatus::Terminal {
             return Ok(None);
         }
@@ -411,14 +422,30 @@ impl<'a> Engine<'a> {
             if fired {
                 continue;
             }
+            // adımlar sıralı — ilk ateşlenmemiş adım bu turun cevabıdır
             let after = parse_iso8601_duration(&step.after)?;
-            if now >= entered_at + after {
-                return Ok(Some(idx));
-            }
-            // adımlar sıralı — vadesi gelmemiş adımdan sonrakiler de gelmemiştir
-            break;
+            let deadline = entered_at + after;
+            return Ok(Some(EscalationForecast {
+                step_idx: idx,
+                entered_at,
+                deadline,
+                overdue: now >= deadline,
+            }));
         }
         Ok(None)
+    }
+
+    /// Süresi dolan ilk escalation adımının index'i (M6/§8).
+    pub fn due_escalation(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        now: DateTime<Utc>,
+    ) -> Result<Option<usize>, EngineError> {
+        Ok(self
+            .next_escalation(wfd, wfes, now)?
+            .filter(|f| f.overdue)
+            .map(|f| f.step_idx))
     }
 
     /// Vadesi gelen escalation adımını uygular; assigned WFE'de de çalışır,

@@ -101,6 +101,9 @@ async fn list_wfds(
 
 #[derive(Deserialize)]
 struct StartRequest {
+    /// M16: verilirse yalnız bu action adını taşıyan start kuralları aday olur.
+    #[serde(default)]
+    action: Option<String>,
     #[serde(default)]
     initial_context: Value,
 }
@@ -137,7 +140,7 @@ async fn start_wfd(
 
     let result = s
         .executor
-        .start(wfd_id, version, &portal_actor, &body.initial_context)
+        .start(wfd_id, version, &portal_actor, body.action.as_deref(), &body.initial_context)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::BAD_REQUEST))?;
 

@@ -265,23 +265,15 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
     out
 }
 
-// ---- V1–V6: simetrik start kuralları (spec runtime-semantics) ----
+// ---- V1–V5: simetrik start kuralları (spec runtime-semantics, M16) ----
 
 fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
-    // V6: en az 1 start
+    // V5: en az 1 start
     if wfd.start.is_empty() {
         report.error(
             "start_required",
             "start".into(),
             "en az bir start kuralı gerekli".into(),
-        );
-    }
-    // V5: "start" rezerve aksiyondur — actions{} içinde OLAMAZ
-    if wfd.actions.contains_key("start") {
-        report.error(
-            "reserved_action",
-            "actions[start]".into(),
-            "'start' rezerve aksiyondur — actions{} içinde tanımlanamaz".into(),
         );
     }
     // V2 için: tüm wft NODE hedeflerini topla (transition + start + escalation)
@@ -307,12 +299,13 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
 
     for s in &wfd.start {
         let path = format!("start[{}]", s.id);
-        // V4: action == "start"
-        if s.action != "start" {
+        // V4 (M16): start.action gerçek bir action adıdır — actions{} içinde tanımlı
+        // olmalı (transition'lardaki action ile aynı kural).
+        if !wfd.actions.contains_key(&s.action) {
             report.error(
                 "start_action",
                 format!("{path}.action"),
-                format!("start.action '{}' — rezerve sabit \"start\" olmalı", s.action),
+                format!("bilinmeyen action '{}'", s.action),
             );
         }
         // V1: from var olan bir node'a işaret etmeli

@@ -65,20 +65,31 @@ impl<'a> Engine<'a> {
 
     /// Yeni WFE başlatır. `wfe_id` çağıran tarafından üretilir ve effects
     /// GERÇEK id ile çözülür (WOR-6).
+    ///
+    /// `action`: M16 sonrası start aksiyonları gerçek ad taşır; verilirse yalnız o
+    /// action adını taşıyan start kuralları aday olur (spec runtime resolution —
+    /// "actor, start[].action ile adlandırılmış aksiyonu çağırır"). `None` = tüm
+    /// start kuralları aday (tek start aksiyonlu WFD'ler ve eski istemciler).
     pub async fn start(
         &self,
         wfd: &Wfd,
         actor: &Actor,
         orgtnt_id: Uuid,
+        action: Option<&str>,
         input: &Value,
         wfe_id: Uuid,
     ) -> Result<NewWfe, EngineError> {
         let empty_ctx = json!({});
         let empty_wfah = Wfah::empty();
 
-        // Actor'ün başlatabildiği ilk kural
+        // Actor'ün başlatabildiği ilk kural (istenirse action adına daraltılmış)
         let mut rule = None;
         for r in &wfd.start {
+            if let Some(a) = action {
+                if r.action != a {
+                    continue;
+                }
+            }
             // Simetrik start: initiator yetkisi `from` node'unun c_a'sında yaşar.
             let node = wfd.nodes.get(&r.from).ok_or_else(|| {
                 EngineError::InvalidWfd(format!("start.from bilinmeyen node: '{}'", r.from))
@@ -91,13 +102,24 @@ impl<'a> Engine<'a> {
         }
         let rule = rule.ok_or(EngineError::StartNotEligible)?;
 
-        // Başlangıç ctx'i = input (readonly alanlar yazılamaz)
-        let mut staged = match input {
-            Value::Object(m) => Value::Object(m.clone()),
+        // §7.5 simetrisi: start input'u da transition input'ları gibi doğrulanır —
+        // action.input.required mevcut olmalı, bildirilmemiş yol reddedilir; başlangıç
+        // ctx'i YALNIZ bildirilen yollardan + effects'ten tohumlanır (serbest-form
+        // context enjeksiyonu kapalı).
+        let input_norm = match input {
+            Value::Object(_) => input.clone(),
             Value::Null => json!({}),
             _ => return Err(EngineError::InvalidInput("start input obje olmalı".into())),
         };
-        validate_start_input(&staged, &wfd.context)?;
+        let input = &input_norm;
+        let action_def = wfd.actions.get(&rule.action).ok_or_else(|| {
+            EngineError::InvalidWfd(format!(
+                "start action '{}' actions içinde tanımsız",
+                rule.action
+            ))
+        })?;
+        validate_readonly_paths(action_def, input, &wfd.context)?;
+        let mut staged = merge_action_input(&json!({}), action_def, input)?;
 
         let now = Utc::now();
         let mut wfah_entries: Vec<WfahEntry> = Vec::new();
@@ -117,9 +139,9 @@ impl<'a> Engine<'a> {
 
         wfah_entries.push(WfahEntry {
             seq,
-            // Rezerve action adı "start" — transition'lar gibi düz action adını yazar (rule.id
-            // DEĞİL). Böylece `c_orgu` WFAH anchor'ı (from.wfah = "start") hangi start kuralı
-            // fire ederse etsin initiator'a çözülür.
+            // Transition'lar gibi düz action adını yazar (rule.id DEĞİL). M16: start
+            // aksiyonu gerçek adını taşır; `c_orgu` WFAH anchor'ları da aynı gerçek
+            // adı referans alır (from.wfah = "<start action adı>").
             action: rule.action.clone(),
             actor: actor.clone(),
             input: Some(input.clone()),
@@ -154,6 +176,11 @@ impl<'a> Engine<'a> {
                 orgtnt_id,
             )
             .await?;
+
+        // context.required, start zinciri (input merge + effects + wft effects)
+        // tamamlandıktan SONRA denetlenir: alanlar input'tan değil effect'lerden de
+        // yazılabilir ($action.input.X → ctx).
+        validate_context_required(&final_ctx, &wfd.context)?;
 
         Ok(NewWfe {
             wfe_id,
@@ -994,30 +1021,48 @@ fn collect_leaf_paths(value: &Value, prefix: String, out: &mut Vec<String>) {
     }
 }
 
-/// Start input'u: context.required alanları mevcut ve readonly alan yazılmamış olmalı.
-fn validate_start_input(input: &Value, context_schema: &Value) -> Result<(), EngineError> {
-    if let Some(required) = context_schema.get("required").and_then(Value::as_array) {
-        for field in required.iter().filter_map(Value::as_str) {
-            if input.get(field).is_none() {
+/// Start input'unda dolu gelen, bildirimli (declared) bir yol context şemasında
+/// x-wf-readonly işaretliyse reddedilir — yol üzerindeki her segment denetlenir.
+/// Bildirimsiz yollar zaten `merge_action_input`'ta reddedildiği için burada yalnız
+/// action.input listesindeki yollara bakmak yeterlidir.
+fn validate_readonly_paths(
+    action: &ActionDef,
+    input: &Value,
+    context_schema: &Value,
+) -> Result<(), EngineError> {
+    let declared = action.input.required.iter().chain(action.input.optional.iter());
+    for path in declared {
+        if get_path(input, path).is_none() {
+            continue;
+        }
+        let mut schema = context_schema;
+        for seg in path.split('.') {
+            let Some(prop) = schema.get("properties").and_then(|p| p.get(seg)) else {
+                break;
+            };
+            if prop
+                .get("x-wf-readonly")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 return Err(EngineError::InvalidInput(format!(
-                    "context zorunlu alanı '{field}' start input'unda eksik"
+                    "'{path}' x-wf-readonly — start input'unda verilemez"
                 )));
             }
+            schema = prop;
         }
     }
-    if let (Some(props), Some(obj)) = (
-        context_schema.get("properties").and_then(Value::as_object),
-        input.as_object(),
-    ) {
-        for key in obj.keys() {
-            let readonly = props
-                .get(key)
-                .and_then(|s| s.get("x-wf-readonly"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if readonly {
+    Ok(())
+}
+
+/// context.required alanları (noktalı yol olabilir) start zinciri bittiğinde
+/// final ctx'te mevcut olmalı — kaynak fark etmez (input merge veya effects).
+fn validate_context_required(ctx: &Value, context_schema: &Value) -> Result<(), EngineError> {
+    if let Some(required) = context_schema.get("required").and_then(Value::as_array) {
+        for field in required.iter().filter_map(Value::as_str) {
+            if get_path(ctx, field).is_none() {
                 return Err(EngineError::InvalidInput(format!(
-                    "'{key}' x-wf-readonly — start input'unda verilemez"
+                    "context zorunlu alanı '{field}' start sonrasında eksik"
                 )));
             }
         }

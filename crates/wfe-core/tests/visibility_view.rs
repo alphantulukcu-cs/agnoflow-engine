@@ -4,9 +4,12 @@
 //!
 //! Covers:
 //! (a) owner can always view
-//! (b) actor authorized on the current node's c_a can view
-//! (c) an unrelated actor (wrong role, not owner, not listable) CANNOT view
-//! (d) a listable-matching actor can view; the golden fixture's second
+//! (b) a WFAH participant retains view — including on a TERMINAL WFE where
+//!     both assignment and current_node are cleared by the commit
+//! (c) actor authorized on the current node's c_a can view
+//! (d) an unrelated actor (wrong role, not owner, not participant, not
+//!     listable) CANNOT view — active or terminal
+//! (e) a listable-matching actor can view; the golden fixture's second
 //!     listable entry carries a `when` guard — tested true and false.
 
 use async_trait::async_trait;
@@ -108,7 +111,57 @@ async fn owner_can_view_regardless_of_role() {
     assert!(can_view(&golden(), &wfes, &owner, &org).await.unwrap());
 }
 
-// ================================================================ (b) node c_a
+// ============================================================ (b) participant
+
+/// Terminal commit `assigned_to` ve `current_node`'u temizler; WFAH'ta eylemi
+/// olan kullanıcı yine de sonucu (dynctx/end_response) görebilmeli.
+#[tokio::test]
+async fn wfah_participant_can_view_terminal_wfe() {
+    let org = MockOrg { role_assigned: false };
+    let orgu = Uuid::new_v4();
+    let participant = clerk(orgu);
+
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.wfah = wfes
+        .wfah
+        .push("reject".into(), participant.clone(), Some(json!({"red_sebebi": "x"})));
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+
+    assert!(can_view(&golden(), &wfes, &participant, &org).await.unwrap());
+}
+
+#[tokio::test]
+async fn non_participant_cannot_view_terminal_wfe() {
+    let org = MockOrg { role_assigned: true };
+    let orgu = Uuid::new_v4();
+    // clerk: WFAH'ta yalnız system + başka bir kullanıcı var; listable rolleri
+    // (branchManager/creditDeptManager) ile de eşleşmiyor
+    let outsider = clerk(orgu);
+
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.wfah = wfes.wfah.push("reject".into(), clerk(Uuid::new_v4()), None);
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+
+    assert!(!can_view(&golden(), &wfes, &outsider, &org).await.unwrap());
+}
+
+/// System aktörünün (nil uuid) WFAH kayıtları katılımcı grant'i üretmez.
+#[tokio::test]
+async fn system_wfah_entries_do_not_grant_view() {
+    let org = MockOrg { role_assigned: false };
+    let nil_viewer = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::nil(), role: "x".into() };
+
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+
+    // wfah'ta yalnızca system (nil) kaydı var — nil user_id'li viewer bile geçemez
+    assert!(!can_view(&golden(), &wfes, &nil_viewer, &org).await.unwrap());
+}
+
+// ================================================================ (c) node c_a
 
 #[tokio::test]
 async fn actor_authorized_on_current_node_c_a_can_view() {

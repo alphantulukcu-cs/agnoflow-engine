@@ -1,5 +1,10 @@
 # Engine Handoff — WFD v2.2 "Symmetric Start"
 
+> **GÜNCEL NOT (M16, 2026-07):** Bu brief'teki "action rezerve sabit \"start\"" kuralı
+> spec'ten KALDIRILDI (bkz. docs/spec/WFD_MIGRATION_NOTES_v2_2.md §M16). `start[].action`
+> artık start aksiyonunun gerçek adıdır ve `actions{}` içinde normal bir ACT olarak tanımlanır;
+> validator V4 buna göre güncellendi, eski V5 (reserved_action) kaldırıldı. Aşağısı tarihsel brief.
+
 > Bu doküman, workflow-engine'i WFD v2.2'nin **simetrik start** değişikliğine uyarlamak
 > için hazırlanmış bir görev brief'idir. Editor tarafı (WFD-EDITOR reposu) bitti ve merge
 > edildi; engine bu değişikliği tüketecek şekilde güncellenmezse **yeni WFD JSON'ları parse

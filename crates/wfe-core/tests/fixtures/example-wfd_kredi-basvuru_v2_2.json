@@ -161,7 +161,7 @@
     {
       "id": "start__type_branch__branchClerk",
       "from": "type_branch__branchClerk",
-      "action": "start",
+      "action": "create_application",
       "wfes_effects": {
         "set": {
           "initiated_by": "$actor"
@@ -173,6 +173,17 @@
     }
   ],
   "actions": {
+    "create_application": {
+      "label": "Başvuru Oluştur",
+      "description": "Şube memurunun kredi başvurusunu oluşturması — akışı başlatan aksiyon.",
+      "input": {
+        "required": [
+          "applicant",
+          "credit_info"
+        ],
+        "optional": []
+      }
+    },
     "analyst_approve": {
       "label": "Analist Değerlendirmesi",
       "description": "Analistin başvuruyu değerlendirmesi. Kredi skoru ve limit kontrolü trigger'larla otomatik yapılır.",

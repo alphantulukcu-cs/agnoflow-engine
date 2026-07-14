@@ -88,6 +88,32 @@ sidecar dokümandan bağımsız eşlenebilir.
 - Eski (bu değişiklikten önceki v2.2): `startRule = { id, c_a(inline), wfes_effects?, trigger?, wft }` — `from`/`action` yoktu, `c_a` node'a değil doğrudan startRule'a bağlıydı.
 - Yeni: `c_a` node'da; `startRule.c_a` alanı SİLİNDİ.
 
+## Start input = action input sözleşmesi (2026-07-14)
+
+**Sorun:** Start, gelen input objesini olduğu gibi başlangıç ctx'i yapıyordu; start
+aksiyonunun `input.required/optional` bildirimi runtime'da hiç doğrulanmıyordu
+(yalnız `context.required` + top-level `x-wf-readonly` bakılıyordu). Sonuç: (a) portal,
+hangi alanların kullanıcıdan isteneceğini context şemasından tahmin etmek zorundaydı;
+(b) API'ye doğrudan istek atan bir istemci, readonly işaretlenmemiş HER context alanını
+start'ta enjekte edebiliyordu (ör. `durum: "onaylandi"`).
+
+**Karar:** Start input'u transition input'larıyla (§7.5) simetrik doğrulanır:
+- `input.required` eksikse `zorunlu input 'x' eksik`;
+- bildirilmemiş leaf yol **hard reject** (`input yolu 'x' bu action'da tanımlı değil`) —
+  sessiz düşürme bilinçli reddedildi (hatalı istemci sessizce yanlış çalışmasın);
+- başlangıç ctx'i = yalnız declared yollar + start rule effects (serbest-form seed kalktı);
+- `x-wf-readonly` denetimi declared yolların TÜM segmentlerinde (eskisi top-level'dı);
+- `context.required` denetimi start zinciri bittikten sonra FINAL ctx üzerinde,
+  noktalı yol destekli (alanlar `$action.input.X` effect'iyle de yazılabildiği için
+  input-öncesi kontrol yanlış katmandaydı). Hata metni değişti:
+  `context zorunlu alanı 'x' start sonrasında eksik`.
+
+Golden fixture bu spec değişikliği gereği güncellendi: `create_application.input.required
+= ["applicant", "credit_info"]` (start aksiyonu artık kabul ettiği girdiyi bildirmek
+ZORUNDA — boş bildirim "start input almaz" demektir). Tüketici sözleşmesi: portal start
+formları context şemasından değil, start aksiyonunun `input` tanımından üretilir
+(work-pool-portal `WorkflowsPage` buna geçirildi).
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).
@@ -129,6 +155,20 @@ engine tarafında charset/format kısıtı yok, sadece uniqueness). Terminal isi
   uniqueness kuralı.
 - Golden fixture (`example-wfd_kredi-basvuru_v2_2.json`) değişmedi — `terminal_approved` /
   `terminal_rejected` zaten case-insensitive unique.
+
+## WFE-seviyesi VIEW: WFAH katılımcısına kalıcı okuma hakkı (2026-07-14)
+
+**Sorun:** Terminal commit `assigned_to` ve `current_node`'u temizler. `can_view` kapısının
+üç kriteri de (owner / aktif node c_a / listable) düştüğünden, `listable` tanımlamayan
+WFD'lerde biten WFE'nin dynctx'i ve end_response'u HİÇ KİMSEYE görünmez oluyordu
+(work-pool-portal bulgusu: Reddet sonrası `red_sebebi` bağlamda görüntülenemiyor).
+
+**Karar:** `can_view`'a katılımcı kapısı eklendi: viewer, WFAH'ta eylemi bulunan gerçek
+bir kullanıcıysa (system/nil aktör hariç) WFE'yi görüntüleyebilir — WFE durumu fark etmez
+(aktif veya terminal). Gerekçe: WFAH append-only audit izidir; sürece eylem katmış aktör
+sonucu izleyebilmelidir. Bu kapı ACT/claim/listability ÜRETMEZ — yalnız VIEW; field-level
+`x-visibility` filtresi katılımcılara da aynen uygulanmaya devam eder.
+(`wfe-core/src/v22/visibility.rs::can_view`, testler `tests/visibility_view.rs`.)
 
 ## Kapsam notları
 

@@ -47,6 +47,9 @@ fn parse_and_validate(wfd_json: Value) -> Result<Wfd, AppError> {
 struct SimStartBody {
     wfd: Value,
     actor: Actor,
+    /// M16: verilirse yalnız bu action adını taşıyan start kuralları aday olur.
+    #[serde(default)]
+    action: Option<String>,
     #[serde(default)]
     input: Value,
 }
@@ -74,7 +77,7 @@ async fn sim_start(
         .map_err(AppError::from)?;
 
     let new = engine
-        .start(&wfd, &body.actor, orgtnt_id, &body.input, Uuid::new_v4())
+        .start(&wfd, &body.actor, orgtnt_id, body.action.as_deref(), &body.input, Uuid::new_v4())
         .await
         .map_err(AppError::from)?;
     let sim_state = SimState::from_new_wfe(&new);

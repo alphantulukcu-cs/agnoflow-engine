@@ -99,6 +99,12 @@ Yeni (v2.2):
 
 Sonrası: `startRule = { id, from, action:"start", wfes_effects?, trigger?, wft }` — her start rule, `from` ile `nodes` kataloğundaki bir girdiye referans verir; o node `c_a`'yı taşır (transition'daki `node.c_a` ile aynı yer). `action` rezerve sabit `"start"`'tır ve `actions{}` içinde tanımlanamaz. Start node kimliği `start[].from` referansından türetilir; node'a `kind` alanı eklenmedi. `wfd_version` `"2.2"` kalır (amend in place, v2.3 yok).
 
+## M16. Start Aksiyonu Artık Rezerve Kelime Değil — Gerçek Ad Taşır (v2.2 — amended in place)
+
+Öncesi: `start[].action` her zaman rezerve sabit `"start"` yazılırdı (M15, custom validator V4/V5); editördeki başlama aksiyonunun gerçek adı (varsa) atılır, wire format'ta hiçbir yerde görünmezdi. WFAH anchor'ları da (`c_orgu.from.wfah`) bu yüzden literal `"start"` ile eşleştirilirdi.
+
+Sonrası: Editörde "Başlama aksiyonu olsun" checkbox'ı (`isStart`) hangi ActionStep'in start rule'a gideceğini belirler — isim bu kararı hiç etkilemez (ad artık serbest, ör. `"Akışı Hazırla"`). Export, o adımın gerçek `action` adını `start[].action` alanına yazar ve bu ad `actions{}` içinde normal bir ACT olarak tanımlanır (eski V5 kuralı kaldırıldı). WFAH anchor'ları da aynı gerçek adı referans alır. Şema: `startRule.action` artık `const:"start"` değil, `transition.action` ile aynı `idName` tipindedir.
+
 ## Editor (React Flow) Eşlemesi
 
 ```text

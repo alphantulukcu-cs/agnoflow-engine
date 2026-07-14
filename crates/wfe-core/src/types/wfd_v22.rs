@@ -343,7 +343,7 @@ pub struct StartRule {
     pub id: String,
     /// v2.2 simetrik start: giriş node id'si (nodes katalogunda; initiator c_a'sını taşır). Tekil.
     pub from: String,
-    /// Rezerve sabit "start".
+    /// Start aksiyonunun gerçek adı (M16) — actions{} içinde normal bir ACT olarak tanımlıdır.
     pub action: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,

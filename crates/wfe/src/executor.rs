@@ -78,6 +78,7 @@ impl WfeExecutor {
         wfd_id: Uuid,
         version: i32,
         actor: &Actor,
+        action: Option<&str>,
         input: &Value,
     ) -> Result<WfeStartResult, EngineError> {
         let wfd = self.wfd.fetch(wfd_id, version).await?;
@@ -87,7 +88,7 @@ impl WfeExecutor {
         let wfe_id = Uuid::new_v4();
         let mut new = self
             .engine()
-            .start(&wfd, actor, orgtnt_id, input, wfe_id)
+            .start(&wfd, actor, orgtnt_id, action, input, wfe_id)
             .await?;
         new.wfd_id = wfd_id;
         new.wfd_version = version;

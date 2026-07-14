@@ -69,3 +69,4 @@ temp/
 org-ui
 org-api
 data/
+.gstack/

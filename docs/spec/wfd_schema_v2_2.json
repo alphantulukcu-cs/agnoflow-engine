@@ -870,8 +870,8 @@
           "description": "Bu start kuralinin giris node id'si (nodes katalogunda; initiator c_a'sini tasir). Tekil — her initiator havuzu ayri start kurali."
         },
         "action": {
-          "const": "start",
-          "description": "Rezerve aksiyon. Her zaman \"start\". actions{} icinde tanimlanamaz (custom validator V5)."
+          "$ref": "#/$defs/idName",
+          "description": "Start aksiyonunun gercek adi (ornek: \"Akisi Hazirla\") — actions{} icinde normal bir ACT olarak tanimlanir, sabit deger degildir."
         },
         "wfes_effects": { "$ref": "#/$defs/wfesEffects" },
         "trigger": { "$ref": "#/$defs/triggerList" },

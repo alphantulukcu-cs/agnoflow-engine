@@ -152,7 +152,7 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
     let wfe_id = Uuid::new_v4();
 
     let new = engine
-        .start(&golden(), &actor, Uuid::nil(), &start_input(), wfe_id)
+        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), wfe_id)
         .await
         .unwrap();
 
@@ -161,7 +161,8 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
     // initiated_by = $actor gerçek aktörle çözülmeli
     assert_eq!(new.initial_dynctx["initiated_by"]["role"], json!("branchClerk"));
     assert_eq!(new.initial_dynctx["applicant"]["name"], json!("Ayşe Yılmaz"));
-    assert_eq!(new.wfah_entries[0].action, "start");
+    // M16: WFAH start kaydı gerçek action adını taşır (rezerve "start" değil)
+    assert_eq!(new.wfah_entries[0].action, "create_application");
     assert!(new.resolved_c_a.iter().any(|c| c.role == "creditAnalyst"));
 }
 
@@ -173,10 +174,49 @@ async fn start_rejects_missing_required_context_field() {
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), &json!({"applicant": {}}), Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &json!({"applicant": {}}), Uuid::new_v4())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+}
+
+#[tokio::test]
+async fn start_rejects_undeclared_input_path() {
+    // §7.5 simetrisi: start action'ın input tanımında olmayan yol ctx'e sızamaz.
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner };
+    let actor = clerk(Uuid::new_v4());
+    let mut input = start_input();
+    input["status"] = json!("approved"); // bildirilmemiş alan — enjeksiyon denemesi
+
+    let err = engine
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidInput(m) if m.contains("tanımlı değil")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn start_rejects_missing_required_action_input() {
+    // start action'ın input.required'ı transition'lardaki gibi zorunludur.
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner };
+    let actor = clerk(Uuid::new_v4());
+    let input = json!({"applicant": {"name": "Ayşe"}}); // credit_info yok
+
+    let err = engine
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidInput(m) if m.contains("zorunlu input")),
+        "{err}"
+    );
 }
 
 #[tokio::test]
@@ -189,10 +229,39 @@ async fn start_rejects_readonly_field_in_input() {
     input["credit_score"] = json!(999);
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), &input, Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+}
+
+#[tokio::test]
+async fn start_with_named_action_selects_matching_rule() {
+    // M16: start.action gerçek ad — istemci action adı verirse yalnız o kural aday olur.
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner };
+    let actor = clerk(Uuid::new_v4());
+
+    let new = engine
+        .start(&golden(), &actor, Uuid::nil(), Some("create_application"), &start_input(), Uuid::new_v4())
+        .await
+        .unwrap();
+    assert_eq!(new.wfah_entries[0].action, "create_application");
+}
+
+#[tokio::test]
+async fn start_with_unknown_action_is_not_eligible() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner };
+    let actor = clerk(Uuid::new_v4());
+
+    let err = engine
+        .start(&golden(), &actor, Uuid::nil(), Some("ghost_action"), &start_input(), Uuid::new_v4())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::StartNotEligible));
 }
 
 #[tokio::test]
@@ -203,7 +272,7 @@ async fn start_ineligible_actor_is_rejected() {
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), &start_input(), Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4())
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::StartNotEligible));

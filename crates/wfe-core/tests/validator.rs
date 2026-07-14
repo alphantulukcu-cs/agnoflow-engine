@@ -306,27 +306,47 @@ fn start_node_with_escalation_is_error() {
 }
 
 #[test]
-fn start_action_not_start_is_error() {
-    // V4
+fn start_action_unknown_is_error() {
+    // V4 (M16): start.action actions{} içinde tanımlı olmalı
     let mut v = fixture_value();
-    v["start"][0]["action"] = json!("begin");
+    v["start"][0]["action"] = json!("ghost_start_action");
     assert!(has_error(&validate_value(v), "start_action"));
 }
 
 #[test]
-fn reserved_start_action_in_actions_is_error() {
-    // V5
+fn start_action_named_start_is_allowed() {
+    // M16: "start" artık rezerve kelime DEĞİL — actions{} içinde tanımlıysa
+    // start.action olarak da kullanılabilir.
     let mut v = fixture_value();
-    v["actions"]["start"] = v["actions"]["manager_decide"].clone();
-    assert!(has_error(&validate_value(v), "reserved_action"));
+    v["actions"]["start"] = v["actions"]["create_application"].clone();
+    v["start"][0]["action"] = json!("start");
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "start_action") && !has_error(&report, "reserved_action"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
 fn golden_start_is_symmetric_from_action() {
-    // V1/V4 pozitif: golden fixture yeni şekilde temiz geçer
+    // V1/V4 pozitif: golden fixture yeni şekilde temiz geçer (M16: gerçek action adı)
     let v = fixture_value();
     assert_eq!(v["start"][0]["from"], json!("type_branch__branchClerk"));
-    assert_eq!(v["start"][0]["action"], json!("start"));
+    assert_eq!(v["start"][0]["action"], json!("create_application"));
+    assert!(
+        v["actions"].get("create_application").is_some(),
+        "start aksiyonu actions{{}} içinde tanımlı olmalı"
+    );
     assert!(v["start"][0].get("c_a").is_none(), "start artık c_a taşımamalı");
     assert!(validate_value(v).errors.is_empty());
+}
+
+#[test]
+fn start_with_named_action_selects_matching_rule() {
+    // M16 runtime resolution ile uyum: aynı action adı transitions'ta da kullanılmadığı
+    // sürece yalnız start[].action üzerinden erişilir — validator bunu kabul eder.
+    let v = fixture_value();
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }

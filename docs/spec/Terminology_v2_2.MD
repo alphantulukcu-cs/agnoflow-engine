@@ -111,14 +111,14 @@ WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, 
 {
   "id": "start__type_branch__branchClerk",
   "from": "type_branch__branchClerk",
-  "action": "start",
+  "action": "Akışı Hazırla",
   "wfes_effects": { "set": { "initiated_by": "$actor" } },
   "wft": { "node": "self__creditAnalyst" }
 }
 ```
 
 - `from`: WFE'yi başlatabilecek adayların havuzunu tutan bir **start node** slug'ı (tekil, array değil) — `nodes` kataloğundaki normal bir node.
-- `action`: rezerve sabit `"start"`; `actions{}` içinde tanımlanamaz.
+- `action`: start aksiyonunun gerçek adı — rezerve sabit değildir, `actions{}` içinde normal bir ACT olarak tanımlanır (transition'lardaki `action` ile aynı kural).
 - **Start node = referans ile türetilmiş kimlik.** Node'un kendisinde `kind` alanı YOKTUR; bir node sadece `start[].from` tarafından işaret edildiği için start node'dur. `c_a` (kim başlatabilir) o node'un üzerinde durur — TRANSITION'daki `node.c_a` (kim owner) ile aynı yerdedir, artık startRule üzerinde inline DEĞİLDİR.
 - Start node, hiçbir transition/start'ın `wft` hedefi olamaz (giriş-only, yeniden girilemez) ve `escalation` taşıyamaz.
 - `wfes_effects`/`trigger`/`wft` start EDGE'inde kalır (node'da asla).

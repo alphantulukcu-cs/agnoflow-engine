@@ -57,6 +57,10 @@ fn parse_uuid_header(headers: &HeaderMap, name: &str) -> Result<Uuid, AppError> 
 struct StartBody {
     wfd_id: Uuid,
     version: i32,
+    /// M16: start aksiyonları gerçek ad taşır — verilirse yalnız bu action adını
+    /// taşıyan start kuralları aday olur; verilmezse tüm start kuralları denenir.
+    #[serde(default)]
+    action: Option<String>,
     #[serde(default)]
     input: Value,
 }
@@ -68,7 +72,7 @@ async fn start_wfe(
 ) -> Result<Json<wf_wfe::executor::WfeStartResult>, AppError> {
     let actor = extract_actor(&headers)?;
     s.executor
-        .start(body.wfd_id, body.version, &actor, &body.input)
+        .start(body.wfd_id, body.version, &actor, body.action.as_deref(), &body.input)
         .await
         .map(Json)
         .map_err(AppError::from)

@@ -110,10 +110,11 @@ pub async fn filter_dynctx(
 }
 
 /// §4/L — WFE-seviyesi VIEW kapısı (spec Terminology VISIBILITY/LISTABLE):
-/// bir WFE şu üç durumdan biri doğruysa görüntülenebilir (OR):
+/// bir WFE şu durumlardan biri doğruysa görüntülenebilir (OR):
 ///   (a) viewer sahibi mi (`assigned_to == viewer.user_id`)
-///   (b) viewer aktif node'un c_a'sına (§3) authorize mi
-///   (c) viewer `wfd.listable[]` kurallarından birine authorize VE kuralın
+///   (b) viewer WFAH'ta eylemi bulunan gerçek bir katılımcı mı (system hariç)
+///   (c) viewer aktif node'un c_a'sına (§3) authorize mi
+///   (d) viewer `wfd.listable[]` kurallarından birine authorize VE kuralın
 ///       `when` guard'ı (varsa) staged ctx üzerinde true mü
 /// `visible`/`filter_dynctx`'ten AYRIDIR: onlar field-level x-visibility'dir,
 /// bu fonksiyon WFE'nin bütünüyle görünür olup olmadığını belirler.
@@ -128,9 +129,23 @@ pub async fn can_view(
         return Ok(true);
     }
 
+    // (b) katılımcı — WFAH audit izinde eylemi olan kullanıcı süreci ve sonucunu
+    // görmeye devam eder. Terminal commit owner'ı ve current_node'u temizlediği
+    // için bu kapı olmadan listable'sız WFD'lerde biten WFE'nin dynctx'i ve
+    // end_response'u HİÇ KİMSEYE görünmez olurdu. System aktörü (nil uuid) grant
+    // üretmez.
+    if wfes
+        .wfah
+        .entries()
+        .iter()
+        .any(|e| !e.actor.user_id.is_nil() && e.actor.user_id == viewer.user_id)
+    {
+        return Ok(true);
+    }
+
     let ctx = wfes.dynctx.as_value();
 
-    // (b) aktif node'un c_a'sı (§3)
+    // (c) aktif node'un c_a'sı (§3)
     if let Some(node_key) = wfes.current_node.as_deref() {
         if let Some(node) = wfd.nodes.get(node_key) {
             let env = MatchEnv {
@@ -144,7 +159,7 @@ pub async fn can_view(
         }
     }
 
-    // (c) wfd.listable[] grant'i — c_a eşleşir VE when (varsa) true
+    // (d) wfd.listable[] grant'i — c_a eşleşir VE when (varsa) true
     for rule in &wfd.listable {
         let env = MatchEnv {
             ctx,

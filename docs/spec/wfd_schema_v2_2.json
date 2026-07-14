@@ -139,6 +139,11 @@
       "minLength": 1,
       "pattern": "^[A-Za-z_][A-Za-z0-9_-]*$"
     },
+    "terminalId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Terminal id/referansi - node key'lerin aksine slug/charset kisiti yok, engine sadece case-insensitive uniqueness kontrol eder (bkz. wfe-core validator.rs)."
+    },
     "expression": {
       "type": "string",
       "minLength": 1,
@@ -752,7 +757,7 @@
       ],
       "properties": {
         "terminal": {
-          "$ref": "#/$defs/idName"
+          "$ref": "#/$defs/terminalId"
         }
       }
     },
@@ -770,7 +775,7 @@
           "$ref": "#/$defs/idName"
         },
         "terminal": {
-          "$ref": "#/$defs/idName"
+          "$ref": "#/$defs/terminalId"
         }
       },
       "oneOf": [
@@ -804,7 +809,7 @@
           "$ref": "#/$defs/idName"
         },
         "terminal": {
-          "$ref": "#/$defs/idName"
+          "$ref": "#/$defs/terminalId"
         }
       },
       "oneOf": [
@@ -934,7 +939,7 @@
       ],
       "properties": {
         "id": {
-          "$ref": "#/$defs/idName"
+          "$ref": "#/$defs/terminalId"
         },
         "wfes_effects": {
           "$ref": "#/$defs/wfesEffects",

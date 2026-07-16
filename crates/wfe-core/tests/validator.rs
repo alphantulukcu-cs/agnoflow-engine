@@ -350,3 +350,67 @@ fn start_with_named_action_selects_matching_rule() {
     let report = validate_value(v);
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
+
+// ---- 2026-07-16 SLA sözleşmesi: escalation wft XOR terminate + claim_timeout ----
+
+#[test]
+fn escalation_with_both_wft_and_terminate_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["terminate"] = json!(true);
+    // wft zaten fixture'da mevcut — ikisi birden XOR ihlali
+    assert!(has_error(&validate_value(v), "escalation_xor"));
+}
+
+#[test]
+fn escalation_with_neither_wft_nor_terminate_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("wft");
+    assert!(has_error(&validate_value(v), "escalation_xor"));
+}
+
+#[test]
+fn escalation_terminate_true_without_wft_is_valid() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("wft");
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["terminate"] = json!(true);
+    let report = validate_value(v);
+    assert!(!has_error(&report, "escalation_xor"), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn claim_timeout_invalid_duration_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] = json!({"after": "not-a-duration"});
+    assert!(has_error(&validate_value(v), "duration_format"));
+}
+
+#[test]
+fn claim_timeout_unknown_wft_target_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "self__ghost"});
+    assert!(has_error(&validate_value(v), "cross_ref"));
+}
+
+#[test]
+fn claim_timeout_valid_node_target_passes() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "self__branchManager"});
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] = json!({"after": "PT2H"});
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}

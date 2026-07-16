@@ -2,16 +2,33 @@
 //! ince orkestrasyon katmanı. Tüm yazımlar WfeStore'un atomik create/commit/claim'i
 //! üzerinden gider (M8).
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
+use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::MatchEnv;
-use wfe_core::v22::pipeline::{ClaimCheck, Engine};
+use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, CommitOutcome, WfdStore, WfeStore};
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
 use wfe_core::{EngineError, OrgPort};
+
+/// SLA-1 (2026-07-16): `claimed_at + node.claim_timeout.after`; claim yoksa,
+/// current_node yoksa veya node claim_timeout taşımıyorsa `None`. `WfeView` ve
+/// pool/liste görünümlerinin ortak hesabı.
+pub fn compute_claim_deadline(
+    wfd: &Wfd,
+    current_node: Option<&str>,
+    claimed_at: Option<DateTime<Utc>>,
+) -> Option<DateTime<Utc>> {
+    let claimed_at = claimed_at?;
+    let node = wfd.nodes.get(current_node?)?;
+    let ct = node.claim_timeout.as_ref()?;
+    let after = wfe_core::v22::duration::parse_iso8601_duration(&ct.after).ok()?;
+    Some(claimed_at + after)
+}
 
 pub struct WfeExecutor {
     pub org: Arc<dyn OrgPort>,
@@ -47,6 +64,14 @@ pub struct WfeView {
     pub dynctx: Value,
     pub wfah: Vec<wfe_core::types::wfah::WfahEntry>,
     pub end_response: Option<Value>,
+    /// SLA-3: çözülmüş mutlak workflow deadline'ı; NULL = yok.
+    pub deadline: Option<DateTime<Utc>>,
+    /// SLA-1: en son claim anı.
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// SLA-1: `claimed_at + node.claim_timeout.after` (hesaplanmış); n/a ise NULL.
+    pub claim_deadline: Option<DateTime<Utc>>,
+    /// 1–10, deadline'dan otomatik hesaplanır (bkz. `priority::compute_priority`).
+    pub priority: i32,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -73,6 +98,8 @@ impl WfeExecutor {
         }
     }
 
+    /// `deadline`: SLA-3 — başlatan kullanıcının opsiyonel ISO 8601 duration'ı
+    /// (bkz. `Engine::start`; `wfd.timeout` tavanına tabidir).
     pub async fn start(
         &self,
         wfd_id: Uuid,
@@ -80,6 +107,7 @@ impl WfeExecutor {
         actor: &Actor,
         action: Option<&str>,
         input: &Value,
+        deadline: Option<&str>,
     ) -> Result<WfeStartResult, EngineError> {
         let wfd = self.wfd.fetch(wfd_id, version).await?;
         let orgtnt_id = self.org.orgtnt_for_orgu(actor.orgu_id).await?;
@@ -88,7 +116,7 @@ impl WfeExecutor {
         let wfe_id = Uuid::new_v4();
         let mut new = self
             .engine()
-            .start(&wfd, actor, orgtnt_id, action, input, wfe_id)
+            .start(&wfd, actor, orgtnt_id, action, input, wfe_id, deadline)
             .await?;
         new.wfd_id = wfd_id;
         new.wfd_version = version;
@@ -99,6 +127,7 @@ impl WfeExecutor {
             CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
             CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
             CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
+            CommitOutcome::Terminated { end_response } => (true, None, Some(end_response.clone())),
         };
         Ok(WfeStartResult {
             wfe_id,
@@ -126,6 +155,7 @@ impl WfeExecutor {
             CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
             CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
             CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
+            CommitOutcome::Terminated { end_response } => (true, None, Some(end_response.clone())),
         };
         Ok(WfeApplyResult {
             wfe_id,
@@ -194,6 +224,11 @@ impl WfeExecutor {
         };
         let filtered = filter_dynctx(&wfd.context, ctx, viewer, env, &*self.org).await?;
 
+        let now = Utc::now();
+        let priority = crate::priority::compute_priority(wfes.created_at, wfes.deadline, now);
+        let claim_deadline =
+            compute_claim_deadline(&wfd, wfes.current_node.as_deref(), wfes.claimed_at);
+
         Ok(WfeView {
             wfe_id,
             status: wfes.status,
@@ -202,6 +237,10 @@ impl WfeExecutor {
             dynctx: filtered,
             wfah: wfes.wfah.entries().to_vec(),
             end_response: wfes.end_response,
+            deadline: wfes.deadline,
+            claimed_at: wfes.claimed_at,
+            claim_deadline,
+            priority,
         })
     }
 
@@ -218,8 +257,10 @@ impl WfeExecutor {
         self.engine().possible_actions(&wfd, &wfes, actor).await
     }
 
-    /// Tek WFE için zamanlayıcı kontrolü: önce root timeout, sonra escalation.
-    /// Bir şey ateşlendiyse true döner (M5/M6 — WOR-46/47).
+    /// Tek WFE için zamanlayıcı kontrolü — sıra (2026-07-16 SLA sözleşmesi):
+    /// 1. instance deadline (SLA-3), 2. claim timeout (SLA-1), 3. escalation
+    /// (SLA-2, `terminate:true` dahil). Bir şey ateşlendiyse true döner
+    /// (M5/M6 — WOR-46/47).
     pub async fn tick_timers(&self, wfe_id: Uuid) -> Result<bool, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
         if wfes.status != WfeStatus::Active {
@@ -229,9 +270,18 @@ impl WfeExecutor {
         let now = chrono::Utc::now();
         let engine = self.engine();
 
-        if engine.root_timeout_due(&wfd, &wfes, now)? {
-            let commit = engine.fire_root_timeout(&wfd, &wfes, now)?;
+        if engine.deadline_due(&wfes, now) {
+            let commit = engine.fire_deadline_timeout(&wfes, now);
             self.wfe.commit(&commit).await?;
+            return Ok(true);
+        }
+        if engine.claim_timeout_due(&wfd, &wfes, now)? {
+            match engine.fire_claim_timeout(&wfd, &wfes, now).await? {
+                ClaimTimeoutOutcome::Move(commit) => self.wfe.commit(&commit).await?,
+                ClaimTimeoutOutcome::Release(entry) => {
+                    self.wfe.release_claim(wfe_id, wfes.orgtnt_id, &entry).await?
+                }
+            }
             return Ok(true);
         }
         if let Some(idx) = engine.due_escalation(&wfd, &wfes, now)? {

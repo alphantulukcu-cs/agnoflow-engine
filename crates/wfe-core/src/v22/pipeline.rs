@@ -60,6 +60,21 @@ pub struct EscalationForecast {
     pub overdue: bool,
 }
 
+/// `fire_claim_timeout` sonucu — `wft` verilmişse node/terminal taşıması
+/// (`TransitionCommit` — normal `commit()` yolu), verilmemişse yalnızca
+/// claimed_by/claimed_at temizliği (`release_claim` yolu, node DEĞİŞMEZ).
+#[derive(Debug, Clone)]
+pub enum ClaimTimeoutOutcome {
+    Move(TransitionCommit),
+    Release(WfahEntry),
+}
+
+/// `Terminal` ve `Terminated` her ikisi de "aktif değil" sınıfıdır: yeni
+/// aksiyon/claim/escalation kabul etmezler (2026-07-16 SLA sözleşmesi).
+fn is_terminal_class(status: &WfeStatus) -> bool {
+    matches!(status, WfeStatus::Terminal | WfeStatus::Terminated)
+}
+
 impl<'a> Engine<'a> {
     // ---------------------------------------------------------------- start
 
@@ -70,6 +85,11 @@ impl<'a> Engine<'a> {
     /// action adını taşıyan start kuralları aday olur (spec runtime resolution —
     /// "actor, start[].action ile adlandırılmış aksiyonu çağırır"). `None` = tüm
     /// start kuralları aday (tek start aksiyonlu WFD'ler ve eski istemciler).
+    /// `deadline`: SLA-3 — başlatan kullanıcının opsiyonel ISO 8601 duration'ı
+    /// (start anından itibaren). `wfd.timeout` tanımlıysa `deadline ≤ timeout`
+    /// olmalı (aksi InvalidInput); resolved mutlak deadline `NewWfe.deadline`'a
+    /// yazılır (2026-07-16 SLA sözleşmesi).
+    #[allow(clippy::too_many_arguments)]
     pub async fn start(
         &self,
         wfd: &Wfd,
@@ -78,6 +98,7 @@ impl<'a> Engine<'a> {
         action: Option<&str>,
         input: &Value,
         wfe_id: Uuid,
+        deadline: Option<&str>,
     ) -> Result<NewWfe, EngineError> {
         let empty_ctx = json!({});
         let empty_wfah = Wfah::empty();
@@ -124,6 +145,25 @@ impl<'a> Engine<'a> {
         let now = Utc::now();
         let mut wfah_entries: Vec<WfahEntry> = Vec::new();
         let mut seq = 1u32;
+
+        // SLA-3: efektif deadline çözümü — deadline verildi → now+parse(deadline)
+        // (timeout tavanına tabi); verilmedi ve wfd.timeout var → now+parse(timeout);
+        // ikisi de yok → NULL.
+        let resolved_deadline: Option<DateTime<Utc>> = match (deadline, &wfd.timeout) {
+            (Some(d), Some(t)) => {
+                let dur = parse_iso8601_duration(d)?;
+                let ceiling = parse_iso8601_duration(t)?;
+                if dur > ceiling {
+                    return Err(EngineError::InvalidInput(format!(
+                        "deadline '{d}' WFD timeout '{t}' değerini aşamaz"
+                    )));
+                }
+                Some(now + dur)
+            }
+            (Some(d), None) => Some(now + parse_iso8601_duration(d)?),
+            (None, Some(t)) => Some(now + parse_iso8601_duration(t)?),
+            (None, None) => None,
+        };
 
         if let Some(effects) = &rule.wfes_effects {
             let env = EffectEnv {
@@ -191,6 +231,7 @@ impl<'a> Engine<'a> {
             wfah_entries,
             outcome,
             resolved_c_a,
+            deadline: resolved_deadline,
         })
     }
 
@@ -204,7 +245,7 @@ impl<'a> Engine<'a> {
         action: &str,
         input: &Value,
     ) -> Result<TransitionCommit, EngineError> {
-        if wfes.status == WfeStatus::Terminal {
+        if is_terminal_class(&wfes.status) {
             return Err(EngineError::WfeTerminal);
         }
         let current_node = wfes
@@ -335,7 +376,7 @@ impl<'a> Engine<'a> {
         wfes: &Wfes,
         actor: &Actor,
     ) -> Result<ClaimCheck, EngineError> {
-        if wfes.status == WfeStatus::Terminal {
+        if is_terminal_class(&wfes.status) {
             return Ok(ClaimCheck::Terminal);
         }
         if wfes.assigned_to.is_some() {
@@ -365,7 +406,7 @@ impl<'a> Engine<'a> {
         wfes: &Wfes,
         actor: &Actor,
     ) -> Result<Vec<String>, EngineError> {
-        if wfes.status == WfeStatus::Terminal || wfes.assigned_to != Some(actor.user_id) {
+        if is_terminal_class(&wfes.status) || wfes.assigned_to != Some(actor.user_id) {
             return Ok(vec![]);
         }
         let Some(current_node) = wfes.current_node.as_deref() else {
@@ -416,7 +457,7 @@ impl<'a> Engine<'a> {
         wfes: &Wfes,
         now: DateTime<Utc>,
     ) -> Result<Option<EscalationForecast>, EngineError> {
-        if wfes.status == WfeStatus::Terminal {
+        if is_terminal_class(&wfes.status) {
             return Ok(None);
         }
         let Some(node_key) = wfes.current_node.as_deref() else {
@@ -477,6 +518,8 @@ impl<'a> Engine<'a> {
 
     /// Vadesi gelen escalation adımını uygular; assigned WFE'de de çalışır,
     /// taşımada assignment temizlenir (store commit'i her MoveTo'da temizler).
+    /// SLA-2 (2026-07-16): `terminate: true` ise wft'e bakılmaksızın instance
+    /// `terminated` olur (end_response `{"reason":"SLA.Dwell","node":...}`).
     pub async fn fire_escalation(
         &self,
         wfd: &Wfd,
@@ -519,17 +562,27 @@ impl<'a> Engine<'a> {
             applied_at: now,
         }];
 
+        if step.terminate == Some(true) {
+            return Ok(TransitionCommit {
+                wfe_id: wfes.wfe_id,
+                orgtnt_id: wfes.orgtnt_id,
+                new_dynctx: staged,
+                wfah_entries,
+                outcome: CommitOutcome::Terminated {
+                    end_response: json!({"reason": "SLA.Dwell", "node": node_key}),
+                },
+                resolved_c_a: vec![],
+            });
+        }
+
+        // XOR validator garanti eder: terminate yoksa wft vardır.
+        let wft = step.wft.as_ref().ok_or_else(|| {
+            EngineError::InvalidWfd(format!(
+                "escalation adımı wft veya terminate içermeli: {node_key}[{step_idx}]"
+            ))
+        })?;
         let (outcome, resolved_c_a, final_ctx) = self
-            .resolve_wft(
-                &step.wft,
-                wfd,
-                staged,
-                &wfes.wfah,
-                &system,
-                wfes.wfe_id,
-                None,
-                wfes.orgtnt_id,
-            )
+            .resolve_wft(wft, wfd, staged, &wfes.wfah, &system, wfes.wfe_id, None, wfes.orgtnt_id)
             .await?;
 
         Ok(TransitionCommit {
@@ -542,55 +595,144 @@ impl<'a> Engine<'a> {
         })
     }
 
-    // ---------------------------------------------------------- root timeout
+    // -------------------------------------------------------- SLA-3 deadline
 
-    /// Root WFD `timeout` (ISO 8601) aşıldı mı? Başlangıç = ilk WFAH kaydı (M5).
-    pub fn root_timeout_due(
-        &self,
-        wfd: &Wfd,
-        wfes: &Wfes,
-        now: DateTime<Utc>,
-    ) -> Result<bool, EngineError> {
-        if wfes.status == WfeStatus::Terminal {
-            return Ok(false);
+    /// Instance deadline (SLA-3) aşıldı mı? — `wfe.deadline` kolonundan okunur
+    /// (start'ta resolve edilmiş mutlak zaman); her tick'te ISO parse ETMEZ
+    /// (eski `root_timeout_due`'nun yerini alır, 2026-07-16).
+    pub fn deadline_due(&self, wfes: &Wfes, now: DateTime<Utc>) -> bool {
+        if is_terminal_class(&wfes.status) {
+            return false;
         }
-        let Some(timeout) = &wfd.timeout else {
-            return Ok(false);
-        };
-        let Some(started_at) = wfes.wfah.entries().first().map(|e| e.applied_at) else {
-            return Ok(false);
-        };
-        Ok(now >= started_at + parse_iso8601_duration(timeout)?)
+        matches!(wfes.deadline, Some(d) if now >= d)
     }
 
-    /// Engine-defined fail: WFE terminal'e alınır, WFAH'a system kaydı düşülür (M5).
-    pub fn fire_root_timeout(
-        &self,
-        wfd: &Wfd,
-        wfes: &Wfes,
-        now: DateTime<Utc>,
-    ) -> Result<TransitionCommit, EngineError> {
+    /// Engine-defined SLA sonlanması: WFE `terminated`'a alınır (§5'teki
+    /// `Failed`/`error`'dan AYRI — SLA ihlali hata değildir).
+    pub fn fire_deadline_timeout(&self, wfes: &Wfes, now: DateTime<Utc>) -> TransitionCommit {
         let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let system = system_actor();
-        Ok(TransitionCommit {
+        TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: wfes.dynctx.as_value().clone(),
             wfah_entries: vec![WfahEntry {
                 seq,
-                action: "timeout:root".into(),
+                action: "timeout:deadline".into(),
                 actor: system,
-                input: Some(json!({"timeout": wfd.timeout})),
+                input: Some(json!({"deadline": wfes.deadline})),
                 applied_at: now,
             }],
-            outcome: CommitOutcome::Failed {
-                end_response: json!({
-                    "error": "WFD.Timeout",
-                    "message": "WFD kök zaman aşımı doldu",
-                }),
+            outcome: CommitOutcome::Terminated {
+                end_response: json!({"reason": "SLA.Deadline"}),
             },
             resolved_c_a: vec![],
-        })
+        }
+    }
+
+    // ----------------------------------------------------- SLA-1 claim timeout
+
+    /// Claim timeout (SLA-1) süresi doldu mu? — node'un `claim_timeout.after`'ı
+    /// `wfes.claimed_at`'tan itibaren ölçülür; unassigned/terminal-class/
+    /// claim_timeout tanımsız node'da her zaman false.
+    pub fn claim_timeout_due(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        now: DateTime<Utc>,
+    ) -> Result<bool, EngineError> {
+        if is_terminal_class(&wfes.status) {
+            return Ok(false);
+        }
+        let Some(claimed_at) = wfes.claimed_at else {
+            return Ok(false);
+        };
+        let Some(node_key) = wfes.current_node.as_deref() else {
+            return Ok(false);
+        };
+        let Some(node) = wfd.nodes.get(node_key) else {
+            return Ok(false);
+        };
+        let Some(ct) = &node.claim_timeout else {
+            return Ok(false);
+        };
+        Ok(now >= claimed_at + parse_iso8601_duration(&ct.after)?)
+    }
+
+    /// Vadesi gelen claim timeout'u uygular. `wft` verilmişse escalation fire
+    /// benzeri node/terminal taşıması (assignment zaten commit'te temizlenir);
+    /// verilmemişse yalnızca claimed_by/claimed_at CAS ile temizlenir (sayaç
+    /// sıfırlanır, node DEĞİŞMEZ) — `WfeStore::release_claim` ile persist edilir.
+    pub async fn fire_claim_timeout(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        now: DateTime<Utc>,
+    ) -> Result<ClaimTimeoutOutcome, EngineError> {
+        let node_key = wfes
+            .current_node
+            .as_deref()
+            .ok_or_else(|| EngineError::InvalidWfd("claim timeout için current_node yok".into()))?;
+        let node = wfd
+            .nodes
+            .get(node_key)
+            .ok_or_else(|| EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'")))?;
+        let ct = node.claim_timeout.as_ref().ok_or_else(|| {
+            EngineError::InvalidWfd(format!("node '{node_key}' claim_timeout taşımıyor"))
+        })?;
+        let system = system_actor();
+        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let marker = format!("claim_timeout:{node_key}");
+
+        match &ct.wft {
+            None => {
+                let wfah_entry = WfahEntry {
+                    seq,
+                    action: marker,
+                    actor: system,
+                    input: Some(json!({"after": ct.after})),
+                    applied_at: now,
+                };
+                Ok(ClaimTimeoutOutcome::Release(wfah_entry))
+            }
+            Some(target) => {
+                // Bare string hedef — node/terminal ayrımı validator'ın garanti
+                // ettiği referansa göre çözülür (wft-target-exists).
+                let wft = if wfd.nodes.contains_key(target) {
+                    Wft::Node { node: target.clone() }
+                } else {
+                    Wft::Terminal { terminal: target.clone() }
+                };
+                let wfah_entries = vec![WfahEntry {
+                    seq,
+                    action: marker,
+                    actor: system.clone(),
+                    input: Some(json!({"after": ct.after, "wft": target})),
+                    applied_at: now,
+                }];
+                let staged = wfes.dynctx.as_value().clone();
+                let (outcome, resolved_c_a, final_ctx) = self
+                    .resolve_wft(
+                        &wft,
+                        wfd,
+                        staged,
+                        &wfes.wfah,
+                        &system,
+                        wfes.wfe_id,
+                        None,
+                        wfes.orgtnt_id,
+                    )
+                    .await?;
+                Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
+                    wfe_id: wfes.wfe_id,
+                    orgtnt_id: wfes.orgtnt_id,
+                    new_dynctx: final_ctx,
+                    wfah_entries,
+                    outcome,
+                    resolved_c_a,
+                }))
+            }
+        }
     }
 
     // ------------------------------------------------------------- internals

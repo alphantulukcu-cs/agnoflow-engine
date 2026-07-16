@@ -14,6 +14,10 @@ pub struct WfeRow {
     pub current_c_a: serde_json::Value,
     pub claimed_by: Option<serde_json::Value>,
     pub end_response: Option<serde_json::Value>,
+    /// SLA-3: çözülmüş mutlak workflow deadline'ı; NULL = yok (2026-07-16).
+    pub deadline: Option<DateTime<Utc>>,
+    /// SLA-1: en son claim anı; claimed_by temizlenince NULL'lanır (node değişimi dahil).
+    pub claimed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

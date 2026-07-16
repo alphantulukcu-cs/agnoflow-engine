@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
+use wfe_core::v22::ports::WfdStore;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -63,6 +64,10 @@ struct StartBody {
     action: Option<String>,
     #[serde(default)]
     input: Value,
+    /// SLA-3 (2026-07-16): opsiyonel ISO 8601 duration, start anından itibaren.
+    /// WFD `timeout` tanımlıysa tavan olarak uygulanır (aşarsa InvalidInput).
+    #[serde(default)]
+    deadline: Option<String>,
 }
 
 async fn start_wfe(
@@ -72,7 +77,14 @@ async fn start_wfe(
 ) -> Result<Json<wf_wfe::executor::WfeStartResult>, AppError> {
     let actor = extract_actor(&headers)?;
     s.executor
-        .start(body.wfd_id, body.version, &actor, body.action.as_deref(), &body.input)
+        .start(
+            body.wfd_id,
+            body.version,
+            &actor,
+            body.action.as_deref(),
+            &body.input,
+            body.deadline.as_deref(),
+        )
         .await
         .map(Json)
         .map_err(AppError::from)
@@ -144,11 +156,22 @@ struct WfeListQuery {
     offset: Option<i64>,
 }
 
+/// `WfeRow` + SLA görünüm alanları (2026-07-16): `priority` (1-10, otomatik) ve
+/// `claim_deadline` (claimed_at + node.claim_timeout, hesaplanmış). `deadline` /
+/// `claimed_at` zaten `WfeRow` kolonları — flatten ile response'a dahil olur.
+#[derive(serde::Serialize)]
+struct WfeListItem {
+    #[serde(flatten)]
+    row: wf_wfe::models::WfeRow,
+    priority: i32,
+    claim_deadline: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 async fn list_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<WfeListQuery>,
-) -> Result<Json<Vec<wf_wfe::models::WfeRow>>, AppError> {
+) -> Result<Json<Vec<WfeListItem>>, AppError> {
     let actor = extract_actor(&headers)?;
     // WOR-5 fix: orgu_id tenant DEĞİLDİR — orgtnt_id org katmanından çözülür
     let orgtnt_id = s
@@ -159,8 +182,42 @@ async fn list_wfe(
         .map_err(AppError::from)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
-    wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id, limit, offset)
+    let rows = wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id, limit, offset)
         .await
-        .map(Json)
-        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    let now = chrono::Utc::now();
+    // (wfd_id, version) immutable — aynı sürüm birden çok satırda paylaşılıyorsa
+    // fetch tekrarlanmaz.
+    let mut wfd_cache: std::collections::HashMap<(Uuid, i32), wfe_core::types::wfd_v22::Wfd> =
+        std::collections::HashMap::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
+        let claim_deadline = if row.claimed_at.is_some() && row.current_node.is_some() {
+            let key = (row.wfd_id, row.wfd_version);
+            let wfd = match wfd_cache.get(&key) {
+                Some(w) => Some(w),
+                None => match s.wfd.fetch(row.wfd_id, row.wfd_version).await {
+                    Ok(w) => {
+                        wfd_cache.insert(key, w);
+                        wfd_cache.get(&key)
+                    }
+                    // Bozuk/silinmiş tek bir WFD tüm listeyi düşürmesin.
+                    Err(_) => None,
+                },
+            };
+            wfd.and_then(|wfd| {
+                wf_wfe::executor::compute_claim_deadline(
+                    wfd,
+                    row.current_node.as_deref(),
+                    row.claimed_at,
+                )
+            })
+        } else {
+            None
+        };
+        out.push(WfeListItem { priority, claim_deadline, row });
+    }
+    Ok(Json(out))
 }

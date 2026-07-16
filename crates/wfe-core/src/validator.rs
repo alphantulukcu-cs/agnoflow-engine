@@ -3,6 +3,7 @@
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
 use crate::types::wfd_v22::{Wfd, Wft, WftCondition, WftTarget};
+use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -54,6 +55,7 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_effect_paths(wfd, &mut report);
     check_retries(wfd, &mut report);
     check_string_namespaces(wfd, &mut report);
+    check_sla(wfd, &mut report);
     report
 }
 
@@ -200,12 +202,14 @@ fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
-            check_wft_refs(
-                wfd,
-                &esc.wft,
-                &format!("nodes[{key}].escalation[{j}].wft"),
-                report,
-            );
+            if let Some(wft) = &esc.wft {
+                check_wft_refs(
+                    wfd,
+                    wft,
+                    &format!("nodes[{key}].escalation[{j}].wft"),
+                    report,
+                );
+            }
         }
     }
 }
@@ -293,7 +297,9 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for node in wfd.nodes.values() {
         for esc in &node.escalation {
-            add_node_targets(&esc.wft, &mut wft_node_targets);
+            if let Some(wft) = &esc.wft {
+                add_node_targets(wft, &mut wft_node_targets);
+            }
         }
     }
 
@@ -355,11 +361,13 @@ fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
-            visit(
-                &esc.wft,
-                format!("nodes[{key}].escalation[{j}].wft"),
-                report,
-            );
+            if let Some(wft) = &esc.wft {
+                visit(
+                    wft,
+                    format!("nodes[{key}].escalation[{j}].wft"),
+                    report,
+                );
+            }
         }
     }
 }
@@ -433,12 +441,31 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
         }
         if let Some(node) = wfd.nodes.get(&node_key) {
             for esc in &node.escalation {
-                absorb(
-                    wft_targets(&esc.wft),
-                    &mut reached_nodes,
-                    &mut reached_terminals,
-                    &mut queue,
-                );
+                if let Some(wft) = &esc.wft {
+                    absorb(
+                        wft_targets(wft),
+                        &mut reached_nodes,
+                        &mut reached_terminals,
+                        &mut queue,
+                    );
+                }
+            }
+            // SLA-1: claim_timeout.wft de bir çıkıştır (node/terminal hedefi
+            // BFS'e dahil edilmezse hedef yanlışlıkla "unreachable" görünür).
+            if let Some(ct) = &node.claim_timeout {
+                if let Some(target) = &ct.wft {
+                    let kind = if wfd.nodes.contains_key(target) {
+                        TargetKind::Node
+                    } else {
+                        TargetKind::Terminal
+                    };
+                    absorb(
+                        vec![(kind, target.as_str())],
+                        &mut reached_nodes,
+                        &mut reached_terminals,
+                        &mut queue,
+                    );
+                }
             }
         }
     }
@@ -553,11 +580,13 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
-            visit_wft(
-                &esc.wft,
-                &format!("nodes[{key}].escalation[{j}].wft"),
-                report,
-            );
+            if let Some(wft) = &esc.wft {
+                visit_wft(
+                    wft,
+                    &format!("nodes[{key}].escalation[{j}].wft"),
+                    report,
+                );
+            }
         }
     }
     for (i, l) in wfd.listable.iter().enumerate() {
@@ -683,6 +712,42 @@ fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for t in &wfd.transitions {
         check_triggers(&t.trigger, &format!("transitions[{}]", t.id), report);
+    }
+}
+
+// ---- 2026-07-16 SLA sözleşmesi: escalation wft XOR terminate + claim_timeout ----
+
+fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
+    for (key, node) in &wfd.nodes {
+        for (j, esc) in node.escalation.iter().enumerate() {
+            let path = format!("nodes[{key}].escalation[{j}]");
+            let has_wft = esc.wft.is_some();
+            let terminates = esc.terminate.unwrap_or(false);
+            if has_wft == terminates {
+                report.error(
+                    "escalation_xor",
+                    path,
+                    "escalation adımı `wft` VEYA `terminate: true` içermeli — ikisi birden ya da hiçbiri olamaz".into(),
+                );
+            }
+        }
+        if let Some(ct) = &node.claim_timeout {
+            let path = format!("nodes[{key}].claim_timeout");
+            if let Err(e) = parse_iso8601_duration(&ct.after) {
+                report.error("duration_format", format!("{path}.after"), e.to_string());
+            }
+            if let Some(target) = &ct.wft {
+                let known = wfd.nodes.contains_key(target)
+                    || wfd.terminals.iter().any(|t| t.id == *target);
+                if !known {
+                    report.error(
+                        "cross_ref",
+                        format!("{path}.wft"),
+                        format!("bilinmeyen node/terminal '{target}'"),
+                    );
+                }
+            }
+        }
     }
 }
 

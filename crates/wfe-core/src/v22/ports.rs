@@ -9,6 +9,7 @@ use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{AutoexecDef, Wfd};
 use crate::types::wfe::WfeStatus;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -27,6 +28,12 @@ pub struct Wfes {
     /// Claim eden kullanıcı (assignment). Node değişiminde temizlenir (M8).
     pub assigned_to: Option<Uuid>,
     pub end_response: Option<Value>,
+    /// SLA-3: çözülmüş mutlak workflow deadline'ı (start'ta hesaplanır); NULL = yok.
+    pub deadline: Option<DateTime<Utc>>,
+    /// SLA-1: en son claim anı — claimed_by temizlenince NULL'lanır (node değişimi dahil).
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// Priority hesabı (elapsed/window) için pencere başlangıcı.
+    pub created_at: DateTime<Utc>,
 }
 
 /// Transition sonucunun gideceği yer.
@@ -37,6 +44,9 @@ pub enum CommitOutcome {
     /// Engine-defined fail (§5 root timeout vb.) — WFE `error` durumuna alınır,
     /// başarılı `Terminal` sonlanmasından ayrıdır.
     Failed { end_response: Value },
+    /// SLA ihlali (deadline aşımı / dwell terminate) — WFE `terminated` durumuna
+    /// alınır (2026-07-16). Hata değil, başarılı `Terminal` da değil.
+    Terminated { end_response: Value },
 }
 
 /// Tek transaction'da persist edilecek transition sonucu (M8).
@@ -64,6 +74,8 @@ pub struct NewWfe {
     pub wfah_entries: Vec<WfahEntry>,
     pub outcome: CommitOutcome,
     pub resolved_c_a: Vec<ResolvedCandidate>,
+    /// SLA-3: start'ta çözülen mutlak deadline (bkz. `Engine::start`); NULL = yok.
+    pub deadline: Option<DateTime<Utc>>,
 }
 
 #[async_trait]
@@ -83,6 +95,15 @@ pub trait WfeStore: Send + Sync {
     /// Atomik claim (CAS): yalnızca unassigned ise yazar; başarıyı döner.
     async fn claim(&self, wfe_id: Uuid, orgtnt_id: Uuid, user_id: Uuid)
         -> Result<bool, EngineError>;
+    /// SLA-1 claim timeout (wft'siz kol): node DEĞİŞMEDEN claimed_by/claimed_at
+    /// temizlenir + WFAH marker eklenir — `commit()`'ten ayrı çünkü node/status
+    /// değişmiyor (bkz. `Engine::fire_claim_timeout` / `ClaimTimeoutOutcome::Release`).
+    async fn release_claim(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError>;
 }
 
 /// Autoexec çalıştırma hatası — WFD.* hata taksonomisi (M9).

@@ -77,7 +77,15 @@ async fn sim_start(
         .map_err(AppError::from)?;
 
     let new = engine
-        .start(&wfd, &body.actor, orgtnt_id, body.action.as_deref(), &body.input, Uuid::new_v4())
+        .start(
+            &wfd,
+            &body.actor,
+            orgtnt_id,
+            body.action.as_deref(),
+            &body.input,
+            Uuid::new_v4(),
+            None, // simülasyonda SLA-3 deadline izlenmez
+        )
         .await
         .map_err(AppError::from)?;
     let sim_state = SimState::from_new_wfe(&new);
@@ -136,7 +144,10 @@ async fn sim_apply(
         .map_err(AppError::from)?;
     sim_state.apply_commit(&commit);
 
-    let terminal = sim_state.status == wfe_core::types::wfe::WfeStatus::Terminal;
+    let terminal = matches!(
+        sim_state.status,
+        wfe_core::types::wfe::WfeStatus::Terminal | wfe_core::types::wfe::WfeStatus::Terminated
+    );
     let possible_actions = if terminal {
         vec![]
     } else {

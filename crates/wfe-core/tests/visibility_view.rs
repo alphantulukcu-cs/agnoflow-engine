@@ -84,17 +84,22 @@ fn start_input(amount_requested: i64) -> Value {
 
 fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
     let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let wfah = Wfah::empty().push("start".into(), system, None);
+    let created_at = wfah.entries()[0].applied_at;
     Wfes {
         wfe_id: Uuid::new_v4(),
         orgtnt_id: Uuid::nil(),
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
-        wfah: Wfah::empty().push("start".into(), system, None),
+        wfah,
         status: WfeStatus::Active,
         current_node: Some(node.into()),
         assigned_to: assigned,
         end_response: None,
+        deadline: None,
+        claimed_at: None,
+        created_at,
     }
 }
 

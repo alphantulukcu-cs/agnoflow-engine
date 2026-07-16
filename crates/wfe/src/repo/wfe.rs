@@ -3,7 +3,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const WFE_COLUMNS: &str = "wfe_id, orgtnt_id, wfd_id, wfd_version, status,
-                current_node, current_c_a, claimed_by, end_response, created_at, updated_at";
+                current_node, current_c_a, claimed_by, end_response,
+                deadline, claimed_at, created_at, updated_at";
 
 pub async fn get(pool: &PgPool, wfe_id: Uuid) -> Result<WfeRow, WfeError> {
     sqlx::query_as::<_, WfeRow>(&format!(

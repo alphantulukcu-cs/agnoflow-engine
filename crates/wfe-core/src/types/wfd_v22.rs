@@ -82,6 +82,20 @@ pub struct NodeDef {
     pub c_a: CandidateActor,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalation: Vec<EscalationStep>,
+    /// SLA-1 (2026-07-16): claim eden aktör `after` içinde aksiyon almazsa tetiklenir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_timeout: Option<ClaimTimeout>,
+}
+
+/// SLA-1 — claim timeout (havuz node'u üzerinde). `wft` yoksa aynı havuza döner
+/// (claimed_by/claimed_at temizlenir); varsa belirtilen node/terminal'e taşınır.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimTimeout {
+    /// ISO 8601 duration — claim anından itibaren.
+    pub after: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wft: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,7 +105,12 @@ pub struct EscalationStep {
     pub after: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
-    pub wft: Wft,
+    /// wft XOR terminate — biri zorunlu (2026-07-16 SLA sözleşmesi, validator XOR).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wft: Option<Wft>,
+    /// SLA-2: true ise instance `terminated` olur (end_response `{"reason":"SLA.Dwell",...}`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminate: Option<bool>,
 }
 
 /// Tek C_A kuralı. match = resolved(c_orgu) AND (rol_match OR user_match).

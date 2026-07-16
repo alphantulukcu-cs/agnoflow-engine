@@ -252,12 +252,13 @@ async fn wfe_usage(
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
-    let (mut active, mut terminal, mut error) = (0i64, 0i64, 0i64);
+    let (mut active, mut terminal, mut error, mut terminated) = (0i64, 0i64, 0i64, 0i64);
     for (status, n) in rows {
         match status.as_str() {
             "active" => active = n,
             "terminal" => terminal = n,
             "error" => error = n,
+            "terminated" => terminated = n,
             _ => {}
         }
     }
@@ -265,7 +266,8 @@ async fn wfe_usage(
         "active": active,
         "terminal": terminal,
         "error": error,
-        "total": active + terminal + error,
+        "terminated": terminated,
+        "total": active + terminal + error + terminated,
     })))
 }
 
@@ -298,6 +300,8 @@ struct ExecutionStatsRow {
     active: i64,
     terminal: i64,
     error: i64,
+    /// SLA ihlali sonlanması (2026-07-16) — `terminal`/`error`'dan AYRI bucket.
+    terminated: i64,
     total: i64,
 }
 
@@ -327,12 +331,13 @@ async fn load_execution_stats(
     .await
     .map_err(internal_error)?;
 
-    let (mut active, mut terminal, mut error) = (0i64, 0i64, 0i64);
+    let (mut active, mut terminal, mut error, mut terminated) = (0i64, 0i64, 0i64, 0i64);
     for (status, n) in rows {
         match status.as_str() {
             "active" => active = n,
             "terminal" => terminal = n,
             "error" => error = n,
+            "terminated" => terminated = n,
             _ => {}
         }
     }
@@ -340,7 +345,8 @@ async fn load_execution_stats(
         active,
         terminal,
         error,
-        total: active + terminal + error,
+        terminated,
+        total: active + terminal + error + terminated,
     })
 }
 

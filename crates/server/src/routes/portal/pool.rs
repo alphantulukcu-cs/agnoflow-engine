@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
+use wfe_core::v22::ports::WfdStore;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -32,8 +33,25 @@ fn to_actor(actor: &PortalActor) -> Actor {
     }
 }
 
-/// One item in the pool list.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+/// One item in the pool list. Bir SQL row'u — `wfd_version` yalnızca
+/// `claim_deadline` hesabı için tutulur, response'a serialize edilmez.
+#[derive(Debug, sqlx::FromRow)]
+struct PoolRow {
+    id: Uuid,
+    title: String,
+    workflow_id: Uuid,
+    wfd_version: i32,
+    status: String,
+    current_node: Option<String>,
+    created_at: DateTime<Utc>,
+    claimed_by: Option<Value>,
+    deadline: Option<DateTime<Utc>>,
+    claimed_at: Option<DateTime<Utc>>,
+}
+
+/// Response şekli — SLA görünüm alanları (2026-07-16): `priority` (1-10,
+/// otomatik) ve `claim_deadline` (claimed_at + node.claim_timeout).
+#[derive(Debug, Serialize)]
 pub struct PoolTask {
     pub id: Uuid,
     pub title: String,
@@ -42,6 +60,10 @@ pub struct PoolTask {
     pub current_node: Option<String>,
     pub created_at: DateTime<Utc>,
     pub claimed_by: Option<Value>,
+    pub deadline: Option<DateTime<Utc>>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub claim_deadline: Option<DateTime<Utc>>,
+    pub priority: i32,
 }
 
 async fn list_pool(
@@ -76,14 +98,17 @@ async fn list_pool(
         });
     let owner_filter = serde_json::json!({ "user_id": actor.user_id.to_string() });
 
-    let tasks = sqlx::query_as::<_, PoolTask>(
+    let rows = sqlx::query_as::<_, PoolRow>(
         "SELECT e.wfe_id       AS id,
                 m.name         AS title,
                 e.wfd_id       AS workflow_id,
+                e.wfd_version,
                 e.status,
                 e.current_node,
                 e.created_at,
-                e.claimed_by
+                e.claimed_by,
+                e.deadline,
+                e.claimed_at
          FROM wf.wfe e
          JOIN wf.wfd_meta m
            ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
@@ -95,7 +120,7 @@ async fn list_pool(
               OR ($4::jsonb IS NOT NULL AND e.current_c_a @> $4::jsonb)
               OR e.claimed_by @> $5::jsonb
            )
-         ORDER BY e.created_at DESC",
+         ORDER BY e.created_at ASC",
     )
     .bind(actor.orgtnt_id)
     .bind(role_filter)
@@ -105,6 +130,66 @@ async fn list_pool(
     .fetch_all(&s.pool)
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    // priority kolon DEĞİL — okuma anında hesaplanır (2026-07-16 sözleşmesi).
+    // Basitlik için Rust'ta hesaplanır ve sıralanır (SQL CASE/window ifadesi
+    // yerine): pool boyutu tek aktörle sınırlı, N+1 sıralama maliyeti ihmal
+    // edilebilir düzeyde.
+    let now = Utc::now();
+    let mut wfd_cache: std::collections::HashMap<(Uuid, i32), wfe_core::types::wfd_v22::Wfd> =
+        std::collections::HashMap::new();
+    let mut tasks = Vec::with_capacity(rows.len());
+    for row in rows {
+        let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
+        let claim_deadline = if row.claimed_at.is_some() && row.current_node.is_some() {
+            let key = (row.workflow_id, row.wfd_version);
+            let wfd = match wfd_cache.get(&key) {
+                Some(w) => Some(w),
+                None => match s.wfd.fetch(row.workflow_id, row.wfd_version).await {
+                    Ok(w) => {
+                        wfd_cache.insert(key, w);
+                        wfd_cache.get(&key)
+                    }
+                    Err(_) => None,
+                },
+            };
+            wfd.and_then(|wfd| {
+                wf_wfe::executor::compute_claim_deadline(
+                    wfd,
+                    row.current_node.as_deref(),
+                    row.claimed_at,
+                )
+            })
+        } else {
+            None
+        };
+        tasks.push(PoolTask {
+            id: row.id,
+            title: row.title,
+            workflow_id: row.workflow_id,
+            status: row.status,
+            current_node: row.current_node,
+            created_at: row.created_at,
+            claimed_by: row.claimed_by,
+            deadline: row.deadline,
+            claimed_at: row.claimed_at,
+            claim_deadline,
+            priority,
+        });
+    }
+
+    // priority DESC, deadline ASC NULLS LAST, created_at ASC (sözleşme sırası).
+    tasks.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| match (a.deadline, b.deadline) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => std::cmp::Ordering::Equal,
+            })
+            .then_with(|| a.created_at.cmp(&b.created_at))
+    });
 
     Ok(Json(tasks))
 }

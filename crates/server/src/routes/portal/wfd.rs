@@ -106,6 +106,10 @@ struct StartRequest {
     action: Option<String>,
     #[serde(default)]
     initial_context: Value,
+    /// SLA-3 (2026-07-16): opsiyonel "Tamamlanma süresi" — ISO 8601 duration,
+    /// start anından itibaren. WFD `timeout` tavanına tabidir.
+    #[serde(default)]
+    deadline: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -140,7 +144,14 @@ async fn start_wfd(
 
     let result = s
         .executor
-        .start(wfd_id, version, &portal_actor, body.action.as_deref(), &body.initial_context)
+        .start(
+            wfd_id,
+            version,
+            &portal_actor,
+            body.action.as_deref(),
+            &body.initial_context,
+            body.deadline.as_deref(),
+        )
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::BAD_REQUEST))?;
 

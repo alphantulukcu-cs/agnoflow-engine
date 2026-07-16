@@ -93,6 +93,7 @@ impl WfeStore for WfeAdapter {
         let status = match row.status.as_str() {
             "terminal" => WfeStatus::Terminal,
             "error" => WfeStatus::Error,
+            "terminated" => WfeStatus::Terminated,
             _ => WfeStatus::Active,
         };
 
@@ -114,6 +115,9 @@ impl WfeStore for WfeAdapter {
             current_node: row.current_node,
             assigned_to,
             end_response: row.end_response,
+            deadline: row.deadline,
+            claimed_at: row.claimed_at,
+            created_at: row.created_at,
         })
     }
 
@@ -124,13 +128,16 @@ impl WfeStore for WfeAdapter {
             CommitOutcome::MoveTo { node } => ("active", Some(node.as_str()), None),
             CommitOutcome::Terminal { end_response } => ("terminal", None, Some(end_response)),
             CommitOutcome::Failed { end_response } => ("error", None, Some(end_response)),
+            CommitOutcome::Terminated { end_response } => {
+                ("terminated", None, Some(end_response))
+            }
         };
         let c_a_json = serde_json::to_value(&new.resolved_c_a).map_err(db_err)?;
 
         sqlx::query(
             "INSERT INTO wf.wfe
-               (wfe_id, orgtnt_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+               (wfe_id, orgtnt_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(new.wfe_id)
         .bind(new.orgtnt_id)
@@ -140,6 +147,7 @@ impl WfeStore for WfeAdapter {
         .bind(current_node)
         .bind(&c_a_json)
         .bind(end_response)
+        .bind(new.deadline)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -177,10 +185,11 @@ impl WfeStore for WfeAdapter {
         match &commit.outcome {
             CommitOutcome::MoveTo { node } => {
                 let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
-                // M8: yeni node'a UNASSIGNED giriş — claimed_by temizlenir
+                // M8: yeni node'a UNASSIGNED giriş — claimed_by/claimed_at temizlenir
                 sqlx::query(
                     "UPDATE wf.wfe
-                     SET current_node = $1, current_c_a = $2, claimed_by = NULL, updated_at = now()
+                     SET current_node = $1, current_c_a = $2, claimed_by = NULL,
+                         claimed_at = NULL, updated_at = now()
                      WHERE wfe_id = $3 AND orgtnt_id = $4",
                 )
                 .bind(node)
@@ -195,7 +204,7 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'terminal', current_node = NULL, current_c_a = '[]'::jsonb,
-                         claimed_by = NULL, end_response = $1, updated_at = now()
+                         claimed_by = NULL, claimed_at = NULL, end_response = $1, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )
                 .bind(end_response)
@@ -210,7 +219,22 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'error', current_node = NULL, current_c_a = '[]'::jsonb,
-                         claimed_by = NULL, end_response = $1, updated_at = now()
+                         claimed_by = NULL, claimed_at = NULL, end_response = $1, updated_at = now()
+                     WHERE wfe_id = $2 AND orgtnt_id = $3",
+                )
+                .bind(end_response)
+                .bind(commit.wfe_id)
+                .bind(commit.orgtnt_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            }
+            CommitOutcome::Terminated { end_response } => {
+                // SLA ihlali (§5 2026-07-16): `error` DEĞİL, `terminated` durumu.
+                sqlx::query(
+                    "UPDATE wf.wfe
+                     SET status = 'terminated', current_node = NULL, current_c_a = '[]'::jsonb,
+                         claimed_by = NULL, claimed_at = NULL, end_response = $1, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )
                 .bind(end_response)
@@ -236,7 +260,7 @@ impl WfeStore for WfeAdapter {
         let claimed_by = json!({ "user_id": user_id.to_string() });
         let result = sqlx::query(
             "UPDATE wf.wfe
-             SET claimed_by = $1, updated_at = now()
+             SET claimed_by = $1, claimed_at = now(), updated_at = now()
              WHERE wfe_id = $2 AND orgtnt_id = $3 AND status = 'active' AND claimed_by IS NULL",
         )
         .bind(&claimed_by)
@@ -246,5 +270,30 @@ impl WfeStore for WfeAdapter {
         .await
         .map_err(db_err)?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// SLA-1 claim timeout (wft'siz kol, bkz. `Engine::fire_claim_timeout`):
+    /// node DEĞİŞMEDEN claimed_by/claimed_at temizlenir + WFAH marker eklenir.
+    async fn release_claim(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query(
+            "UPDATE wf.wfe
+             SET claimed_by = NULL, claimed_at = NULL, updated_at = now()
+             WHERE wfe_id = $1 AND orgtnt_id = $2",
+        )
+        .bind(wfe_id)
+        .bind(orgtnt_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+
+        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
+
+        tx.commit().await.map_err(db_err)
     }
 }

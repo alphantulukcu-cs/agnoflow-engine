@@ -13,9 +13,9 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
-use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, EscalationStep, Wfd, Wft};
+use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, ClaimTimeout, EscalationStep, Wfd, Wft};
 use wfe_core::types::wfe::WfeStatus;
-use wfe_core::v22::pipeline::{ClaimCheck, Engine};
+use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, CommitOutcome, ExecEnv, ExecFailure, Wfes};
 
 const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
@@ -126,17 +126,22 @@ fn start_input() -> Value {
 /// self__creditAnalyst node'unda bekleyen, analiste atanmış bir WFES kurar.
 fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
     let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let wfah = Wfah::empty().push("start".into(), system, None);
+    let created_at = wfah.entries()[0].applied_at;
     Wfes {
         wfe_id: Uuid::new_v4(),
         orgtnt_id: Uuid::nil(),
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
-        wfah: Wfah::empty().push("start".into(), system, None),
+        wfah,
         status: WfeStatus::Active,
         current_node: Some(node.into()),
         assigned_to: assigned,
         end_response: None,
+        deadline: None,
+        claimed_at: assigned.map(|_| created_at),
+        created_at,
     }
 }
 
@@ -152,7 +157,7 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
     let wfe_id = Uuid::new_v4();
 
     let new = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), wfe_id)
+        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), wfe_id, None)
         .await
         .unwrap();
 
@@ -174,7 +179,7 @@ async fn start_rejects_missing_required_context_field() {
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &json!({"applicant": {}}), Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &json!({"applicant": {}}), Uuid::new_v4(), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -191,7 +196,7 @@ async fn start_rejects_undeclared_input_path() {
     input["status"] = json!("approved"); // bildirilmemiş alan — enjeksiyon denemesi
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
         .await
         .unwrap_err();
     assert!(
@@ -210,7 +215,7 @@ async fn start_rejects_missing_required_action_input() {
     let input = json!({"applicant": {"name": "Ayşe"}}); // credit_info yok
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
         .await
         .unwrap_err();
     assert!(
@@ -229,7 +234,7 @@ async fn start_rejects_readonly_field_in_input() {
     input["credit_score"] = json!(999);
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -244,7 +249,7 @@ async fn start_with_named_action_selects_matching_rule() {
     let actor = clerk(Uuid::new_v4());
 
     let new = engine
-        .start(&golden(), &actor, Uuid::nil(), Some("create_application"), &start_input(), Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), Some("create_application"), &start_input(), Uuid::new_v4(), None)
         .await
         .unwrap();
     assert_eq!(new.wfah_entries[0].action, "create_application");
@@ -258,7 +263,7 @@ async fn start_with_unknown_action_is_not_eligible() {
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), Some("ghost_action"), &start_input(), Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), Some("ghost_action"), &start_input(), Uuid::new_v4(), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::StartNotEligible));
@@ -272,7 +277,7 @@ async fn start_ineligible_actor_is_rejected() {
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4())
+        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::StartNotEligible));
@@ -665,7 +670,8 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Wft::Node { node: "self__branchManager".into() },
+            wft: Some(Wft::Node { node: "self__branchManager".into() }),
+            terminate: None,
         });
 
     let t0 = Utc::now();
@@ -691,28 +697,177 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
     );
 }
 
-// ================================================================ root timeout (M5)
+// ================================================================ SLA-3 deadline (2026-07-16)
 
 #[tokio::test]
-async fn root_timeout_fires_engine_defined_fail() {
+async fn deadline_due_fires_terminated_not_error() {
     let org = MockOrg { role_assigned: true };
     let runner = MockRunner::ok(0, "-", false);
     let engine = Engine { org: &org, exec: &runner };
-    let wfd = golden(); // timeout: P30D
-    let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    let started = wfes.wfah.entries().first().unwrap().applied_at;
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let deadline = wfes.created_at + Duration::days(30);
+    wfes.deadline = Some(deadline);
 
-    assert!(!engine.root_timeout_due(&wfd, &wfes, started + Duration::days(29)).unwrap());
-    let now = started + Duration::days(30) + Duration::seconds(1);
-    assert!(engine.root_timeout_due(&wfd, &wfes, now).unwrap());
+    assert!(!engine.deadline_due(&wfes, deadline - Duration::seconds(1)));
+    let now = deadline + Duration::seconds(1);
+    assert!(engine.deadline_due(&wfes, now));
 
-    let commit = engine.fire_root_timeout(&wfd, &wfes, now).unwrap();
-    // Root timeout başarılı Terminal DEĞİL, engine-defined Failed'dir (§5) → WFE error durumu.
-    let CommitOutcome::Failed { end_response } = &commit.outcome else {
-        panic!("Failed (engine fail) bekleniyordu");
+    let commit = engine.fire_deadline_timeout(&wfes, now);
+    // SLA ihlali `error` DEĞİL, `terminated`dır — Failed'ten ayrı (2026-07-16 sözleşmesi).
+    let CommitOutcome::Terminated { end_response } = &commit.outcome else {
+        panic!("Terminated bekleniyordu");
     };
-    assert_eq!(end_response["error"], json!("WFD.Timeout"));
-    assert_eq!(commit.wfah_entries[0].action, "timeout:root");
+    assert_eq!(end_response["reason"], json!("SLA.Deadline"));
+    assert_eq!(commit.wfah_entries[0].action, "timeout:deadline");
+
+    // deadline yoksa hiçbir zaman due değil
+    wfes.deadline = None;
+    assert!(!engine.deadline_due(&wfes, now + Duration::days(999)));
+
+    // terminal-class WFE'de asla due sayılmaz
+    wfes.deadline = Some(deadline);
+    wfes.status = WfeStatus::Terminated;
+    assert!(!engine.deadline_due(&wfes, now));
+}
+
+#[tokio::test]
+async fn start_resolves_deadline_and_rejects_when_exceeding_wfd_timeout() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden(); // timeout: P30D
+    let actor = clerk(Uuid::new_v4());
+
+    // deadline > wfd.timeout → InvalidInput hard-reject
+    let err = engine
+        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), Some("P40D"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+
+    // deadline ≤ timeout → kabul, mutlak deadline start anından itibaren çözülür
+    let before = Utc::now();
+    let new = engine
+        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), Some("P10D"))
+        .await
+        .unwrap();
+    let deadline = new.deadline.expect("deadline verildiğinde resolve edilmeli");
+    assert!(deadline >= before + Duration::days(10) && deadline <= Utc::now() + Duration::days(10));
+
+    // deadline verilmedi, wfd.timeout var → wfd.timeout kullanılır
+    let new = engine
+        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .await
+        .unwrap();
+    let deadline = new.deadline.expect("wfd.timeout varken deadline resolve edilmeli");
+    assert!(deadline >= before + Duration::days(30) && deadline <= Utc::now() + Duration::days(30));
+}
+
+#[tokio::test]
+async fn start_without_deadline_or_timeout_leaves_deadline_null() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfd = golden();
+    wfd.timeout = None;
+    let actor = clerk(Uuid::new_v4());
+
+    let new = engine
+        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .await
+        .unwrap();
+    assert!(new.deadline.is_none());
+}
+
+// ================================================================ SLA-1 claim timeout (2026-07-16)
+
+/// self__creditAnalyst'e claim_timeout ekleyen golden varyantı.
+fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
+    let mut wfd = golden();
+    wfd.nodes.get_mut("self__creditAnalyst").unwrap().claim_timeout = Some(ClaimTimeout {
+        after: after.into(),
+        wft: wft.map(String::from),
+    });
+    wfd
+}
+
+#[tokio::test]
+async fn claim_timeout_due_without_wft_releases_claim() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_claim_timeout("PT2H", None);
+    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    let claimed_at = wfes.created_at;
+    wfes.claimed_at = Some(claimed_at);
+
+    assert!(!engine.claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1)).unwrap());
+    let now = claimed_at + Duration::hours(2) + Duration::seconds(1);
+    assert!(engine.claim_timeout_due(&wfd, &wfes, now).unwrap());
+
+    match engine.fire_claim_timeout(&wfd, &wfes, now).await.unwrap() {
+        ClaimTimeoutOutcome::Release(entry) => {
+            assert_eq!(entry.action, "claim_timeout:self__creditAnalyst");
+            assert_eq!(entry.actor.role, "system");
+        }
+        ClaimTimeoutOutcome::Move(_) => panic!("wft yokken Release bekleniyordu"),
+    }
+}
+
+#[tokio::test]
+async fn claim_timeout_due_with_wft_moves_like_escalation() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
+    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    let claimed_at = wfes.created_at;
+    wfes.claimed_at = Some(claimed_at);
+    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
+
+    match engine.fire_claim_timeout(&wfd, &wfes, now).await.unwrap() {
+        ClaimTimeoutOutcome::Move(commit) => {
+            assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"));
+            assert_eq!(commit.wfah_entries[0].action, "claim_timeout:self__creditAnalyst");
+        }
+        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
+    }
+}
+
+#[tokio::test]
+async fn claim_timeout_not_due_without_claim() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_claim_timeout("PT1H", None);
+    // hiç claim edilmemiş (claimed_at None) — asla due olmaz
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+    assert!(!engine.claim_timeout_due(&wfd, &wfes, wfes.created_at + Duration::days(1)).unwrap());
+}
+
+// ================================================================ SLA-2 escalation terminate (2026-07-16)
+
+#[tokio::test]
+async fn escalation_terminate_true_ends_instance_as_terminated() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfd = golden();
+    {
+        let esc = &mut wfd.nodes.get_mut("self__creditAnalyst").unwrap().escalation[0];
+        esc.wft = None;
+        esc.terminate = Some(true);
+    }
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
+
+    let commit = engine.fire_escalation(&wfd, &wfes, 0, now).await.unwrap();
+    let CommitOutcome::Terminated { end_response } = &commit.outcome else {
+        panic!("Terminated bekleniyordu");
+    };
+    assert_eq!(end_response["reason"], json!("SLA.Dwell"));
+    assert_eq!(end_response["node"], json!("self__creditAnalyst"));
+    assert_eq!(commit.wfah_entries[0].action, "escalate:self__creditAnalyst:0");
 }
 
 // ================================================================ terminal WFE korunur
@@ -732,4 +887,28 @@ async fn terminal_wfe_rejects_actions() {
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeTerminal));
     assert_eq!(engine.can_claim(&golden(), &wfes, &m).await.unwrap(), ClaimCheck::Terminal);
+}
+
+/// `Terminated` (SLA ihlali) `Terminal` ile AYNI korumaya tabidir: aksiyon/claim
+/// reddedilir, escalation/possible-actions boş döner (2026-07-16 sözleşmesi).
+#[tokio::test]
+async fn terminated_wfe_is_treated_like_terminal() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let m = manager(Uuid::new_v4());
+    let mut wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    wfes.status = WfeStatus::Terminated;
+
+    let err = engine
+        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::WfeTerminal));
+    assert_eq!(engine.can_claim(&golden(), &wfes, &m).await.unwrap(), ClaimCheck::Terminal);
+    assert!(engine.possible_actions(&golden(), &wfes, &m).await.unwrap().is_empty());
+    assert_eq!(engine.next_escalation(&golden(), &wfes, Utc::now()).unwrap(), None);
+
+    // wire format kontrolü: serde "terminated" olarak yazar
+    assert_eq!(serde_json::to_value(&wfes.status).unwrap(), json!("terminated"));
 }

@@ -38,7 +38,13 @@ impl SimState {
     }
 
     /// Simülasyon Wfes'i — `assigned_to` verilen aktöre bağlanır (claim bypass).
+    /// Simülasyonda SLA alanları izlenmez: deadline/claimed_at her zaman NULL.
     pub fn to_wfes(&self, assigned_to: Option<Uuid>) -> Wfes {
+        let created_at = self
+            .wfah
+            .first()
+            .map(|e| e.applied_at)
+            .unwrap_or_else(chrono::Utc::now);
         Wfes {
             wfe_id: self.wfe_id,
             orgtnt_id: self.orgtnt_id,
@@ -50,6 +56,9 @@ impl SimState {
             current_node: self.current_node.clone(),
             assigned_to,
             end_response: self.end_response.clone(),
+            deadline: None,
+            claimed_at: None,
+            created_at,
         }
     }
 
@@ -75,6 +84,9 @@ fn outcome_parts(
         }
         CommitOutcome::Failed { end_response } => {
             (WfeStatus::Error, None, Some(end_response.clone()))
+        }
+        CommitOutcome::Terminated { end_response } => {
+            (WfeStatus::Terminated, None, Some(end_response.clone()))
         }
     }
 }

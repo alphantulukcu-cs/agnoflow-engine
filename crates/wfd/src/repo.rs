@@ -2,9 +2,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use crate::{error::WfdError, models::WfdMeta};
 
-const COLS: &str = "wfd_id, orgtnt_id, name, version, s3_key, is_active, created_at, \
+const COLS: &str = "wfd_id, orgtnt_id, project_id, name, version, s3_key, is_active, created_at, \
                     status, description, tags, owner, updated_at";
-const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
+const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.project_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
                       m.status, m.description, m.tags, m.owner, m.updated_at";
 
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
@@ -13,6 +13,7 @@ pub async fn insert(
     pool:        &PgPool,
     wfd_id:      Uuid,
     orgtnt_id:   Uuid,
+    project_id:  Uuid,
     name:        &str,
     version:     i32,
     s3_key:      &str,
@@ -23,10 +24,10 @@ pub async fn insert(
 ) -> Result<Uuid, WfdError> {
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO wf.wfd_meta \
-         (wfd_id, orgtnt_id, name, version, s3_key, status, description, tags, owner) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING wfd_id"
+         (wfd_id, orgtnt_id, project_id, name, version, s3_key, status, description, tags, owner) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING wfd_id"
     )
-    .bind(wfd_id).bind(orgtnt_id).bind(name).bind(version).bind(s3_key)
+    .bind(wfd_id).bind(orgtnt_id).bind(project_id).bind(name).bind(version).bind(s3_key)
     .bind(status).bind(description).bind(tags).bind(owner)
     .fetch_one(pool)
     .await
@@ -62,24 +63,27 @@ pub async fn get_meta_any(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<W
 }
 
 /// Liste — draft ve published birlikte döner (UI ayırır).
-pub async fn list(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64)
+/// `project_id` verilirse o projeyle sınırlanır.
+pub async fn list(pool: &PgPool, orgtnt_id: Uuid, project_id: Option<Uuid>, limit: i64, offset: i64)
     -> Result<Vec<WfdMeta>, WfdError>
 {
     sqlx::query_as::<_, WfdMeta>(
         &format!("SELECT {COLS} FROM wf.wfd_meta \
                   WHERE orgtnt_id=$1 AND is_active=true \
+                    AND ($4::uuid IS NULL OR project_id=$4) \
                   ORDER BY name, version DESC LIMIT $2 OFFSET $3")
     )
-    .bind(orgtnt_id).bind(limit).bind(offset)
+    .bind(orgtnt_id).bind(limit).bind(offset).bind(project_id)
     .fetch_all(pool).await
     .map_err(WfdError::Database)
 }
 
-pub async fn next_version(pool: &PgPool, orgtnt_id: Uuid, name: &str) -> Result<i32, WfdError> {
+/// Versiyon sayacı proje kapsamındadır (name benzersizliği gibi).
+pub async fn next_version(pool: &PgPool, project_id: Uuid, name: &str) -> Result<i32, WfdError> {
     let max: Option<i32> = sqlx::query_scalar(
-        "SELECT MAX(version) FROM wf.wfd_meta WHERE orgtnt_id=$1 AND name=$2"
+        "SELECT MAX(version) FROM wf.wfd_meta WHERE project_id=$1 AND name=$2"
     )
-    .bind(orgtnt_id).bind(name)
+    .bind(project_id).bind(name)
     .fetch_one(pool).await?;
     Ok(max.unwrap_or(0) + 1)
 }
@@ -115,7 +119,7 @@ pub async fn update_group_metadata(
 ) -> Result<Vec<WfdMeta>, WfdError> {
     let rows = sqlx::query_as::<_, WfdMeta>(&format!(
         "WITH anchor AS (
-             SELECT orgtnt_id, name AS old_name
+             SELECT project_id, name AS old_name
              FROM wf.wfd_meta
              WHERE wfd_id = $1 AND version = $2 AND is_active = true
          ),
@@ -125,7 +129,7 @@ pub async fn update_group_metadata(
                  description = COALESCE($4, m.description),
                  updated_at = now()
              FROM anchor a
-             WHERE m.orgtnt_id = a.orgtnt_id
+             WHERE m.project_id = a.project_id
                AND m.name = a.old_name
                AND m.is_active = true
              RETURNING {M_COLS}
@@ -139,7 +143,7 @@ pub async fn update_group_metadata(
     .fetch_all(pool)
     .await
     .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {
-        Some("wfd_meta_orgtnt_id_name_version_key") | Some("wfd_single_draft") =>
+        Some("wfd_meta_project_name_version_key") | Some("wfd_single_draft") =>
             WfdError::Conflict("Bu isimde başka bir workflow zaten var".into()),
         _ => WfdError::Database(e),
     })?;

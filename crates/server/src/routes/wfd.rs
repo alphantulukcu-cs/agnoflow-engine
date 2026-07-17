@@ -192,6 +192,9 @@ struct CreateDraftBody {
     /// Editörün ürettiği başlangıç dokümanı; yoksa engine iskelet yazar.
     #[serde(default)]
     wfd: Option<Value>,
+    /// Taslağın türetildiği predefined şablon versiyonu (galeri akışı doldurur).
+    #[serde(default)]
+    source_template_id: Option<Uuid>,
 }
 
 async fn create_draft(
@@ -200,6 +203,13 @@ async fn create_draft(
     Json(b): Json<CreateDraftBody>,
 ) -> Result<Json<Value>, AppError> {
     let project_id = resolve_project_for_write(&s, &auth, b.orgtnt_id, b.project_id).await?;
+    if let Some(tid) = b.source_template_id {
+        // İz güvenilir olsun: şablon var ve aynı tenant'ta olmalı.
+        let tpl = wf_wfd::template::get(&s.pool, tid).await.map_err(map_wfd_err)?;
+        if tpl.orgtnt_id != auth.orgtnt_id {
+            return Err(AppError("Şablon bulunamadı".into(), StatusCode::NOT_FOUND));
+        }
+    }
     let (wfd_id, version) = s
         .wfd
         .create_draft(
@@ -209,6 +219,7 @@ async fn create_draft(
             b.description.as_deref(),
             &b.tags,
             b.wfd.as_ref(),
+            b.source_template_id,
         )
         .await
         .map_err(map_wfd_err)?;

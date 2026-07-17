@@ -91,7 +91,7 @@ impl WfdAdapter {
         repo::insert(
             &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
-            "published", None, &[], "admin",
+            "published", None, &[], "admin", None,
         ).await?;
         Ok((wfd_id, version))
     }
@@ -115,6 +115,7 @@ impl WfdAdapter {
         description: Option<&str>,
         tags:        &[String],
         wfd_json:    Option<&Value>,
+        source_template_id: Option<Uuid>,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
         let project_id = self.resolve_project(orgtnt_id, project_id).await?;
         let version = repo::next_version(&self.pool, project_id, name).await?;
@@ -138,7 +139,7 @@ impl WfdAdapter {
         repo::insert(
             &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
-            "draft", description, tags, "admin",
+            "draft", description, tags, "admin", source_template_id,
         ).await?;
         Ok((wfd_id, version))
     }
@@ -218,6 +219,7 @@ impl WfdAdapter {
         self.create_draft(
             src.orgtnt_id, Some(src.project_id), &src.name,
             src.description.as_deref(), &src.tags, Some(&json),
+            src.source_template_id,
         ).await
     }
 

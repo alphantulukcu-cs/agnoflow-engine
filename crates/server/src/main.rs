@@ -120,6 +120,7 @@ async fn main() {
         .nest("/auth", routes::auth::router(state.clone()))
         .nest("/users", routes::users::router(state.clone()))
         .nest("/project", routes::project::router(state.clone()))
+        .nest("/templates", routes::templates::router(state.clone()))
         .nest("/wfd", routes::wfd::router(state.clone()))
         .nest("/wfe/simulate", routes::simulate::router(state.clone()))
         .nest("/wfe", routes::wfe::router(state.clone()))

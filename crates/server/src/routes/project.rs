@@ -19,7 +19,43 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(list_projects).post(create_project))
         .route("/:id", get(get_project))
         .route("/:id", patch(update_project))
+        .route("/:id/members", get(list_members))
         .with_state(state)
+}
+
+#[derive(serde::Serialize)]
+struct MemberRow {
+    user_id: Uuid,
+    display_name: String,
+    email: String,
+    role: String,
+}
+
+/// Projenin üyeleri — görünürlük seçimi için; proje admini de görebilir.
+async fn list_members(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<MemberRow>>, AppError> {
+    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    if project.orgtnt_id != auth.orgtnt_id {
+        return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
+    }
+    require_can_manage_project(&s.pool, &auth, id).await?;
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT u.user_id, u.display_name, u.email, m.role
+         FROM wf.project_member m JOIN wf.app_user u USING (user_id)
+         WHERE m.project_id = $1 AND u.is_active = true ORDER BY u.display_name",
+    )
+    .bind(id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(user_id, display_name, email, role)| MemberRow { user_id, display_name, email, role })
+            .collect(),
+    ))
 }
 
 async fn list_projects(

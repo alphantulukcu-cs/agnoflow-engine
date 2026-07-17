@@ -28,4 +28,6 @@ pub struct WfdMeta {
     pub tags:        Vec<String>,
     pub owner:       String,
     pub updated_at:  DateTime<Utc>,
+    /// Türetildiği predefined şablon versiyonu (varsa).
+    pub source_template_id: Option<Uuid>,
 }

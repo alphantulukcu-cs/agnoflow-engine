@@ -3,9 +3,9 @@ use uuid::Uuid;
 use crate::{error::WfdError, models::WfdMeta};
 
 const COLS: &str = "wfd_id, orgtnt_id, project_id, name, version, s3_key, is_active, created_at, \
-                    status, description, tags, owner, updated_at";
+                    status, description, tags, owner, updated_at, source_template_id";
 const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.project_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
-                      m.status, m.description, m.tags, m.owner, m.updated_at";
+                      m.status, m.description, m.tags, m.owner, m.updated_at, m.source_template_id";
 
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
 #[allow(clippy::too_many_arguments)]
@@ -21,14 +21,15 @@ pub async fn insert(
     description: Option<&str>,
     tags:        &[String],
     owner:       &str,
+    source_template_id: Option<Uuid>,
 ) -> Result<Uuid, WfdError> {
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO wf.wfd_meta \
-         (wfd_id, orgtnt_id, project_id, name, version, s3_key, status, description, tags, owner) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING wfd_id"
+         (wfd_id, orgtnt_id, project_id, name, version, s3_key, status, description, tags, owner, source_template_id) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING wfd_id"
     )
     .bind(wfd_id).bind(orgtnt_id).bind(project_id).bind(name).bind(version).bind(s3_key)
-    .bind(status).bind(description).bind(tags).bind(owner)
+    .bind(status).bind(description).bind(tags).bind(owner).bind(source_template_id)
     .fetch_one(pool)
     .await
     .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {

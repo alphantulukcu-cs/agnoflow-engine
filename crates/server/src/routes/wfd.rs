@@ -1,3 +1,4 @@
+use super::auth::{require_can_design, AppAuth, MaybeAppAuth};
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -46,14 +47,77 @@ struct ListQuery {
 
 async fn list_wfd(
     State(s): State<AppState>,
+    MaybeAppAuth(auth): MaybeAppAuth,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<wf_wfd::models::WfdMeta>>, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
-    wf_wfd::repo::list(&s.pool, q.orgtnt_id, q.project_id, limit, offset)
+    // Token'lı istekte tenant token'dan doğrulanır; üye yalnız atandığı
+    // projelerin akışlarını görür. Token'sız okuma (sim/araçlar) eski davranış.
+    if let Some(auth) = &auth {
+        if auth.orgtnt_id != q.orgtnt_id {
+            return Err(AppError("Tenant uyuşmuyor".into(), StatusCode::FORBIDDEN));
+        }
+    }
+    let mut rows = wf_wfd::repo::list(&s.pool, q.orgtnt_id, q.project_id, limit, offset)
         .await
-        .map(Json)
-        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    if let Some(auth) = &auth {
+        if auth.role != "admin" {
+            let member_of: Vec<Uuid> = sqlx::query_scalar(
+                "SELECT project_id FROM wf.project_member WHERE user_id = $1",
+            )
+            .bind(auth.user_id)
+            .fetch_all(&s.pool)
+            .await
+            .map_err(internal_error)?;
+            rows.retain(|w| member_of.contains(&w.project_id));
+        }
+    }
+    Ok(Json(rows))
+}
+
+/// Yazma uçlarının ortak kapısı: hedef WFD'nin projesinde tasarım yetkisi.
+async fn require_design_on_wfd(
+    s: &AppState,
+    auth: &AppAuth,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<(), AppError> {
+    let meta = wf_wfd::repo::get_meta_any(&s.pool, wfd_id, version)
+        .await
+        .map_err(map_wfd_err)?;
+    if meta.orgtnt_id != auth.orgtnt_id {
+        return Err(AppError("Bulunamadı".into(), StatusCode::NOT_FOUND));
+    }
+    require_can_design(&s.pool, auth, meta.project_id).await
+}
+
+/// Yeni doküman yaratırken proje çözümü + yetki: body'de proje verilmişse o,
+/// verilmemişse tenant'ın varsayılanı. Dönen id adapter'a AYNEN geçilir ki
+/// yetki verilen proje ile yazılan proje ayrışamasın.
+async fn resolve_project_for_write(
+    s: &AppState,
+    auth: &AppAuth,
+    body_tenant: Uuid,
+    project_id: Option<Uuid>,
+) -> Result<Uuid, AppError> {
+    if body_tenant != auth.orgtnt_id {
+        return Err(AppError("Tenant uyuşmuyor".into(), StatusCode::FORBIDDEN));
+    }
+    let project_id = match project_id {
+        Some(id) => {
+            wf_wfd::project::assert_in_tenant(&s.pool, id, auth.orgtnt_id)
+                .await
+                .map_err(map_wfd_err)?;
+            id
+        }
+        None => wf_wfd::project::resolve_default(&s.pool, auth.orgtnt_id)
+            .await
+            .map_err(map_wfd_err)?,
+    };
+    require_can_design(&s.pool, auth, project_id).await?;
+    Ok(project_id)
 }
 
 #[derive(Deserialize)]
@@ -68,11 +132,13 @@ struct UploadBody {
 
 async fn upload_wfd(
     State(s): State<AppState>,
+    auth: AppAuth,
     Json(body): Json<UploadBody>,
 ) -> Result<Json<Value>, AppError> {
+    let project_id = resolve_project_for_write(&s, &auth, body.orgtnt_id, body.project_id).await?;
     let (wfd_id, version) = s
         .wfd
-        .upload(body.orgtnt_id, body.project_id, &body.wfd)
+        .upload(body.orgtnt_id, Some(project_id), &body.wfd)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
     Ok(Json(
@@ -130,13 +196,15 @@ struct CreateDraftBody {
 
 async fn create_draft(
     State(s): State<AppState>,
+    auth: AppAuth,
     Json(b): Json<CreateDraftBody>,
 ) -> Result<Json<Value>, AppError> {
+    let project_id = resolve_project_for_write(&s, &auth, b.orgtnt_id, b.project_id).await?;
     let (wfd_id, version) = s
         .wfd
         .create_draft(
             b.orgtnt_id,
-            b.project_id,
+            Some(project_id),
             &b.name,
             b.description.as_deref(),
             &b.tags,
@@ -151,8 +219,10 @@ async fn create_draft(
 
 async fn get_draft(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .fetch_draft_json(id, ver)
         .await
@@ -172,9 +242,11 @@ struct SaveDraftBody {
 
 async fn save_draft(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
     Json(b): Json<SaveDraftBody>,
 ) -> Result<StatusCode, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .save_draft(id, ver, &b.wfd, b.description.as_deref(), b.tags.as_deref())
         .await
@@ -184,8 +256,10 @@ async fn save_draft(
 
 async fn publish_draft(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .publish_draft(id, ver)
         .await
@@ -195,8 +269,10 @@ async fn publish_draft(
 
 async fn delete_draft(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<StatusCode, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .delete_draft(id, ver)
         .await
@@ -206,8 +282,10 @@ async fn delete_draft(
 
 async fn new_draft(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
     let (wfd_id, version) = s.wfd.new_draft_from(id, ver).await.map_err(map_wfd_err)?;
     Ok(Json(
         serde_json::json!({ "wfd_id": wfd_id, "version": version }),
@@ -224,9 +302,11 @@ struct UpdateWfdMetaBody {
 
 async fn update_wfd_meta(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
     Json(body): Json<UpdateWfdMetaBody>,
 ) -> Result<Json<Vec<wf_wfd::models::WfdMeta>>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
     let name = body
         .name
         .as_deref()

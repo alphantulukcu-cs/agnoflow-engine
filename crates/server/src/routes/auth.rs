@@ -93,6 +93,80 @@ pub fn decode_app_jwt(secret: &str, token: &str) -> Result<AppAuth, AppError> {
     })
 }
 
+/// Opsiyonel auth: token varsa doğrular (geçersiz token yine 401), yoksa None.
+/// Okuma uçlarında "token'lıysa üyeliğe göre süz, değilse eski davranış" için.
+pub struct MaybeAppAuth(pub Option<AppAuth>);
+
+#[async_trait]
+impl FromRequestParts<AppState> for MaybeAppAuth {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        let token = parts
+            .headers
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "));
+        match token {
+            None => Ok(MaybeAppAuth(None)),
+            Some(t) => decode_app_jwt(&state.cfg.jwt_secret, t).map(|a| MaybeAppAuth(Some(a))),
+        }
+    }
+}
+
+// ── Proje-düzeyi yetki denetimleri ───────────────────────────────────────────
+
+async fn membership_role(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    project_id: Uuid,
+) -> Result<Option<String>, AppError> {
+    sqlx::query_scalar(
+        "SELECT role FROM wf.project_member WHERE user_id = $1 AND project_id = $2",
+    )
+    .bind(user_id)
+    .bind(project_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// WFD tasarımı yapabilir mi: tenant admin ya da projenin üyesi (admin/user farketmez).
+pub async fn require_can_design(
+    pool: &sqlx::PgPool,
+    auth: &AppAuth,
+    project_id: Uuid,
+) -> Result<(), AppError> {
+    if auth.role == "admin" {
+        return Ok(());
+    }
+    if membership_role(pool, auth.user_id, project_id).await?.is_some() {
+        return Ok(());
+    }
+    Err(AppError(
+        "Bu projede çalışma yetkiniz yok".into(),
+        StatusCode::FORBIDDEN,
+    ))
+}
+
+/// Projeyi yönetebilir mi (meta düzenleme): tenant admin ya da project admin.
+pub async fn require_can_manage_project(
+    pool: &sqlx::PgPool,
+    auth: &AppAuth,
+    project_id: Uuid,
+) -> Result<(), AppError> {
+    if auth.role == "admin" {
+        return Ok(());
+    }
+    if membership_role(pool, auth.user_id, project_id).await?.as_deref() == Some("admin") {
+        return Ok(());
+    }
+    Err(AppError(
+        "Bu projeyi yönetme yetkiniz yok".into(),
+        StatusCode::FORBIDDEN,
+    ))
+}
+
 #[async_trait]
 impl FromRequestParts<AppState> for AppAuth {
     type Rejection = AppError;

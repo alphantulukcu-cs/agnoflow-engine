@@ -202,6 +202,8 @@ pub struct UserView {
     pub display_name: String,
     pub role: String,
     pub is_active: bool,
+    /// Doğrudan yayın yetkisi (member için) — false ise yayın onaya gider.
+    pub can_publish: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub projects: Vec<ProjectMembership>,
 }
@@ -232,11 +234,12 @@ pub struct UserRow {
     pub display_name: String,
     pub role: String,
     pub is_active: bool,
+    pub can_publish: bool,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub const USER_COLS: &str =
-    "user_id, orgtnt_id, email, display_name, role, is_active, created_at";
+    "user_id, orgtnt_id, email, display_name, role, is_active, can_publish, created_at";
 
 pub async fn user_view(pool: &sqlx::PgPool, row: UserRow) -> Result<UserView, AppError> {
     let projects = load_memberships(pool, row.user_id).await?;
@@ -247,6 +250,7 @@ pub async fn user_view(pool: &sqlx::PgPool, row: UserRow) -> Result<UserView, Ap
         display_name: row.display_name,
         role: row.role,
         is_active: row.is_active,
+        can_publish: row.can_publish,
         created_at: row.created_at,
         projects,
     })

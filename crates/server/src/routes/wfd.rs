@@ -1,4 +1,4 @@
-use super::auth::{require_can_design, AppAuth, MaybeAppAuth};
+use super::auth::{require_can_design, require_can_manage_project, AppAuth, MaybeAppAuth};
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, Query, State},
@@ -29,6 +29,9 @@ pub fn router(state: AppState) -> Router {
             get(get_draft).put(save_draft).delete(delete_draft),
         )
         .route("/draft/:id/:version/publish", post(publish_draft))
+        .route("/draft/:id/:version/submit", post(submit_draft))
+        .route("/draft/:id/:version/approve", post(approve_draft))
+        .route("/draft/:id/:version/reject", post(reject_draft))
         .route("/:id/:version/meta", patch(update_wfd_meta))
         .route("/:id/:version", get(get_wfd))
         .route("/:id/:version/new-draft", post(new_draft))
@@ -91,6 +94,22 @@ async fn require_design_on_wfd(
         return Err(AppError("Bulunamadı".into(), StatusCode::NOT_FOUND));
     }
     require_can_design(&s.pool, auth, meta.project_id).await
+}
+
+/// Onay/yayın kapısı: tenant admin veya hedef projenin admini.
+async fn require_approver_on_wfd(
+    s: &AppState,
+    auth: &AppAuth,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<(), AppError> {
+    let meta = wf_wfd::repo::get_meta_any(&s.pool, wfd_id, version)
+        .await
+        .map_err(map_wfd_err)?;
+    if meta.orgtnt_id != auth.orgtnt_id {
+        return Err(AppError("Bulunamadı".into(), StatusCode::NOT_FOUND));
+    }
+    require_can_manage_project(&s.pool, auth, meta.project_id).await
 }
 
 /// Yeni doküman yaratırken proje çözümü + yetki: body'de proje verilmişse o,
@@ -265,16 +284,103 @@ async fn save_draft(
         .map_err(map_wfd_err)
 }
 
+/// Doğrudan yayın: onaycı (tenant admin | proje admini) VEYA admin'in
+/// "doğrudan yayınlayabilir" bayrağını verdiği proje üyesi. Diğerleri
+/// /submit ile onaya gönderir.
+async fn require_can_publish_wfd(
+    s: &AppState,
+    auth: &AppAuth,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<(), AppError> {
+    if require_approver_on_wfd(s, auth, wfd_id, version).await.is_ok() {
+        return Ok(());
+    }
+    // Onaycı değil: tasarım yetkisi + kullanıcı bayrağı gerekir.
+    require_design_on_wfd(s, auth, wfd_id, version).await?;
+    let flag: Option<bool> = sqlx::query_scalar(
+        "SELECT can_publish FROM wf.app_user WHERE user_id = $1",
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&s.pool)
+    .await
+    .map_err(internal_error)?;
+    if flag == Some(true) {
+        return Ok(());
+    }
+    Err(AppError(
+        "Doğrudan yayın yetkiniz yok — taslağı onaya gönderin".into(),
+        StatusCode::FORBIDDEN,
+    ))
+}
+
 async fn publish_draft(
     State(s): State<AppState>,
     auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
-    require_design_on_wfd(&s, &auth, id, ver).await?;
+    require_can_publish_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .publish_draft(id, ver)
         .await
         .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "published" })))
+        .map_err(map_wfd_err)
+}
+
+/// Taslağı yayın onayına gönderir (tasarım yetkisi yeter). Validator kapısı
+/// yayınla AYNIDIR — geçersiz doküman onaya giremez.
+async fn submit_draft(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    // Token minimal kimlik taşır — gönderenin görünen adı DB'den çözülür.
+    let submitted_by: String = sqlx::query_scalar(
+        "SELECT display_name FROM wf.app_user WHERE user_id = $1",
+    )
+    .bind(auth.user_id)
+    .fetch_optional(&s.pool)
+    .await
+    .map_err(internal_error)?
+    .unwrap_or_else(|| auth.user_id.to_string());
+    s.wfd
+        .submit_draft(id, ver, &submitted_by)
+        .await
+        .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "pending_approval" })))
+        .map_err(map_wfd_err)
+}
+
+async fn approve_draft(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    require_approver_on_wfd(&s, &auth, id, ver).await?;
+    s.wfd
+        .approve_draft(id, ver)
+        .await
+        .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "published" })))
+        .map_err(map_wfd_err)
+}
+
+#[derive(Deserialize)]
+struct RejectBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn reject_draft(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+    Json(b): Json<RejectBody>,
+) -> Result<Json<Value>, AppError> {
+    require_approver_on_wfd(&s, &auth, id, ver).await?;
+    s.wfd
+        .reject_draft(id, ver, b.reason.as_deref())
+        .await
+        .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "draft" })))
         .map_err(map_wfd_err)
 }
 

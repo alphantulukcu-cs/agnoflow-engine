@@ -85,6 +85,9 @@ struct CreateUserBody {
     password: String,
     #[serde(default)]
     role: Option<String>, // 'admin' | 'member' (default member)
+    /// Doğrudan yayın yetkisi — verilmezse false (onay sürecine girer).
+    #[serde(default)]
+    can_publish: Option<bool>,
 }
 
 async fn create_user(
@@ -108,14 +111,15 @@ async fn create_user(
     let hash = bcrypt::hash(&b.password, BCRYPT_COST).map_err(internal)?;
 
     let row = sqlx::query_as::<_, UserRow>(&format!(
-        "INSERT INTO wf.app_user (orgtnt_id, email, display_name, password_hash, role) \
-         VALUES ($1,$2,$3,$4,$5) RETURNING {USER_COLS}",
+        "INSERT INTO wf.app_user (orgtnt_id, email, display_name, password_hash, role, can_publish) \
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING {USER_COLS}",
     ))
     .bind(auth.orgtnt_id)
     .bind(&email)
     .bind(name)
     .bind(&hash)
     .bind(role)
+    .bind(b.can_publish.unwrap_or(false))
     .fetch_one(&s.pool)
     .await
     .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {
@@ -138,6 +142,8 @@ struct UpdateUserBody {
     /// Verilirse şifre sıfırlanır.
     #[serde(default)]
     password: Option<String>,
+    #[serde(default)]
+    can_publish: Option<bool>,
 }
 
 async fn update_user(
@@ -176,6 +182,7 @@ async fn update_user(
              role = COALESCE($4, role), \
              is_active = COALESCE($5, is_active), \
              password_hash = COALESCE($6, password_hash), \
+             can_publish = COALESCE($7, can_publish), \
              updated_at = now() \
          WHERE user_id = $1 AND orgtnt_id = $2 RETURNING {USER_COLS}",
     ))
@@ -185,6 +192,7 @@ async fn update_user(
     .bind(b.role.as_deref())
     .bind(b.is_active)
     .bind(password_hash.as_deref())
+    .bind(b.can_publish)
     .fetch_one(&s.pool)
     .await
     .map_err(internal)?;

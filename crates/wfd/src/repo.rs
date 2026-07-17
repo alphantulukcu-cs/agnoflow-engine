@@ -3,9 +3,9 @@ use uuid::Uuid;
 use crate::{error::WfdError, models::WfdMeta};
 
 const COLS: &str = "wfd_id, orgtnt_id, project_id, name, version, s3_key, is_active, created_at, \
-                    status, description, tags, owner, updated_at, source_template_id";
+                    status, description, tags, owner, updated_at, source_template_id, review_note, submitted_by";
 const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.project_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
-                      m.status, m.description, m.tags, m.owner, m.updated_at, m.source_template_id";
+                      m.status, m.description, m.tags, m.owner, m.updated_at, m.source_template_id, m.review_note, m.submitted_by";
 
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
 #[allow(clippy::too_many_arguments)]
@@ -153,6 +153,42 @@ pub async fn update_group_metadata(
         return Err(WfdError::NotFound(format!("{anchor_wfd_id} v{anchor_version}")));
     }
     Ok(rows)
+}
+
+/// Draft'ı onaya gönderir: draft → pending_approval (+ gönderen, eski ret notu silinir).
+pub async fn set_pending(pool: &PgPool, wfd_id: Uuid, version: i32, submitted_by: &str) -> Result<(), WfdError> {
+    let n = sqlx::query(
+        "UPDATE wf.wfd_meta SET status='pending_approval', submitted_by=$3, review_note=NULL, updated_at=now() \
+         WHERE wfd_id=$1 AND version=$2 AND status='draft'"
+    )
+    .bind(wfd_id).bind(version).bind(submitted_by)
+    .execute(pool).await?.rows_affected();
+    if n == 0 { return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}"))); }
+    Ok(())
+}
+
+/// Onay bekleyeni yayınlar: pending_approval → published.
+pub async fn set_published_from_pending(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
+    let n = sqlx::query(
+        "UPDATE wf.wfd_meta SET status='published', review_note=NULL, updated_at=now() \
+         WHERE wfd_id=$1 AND version=$2 AND status='pending_approval'"
+    )
+    .bind(wfd_id).bind(version)
+    .execute(pool).await?.rows_affected();
+    if n == 0 { return Err(WfdError::NotFound(format!("pending {wfd_id} v{version}"))); }
+    Ok(())
+}
+
+/// Onay bekleyeni reddeder: pending_approval → draft (+ gerekçe).
+pub async fn set_rejected(pool: &PgPool, wfd_id: Uuid, version: i32, note: Option<&str>) -> Result<(), WfdError> {
+    let n = sqlx::query(
+        "UPDATE wf.wfd_meta SET status='draft', review_note=$3, updated_at=now() \
+         WHERE wfd_id=$1 AND version=$2 AND status='pending_approval'"
+    )
+    .bind(wfd_id).bind(version).bind(note)
+    .execute(pool).await?.rows_affected();
+    if n == 0 { return Err(WfdError::NotFound(format!("pending {wfd_id} v{version}"))); }
+    Ok(())
 }
 
 /// Draft'ı published yapar (publish sonrası). status flip + updated_at.

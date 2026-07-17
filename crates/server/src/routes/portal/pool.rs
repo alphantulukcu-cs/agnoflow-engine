@@ -114,6 +114,7 @@ async fn list_pool(
            ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
          WHERE e.status     = 'active'
            AND e.orgtnt_id  = $1
+           AND (e.deadline IS NULL OR e.deadline > now())
            AND (
                  e.current_c_a @> $2::jsonb
               OR e.current_c_a @> $3::jsonb

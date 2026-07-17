@@ -255,13 +255,17 @@ impl WfeStore for WfeAdapter {
         orgtnt_id: Uuid,
         user_id: Uuid,
     ) -> Result<bool, EngineError> {
-        // CAS: yalnızca unassigned aktif WFE claim edilebilir — eşzamanlı
-        // claim'lerden yalnızca biri satırı günceller (V1 stateless claim'in kalıcı çözümü)
+        // CAS: yalnızca unassigned aktif VE deadline'ı geçmemiş WFE claim edilebilir —
+        // eşzamanlı claim'lerden yalnızca biri satırı günceller (V1 stateless claim'in
+        // kalıcı çözümü). `deadline` kontrolü DB seviyesinde tekrarlanır (2026-07-16 fix):
+        // Engine::can_claim aynı kontrolü zaten yapar ama sweeper'ın henüz `terminated`'a
+        // taşımadığı bir satırda check-then-write arasında güvenlik ağı sağlar.
         let claimed_by = json!({ "user_id": user_id.to_string() });
         let result = sqlx::query(
             "UPDATE wf.wfe
              SET claimed_by = $1, claimed_at = now(), updated_at = now()
-             WHERE wfe_id = $2 AND orgtnt_id = $3 AND status = 'active' AND claimed_by IS NULL",
+             WHERE wfe_id = $2 AND orgtnt_id = $3 AND status = 'active' AND claimed_by IS NULL
+               AND (deadline IS NULL OR deadline > now())",
         )
         .bind(&claimed_by)
         .bind(wfe_id)

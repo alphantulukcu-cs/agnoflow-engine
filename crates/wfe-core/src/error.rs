@@ -8,6 +8,8 @@ pub enum EngineError {
     TransitionNotFound(String),
     #[error("wfe is terminal — no further actions accepted")]
     WfeTerminal,
+    #[error("wfe deadline (SLA-3) has passed — no further actions accepted pending SLA sweep")]
+    WfeExpired,
     #[error("wfe is unassigned — claim required before acting")]
     NotClaimed,
     #[error("actor is not the assignment owner of this wfe")]

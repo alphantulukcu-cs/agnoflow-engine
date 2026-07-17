@@ -276,7 +276,8 @@ fn wft_condition_with_neither_target_is_error() {
     assert!(has_error(&validate_value(v), "wft_target"));
 }
 
-// ---- V1–V6 simetrik start ----
+// ---- V1, V4, V5 simetrik start. V2/V3 kaldırıldı (2026-07-16): start node yeniden
+// girilebilir — mid-flow'da normal node gibi wft hedefi ve escalation taşıyabilir. ----
 
 #[test]
 fn start_from_unknown_node_is_error() {
@@ -287,22 +288,32 @@ fn start_from_unknown_node_is_error() {
 }
 
 #[test]
-fn start_node_as_wft_target_is_error() {
-    // V2 — bir escalation start node'unu hedeflerse ihlal
+fn start_node_as_wft_target_is_allowed() {
+    // eski V2: bir escalation start node'unu hedeflerse artık geçerli konfigürasyon
     let mut v = fixture_value();
     v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
         json!({"node": "type_branch__branchClerk"});
-    assert!(has_error(&validate_value(v), "start_target"));
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "start_target"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
-fn start_node_with_escalation_is_error() {
-    // V3
+fn start_node_with_escalation_is_allowed() {
+    // eski V3: start node artık escalation taşıyabilir (mid-flow'da normal node gibi)
     let mut v = fixture_value();
     v["nodes"]["type_branch__branchClerk"]["escalation"] = json!([
         {"after": "P1D", "wft": {"node": "self__creditAnalyst"}}
     ]);
-    assert!(has_error(&validate_value(v), "start_escalation"));
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "start_escalation"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 #[test]

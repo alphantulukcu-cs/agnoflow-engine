@@ -114,10 +114,10 @@ v2.1 ile aynı: escalation zamanlayıcısı node-giriş anından başlar (WFAH't
 | # | Kural |
 |---|------|
 | V1 | `start[].from`, `nodes` içinde var olan bir node'a referans vermelidir. |
-| V2 | Herhangi bir `start[].from` tarafından referans edilen node, HİÇBİR transition veya start'ın `wft` hedefi OLMAMALIDIR — start havuzları yalnızca giriş noktasıdır, yeniden girilemez. |
-| V3 | Bir start node `escalation` TAŞIYAMAZ (orada bekleyen yoktur). |
 | V4 | `start[].action`, `actions{}` içinde tanımlı bir action key'e karşılık gelmelidir (transition'lardaki `action` ile aynı kural). |
 | V5 | En az bir `start` girdisi olmalıdır (mevcut `minItems: 1`). |
+
+**V2/V3 kaldırıldı (2026-07-16):** Start node artık yeniden girilebilir. Bir `start[].from` node'u başka bir transition/start/escalation'ın `wft` hedefi OLABİLİR ve kendi `escalation`'ını taşıyabilir — bir akışı hem müdür hem memur başlatabildiğinde (iki start node), biri diğerini `wft` ile hedefleyebilir (onay/kontrol simetrisi). Start kuralları yalnızca WFE **yaratılırken** devreye girer; node'a mid-flow bir `wft` ile girildiğinde WFE orada normal bir node gibi durur — escalation/claim_timeout zaten node-giriş WFAH zaman damgasından ölçülür, start anında WFE o node'da beklemediği için ayrım runtime'da halihazırda vardı; değişiklik sadece validasyon katmanındaydı.
 
 **Runtime resolution:** Actor, `start[].action` ile adlandırılmış aksiyonu çağırır → her aday start node'un `c_a`'sına karşı eşleştirilir → eşleşen node efektif `from` olur → o start rule'ın `wfes_effects`/`trigger`'ı çalışır → WFE `wft`'e iner. Transition seçimiyle (`from` + `action`) birebir aynı mekanik.
 

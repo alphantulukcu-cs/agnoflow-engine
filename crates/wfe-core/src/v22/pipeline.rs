@@ -47,6 +47,8 @@ pub struct Engine<'a> {
 pub enum ClaimCheck {
     Ok,
     Terminal,
+    /// SLA-3 deadline geçmiş ama sweeper henüz `terminated`'a taşımadı (2026-07-16 fix).
+    Expired,
     AlreadyClaimed,
     NotEligible,
 }
@@ -149,9 +151,18 @@ impl<'a> Engine<'a> {
         // SLA-3: efektif deadline çözümü — deadline verildi → now+parse(deadline)
         // (timeout tavanına tabi); verilmedi ve wfd.timeout var → now+parse(timeout);
         // ikisi de yok → NULL.
+        // Çağıran girdisindeki parse hatası InvalidInput'tur (InvalidWfd değil —
+        // kusur WFD'de değil, istekte) ve beklenen biçimi tarif etmelidir.
+        let parse_caller_deadline = |d: &str| {
+            parse_iso8601_duration(d).map_err(|_| {
+                EngineError::InvalidInput(format!(
+                    "deadline '{d}' geçersiz — ISO 8601 süre bekleniyor: PT30M (30 dakika), PT2H (2 saat), P1D (1 gün), P1DT12H (1 gün 12 saat)"
+                ))
+            })
+        };
         let resolved_deadline: Option<DateTime<Utc>> = match (deadline, &wfd.timeout) {
             (Some(d), Some(t)) => {
-                let dur = parse_iso8601_duration(d)?;
+                let dur = parse_caller_deadline(d)?;
                 let ceiling = parse_iso8601_duration(t)?;
                 if dur > ceiling {
                     return Err(EngineError::InvalidInput(format!(
@@ -160,7 +171,7 @@ impl<'a> Engine<'a> {
                 }
                 Some(now + dur)
             }
-            (Some(d), None) => Some(now + parse_iso8601_duration(d)?),
+            (Some(d), None) => Some(now + parse_caller_deadline(d)?),
             (None, Some(t)) => Some(now + parse_iso8601_duration(t)?),
             (None, None) => None,
         };
@@ -247,6 +258,12 @@ impl<'a> Engine<'a> {
     ) -> Result<TransitionCommit, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Err(EngineError::WfeTerminal);
+        }
+        // SLA-3: deadline geçtiyse sweeper (60s tick) henüz `terminated`'a taşımamış
+        // olsa bile aksiyon reddedilir — request-time re-check (2026-07-16 fix,
+        // bkz. can_claim'deki eşdeğer kapı).
+        if self.deadline_due(wfes, Utc::now()) {
+            return Err(EngineError::WfeExpired);
         }
         let current_node = wfes
             .current_node
@@ -379,6 +396,12 @@ impl<'a> Engine<'a> {
         if is_terminal_class(&wfes.status) {
             return Ok(ClaimCheck::Terminal);
         }
+        // SLA-3: deadline geçmiş ama sweeper henüz `terminated`'a taşımadıysa
+        // status hâlâ 'active' okunur — claim bu request-time kontrolle reddedilir
+        // (2026-07-16 fix; sweeper 60s tick'e kadar tek başına yeterli değildi).
+        if self.deadline_due(wfes, Utc::now()) {
+            return Ok(ClaimCheck::Expired);
+        }
         if wfes.assigned_to.is_some() {
             return Ok(ClaimCheck::AlreadyClaimed);
         }
@@ -407,6 +430,9 @@ impl<'a> Engine<'a> {
         actor: &Actor,
     ) -> Result<Vec<String>, EngineError> {
         if is_terminal_class(&wfes.status) || wfes.assigned_to != Some(actor.user_id) {
+            return Ok(vec![]);
+        }
+        if self.deadline_due(wfes, Utc::now()) {
             return Ok(vec![]);
         }
         let Some(current_node) = wfes.current_node.as_deref() else {

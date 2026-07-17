@@ -697,6 +697,65 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
     );
 }
 
+// ---- start node yeniden girilebilir (2026-07-16): start node artık normal bir
+// mid-flow hedefi/ara-durak olabilir; escalation orada da normal işler. ----
+
+#[tokio::test]
+async fn start_wft_targeting_own_from_node_lands_there() {
+    // Bir start rule kendi `from`'unu wft hedefi seçebilir (örn. memur başlatır,
+    // akış müdür node'una gider; müdür başlatınca memur node'una — burada
+    // sadeleştirilmiş biçimde: start.wft kendi from'unu hedefliyor).
+    let mut wfd = golden();
+    wfd.start[0].wft = Wft::Node { node: "type_branch__branchClerk".into() };
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let actor = clerk(Uuid::new_v4());
+
+    let new = engine
+        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&new.outcome, CommitOutcome::MoveTo { node } if node == "type_branch__branchClerk"),
+        "{:?}", new.outcome
+    );
+}
+
+#[tokio::test]
+async fn escalation_fires_normally_at_start_node() {
+    // start node'a mid-flow'da (wft ile) girilen bir WFE, orada normal node gibi
+    // escalation taşıyabilir ve SLA aşımında normal şekilde ateşlenir.
+    let mut wfd = golden();
+    wfd.nodes
+        .get_mut("type_branch__branchClerk")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P1D".into(),
+            wfes_effects: None,
+            wft: Some(Wft::Node { node: "self__creditAnalyst".into() }),
+            terminate: None,
+        });
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfes = wfes_at("type_branch__branchClerk", None, start_input());
+    let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
+
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, entered_at + Duration::hours(12)).unwrap(),
+        None
+    );
+    let now = entered_at + Duration::days(1) + Duration::seconds(1);
+    assert_eq!(engine.due_escalation(&wfd, &wfes, now).unwrap(), Some(0));
+
+    let commit = engine.fire_escalation(&wfd, &wfes, 0, now).await.unwrap();
+    assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst"));
+}
+
 // ================================================================ SLA-3 deadline (2026-07-16)
 
 #[tokio::test]
@@ -911,4 +970,39 @@ async fn terminated_wfe_is_treated_like_terminal() {
 
     // wire format kontrolü: serde "terminated" olarak yazar
     assert_eq!(serde_json::to_value(&wfes.status).unwrap(), json!("terminated"));
+}
+
+/// Regresyon: deadline geçmiş ama status hâlâ `Active` (sweeper 60s tick'e kadar
+/// henüz `terminated`'a taşımadı) — claim/apply bu ARA PENCEREDE de reddedilmeli.
+/// Bug: "süresi geçmiş iş claim edilip aksiyon alınabiliyordu, durum terminated
+/// olarak bitiyordu" — kök neden, expiry'nin yalnızca 60s sweeper tarafından
+/// materialize edilmesi, claim/apply yolunun request-time deadline kontrolü
+/// yapmamasıydı (2026-07-16 fix).
+#[tokio::test]
+async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let m = manager(Uuid::new_v4());
+
+    // unclaimed, status hâlâ Active, deadline geçmiş → can_claim Expired döner (Ok DEĞİL)
+    let mut unclaimed = wfes_at("self__branchManager", None, start_input());
+    unclaimed.deadline = Some(unclaimed.created_at - Duration::hours(1));
+    assert_eq!(unclaimed.status, WfeStatus::Active);
+    assert_eq!(
+        engine.can_claim(&golden(), &unclaimed, &m).await.unwrap(),
+        ClaimCheck::Expired,
+        "deadline geçmiş ama status hâlâ active olan WFE claim edilebilir görünmemeli"
+    );
+
+    // zaten claim edilmiş, status hâlâ Active, deadline geçmiş → apply reddedilir
+    let mut claimed = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    claimed.deadline = Some(claimed.created_at - Duration::hours(1));
+    assert_eq!(claimed.status, WfeStatus::Active);
+    let err = engine
+        .apply(&golden(), &claimed, &m, "manager_decide", &json!({"manager_decision": "approve"}))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::WfeExpired), "{err}");
+    assert!(engine.possible_actions(&golden(), &claimed, &m).await.unwrap().is_empty());
 }

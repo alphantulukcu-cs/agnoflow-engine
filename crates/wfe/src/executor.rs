@@ -181,6 +181,7 @@ impl WfeExecutor {
             ClaimCheck::Ok => (true, None),
             ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
             ClaimCheck::Terminal => (false, Some("terminal".into())),
+            ClaimCheck::Expired => (false, Some("expired".into())),
             ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
         })
     }

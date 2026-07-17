@@ -21,6 +21,7 @@ impl From<EngineError> for AppError {
             EngineError::PermissionDenied(_) => StatusCode::FORBIDDEN,
             EngineError::TransitionNotFound(_) => StatusCode::BAD_REQUEST,
             EngineError::WfeTerminal => StatusCode::CONFLICT,
+            EngineError::WfeExpired => StatusCode::CONFLICT,
             EngineError::StartNotEligible => StatusCode::FORBIDDEN,
             EngineError::NotClaimed => StatusCode::FORBIDDEN,
             EngineError::NotOwner => StatusCode::FORBIDDEN,

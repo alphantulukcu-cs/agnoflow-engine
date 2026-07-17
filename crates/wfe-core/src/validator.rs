@@ -269,7 +269,9 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
     out
 }
 
-// ---- V1–V5: simetrik start kuralları (spec runtime-semantics, M16) ----
+// ---- V1, V4, V5: start kuralları (spec runtime-semantics, M16). V2/V3 kaldırıldı
+// (2026-07-16): start node yeniden girilebilir; mid-flow'da normal node gibi
+// davranır, wft hedefi ve escalation geçerlidir. ----
 
 fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
     // V5: en az 1 start
@@ -280,29 +282,6 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
             "en az bir start kuralı gerekli".into(),
         );
     }
-    // V2 için: tüm wft NODE hedeflerini topla (transition + start + escalation)
-    fn add_node_targets<'a>(wft: &'a Wft, set: &mut HashSet<&'a str>) {
-        for (kind, tgt) in wft_targets(wft) {
-            if let TargetKind::Node = kind {
-                set.insert(tgt);
-            }
-        }
-    }
-    let mut wft_node_targets: HashSet<&str> = HashSet::new();
-    for t in &wfd.transitions {
-        add_node_targets(&t.wft, &mut wft_node_targets);
-    }
-    for s in &wfd.start {
-        add_node_targets(&s.wft, &mut wft_node_targets);
-    }
-    for node in wfd.nodes.values() {
-        for esc in &node.escalation {
-            if let Some(wft) = &esc.wft {
-                add_node_targets(wft, &mut wft_node_targets);
-            }
-        }
-    }
-
     for s in &wfd.start {
         let path = format!("start[{}]", s.id);
         // V4 (M16): start.action gerçek bir action adıdır — actions{} içinde tanımlı
@@ -315,29 +294,11 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
             );
         }
         // V1: from var olan bir node'a işaret etmeli
-        match wfd.nodes.get(&s.from) {
-            None => report.error(
+        if wfd.nodes.get(&s.from).is_none() {
+            report.error(
                 "cross_ref",
                 format!("{path}.from"),
                 format!("start.from bilinmeyen node '{}'", s.from),
-            ),
-            Some(node) => {
-                // V3: start node escalation taşıyamaz (giriş-only)
-                if !node.escalation.is_empty() {
-                    report.error(
-                        "start_escalation",
-                        format!("nodes[{}].escalation", s.from),
-                        format!("start node '{}' escalation taşıyamaz (giriş-only)", s.from),
-                    );
-                }
-            }
-        }
-        // V2: start.from node HİÇBİR wft.node hedefi olamaz (yalnızca giriş)
-        if wft_node_targets.contains(s.from.as_str()) {
-            report.error(
-                "start_target",
-                format!("{path}.from"),
-                format!("start node '{}' bir wft hedefi olamaz (yalnızca giriş)", s.from),
             );
         }
     }

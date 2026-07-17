@@ -18,8 +18,21 @@ pub struct WfeRow {
     pub deadline: Option<DateTime<Utc>>,
     /// SLA-1: en son claim anı; claimed_by temizlenince NULL'lanır (node değişimi dahil).
     pub claimed_at: Option<DateTime<Utc>>,
+    /// WOR-31: fork'ta persist edilen AND-join hedefi ({node}/{terminal} untagged
+    /// JSON); NOT NULL = paralel mod (bu durumda current_node NULL'dır).
+    pub join_target: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// WOR-31: paralel mod kol satırı (`wf.wfe_branch`).
+#[derive(Debug, FromRow)]
+pub struct BranchRow {
+    pub branch_node: String,
+    pub status: String,
+    pub claimed_by: Option<serde_json::Value>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub entered_at: DateTime<Utc>,
 }
 
 #[derive(Debug, FromRow)]

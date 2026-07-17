@@ -6,6 +6,11 @@ pub enum EngineError {
     PermissionDenied(String),
     #[error("transition not found for action '{0}' in current state")]
     TransitionNotFound(String),
+    #[error("ambiguous action '{action}' — matches multiple active parallel branches, specify node (candidates: {candidates:?})")]
+    AmbiguousAction {
+        action: String,
+        candidates: Vec<String>,
+    },
     #[error("wfe is terminal — no further actions accepted")]
     WfeTerminal,
     #[error("wfe deadline (SLA-3) has passed — no further actions accepted pending SLA sweep")]
@@ -32,6 +37,8 @@ pub enum EngineError {
     WfdPort(String),
     #[error("wfe port error: {0}")]
     WfePort(String),
+    #[error("optimistic concurrency conflict: state changed under commit, retry required")]
+    Conflict,
     #[error("invalid wfd: {0}")]
     InvalidWfd(String),
     #[error("unsupported wfd_version: {0} (desteklenen: 2.2)")]

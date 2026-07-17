@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
-use wf_wfe::{sim::SimState, LiveAutoexecRunner, OrgAdapter};
+use wf_wfe::{executor::PossibleAction, sim::SimState, LiveAutoexecRunner, OrgAdapter};
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::pipeline::Engine;
@@ -57,7 +57,7 @@ struct SimStartBody {
 #[derive(serde::Serialize)]
 struct SimStartResponse {
     sim_state: SimState,
-    possible_actions: Vec<String>,
+    possible_actions: Vec<PossibleAction>,
 }
 
 async fn sim_start(
@@ -91,8 +91,7 @@ async fn sim_start(
     let sim_state = SimState::from_new_wfe(&new);
 
     let wfes = sim_state.to_wfes(Some(body.actor.user_id));
-    let possible_actions = engine
-        .possible_actions(&wfd, &wfes, &body.actor)
+    let possible_actions = wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
         .await
         .map_err(AppError::from)?;
 
@@ -112,6 +111,9 @@ struct SimApplyBody {
     action: String,
     #[serde(default)]
     input: Value,
+    /// WOR-31 T4: paralel modda kol seçimi (bkz. `routes/wfe.rs::ApplyBody.node`).
+    #[serde(default)]
+    node: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -119,7 +121,7 @@ struct SimApplyResponse {
     sim_state: SimState,
     terminal: bool,
     end_response: Option<Value>,
-    possible_actions: Vec<String>,
+    possible_actions: Vec<PossibleAction>,
 }
 
 async fn sim_apply(
@@ -139,7 +141,14 @@ async fn sim_apply(
     let wfes = sim_state.to_wfes(Some(body.actor.user_id));
 
     let commit = engine
-        .apply(&wfd, &wfes, &body.actor, &body.action, &body.input)
+        .apply(
+            &wfd,
+            &wfes,
+            &body.actor,
+            &body.action,
+            &body.input,
+            body.node.as_deref(),
+        )
         .await
         .map_err(AppError::from)?;
     sim_state.apply_commit(&commit);
@@ -152,8 +161,7 @@ async fn sim_apply(
         vec![]
     } else {
         let wfes = sim_state.to_wfes(Some(body.actor.user_id));
-        engine
-            .possible_actions(&wfd, &wfes, &body.actor)
+        wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
             .await
             .map_err(AppError::from)?
     };
@@ -178,7 +186,7 @@ struct SimPossibleActionsBody {
 async fn sim_possible_actions(
     State(s): State<AppState>,
     Json(body): Json<SimPossibleActionsBody>,
-) -> Result<Json<Vec<String>>, AppError> {
+) -> Result<Json<Vec<PossibleAction>>, AppError> {
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
@@ -188,8 +196,7 @@ async fn sim_possible_actions(
     };
 
     let wfes = body.sim_state.to_wfes(Some(body.actor.user_id));
-    engine
-        .possible_actions(&wfd, &wfes, &body.actor)
+    wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
         .await
         .map(Json)
         .map_err(AppError::from)

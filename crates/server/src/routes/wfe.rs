@@ -95,6 +95,10 @@ struct ApplyBody {
     action: String,
     #[serde(default)]
     input: Value,
+    /// WOR-31 T4: paralel modda kol seçimi — action ≥2 aktif kolun
+    /// transition'ıyla eşleşiyorsa zorunlu (aksi halde `AmbiguousAction`/409).
+    #[serde(default)]
+    node: Option<String>,
 }
 
 async fn apply_action(
@@ -105,20 +109,40 @@ async fn apply_action(
 ) -> Result<Json<wf_wfe::executor::WfeApplyResult>, AppError> {
     let actor = extract_actor(&headers)?;
     s.executor
-        .apply(wfe_id, &actor, &body.action, &body.input)
+        .apply(wfe_id, &actor, &body.action, &body.input, body.node.as_deref())
         .await
         .map(Json)
         .map_err(AppError::from)
+}
+
+/// WOR-31 T4: gövde opsiyonel — hiç body/`{}` gönderilirse `node = None` (eski
+/// davranış), `{"node": "..."}` verilirse paralel kol ipucu. Body zorunlu bir
+/// `Json<T>` extractor'ı OLMADIĞI için (geriye uyumluluk: eski istemciler hiç
+/// gövde göndermez) ham `Bytes` üzerinden opsiyonel ayrıştırılır.
+#[derive(Deserialize, Default)]
+struct ClaimBody {
+    #[serde(default)]
+    node: Option<String>,
+}
+
+fn parse_claim_body(bytes: &axum::body::Bytes) -> Result<ClaimBody, AppError> {
+    if bytes.is_empty() {
+        return Ok(ClaimBody::default());
+    }
+    serde_json::from_slice(bytes)
+        .map_err(|e| AppError(format!("invalid claim body: {e}"), StatusCode::BAD_REQUEST))
 }
 
 async fn claim_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(wfe_id): Path<Uuid>,
+    body: axum::body::Bytes,
 ) -> Result<Json<wf_wfe::executor::ClaimOutcome>, AppError> {
     let actor = extract_actor(&headers)?;
+    let claim_body = parse_claim_body(&body)?;
     s.executor
-        .claim(wfe_id, &actor)
+        .claim(wfe_id, &actor, claim_body.node.as_deref())
         .await
         .map(Json)
         .map_err(AppError::from)
@@ -141,7 +165,7 @@ async fn possible_actions(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(wfe_id): Path<Uuid>,
-) -> Result<Json<Vec<String>>, AppError> {
+) -> Result<Json<Vec<wf_wfe::executor::PossibleAction>>, AppError> {
     let actor = extract_actor(&headers)?;
     s.executor
         .possible_actions(wfe_id, &actor)

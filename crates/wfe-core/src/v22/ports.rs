@@ -6,12 +6,39 @@ use crate::error::EngineError;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::dynctx::DynCtx;
 use crate::types::wfah::{Wfah, WfahEntry};
-use crate::types::wfd_v22::{AutoexecDef, Wfd};
+use crate::types::wfd_v22::{AutoexecDef, Wfd, WftTarget};
 use crate::types::wfe::WfeStatus;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+
+/// WOR-31: paralel mod kol durumu. `Serialize`/`Deserialize` — T4: API görünümü
+/// (`GET /wfe/:id`, sim step response) ve `SimState` bu tipi doğrudan taşır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchStatus {
+    Active,
+    Arrived,
+    Cancelled,
+}
+
+/// WOR-31: paralel modda tek kolun runtime durumu — claim/entered alanları
+/// KOL-bazlıdır (escalation ve claim_timeout paralel modda kol üzerinden işler).
+/// `Serialize`/`Deserialize` (T4): API/sim görünümünde JSON alan adı `node`'dur
+/// (Rust tarafında `branch_node` kalır — motor içi isimlendirme değişmedi).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchState {
+    /// Kol token'ının şu an beklediği node slug'ı (fork'ta kolun giriş node'u).
+    #[serde(rename = "node")]
+    pub branch_node: String,
+    pub status: BranchStatus,
+    pub claimed_by: Option<Uuid>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    /// Kolun bu node'a giriş anı — kol escalation dwell'i buradan ölçülür.
+    pub entered_at: DateTime<Utc>,
+}
 
 /// v2.2 WFES — current_node + assignment (WOR-24).
 #[derive(Debug, Clone)]
@@ -34,6 +61,11 @@ pub struct Wfes {
     pub claimed_at: Option<DateTime<Utc>>,
     /// Priority hesabı (elapsed/window) için pencere başlangıcı.
     pub created_at: DateTime<Utc>,
+    /// WOR-31: paralel mod kol durumları — paralel modda değilken boş.
+    pub branches: Vec<BranchState>,
+    /// WOR-31: fork'ta persist edilen AND-join hedefi; `Some(..)` = paralel mod
+    /// (bu durumda `current_node` NULL'dır).
+    pub join_target: Option<WftTarget>,
 }
 
 /// Transition sonucunun gideceği yer.
@@ -47,6 +79,25 @@ pub enum CommitOutcome {
     /// SLA ihlali (deadline aşımı / dwell terminate) — WFE `terminated` durumuna
     /// alınır (2026-07-16). Hata değil, başarılı `Terminal` da değil.
     Terminated { end_response: Value },
+    /// WOR-31 fork: her kol için branch satırı yaratılır, `current_node = NULL`,
+    /// `join_target` persist edilir (paralel moda giriş).
+    ForkTo {
+        branches: Vec<String>,
+        join: WftTarget,
+    },
+    /// WOR-31: tek kolun token hareketi — kol claim'i + entered_at sıfırlanır,
+    /// paralel mod sürer.
+    BranchMoveTo { from_node: String, node: String },
+    /// WOR-31: kol join hedefine vardı, engine'in görüşüne göre ≥1 başka aktif
+    /// kol kaldı — kol `arrived` işaretlenir (join node'u İŞGAL ETMEZ).
+    BranchArrived { from_node: String },
+    /// WOR-31: varan kol engine'in görüşüne göre SONUNCU — paralel mod biter;
+    /// `next` join hedefi: `MoveTo{join}` veya join terminal ise `Terminal{..}`.
+    /// Yarış adapter doğrulaması + executor retry ile çözülür (T3); engine saftır.
+    JoinComplete {
+        from_node: String,
+        next: Box<CommitOutcome>,
+    },
 }
 
 /// Tek transaction'da persist edilecek transition sonucu (M8).
@@ -93,16 +144,26 @@ pub trait WfeStore: Send + Sync {
     /// dynctx snapshot + WFAH append + node/terminal + assignment reset.
     async fn commit(&self, commit: &TransitionCommit) -> Result<(), EngineError>;
     /// Atomik claim (CAS): yalnızca unassigned ise yazar; başarıyı döner.
-    async fn claim(&self, wfe_id: Uuid, orgtnt_id: Uuid, user_id: Uuid)
-        -> Result<bool, EngineError>;
+    /// `branch`: WOR-31 — paralel modda kol node'u verilir; CAS o kolun
+    /// `wf.wfe_branch` satırında yapılır (status='active' AND claimed_by IS NULL);
+    /// `None` paralel-olmayan wfe-seviyesi claim (mevcut davranış).
+    async fn claim(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        user_id: Uuid,
+        branch: Option<&str>,
+    ) -> Result<bool, EngineError>;
     /// SLA-1 claim timeout (wft'siz kol): node DEĞİŞMEDEN claimed_by/claimed_at
     /// temizlenir + WFAH marker eklenir — `commit()`'ten ayrı çünkü node/status
     /// değişmiyor (bkz. `Engine::fire_claim_timeout` / `ClaimTimeoutOutcome::Release`).
+    /// `branch`: WOR-31 — paralel modda o kolun claim'i sıfırlanır.
     async fn release_claim(
         &self,
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         wfah_entry: &WfahEntry,
+        branch: Option<&str>,
     ) -> Result<(), EngineError>;
 }
 

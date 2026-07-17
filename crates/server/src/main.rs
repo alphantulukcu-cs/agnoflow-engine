@@ -48,29 +48,14 @@ async fn main() {
         runner,
     ));
 
-    // M5/M6 — escalation & root-timeout süpürücüsü (WOR-46/47)
-    let sweeper_executor = executor.clone();
-    let sweeper_pool = pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            let ids = match wf_wfe::repo::wfe::list_active_ids(&sweeper_pool).await {
-                Ok(ids) => ids,
-                Err(e) => {
-                    tracing::warn!("timer sweep: aktif WFE listesi alınamadı: {e}");
-                    continue;
-                }
-            };
-            for wfe_id in ids {
-                match sweeper_executor.tick_timers(wfe_id).await {
-                    Ok(true) => tracing::info!("timer fired for wfe {wfe_id}"),
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!("timer sweep {wfe_id}: {e}"),
-                }
-            }
-        }
-    });
+    // M5/M6 — escalation & root-timeout süpürücüsü (WOR-46/47).
+    // Event-driven (2026-07-17): en yakın SLA vadesine kadar uyur; executor
+    // create/commit/claim'de sinyal gönderir. 60 sn'lik FALLBACK_SWEEP kaçan
+    // sinyallere karşı güvenlik ağı olarak timer.rs içinde korunur.
+    tokio::spawn(wf_wfe::timer::run_timer_service(
+        executor.clone(),
+        Arc::new(pool.clone()),
+    ));
 
     let state = state::AppState {
         pool: pool.clone(),

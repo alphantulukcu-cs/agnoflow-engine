@@ -1,0 +1,293 @@
+{
+  "wfd_version": "2.2",
+  "expression_language": "zen@1",
+  "id": "paralel-onay-v1",
+  "name": "Paralel Onay Akışı",
+  "version": "1.0.0",
+  "description": "WOR-31 örnek fixture'ı — satın alma talebi finans/hukuk/ik departmanlarına PARALEL onaya açılır (fork), üçü de onaylayınca sonuç kaydedilir (AND-join); herhangi biri reddederse akış hemen kırmızı terminalde biter.",
+  "timeout": "P14D",
+  "context": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "request": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "number"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "amount"
+        ]
+      },
+      "submitted_by": {
+        "type": "object",
+        "x-wf-readonly": true
+      },
+      "finans_onay_zamani": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "hukuk_onay_zamani": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "ik_onay_zamani": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "sonuc_zamani": {
+        "type": "string",
+        "x-wf-readonly": true
+      }
+    },
+    "required": [
+      "request"
+    ]
+  },
+  "nodes": {
+    "self__requester": {
+      "label": "Talep Eden",
+      "description": "Satın alma talebini oluşturan kişi — akışı başlatır.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "requester"
+        ]
+      }
+    },
+    "self__coordinator": {
+      "label": "Koordinatör Havuzu",
+      "description": "Talebi inceleyip üç departmana paralel onaya açan koordinatör.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "coordinator"
+        ]
+      }
+    },
+    "self__financeApprover": {
+      "label": "Finans Onayı",
+      "description": "Fork kolu — finans departmanı onayı.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "financeApprover"
+        ]
+      }
+    },
+    "self__legalApprover": {
+      "label": "Hukuk Onayı",
+      "description": "Fork kolu — hukuk departmanı onayı.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "legalApprover"
+        ]
+      }
+    },
+    "self__hrApprover": {
+      "label": "İK Onayı",
+      "description": "Fork kolu — insan kaynakları departmanı onayı.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "hrApprover"
+        ]
+      }
+    },
+    "self__resultCoordinator": {
+      "label": "Sonuç Koordinatörü Havuzu",
+      "description": "Join hedefi — üç departman da onayladıktan sonra (AND-join) sonucu kaydeder.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "resultCoordinator"
+        ]
+      }
+    }
+  },
+  "start": [
+    {
+      "id": "start__self__requester",
+      "from": "self__requester",
+      "action": "submit_request",
+      "wfes_effects": {
+        "set": {
+          "submitted_by": "$actor"
+        }
+      },
+      "wft": {
+        "node": "self__coordinator"
+      }
+    }
+  ],
+  "actions": {
+    "submit_request": {
+      "label": "Talep Oluştur",
+      "description": "Talep edenin satın alma talebini oluşturması — akışı başlatan aksiyon.",
+      "input": {
+        "required": [
+          "request.title",
+          "request.amount"
+        ],
+        "optional": [
+          "request.description"
+        ]
+      }
+    },
+    "start_review": {
+      "label": "İncelemeyi Başlat",
+      "description": "Koordinatörün talebi finans/hukuk/ik departmanlarına PARALEL onaya açması (fork).",
+      "input": {
+        "required": [],
+        "optional": []
+      }
+    },
+    "approve": {
+      "label": "Onayla",
+      "description": "İlgili departmanın kendi koluna düşen talebi onaylaması.",
+      "input": {
+        "required": [],
+        "optional": []
+      }
+    },
+    "reject": {
+      "label": "Reddet",
+      "description": "İlgili departmanın kendi koluna düşen talebi reddetmesi — tüm akış hemen sona erer.",
+      "input": {
+        "required": [],
+        "optional": []
+      }
+    },
+    "finalize": {
+      "label": "Sonucu Kaydet",
+      "description": "Üç departman da onayladıktan sonra (join) sonucun kaydedilmesi.",
+      "input": {
+        "required": [],
+        "optional": []
+      }
+    }
+  },
+  "transitions": [
+    {
+      "id": "t_fork",
+      "from": "self__coordinator",
+      "action": "start_review",
+      "wft": {
+        "parallel": {
+          "branches": [
+            "self__financeApprover",
+            "self__legalApprover",
+            "self__hrApprover"
+          ],
+          "join": {
+            "node": "self__resultCoordinator"
+          }
+        }
+      }
+    },
+    {
+      "id": "t_finance_approve",
+      "from": "self__financeApprover",
+      "action": "approve",
+      "wfes_effects": {
+        "set": {
+          "finans_onay_zamani": "$timestamp"
+        }
+      },
+      "wft": {
+        "node": "self__resultCoordinator"
+      }
+    },
+    {
+      "id": "t_finance_reject",
+      "from": "self__financeApprover",
+      "action": "reject",
+      "wft": {
+        "terminal": "terminal_rejected"
+      }
+    },
+    {
+      "id": "t_legal_approve",
+      "from": "self__legalApprover",
+      "action": "approve",
+      "wfes_effects": {
+        "set": {
+          "hukuk_onay_zamani": "$timestamp"
+        }
+      },
+      "wft": {
+        "node": "self__resultCoordinator"
+      }
+    },
+    {
+      "id": "t_legal_reject",
+      "from": "self__legalApprover",
+      "action": "reject",
+      "wft": {
+        "terminal": "terminal_rejected"
+      }
+    },
+    {
+      "id": "t_hr_approve",
+      "from": "self__hrApprover",
+      "action": "approve",
+      "wfes_effects": {
+        "set": {
+          "ik_onay_zamani": "$timestamp"
+        }
+      },
+      "wft": {
+        "node": "self__resultCoordinator"
+      }
+    },
+    {
+      "id": "t_hr_reject",
+      "from": "self__hrApprover",
+      "action": "reject",
+      "wft": {
+        "terminal": "terminal_rejected"
+      }
+    },
+    {
+      "id": "t_finalize",
+      "from": "self__resultCoordinator",
+      "action": "finalize",
+      "wfes_effects": {
+        "set": {
+          "sonuc_zamani": "$timestamp"
+        }
+      },
+      "wft": {
+        "terminal": "terminal_approved"
+      }
+    }
+  ],
+  "terminals": [
+    {
+      "id": "terminal_approved",
+      "wfe_end_response": {
+        "status": "approved",
+        "message": "Talep üç departmandan da onay aldı.",
+        "request_title": "$ctx.request.title"
+      }
+    },
+    {
+      "id": "terminal_rejected",
+      "wfe_end_response": {
+        "status": "rejected",
+        "message": "Talep bir departman tarafından reddedildi.",
+        "request_title": "$ctx.request.title"
+      }
+    }
+  ]
+}

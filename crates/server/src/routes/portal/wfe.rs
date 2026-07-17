@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
-use wfe_core::v22::ports::WfdStore;
+use wfe_core::types::wfd_v22::WftTarget;
+use wfe_core::v22::ports::{BranchState, WfdStore};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -42,6 +43,11 @@ struct AvailableAction {
     name: String,
     label: Option<String>,
     input: ActionInputSchema,
+    /// WOR-31 T4: paralel modda bu aksiyonun ait olduğu kol node'u — action
+    /// gönderiminde `node` olarak geri geçilmelidir (aksiyon ≥2 kolla eşleşirse
+    /// disambiguasyon için zorunlu). Paralel değilse `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,6 +59,13 @@ struct WfeDetailResponse {
     dynctx: Value,
     claimed_by: Option<Uuid>,
     available_actions: Vec<AvailableAction>,
+    /// WOR-31 T4: paralel mod kol durumları — `/wfe/:id` (WfeView) ile aynı
+    /// şekil: `[{node, status, claimed_by, claimed_at, entered_at}]`; paralel
+    /// değilken boş dizi.
+    branches: Vec<BranchState>,
+    /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
+    /// (bu durumda `current_node` `None`'dur).
+    join_target: Option<WftTarget>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -87,7 +100,7 @@ async fn get_wfe_detail(
         .query(wfe_id, &portal_actor)
         .await
         .map_err(AppError::from)?;
-    let action_names = s
+    let possible = s
         .executor
         .possible_actions(wfe_id, &portal_actor)
         .await
@@ -105,16 +118,20 @@ async fn get_wfe_detail(
         .and_then(|n| wfd.nodes.get(n))
         .and_then(|n| n.label.clone());
 
-    let available_actions: Vec<AvailableAction> = action_names
+    // WOR-31 T4: paralel modda aynı aksiyon adı birden fazla kolda tekrar edebilir
+    // (ör. üç kolun da `approve`'u) — her tekrar kendi `node`'uyla ayrı satırdır,
+    // istemci hangi kolu onayladığını `node`'u geri göndererek belirtir.
+    let available_actions: Vec<AvailableAction> = possible
         .iter()
-        .filter_map(|name| {
-            wfd.actions.get(name).map(|def| AvailableAction {
-                name: name.clone(),
+        .filter_map(|pa| {
+            wfd.actions.get(&pa.action).map(|def| AvailableAction {
+                name: pa.action.clone(),
                 label: def.label.clone(),
                 input: ActionInputSchema {
                     required: def.input.required.clone(),
                     optional: def.input.optional.clone(),
                 },
+                node: pa.node.clone(),
             })
         })
         .collect();
@@ -127,6 +144,8 @@ async fn get_wfe_detail(
         dynctx: view.dynctx,
         claimed_by: view.claimed_by,
         available_actions,
+        branches: view.branches,
+        join_target: view.join_target,
     }))
 }
 
@@ -135,6 +154,9 @@ struct ActionRequest {
     action: String,
     #[serde(default)]
     input: Value,
+    /// WOR-31 T4: paralel modda kol seçimi (bkz. `AvailableAction.node`).
+    #[serde(default)]
+    node: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -155,7 +177,13 @@ async fn submit_action(
     // atomik commit içinde — burada ek SQL yok (WOR-43).
     let result = s
         .executor
-        .apply(wfe_id, &to_actor(&actor), &body.action, &body.input)
+        .apply(
+            wfe_id,
+            &to_actor(&actor),
+            &body.action,
+            &body.input,
+            body.node.as_deref(),
+        )
         .await
         .map_err(AppError::from)?;
 

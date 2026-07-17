@@ -232,6 +232,16 @@ pub enum Wft {
         #[serde(default)]
         default: Option<WftTarget>,
     },
+    // WOR-31: fork/join. branches >= 2, distinct (custom validator); join = AND-join
+    // hedefi (son aktif kol vardiginda). Start kuralinda yasak, nested fork yasak.
+    Parallel { parallel: ParallelSpec },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelSpec {
+    pub branches: Vec<String>,
+    pub join: WftTarget,
 }
 
 #[derive(Debug, Deserialize)]

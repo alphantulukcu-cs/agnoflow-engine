@@ -16,7 +16,7 @@ use crate::types::actor::Actor;
 use crate::types::wfd_v22::{CandidateActor, COrgu, Wfd};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize, MatchEnv};
-use crate::v22::ports::Wfes;
+use crate::v22::ports::{BranchStatus, Wfes};
 use crate::v22::resolver::resolve_c_orgu;
 use serde::Deserialize;
 use serde_json::Value;
@@ -111,9 +111,11 @@ pub async fn filter_dynctx(
 
 /// §4/L — WFE-seviyesi VIEW kapısı (spec Terminology VISIBILITY/LISTABLE):
 /// bir WFE şu durumlardan biri doğruysa görüntülenebilir (OR):
-///   (a) viewer sahibi mi (`assigned_to == viewer.user_id`)
+///   (a) viewer sahibi mi (`assigned_to == viewer.user_id`; paralel modda
+///       aktif bir kolun `claimed_by`'ı da sahiplik sayılır — WOR-31)
 ///   (b) viewer WFAH'ta eylemi bulunan gerçek bir katılımcı mı (system hariç)
-///   (c) viewer aktif node'un c_a'sına (§3) authorize mi
+///   (c) viewer aktif node'un c_a'sına (§3) authorize mi (paralel modda
+///       aktif kol node'larından HERHANGİ birinin c_a'sı — WOR-31)
 ///   (d) viewer `wfd.listable[]` kurallarından birine authorize VE kuralın
 ///       `when` guard'ı (varsa) staged ctx üzerinde true mü
 /// `visible`/`filter_dynctx`'ten AYRIDIR: onlar field-level x-visibility'dir,
@@ -124,8 +126,16 @@ pub async fn can_view(
     viewer: &Actor,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
-    // (a) sahiplik
+    // (a) sahiplik — paralel modda assignment KOL-bazlıdır (wfe-seviyesi
+    // assigned_to fork'ta temizlenir): aktif bir kolu claim eden de sahiptir.
     if wfes.assigned_to == Some(viewer.user_id) {
+        return Ok(true);
+    }
+    if wfes
+        .branches
+        .iter()
+        .any(|b| b.status == BranchStatus::Active && b.claimed_by == Some(viewer.user_id))
+    {
         return Ok(true);
     }
 
@@ -145,8 +155,19 @@ pub async fn can_view(
 
     let ctx = wfes.dynctx.as_value();
 
-    // (c) aktif node'un c_a'sı (§3)
-    if let Some(node_key) = wfes.current_node.as_deref() {
+    // (c) aktif node'un c_a'sı (§3) — paralel modda (WOR-31) "aktif node"
+    // kümesi AKTİF kolların node'larıdır (current_node NULL'dır); herhangi bir
+    // aktif kolun c_a'sına authorize olan viewer WFE'yi görüntüleyebilir.
+    let active_nodes: Vec<&str> = if wfes.join_target.is_some() {
+        wfes.branches
+            .iter()
+            .filter(|b| b.status == BranchStatus::Active)
+            .map(|b| b.branch_node.as_str())
+            .collect()
+    } else {
+        wfes.current_node.as_deref().into_iter().collect()
+    };
+    for node_key in active_nodes {
         if let Some(node) = wfd.nodes.get(node_key) {
             let env = MatchEnv {
                 ctx,

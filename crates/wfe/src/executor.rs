@@ -7,11 +7,13 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
-use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::types::wfd_v22::{Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::MatchEnv;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
-use wfe_core::v22::ports::{AutoexecRunner, CommitOutcome, WfdStore, WfeStore};
+use wfe_core::v22::ports::{
+    AutoexecRunner, BranchState, BranchStatus, CommitOutcome, WfdStore, WfeStore, Wfes,
+};
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
 use wfe_core::{EngineError, OrgPort};
 
@@ -30,11 +32,95 @@ pub fn compute_claim_deadline(
     Some(claimed_at + after)
 }
 
+/// İdempotent re-claim kontrolü: verilen aktör zaten sahip mi? Paralel modda
+/// (`node` verilir) o kolun `claimed_by`'ı, aksi halde wfe-seviyesi `assigned_to`.
+fn branch_owner_is(wfes: &Wfes, node: Option<&str>, user_id: Uuid) -> bool {
+    match node {
+        Some(n) => wfes
+            .branches
+            .iter()
+            .find(|b| b.status == BranchStatus::Active && b.branch_node == n)
+            .and_then(|b| b.claimed_by)
+            == Some(user_id),
+        None => wfes.assigned_to == Some(user_id),
+    }
+}
+
+/// WOR-31: WFE'nin şu an aktif kollarının node adları (paralel timer taraması
+/// bunlar üzerinden döner). Paralel modda değilse boş.
+fn active_branch_nodes(wfes: &Wfes) -> Vec<String> {
+    wfes.branches
+        .iter()
+        .filter(|b| b.status == BranchStatus::Active)
+        .map(|b| b.branch_node.clone())
+        .collect()
+}
+
+/// T4 (API/sim): mümkün aksiyon — paralel modda hangi kola ait olduğunu belirten
+/// opsiyonel `node` etiketiyle. Paralel-olmayan modda `node` her zaman `None`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PossibleAction {
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+}
+
+/// T4: `Engine::possible_actions`'ın paralel-farkında sarmalayıcısı — paralel
+/// modda TÜM aktif kollar için ayrı çağrı yapılıp birleşim (her öğe kendi kol
+/// node'uyla etiketli) döner; paralel değilse tek çağrı, `node: None`. Hem
+/// `WfeExecutor::possible_actions` hem de `routes/simulate.rs` (store'suz sim)
+/// bu ortak yardımcıyı kullanır.
+pub async fn possible_actions_for(
+    engine: &Engine<'_>,
+    wfd: &Wfd,
+    wfes: &Wfes,
+    actor: &Actor,
+) -> Result<Vec<PossibleAction>, EngineError> {
+    if wfes.join_target.is_some() {
+        let mut out = Vec::new();
+        for node in active_branch_nodes(wfes) {
+            let actions = engine.possible_actions(wfd, wfes, actor, Some(&node)).await?;
+            out.extend(actions.into_iter().map(|action| PossibleAction {
+                action,
+                node: Some(node.clone()),
+            }));
+        }
+        Ok(out)
+    } else {
+        let actions = engine.possible_actions(wfd, wfes, actor, None).await?;
+        Ok(actions
+            .into_iter()
+            .map(|action| PossibleAction { action, node: None })
+            .collect())
+    }
+}
+
+/// Commit outcome'unun API görünümü: (terminal, current_node, end_response).
+/// WOR-31 paralel outcome'ları: fork/kol hareketi/kol varışı aktif WFE'dir ve
+/// wfe-seviyesi current_node taşımaz (kol durumu T3/T4'te ayrıca sunulur);
+/// `JoinComplete` iç `next` outcome'una göre sınıflanır.
+fn outcome_view(outcome: &CommitOutcome) -> (bool, Option<String>, Option<Value>) {
+    match outcome {
+        CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
+        CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
+        CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
+        CommitOutcome::Terminated { end_response } => (true, None, Some(end_response.clone())),
+        CommitOutcome::ForkTo { .. }
+        | CommitOutcome::BranchMoveTo { .. }
+        | CommitOutcome::BranchArrived { .. } => (false, None, None),
+        CommitOutcome::JoinComplete { next, .. } => outcome_view(next),
+    }
+}
+
 pub struct WfeExecutor {
     pub org: Arc<dyn OrgPort>,
     pub wfd: Arc<dyn WfdStore>,
     pub wfe: Arc<dyn WfeStore>,
     pub runner: Arc<dyn AutoexecRunner>,
+    /// Event-driven SLA timer sinyali (bkz. `crate::timer`): create/commit/claim
+    /// sonrası dürtülür; timer servisi next-due'yu yeniden hesaplar. `notify_one`
+    /// permit biriktirdiği için sweep sırasında gelen sinyal KAYBOLMAZ.
+    timer_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -72,6 +158,12 @@ pub struct WfeView {
     pub claim_deadline: Option<DateTime<Utc>>,
     /// 1–10, deadline'dan otomatik hesaplanır (bkz. `priority::compute_priority`).
     pub priority: i32,
+    /// WOR-31 T4: paralel mod kol durumları — paralel modda değilken boş.
+    /// JSON alan adı `node` (bkz. `BranchState`).
+    pub branches: Vec<BranchState>,
+    /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
+    /// (bu durumda `current_node` `None`'dur).
+    pub join_target: Option<WftTarget>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -88,7 +180,13 @@ impl WfeExecutor {
         wfe: Arc<dyn WfeStore>,
         runner: Arc<dyn AutoexecRunner>,
     ) -> Self {
-        Self { org, wfd, wfe, runner }
+        Self {
+            org,
+            wfd,
+            wfe,
+            runner,
+            timer_notify: Arc::new(tokio::sync::Notify::new()),
+        }
     }
 
     fn engine(&self) -> Engine<'_> {
@@ -96,6 +194,17 @@ impl WfeExecutor {
             org: &*self.org,
             exec: &*self.runner,
         }
+    }
+
+    /// Timer servisinin dinlediği sinyal kanalı (bkz. `crate::timer::run_timer_service`).
+    pub fn timer_signal(&self) -> Arc<tokio::sync::Notify> {
+        self.timer_notify.clone()
+    }
+
+    /// SLA zamanlayıcılarını etkileyen her kalıcı mutasyondan sonra çağrılır —
+    /// timer servisi uyanıp en yakın vadeyi yeniden hesaplar.
+    fn nudge_timers(&self) {
+        self.timer_notify.notify_one();
     }
 
     /// `deadline`: SLA-3 — başlatan kullanıcının opsiyonel ISO 8601 duration'ı
@@ -122,13 +231,9 @@ impl WfeExecutor {
         new.wfd_version = version;
 
         self.wfe.create(&new).await?;
+        self.nudge_timers(); // deadline / node dwell / claim_timeout vadesi değişti
 
-        let (terminal, current_node, end_response) = match &new.outcome {
-            CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
-            CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
-            CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
-            CommitOutcome::Terminated { end_response } => (true, None, Some(end_response.clone())),
-        };
+        let (terminal, current_node, end_response) = outcome_view(&new.outcome);
         Ok(WfeStartResult {
             wfe_id,
             terminal,
@@ -138,46 +243,68 @@ impl WfeExecutor {
         })
     }
 
+    /// `node_hint`: WOR-31 — paralel modda kol seçimi (API body `node`; T4 bağlar).
     pub async fn apply(
         &self,
         wfe_id: Uuid,
         actor: &Actor,
         action: &str,
         input: &Value,
+        node_hint: Option<&str>,
     ) -> Result<WfeApplyResult, EngineError> {
-        let wfes = self.wfe.load(wfe_id).await?;
-        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        // WOR-31: paralel modda eşzamanlı kol varışları (BranchArrived/JoinComplete)
+        // adapter FOR UPDATE + kol CAS + aktif-kol sayımı ile serialize edilir;
+        // uyumsuzlukta `Conflict` döner. Engine SAFtır (yalnız kendi görüşünü emit
+        // eder), yarış burada reload + yeniden-koşma ile çözülür. En çok 3 deneme:
+        // her tur bir kolu kesin ilerletir, sonlu kol sayısı sonluluğu garanti eder.
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut last_err = None;
+        for _ in 0..MAX_ATTEMPTS {
+            let wfes = self.wfe.load(wfe_id).await?;
+            let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
 
-        let commit = self.engine().apply(&wfd, &wfes, actor, action, input).await?;
-        self.wfe.commit(&commit).await?;
-
-        let (terminal, current_node, end_response) = match &commit.outcome {
-            CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
-            CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
-            CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
-            CommitOutcome::Terminated { end_response } => (true, None, Some(end_response.clone())),
-        };
-        Ok(WfeApplyResult {
-            wfe_id,
-            terminal,
-            current_node,
-            end_response,
-            current_c_a: commit.resolved_c_a,
-        })
+            let commit = self
+                .engine()
+                .apply(&wfd, &wfes, actor, action, input, node_hint)
+                .await?;
+            match self.wfe.commit(&commit).await {
+                Ok(()) => {
+                    self.nudge_timers(); // node değişimi escalation dwell'ini ve claim sayacını sıfırlar
+                    let (terminal, current_node, end_response) = outcome_view(&commit.outcome);
+                    return Ok(WfeApplyResult {
+                        wfe_id,
+                        terminal,
+                        current_node,
+                        end_response,
+                        current_c_a: commit.resolved_c_a,
+                    });
+                }
+                Err(EngineError::Conflict) => {
+                    last_err = Some(EngineError::Conflict);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or(EngineError::Conflict))
     }
 
     /// Claim uygunluğu — matcher tabanlı (§7.1); c_u kuralları dahil doğru çalışır.
+    /// `node`: WOR-31 — paralel modda kol node'u; uygunluk O KOLUN c_a'sına ve
+    /// kol claim durumuna göre değerlendirilir. `None` paralel-olmayan davranış.
     pub async fn can_claim(
         &self,
         wfe_id: Uuid,
         actor: &Actor,
+        node: Option<&str>,
     ) -> Result<(bool, Option<String>), EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
-        if wfes.assigned_to == Some(actor.user_id) {
+        // İdempotent re-claim: zaten sahipse (kol veya wfe-seviyesi) başarı.
+        if branch_owner_is(&wfes, node, actor.user_id) {
             return Ok((true, None));
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        Ok(match self.engine().can_claim(&wfd, &wfes, actor).await? {
+        Ok(match self.engine().can_claim(&wfd, &wfes, actor, node).await? {
             ClaimCheck::Ok => (true, None),
             ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
             ClaimCheck::Terminal => (false, Some("terminal".into())),
@@ -187,19 +314,28 @@ impl WfeExecutor {
     }
 
     /// Atomik claim: uygunluk matcher ile doğrulanır, yazım CAS ile yapılır.
-    pub async fn claim(&self, wfe_id: Uuid, actor: &Actor) -> Result<ClaimOutcome, EngineError> {
-        let (eligible, reason) = self.can_claim(wfe_id, actor).await?;
+    /// `node`: WOR-31 — paralel modda kol node'u (CAS o kolda yapılır).
+    pub async fn claim(
+        &self,
+        wfe_id: Uuid,
+        actor: &Actor,
+        node: Option<&str>,
+    ) -> Result<ClaimOutcome, EngineError> {
+        let (eligible, reason) = self.can_claim(wfe_id, actor, node).await?;
         if !eligible {
             return Ok(ClaimOutcome { success: false, reason });
         }
         let wfes = self.wfe.load(wfe_id).await?;
-        if wfes.assigned_to == Some(actor.user_id) {
+        if branch_owner_is(&wfes, node, actor.user_id) {
             return Ok(ClaimOutcome { success: true, reason: None });
         }
         let won = self
             .wfe
-            .claim(wfe_id, wfes.orgtnt_id, actor.user_id)
+            .claim(wfe_id, wfes.orgtnt_id, actor.user_id, node)
             .await?;
+        if won {
+            self.nudge_timers(); // claim_timeout sayacı şimdi başladı (SLA-1)
+        }
         Ok(ClaimOutcome {
             success: won,
             reason: if won { None } else { Some("already_claimed".into()) },
@@ -242,20 +378,24 @@ impl WfeExecutor {
             claimed_at: wfes.claimed_at,
             claim_deadline,
             priority,
+            branches: wfes.branches,
+            join_target: wfes.join_target,
         })
     }
 
+    /// WOR-31 T4: paralel modda TÜM aktif kollar için birleşim döner, her öğe
+    /// kendi kol `node`'uyla etiketli (bkz. `possible_actions_for`).
     pub async fn possible_actions(
         &self,
         wfe_id: Uuid,
         actor: &Actor,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<Vec<PossibleAction>, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
         if wfes.status == WfeStatus::Terminal {
             return Ok(vec![]);
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        self.engine().possible_actions(&wfd, &wfes, actor).await
+        possible_actions_for(&self.engine(), &wfd, &wfes, actor).await
     }
 
     /// Tek WFE için zamanlayıcı kontrolü — sıra (2026-07-16 SLA sözleşmesi):
@@ -271,26 +411,92 @@ impl WfeExecutor {
         let now = chrono::Utc::now();
         let engine = self.engine();
 
+        // SLA-3 deadline wfe-seviyesidir (paralel modda da) — tüm kolları iptal eder.
         if engine.deadline_due(&wfes, now) {
             let commit = engine.fire_deadline_timeout(&wfes, now);
             self.wfe.commit(&commit).await?;
             return Ok(true);
         }
-        if engine.claim_timeout_due(&wfd, &wfes, now)? {
-            match engine.fire_claim_timeout(&wfd, &wfes, now).await? {
-                ClaimTimeoutOutcome::Move(commit) => self.wfe.commit(&commit).await?,
-                ClaimTimeoutOutcome::Release(entry) => {
-                    self.wfe.release_claim(wfe_id, wfes.orgtnt_id, &entry).await?
+        // WOR-31: paralel modda claim_timeout/escalation KOL-bazlıdır — aktif
+        // kollar üzerinden iterasyon; ilk vadesi gelen ateşlenir. Paralel modda
+        // değilse tek wfe-seviyesi kol (branch: None) mevcut davranışla taranır.
+        let branches: Vec<Option<String>> = if wfes.join_target.is_some() {
+            active_branch_nodes(&wfes).into_iter().map(Some).collect()
+        } else {
+            vec![None]
+        };
+        for branch in &branches {
+            let b = branch.as_deref();
+            if engine.claim_timeout_due(&wfd, &wfes, now, b)? {
+                match engine.fire_claim_timeout(&wfd, &wfes, now, b).await? {
+                    ClaimTimeoutOutcome::Move(commit) => self.wfe.commit(&commit).await?,
+                    ClaimTimeoutOutcome::Release(entry) => {
+                        self.wfe.release_claim(wfe_id, wfes.orgtnt_id, &entry, b).await?
+                    }
                 }
+                return Ok(true);
             }
-            return Ok(true);
-        }
-        if let Some(idx) = engine.due_escalation(&wfd, &wfes, now)? {
-            let commit = engine.fire_escalation(&wfd, &wfes, idx, now).await?;
-            self.wfe.commit(&commit).await?;
-            return Ok(true);
+            if let Some(idx) = engine.due_escalation(&wfd, &wfes, now, b)? {
+                let commit = engine.fire_escalation(&wfd, &wfes, idx, now, b).await?;
+                self.wfe.commit(&commit).await?;
+                return Ok(true);
+            }
         }
         Ok(false)
+    }
+
+    /// Tek WFE için en yakın SLA vadesi — `tick_timers`'ın izlediği üç sayacın
+    /// (SLA-3 deadline, SLA-1 claim_timeout, SLA-2 sıradaki escalation) min'i.
+    /// Salt-okunur; hiçbir şey ateşlemez. Aktif değilse `None`. Timer servisinin
+    /// (bkz. `crate::timer`) uyku süresi hesabı için kullanılır.
+    pub async fn next_timer_due(
+        &self,
+        wfe_id: Uuid,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Option<DateTime<Utc>>, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        if wfes.status != WfeStatus::Active {
+            return Ok(None);
+        }
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+
+        // SLA-3 deadline wfe-seviyesi taban; claim_timeout + escalation paralel
+        // modda KOL-bazlı (her aktif kol için ayrı sayaç), aksi halde wfe-seviyesi.
+        let mut due = wfes.deadline;
+        let mut fold = |cand: Option<DateTime<Utc>>| {
+            if let Some(c) = cand {
+                due = Some(match due {
+                    Some(d) => d.min(c),
+                    None => c,
+                });
+            }
+        };
+
+        if wfes.join_target.is_some() {
+            for b in &wfes.branches {
+                if b.status != BranchStatus::Active {
+                    continue;
+                }
+                fold(compute_claim_deadline(&wfd, Some(&b.branch_node), b.claimed_at));
+                fold(
+                    self.engine()
+                        .next_escalation(&wfd, &wfes, now, Some(&b.branch_node))?
+                        .map(|f| f.deadline),
+                );
+            }
+        } else {
+            fold(compute_claim_deadline(
+                &wfd,
+                wfes.current_node.as_deref(),
+                wfes.claimed_at,
+            ));
+            fold(
+                self.engine()
+                    .next_escalation(&wfd, &wfes, now, None)?
+                    .map(|f| f.deadline),
+            );
+        }
+        Ok(due)
     }
 
     /// Tek WFE için bir sonraki escalation vadesi — dashboard insight'ı
@@ -306,6 +512,6 @@ impl WfeExecutor {
             return Ok(None);
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        self.engine().next_escalation(&wfd, &wfes, now)
+        self.engine().next_escalation(&wfd, &wfes, now, None)
     }
 }

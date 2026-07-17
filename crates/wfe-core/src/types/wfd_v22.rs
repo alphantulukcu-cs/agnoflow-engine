@@ -321,8 +321,8 @@ impl CatchDef {
     }
 }
 
-/// WFT üç formdan biridir (M3): {node} / {terminal} / {conditions, default?}.
-/// Inline `wft.c_a` YOKTUR.
+/// WFT dört formdan biridir (M3, WOR-31): {node} / {terminal} /
+/// {conditions, default?} / {parallel}. Inline `wft.c_a` YOKTUR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Wft {
@@ -337,9 +337,23 @@ pub enum Wft {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<WftTarget>,
     },
+    /// WOR-31: fork/join. `branches` paralel kollara giriş node'larıdır (≥2,
+    /// distinct — validator zorunlu kılar); `join` tüm kollar (AND-join)
+    /// bittiğinde WFE'nin gideceği hedeftir (node veya terminal).
+    Parallel {
+        parallel: ParallelSpec,
+    },
 }
 
+/// WOR-31: `Wft::Parallel`'in gövdesi.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParallelSpec {
+    pub branches: Vec<String>,
+    pub join: WftTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum WftTarget {
     Node { node: String },
@@ -427,4 +441,115 @@ pub struct ListableRule {
     pub c_a: CandidateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+}
+
+#[cfg(test)]
+mod wft_roundtrip_tests {
+    use super::*;
+
+    fn roundtrip(json: serde_json::Value) -> Wft {
+        let wft: Wft = serde_json::from_value(json.clone()).unwrap_or_else(|e| {
+            panic!("deserialize failed for {json}: {e}");
+        });
+        let back = serde_json::to_value(&wft).unwrap();
+        assert_eq!(back, json, "roundtrip mismatch for {json}");
+        wft
+    }
+
+    #[test]
+    fn node_shape_roundtrips_as_node() {
+        let wft = roundtrip(serde_json::json!({"node": "n1"}));
+        assert!(matches!(wft, Wft::Node { node } if node == "n1"));
+    }
+
+    #[test]
+    fn terminal_shape_roundtrips_as_terminal() {
+        let wft = roundtrip(serde_json::json!({"terminal": "t1"}));
+        assert!(matches!(wft, Wft::Terminal { terminal } if terminal == "t1"));
+    }
+
+    #[test]
+    fn conditional_shape_roundtrips_as_conditional() {
+        let wft = roundtrip(serde_json::json!({
+            "conditions": [{"when": "true", "node": "n1"}],
+            "default": {"terminal": "t1"},
+        }));
+        assert!(matches!(wft, Wft::Conditional { .. }));
+    }
+
+    #[test]
+    fn conditional_shape_without_default_roundtrips() {
+        let wft = roundtrip(serde_json::json!({
+            "conditions": [{"when": "true", "terminal": "t1"}],
+        }));
+        assert!(matches!(wft, Wft::Conditional { default: None, .. }));
+    }
+
+    #[test]
+    fn parallel_shape_with_node_join_roundtrips_as_parallel() {
+        let wft = roundtrip(serde_json::json!({
+            "parallel": {
+                "branches": ["node-a", "node-b"],
+                "join": {"node": "x"},
+            }
+        }));
+        match wft {
+            Wft::Parallel { parallel } => {
+                assert_eq!(parallel.branches, vec!["node-a", "node-b"]);
+                assert!(matches!(parallel.join, WftTarget::Node { node } if node == "x"));
+            }
+            other => panic!("expected Wft::Parallel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parallel_shape_with_terminal_join_roundtrips_as_parallel() {
+        let wft = roundtrip(serde_json::json!({
+            "parallel": {
+                "branches": ["node-a", "node-b", "node-c"],
+                "join": {"terminal": "t1"},
+            }
+        }));
+        match wft {
+            Wft::Parallel { parallel } => {
+                assert!(matches!(parallel.join, WftTarget::Terminal { terminal } if terminal == "t1"));
+            }
+            other => panic!("expected Wft::Parallel, got {other:?}"),
+        }
+    }
+
+    /// Parallel şekli diğer üç varyant tarafından yutulmamalı (untagged enum
+    /// sırası önemli değil çünkü her varyantın zorunlu alan adı farklı, ama
+    /// yine de regresyona karşı test ediyoruz).
+    #[test]
+    fn parallel_shape_is_not_swallowed_by_other_variants() {
+        let wft: Wft = serde_json::from_value(serde_json::json!({
+            "parallel": {"branches": ["a", "b"], "join": {"node": "x"}}
+        }))
+        .unwrap();
+        assert!(!matches!(wft, Wft::Node { .. }));
+        assert!(!matches!(wft, Wft::Terminal { .. }));
+        assert!(!matches!(wft, Wft::Conditional { .. }));
+        assert!(matches!(wft, Wft::Parallel { .. }));
+    }
+
+    /// deny_unknown_fields: ParallelSpec fazladan alanı reddetmeli.
+    #[test]
+    fn parallel_spec_rejects_unknown_fields() {
+        let res: Result<Wft, _> = serde_json::from_value(serde_json::json!({
+            "parallel": {"branches": ["a", "b"], "join": {"node": "x"}, "extra": 1}
+        }));
+        assert!(res.is_err());
+    }
+
+    /// branches < 2 veya undistinct: tip seviyesinde serbest — bu yalnızca
+    /// validator (WOR-31) tarafından reddedilir, burada sadece parse başarılı
+    /// olmalı (deserialize aşamasında kısıt yok).
+    #[test]
+    fn parallel_spec_parses_regardless_of_branch_count_type_level() {
+        let res: Result<Wft, _> = serde_json::from_value(serde_json::json!({
+            "parallel": {"branches": ["a"], "join": {"node": "x"}}
+        }));
+        assert!(res.is_ok());
+    }
 }

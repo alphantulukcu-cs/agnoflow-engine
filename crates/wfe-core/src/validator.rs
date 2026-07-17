@@ -2,7 +2,7 @@
 //! Spec: docs/spec/wfd-custom-validator-runtime-semantics_v2_2.md §1, §2b, §5, §6.
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
-use crate::types::wfd_v22::{Wfd, Wft, WftCondition, WftTarget};
+use crate::types::wfd_v22::{ParallelSpec, Wfd, Wft, WftCondition, WftTarget};
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -50,6 +50,7 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_start_rules(wfd, &mut report);
     check_wft_conditions(wfd, &mut report);
     check_graph(wfd, &mut report);
+    check_parallel(wfd, &mut report);
     check_expressions(wfd, &mut report);
     check_action_inputs(wfd, &mut report);
     check_effect_paths(wfd, &mut report);
@@ -263,6 +264,19 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
                     out.push((TargetKind::Terminal, terminal.as_str()))
                 }
                 None => {}
+            }
+        }
+        // WOR-31: fork/join — her branch başlangıç node'u VE join hedefi birer
+        // çıkış kenarıdır (cross_ref + graf BFS bunları otomatik kapsar).
+        Wft::Parallel { parallel } => {
+            for b in &parallel.branches {
+                out.push((TargetKind::Node, b.as_str()));
+            }
+            match &parallel.join {
+                WftTarget::Node { node } => out.push((TargetKind::Node, node.as_str())),
+                WftTarget::Terminal { terminal } => {
+                    out.push((TargetKind::Terminal, terminal.as_str()))
+                }
             }
         }
     }
@@ -493,6 +507,164 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
                 format!("transitions[{}]", ids.join(",")),
                 format!("({node}, {action}) için çoklu transition — runtime ilk-match uygular"),
             );
+        }
+    }
+}
+
+// ---- WOR-31: Parallel fork/join — branch/join şekli + subgraph kısıtları ----
+// Restrictions v1 (design doc §Validation): start wft'de Parallel yasak;
+// branches len>=2 + distinct + var olan node; join var olan node/terminal ve
+// branches'ten biri olamaz; branch subgraph'ları (fork'tan join'e/terminale
+// kadar transition wft kenarları) birbirinden ayrık; subgraph içinde iç içe
+// (nested) Parallel yasak; her subgraph join'e veya bir terminal'e ulaşmalı.
+
+fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
+    // Parallel wft start kuralında kullanılamaz.
+    for s in &wfd.start {
+        if matches!(&s.wft, Wft::Parallel { .. }) {
+            report.error(
+                "parallel_start",
+                format!("start[{}].wft", s.id),
+                "Parallel wft start kuralında kullanılamaz".into(),
+            );
+        }
+    }
+
+    // Fork noktalarını topla (yalnızca transitions.wft — start zaten yasak;
+    // nested fork da ayrıca aşağıda yasaklanıyor).
+    struct Fork<'a> {
+        path: String,
+        spec: &'a ParallelSpec,
+    }
+    let mut forks: Vec<Fork> = Vec::new();
+    for t in &wfd.transitions {
+        if let Wft::Parallel { parallel } = &t.wft {
+            forks.push(Fork {
+                path: format!("transitions[{}].wft", t.id),
+                spec: parallel,
+            });
+        }
+    }
+
+    for fork in &forks {
+        let path = &fork.path;
+        let spec = fork.spec;
+
+        if spec.branches.len() < 2 {
+            report.error(
+                "parallel_branches",
+                format!("{path}.parallel.branches"),
+                "parallel.branches en az 2 kol içermeli".into(),
+            );
+        }
+        let mut seen_names = HashSet::new();
+        for b in &spec.branches {
+            if !seen_names.insert(b.as_str()) {
+                report.error(
+                    "parallel_branches",
+                    format!("{path}.parallel.branches"),
+                    format!("branch '{b}' tekrarlanıyor — kollar distinct olmalı"),
+                );
+            }
+        }
+        // branch/join'in var olan node/terminal'e işaret etmesi generic
+        // cross_ref (check_cross_refs → wft_targets) tarafından zaten kontrol
+        // edilir; burada sadece Parallel'e özgü kısıt: join, kollardan biri
+        // olamaz.
+        if let WftTarget::Node { node: join_node } = &spec.join {
+            if spec.branches.iter().any(|b| b == join_node) {
+                report.error(
+                    "parallel_join",
+                    format!("{path}.parallel.join"),
+                    format!(
+                        "join node '{join_node}' branches listesinde de var — join kollardan biri olamaz"
+                    ),
+                );
+            }
+        }
+    }
+
+    // Branch subgraph'ları: fork'tan join'e (veya bir terminal'e) kadar,
+    // transition wft node kenarları takip edilerek BFS. Join node'a
+    // ulaşılınca DURULUR (ötesine geçilmez).
+    for fork in &forks {
+        let spec = fork.spec;
+        let join_node: Option<&str> = match &spec.join {
+            WftTarget::Node { node } => Some(node.as_str()),
+            WftTarget::Terminal { .. } => None,
+        };
+
+        // node -> hangi branch index'inde ilk görüldü (fork içi ayrıklık için)
+        let mut owner: HashMap<&str, usize> = HashMap::new();
+
+        for (bi, start) in spec.branches.iter().enumerate() {
+            let mut visited: HashSet<&str> = HashSet::new();
+            let mut queue: VecDeque<&str> = VecDeque::new();
+            visited.insert(start.as_str());
+            queue.push_back(start.as_str());
+            let mut reaches_exit = join_node == Some(start.as_str());
+
+            while let Some(node_key) = queue.pop_front() {
+                if let Some(prev_bi) = owner.get(node_key) {
+                    if *prev_bi != bi {
+                        report.error(
+                            "parallel_disjoint",
+                            format!("{}.parallel", fork.path),
+                            format!(
+                                "node '{node_key}' birden fazla branch subgraph'ında (branch[{prev_bi}] ve branch[{bi}]) — kollar ayrık olmalı"
+                            ),
+                        );
+                    }
+                } else {
+                    owner.insert(node_key, bi);
+                }
+
+                if Some(node_key) == join_node {
+                    // join'e ulaşıldı — ötesine geçme.
+                    continue;
+                }
+
+                for t in &wfd.transitions {
+                    if !t.from.contains(node_key) {
+                        continue;
+                    }
+                    if matches!(&t.wft, Wft::Parallel { .. }) {
+                        report.error(
+                            "parallel_nested",
+                            format!("transitions[{}].wft", t.id),
+                            "branch subgraph içinde iç içe (nested) Parallel yasak".into(),
+                        );
+                        continue;
+                    }
+                    for (kind, target) in wft_targets(&t.wft) {
+                        match kind {
+                            TargetKind::Terminal => reaches_exit = true,
+                            TargetKind::Node => {
+                                if Some(target) == join_node {
+                                    reaches_exit = true;
+                                    // join node'u da ayrıklık defterine düş
+                                    // (üstte tekrar işlenecek ve durulacak).
+                                    if !owner.contains_key(target) {
+                                        owner.insert(target, bi);
+                                    }
+                                } else if visited.insert(target) {
+                                    queue.push_back(target);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !reaches_exit {
+                report.error(
+                    "parallel_dead_end",
+                    format!("{}.parallel.branches[{}]", fork.path, bi),
+                    format!(
+                        "branch '{start}' join node'a veya bir terminal'e ulaşamıyor"
+                    ),
+                );
+            }
         }
     }
 }

@@ -6,9 +6,14 @@ use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::validator::{validate, ValidationReport};
 
 const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
+const PARALLEL_FIXTURE: &str = include_str!("fixtures/example-wfd_paralel-onay_v2_2.json");
 
 fn fixture_value() -> Value {
     serde_json::from_str(FIXTURE).unwrap()
+}
+
+fn parallel_fixture_value() -> Value {
+    serde_json::from_str(PARALLEL_FIXTURE).unwrap()
 }
 
 fn validate_value(v: Value) -> ValidationReport {
@@ -424,4 +429,110 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
     v["nodes"]["self__creditAnalyst"]["claim_timeout"] = json!({"after": "PT2H"});
     let report = validate_value(v);
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+// ---- WOR-31: Parallel fork/join ----
+
+#[test]
+fn parallel_fixture_is_valid() {
+    let report = validate_value(parallel_fixture_value());
+    assert!(
+        report.errors.is_empty(),
+        "paralel-onay fixture temiz geçmeli, hatalar: {:#?}",
+        report.errors
+    );
+    assert!(report.warnings.is_empty(), "uyarılar: {:#?}", report.warnings);
+}
+
+#[test]
+fn parallel_in_start_wft_is_error() {
+    let mut v = parallel_fixture_value();
+    v["start"][0]["wft"] = json!({
+        "parallel": {
+            "branches": ["self__financeApprover", "self__legalApprover"],
+            "join": {"node": "self__resultCoordinator"}
+        }
+    });
+    assert!(has_error(&validate_value(v), "parallel_start"));
+}
+
+#[test]
+fn parallel_branches_below_two_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["branches"] = json!(["self__financeApprover"]);
+    assert!(has_error(&validate_value(v), "parallel_branches"));
+}
+
+#[test]
+fn parallel_branches_not_distinct_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["branches"] = json!([
+        "self__financeApprover",
+        "self__financeApprover",
+        "self__hrApprover"
+    ]);
+    assert!(has_error(&validate_value(v), "parallel_branches"));
+}
+
+#[test]
+fn parallel_join_equal_to_branch_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join"] = json!({"node": "self__financeApprover"});
+    assert!(has_error(&validate_value(v), "parallel_join"));
+}
+
+#[test]
+fn parallel_unknown_branch_node_is_error() {
+    // branch/join hedeflerinin var olması generic cross_ref (wft_targets) ile denetlenir.
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["branches"] = json!([
+        "self__ghost",
+        "self__legalApprover",
+        "self__hrApprover"
+    ]);
+    assert!(has_error(&validate_value(v), "cross_ref"));
+}
+
+#[test]
+fn parallel_unknown_join_target_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join"] = json!({"node": "self__ghost"});
+    assert!(has_error(&validate_value(v), "cross_ref"));
+}
+
+#[test]
+fn parallel_nested_fork_is_error() {
+    let mut v = parallel_fixture_value();
+    // finans kolunun approve transition'ını, join yerine ikinci bir fork'a çözülecek şekilde
+    // değiştir — branch subgraph içinde nested Parallel yasak.
+    v["transitions"][1]["wft"] = json!({
+        "parallel": {
+            "branches": ["self__legalApprover", "self__hrApprover"],
+            "join": {"node": "self__resultCoordinator"}
+        }
+    });
+    assert!(has_error(&validate_value(v), "parallel_nested"));
+}
+
+#[test]
+fn parallel_overlapping_branch_subgraphs_is_error() {
+    let mut v = parallel_fixture_value();
+    // finans kolunun approve'unu hukuk kolunun node'una yönlendir — iki branch subgraph'ı
+    // artık aynı node'u paylaşıyor (join hariç ayrık olmalı kuralını çiğner).
+    v["transitions"][1]["wft"] = json!({"node": "self__legalApprover"});
+    assert!(has_error(&validate_value(v), "parallel_disjoint"));
+}
+
+#[test]
+fn parallel_branch_dead_end_is_error() {
+    let mut v = parallel_fixture_value();
+    // finans kolunun approve transition'ını sil — o kol artık join'e de terminal'e de
+    // ulaşamıyor (yalnız reject kalıyor, o da başka bir hatayla karışmasın diye node'u
+    // kendine döndürüyoruz: gerçek dead-end üretmek için approve transition'ı kaldırıyoruz).
+    v["transitions"].as_array_mut().unwrap().remove(1); // t_finance_approve
+    // reject de kaldırılırsa no_exit hatasına düşer; onu sadece terminal'e değil
+    // kendi node'una yönlendirerek dead-end'i saf tutuyoruz.
+    v["transitions"][1]["wft"] = json!({"node": "self__financeApprover"});
+    let report = validate_value(v);
+    assert!(has_error(&report, "parallel_dead_end"), "hatalar: {:#?}", report.errors);
 }

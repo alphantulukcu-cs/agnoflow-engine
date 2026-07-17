@@ -21,11 +21,13 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
 use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::types::wfe::WfeStatus;
-use wfe_core::v22::ports::Wfes;
+use wfe_core::v22::ports::{BranchState, BranchStatus, Wfes};
 use wfe_core::v22::visibility::can_view;
 
 const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
+const PARALLEL_FIXTURE: &str = include_str!("fixtures/example-wfd_paralel-onay_v2_2.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).unwrap()
@@ -100,6 +102,8 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         deadline: None,
         claimed_at: None,
         created_at,
+        branches: vec![],
+        join_target: None,
     }
 }
 
@@ -226,4 +230,90 @@ async fn listable_actor_with_when_false_cannot_view() {
     let wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
 
     assert!(!can_view(&golden(), &wfes, &d, &org).await.unwrap());
+}
+
+// ================================================== (c) WOR-31 parallel mode
+
+fn paralel() -> Wfd {
+    Wfd::from_json(PARALLEL_FIXTURE).unwrap()
+}
+
+fn role_actor(orgu: Uuid, role: &str) -> Actor {
+    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: role.into() }
+}
+
+fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchState {
+    let now = chrono::Utc::now();
+    BranchState {
+        branch_node: node.into(),
+        status,
+        claimed_by,
+        claimed_at: claimed_by.map(|_| now),
+        entered_at: now,
+    }
+}
+
+/// Fork SONRASI paralel mod: current_node NULL, join_target persist,
+/// wfe-seviyesi assignment temiz — görünürlük kolların c_a'sından türemeli.
+fn parallel_wfes(branches: Vec<BranchState>) -> Wfes {
+    let mut wfes = wfes_at(
+        "self__coordinator",
+        None,
+        json!({"request": {"title": "Sunucu alımı", "amount": 150000}}),
+    );
+    wfes.current_node = None;
+    wfes.branches = branches;
+    wfes.join_target = Some(WftTarget::Node { node: "self__resultCoordinator".into() });
+    wfes
+}
+
+#[tokio::test]
+async fn parallel_active_branch_c_a_actor_can_view() {
+    let org = MockOrg { role_assigned: true };
+    let fin = role_actor(Uuid::new_v4(), "financeApprover");
+    let wfes = parallel_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Active, None),
+        branch("self__legalApprover", BranchStatus::Active, None),
+    ]);
+
+    assert!(can_view(&paralel(), &wfes, &fin, &org).await.unwrap());
+}
+
+/// Kolu claim eden kullanıcı — rol ataması doğrulanamasa bile (ör. $ctx
+/// sonradan değişip c_a eşleşmez olsa da) kol sahibi olarak görmeye devam eder.
+#[tokio::test]
+async fn parallel_branch_claimer_can_view_without_role() {
+    let org = MockOrg { role_assigned: false };
+    let claimer = role_actor(Uuid::new_v4(), "financeApprover");
+    let wfes = parallel_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Active, Some(claimer.user_id)),
+        branch("self__legalApprover", BranchStatus::Active, None),
+    ]);
+
+    assert!(can_view(&paralel(), &wfes, &claimer, &org).await.unwrap());
+}
+
+/// `arrived` kol artık aktif node değildir — o kolun c_a'sı VIEW grant'i üretmez.
+#[tokio::test]
+async fn parallel_arrived_branch_c_a_does_not_grant_view() {
+    let org = MockOrg { role_assigned: true };
+    let fin = role_actor(Uuid::new_v4(), "financeApprover");
+    let wfes = parallel_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Arrived, None),
+        branch("self__legalApprover", BranchStatus::Active, None),
+    ]);
+
+    assert!(!can_view(&paralel(), &wfes, &fin, &org).await.unwrap());
+}
+
+#[tokio::test]
+async fn parallel_unrelated_actor_cannot_view() {
+    let org = MockOrg { role_assigned: true };
+    let outsider = role_actor(Uuid::new_v4(), "requester");
+    let wfes = parallel_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Active, None),
+        branch("self__legalApprover", BranchStatus::Active, None),
+    ]);
+
+    assert!(!can_view(&paralel(), &wfes, &outsider, &org).await.unwrap());
 }

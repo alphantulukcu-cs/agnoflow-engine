@@ -846,6 +846,39 @@
         }
       }
     },
+    "wftParallel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "parallel"
+      ],
+      "properties": {
+        "parallel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "branches",
+            "join"
+          ],
+          "properties": {
+            "branches": {
+              "type": "array",
+              "minItems": 2,
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/idName"
+              },
+              "description": "Paralel kollara giris node id'leri (WOR-31 fork). En az 2, distinct; custom validator ayrica dogrular (branch subgraph disjointness, no-nesting, join'e/terminal'e ulasabilirlik)."
+            },
+            "join": {
+              "$ref": "#/$defs/wftDefault",
+              "description": "AND-join hedefi: aktif kollarin SONUNCUSU vardiginda WFE'nin gidecegi node veya terminal. Kollardan biriyle ayni olamaz (custom validator)."
+            }
+          }
+        }
+      },
+      "description": "WOR-31: fork/join. Start kuralinda (`start[].wft`) YASAKTIR; nested fork (bir branch subgraph'i icinde ikinci bir Parallel) YASAKTIR (custom validator)."
+    },
     "wft": {
       "oneOf": [
         {
@@ -856,6 +889,9 @@
         },
         {
           "$ref": "#/$defs/wftConditional"
+        },
+        {
+          "$ref": "#/$defs/wftParallel"
         }
       ]
     },

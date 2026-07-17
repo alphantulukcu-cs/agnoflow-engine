@@ -13,10 +13,14 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
-use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, ClaimTimeout, EscalationStep, Wfd, Wft};
+use wfe_core::types::wfd_v22::{
+    AutoexecDef, AutoexecType, ClaimTimeout, EscalationStep, Wfd, Wft, WftTarget,
+};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
-use wfe_core::v22::ports::{AutoexecRunner, CommitOutcome, ExecEnv, ExecFailure, Wfes};
+use wfe_core::v22::ports::{
+    AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, Wfes,
+};
 
 const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
 
@@ -142,6 +146,8 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         deadline: None,
         claimed_at: assigned.map(|_| created_at),
         created_at,
+        branches: vec![],
+        join_target: None,
     }
 }
 
@@ -294,7 +300,7 @@ async fn apply_on_unclaimed_wfe_is_rejected() {
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve", &json!({"credit_info": {"amount_requested": 30000}}))
+        .apply(&golden(), &wfes, &a, "analyst_approve", &json!({"credit_info": {"amount_requested": 30000}}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotClaimed));
@@ -309,7 +315,7 @@ async fn apply_by_non_owner_is_rejected() {
     let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve", &json!({"credit_info": {"amount_requested": 30000}}))
+        .apply(&golden(), &wfes, &a, "analyst_approve", &json!({"credit_info": {"amount_requested": 30000}}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotOwner));
@@ -327,7 +333,7 @@ async fn analyst_approve_within_limit_reaches_terminal_approved() {
 
     let commit = engine
         .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 30000}}))
+               &json!({"credit_info": {"amount_requested": 30000}}), None)
         .await
         .unwrap();
 
@@ -360,7 +366,7 @@ async fn analyst_approve_over_limit_routes_to_branch_manager() {
 
     let commit = engine
         .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 90000}}))
+               &json!({"credit_info": {"amount_requested": 90000}}), None)
         .await
         .unwrap();
 
@@ -385,7 +391,7 @@ async fn failing_score_fetch_is_retried_then_caught_and_routed() {
 
     let commit = engine
         .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 30000}}))
+               &json!({"credit_info": {"amount_requested": 30000}}), None)
         .await
         .unwrap();
 
@@ -417,7 +423,7 @@ async fn hanging_autoexec_times_out_and_is_caught() {
 
     let commit = engine
         .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 30000}}))
+               &json!({"credit_info": {"amount_requested": 30000}}), None)
         .await
         .unwrap();
 
@@ -443,7 +449,7 @@ async fn manager_reject_takes_default_terminal() {
 
     let commit = engine
         .apply(&golden(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "reject"}))
+               &json!({"manager_decision": "reject"}), None)
         .await
         .unwrap();
 
@@ -466,7 +472,7 @@ async fn manager_approve_condition_hits_terminal_approved() {
 
     let commit = engine
         .apply(&golden(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "approve"}))
+               &json!({"manager_decision": "approve"}), None)
         .await
         .unwrap();
 
@@ -486,7 +492,7 @@ async fn undeclared_input_path_is_rejected() {
 
     let err = engine
         .apply(&golden(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "approve", "credit_score": 999}))
+               &json!({"manager_decision": "approve", "credit_score": 999}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -501,7 +507,7 @@ async fn missing_required_input_is_rejected() {
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({}))
+        .apply(&golden(), &wfes, &m, "manager_decide", &json!({}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -536,7 +542,7 @@ async fn first_matching_when_wins_in_array_order() {
     // 30000 < 1000000 → t_guarded'ın when'i false → t_fallback seçilmeli
     let commit = engine
         .apply(&first_match_wfd(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "approve"}))
+               &json!({"manager_decision": "approve"}), None)
         .await
         .unwrap();
     assert!(matches!(&commit.outcome, CommitOutcome::Terminal { .. }),
@@ -560,7 +566,7 @@ async fn conditional_without_default_and_no_match_errors() {
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let err = engine
-        .apply(&wfd, &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}))
+        .apply(&wfd, &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NoConditionMatched), "{err}");
@@ -577,15 +583,15 @@ async fn claim_checks() {
 
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    assert_eq!(engine.can_claim(&wfd, &wfes, &a).await.unwrap(), ClaimCheck::Ok);
+    assert_eq!(engine.can_claim(&wfd, &wfes, &a, None).await.unwrap(), ClaimCheck::Ok);
 
     // yanlış rol → uygun değil
     let c = clerk(Uuid::new_v4());
-    assert_eq!(engine.can_claim(&wfd, &wfes, &c).await.unwrap(), ClaimCheck::NotEligible);
+    assert_eq!(engine.can_claim(&wfd, &wfes, &c, None).await.unwrap(), ClaimCheck::NotEligible);
 
     // zaten claim edilmiş
     let claimed = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    assert_eq!(engine.can_claim(&wfd, &claimed, &a).await.unwrap(), ClaimCheck::AlreadyClaimed);
+    assert_eq!(engine.can_claim(&wfd, &claimed, &a, None).await.unwrap(), ClaimCheck::AlreadyClaimed);
 }
 
 // ================================================================ possible actions
@@ -598,12 +604,12 @@ async fn owner_sees_available_actions() {
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
-    let actions = engine.possible_actions(&golden(), &wfes, &m).await.unwrap();
+    let actions = engine.possible_actions(&golden(), &wfes, &m, None).await.unwrap();
     assert_eq!(actions, vec!["manager_decide"]);
 
     // owner olmayan boş liste alır
     let other = manager(Uuid::new_v4());
-    let actions = engine.possible_actions(&golden(), &wfes, &other).await.unwrap();
+    let actions = engine.possible_actions(&golden(), &wfes, &other, None).await.unwrap();
     assert!(actions.is_empty());
 }
 
@@ -620,15 +626,15 @@ async fn escalation_fires_after_sla_and_moves_wfe() {
 
     // P3D dolmadan due değil
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, entered_at + Duration::days(2)).unwrap(),
+        engine.due_escalation(&wfd, &wfes, entered_at + Duration::days(2), None).unwrap(),
         None
     );
     // P3D sonrası due
     let now = entered_at + Duration::days(3) + Duration::seconds(1);
-    assert_eq!(engine.due_escalation(&wfd, &wfes, now).unwrap(), Some(0));
+    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), Some(0));
 
     // fire → şube müdürüne taşınır, effects uygulanır (assigned olsa bile çalışır)
-    let commit = engine.fire_escalation(&wfd, &wfes, 0, now).await.unwrap();
+    let commit = engine.fire_escalation(&wfd, &wfes, 0, now, None).await.unwrap();
     assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"));
     assert!(commit.new_dynctx["internal_notes"].as_str().unwrap().contains("SLA"));
     assert_eq!(commit.wfah_entries[0].action, "escalate:self__creditAnalyst:0");
@@ -648,7 +654,7 @@ async fn fired_escalation_step_does_not_refire() {
 
     let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
     let now = entered_at + Duration::days(10);
-    assert_eq!(engine.due_escalation(&wfd, &wfes, now).unwrap(), None,
+    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), None,
         "ateşlenen adım tekrar due olmamalı");
 }
 
@@ -685,13 +691,13 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
 
     // Adım 0 ateşlendi; adım 1 (P5D) node girişinden +4 günde henüz due DEĞİL.
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(4)).unwrap(),
+        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(4), None).unwrap(),
         None,
         "adım 1 node girişinden +5g'de due olmalı, +4g'de değil",
     );
     // Node girişinden +5 gün + 1sn: adım 1 due (marker'dan ölçülseydi +8g olurdu).
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(5) + Duration::seconds(1)).unwrap(),
+        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(5) + Duration::seconds(1), None).unwrap(),
         Some(1),
         "adım 1'in `after`'ı NODE GİRİŞİNDEN ölçülmeli (marker'dan değil)",
     );
@@ -746,13 +752,13 @@ async fn escalation_fires_normally_at_start_node() {
     let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
 
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, entered_at + Duration::hours(12)).unwrap(),
+        engine.due_escalation(&wfd, &wfes, entered_at + Duration::hours(12), None).unwrap(),
         None
     );
     let now = entered_at + Duration::days(1) + Duration::seconds(1);
-    assert_eq!(engine.due_escalation(&wfd, &wfes, now).unwrap(), Some(0));
+    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), Some(0));
 
-    let commit = engine.fire_escalation(&wfd, &wfes, 0, now).await.unwrap();
+    let commit = engine.fire_escalation(&wfd, &wfes, 0, now, None).await.unwrap();
     assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst"));
 }
 
@@ -790,19 +796,21 @@ async fn deadline_due_fires_terminated_not_error() {
 }
 
 #[tokio::test]
-async fn start_resolves_deadline_and_rejects_when_exceeding_wfd_timeout() {
+async fn start_resolves_deadline_and_allows_exceeding_wfd_timeout() {
     let org = MockOrg { role_assigned: true };
     let runner = MockRunner::ok(750, "A", true);
     let engine = Engine { org: &org, exec: &runner };
     let wfd = golden(); // timeout: P30D
     let actor = clerk(Uuid::new_v4());
 
-    // deadline > wfd.timeout → InvalidInput hard-reject
-    let err = engine
+    // deadline > wfd.timeout → artık serbest, çağıran WFD tavanını aşabilir
+    let before = Utc::now();
+    let new = engine
         .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), Some("P40D"))
         .await
-        .unwrap_err();
-    assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+        .unwrap();
+    let deadline = new.deadline.expect("deadline verildiğinde resolve edilmeli");
+    assert!(deadline >= before + Duration::days(40) && deadline <= Utc::now() + Duration::days(40));
 
     // deadline ≤ timeout → kabul, mutlak deadline start anından itibaren çözülür
     let before = Utc::now();
@@ -860,11 +868,11 @@ async fn claim_timeout_due_without_wft_releases_claim() {
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
 
-    assert!(!engine.claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1)).unwrap());
+    assert!(!engine.claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1), None).unwrap());
     let now = claimed_at + Duration::hours(2) + Duration::seconds(1);
-    assert!(engine.claim_timeout_due(&wfd, &wfes, now).unwrap());
+    assert!(engine.claim_timeout_due(&wfd, &wfes, now, None).unwrap());
 
-    match engine.fire_claim_timeout(&wfd, &wfes, now).await.unwrap() {
+    match engine.fire_claim_timeout(&wfd, &wfes, now, None).await.unwrap() {
         ClaimTimeoutOutcome::Release(entry) => {
             assert_eq!(entry.action, "claim_timeout:self__creditAnalyst");
             assert_eq!(entry.actor.role, "system");
@@ -884,7 +892,7 @@ async fn claim_timeout_due_with_wft_moves_like_escalation() {
     wfes.claimed_at = Some(claimed_at);
     let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
 
-    match engine.fire_claim_timeout(&wfd, &wfes, now).await.unwrap() {
+    match engine.fire_claim_timeout(&wfd, &wfes, now, None).await.unwrap() {
         ClaimTimeoutOutcome::Move(commit) => {
             assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"));
             assert_eq!(commit.wfah_entries[0].action, "claim_timeout:self__creditAnalyst");
@@ -901,7 +909,7 @@ async fn claim_timeout_not_due_without_claim() {
     let wfd = golden_with_claim_timeout("PT1H", None);
     // hiç claim edilmemiş (claimed_at None) — asla due olmaz
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    assert!(!engine.claim_timeout_due(&wfd, &wfes, wfes.created_at + Duration::days(1)).unwrap());
+    assert!(!engine.claim_timeout_due(&wfd, &wfes, wfes.created_at + Duration::days(1), None).unwrap());
 }
 
 // ================================================================ SLA-2 escalation terminate (2026-07-16)
@@ -920,7 +928,7 @@ async fn escalation_terminate_true_ends_instance_as_terminated() {
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
     let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
 
-    let commit = engine.fire_escalation(&wfd, &wfes, 0, now).await.unwrap();
+    let commit = engine.fire_escalation(&wfd, &wfes, 0, now, None).await.unwrap();
     let CommitOutcome::Terminated { end_response } = &commit.outcome else {
         panic!("Terminated bekleniyordu");
     };
@@ -941,11 +949,11 @@ async fn terminal_wfe_rejects_actions() {
     wfes.status = WfeStatus::Terminal;
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}))
+        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeTerminal));
-    assert_eq!(engine.can_claim(&golden(), &wfes, &m).await.unwrap(), ClaimCheck::Terminal);
+    assert_eq!(engine.can_claim(&golden(), &wfes, &m, None).await.unwrap(), ClaimCheck::Terminal);
 }
 
 /// `Terminated` (SLA ihlali) `Terminal` ile AYNI korumaya tabidir: aksiyon/claim
@@ -960,13 +968,13 @@ async fn terminated_wfe_is_treated_like_terminal() {
     wfes.status = WfeStatus::Terminated;
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}))
+        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeTerminal));
-    assert_eq!(engine.can_claim(&golden(), &wfes, &m).await.unwrap(), ClaimCheck::Terminal);
-    assert!(engine.possible_actions(&golden(), &wfes, &m).await.unwrap().is_empty());
-    assert_eq!(engine.next_escalation(&golden(), &wfes, Utc::now()).unwrap(), None);
+    assert_eq!(engine.can_claim(&golden(), &wfes, &m, None).await.unwrap(), ClaimCheck::Terminal);
+    assert!(engine.possible_actions(&golden(), &wfes, &m, None).await.unwrap().is_empty());
+    assert_eq!(engine.next_escalation(&golden(), &wfes, Utc::now(), None).unwrap(), None);
 
     // wire format kontrolü: serde "terminated" olarak yazar
     assert_eq!(serde_json::to_value(&wfes.status).unwrap(), json!("terminated"));
@@ -990,7 +998,7 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
     unclaimed.deadline = Some(unclaimed.created_at - Duration::hours(1));
     assert_eq!(unclaimed.status, WfeStatus::Active);
     assert_eq!(
-        engine.can_claim(&golden(), &unclaimed, &m).await.unwrap(),
+        engine.can_claim(&golden(), &unclaimed, &m, None).await.unwrap(),
         ClaimCheck::Expired,
         "deadline geçmiş ama status hâlâ active olan WFE claim edilebilir görünmemeli"
     );
@@ -1000,9 +1008,668 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
     claimed.deadline = Some(claimed.created_at - Duration::hours(1));
     assert_eq!(claimed.status, WfeStatus::Active);
     let err = engine
-        .apply(&golden(), &claimed, &m, "manager_decide", &json!({"manager_decision": "approve"}))
+        .apply(&golden(), &claimed, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeExpired), "{err}");
-    assert!(engine.possible_actions(&golden(), &claimed, &m).await.unwrap().is_empty());
+    assert!(engine.possible_actions(&golden(), &claimed, &m, None).await.unwrap().is_empty());
+}
+
+// ================================================================ WOR-31 fork/join (paralel)
+
+const PARALLEL_FIXTURE: &str = include_str!("fixtures/example-wfd_paralel-onay_v2_2.json");
+
+fn paralel() -> Wfd {
+    Wfd::from_json(PARALLEL_FIXTURE).unwrap()
+}
+
+fn parallel_ctx() -> Value {
+    json!({"request": {"title": "Sunucu alımı", "amount": 150000}})
+}
+
+fn actor_with_role(role: &str) -> Actor {
+    Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: role.into() }
+}
+
+fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchState {
+    let now = Utc::now();
+    BranchState {
+        branch_node: node.into(),
+        status,
+        claimed_by,
+        claimed_at: claimed_by.map(|_| now),
+        entered_at: now,
+    }
+}
+
+/// Fork SONRASI paralel modda bir WFES kurar: current_node NULL, join persist.
+fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfes {
+    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let wfah = Wfah::empty().push("start".into(), system, None);
+    let created_at = wfah.entries()[0].applied_at;
+    Wfes {
+        wfe_id: Uuid::new_v4(),
+        orgtnt_id: Uuid::nil(),
+        wfd_id: Uuid::new_v4(),
+        wfd_version: 1,
+        dynctx: DynCtx(ctx),
+        wfah,
+        status: WfeStatus::Active,
+        current_node: None,
+        assigned_to: None,
+        end_response: None,
+        deadline: None,
+        claimed_at: None,
+        created_at,
+        branches,
+        join_target: Some(join),
+    }
+}
+
+fn join_node() -> WftTarget {
+    WftTarget::Node { node: "self__resultCoordinator".into() }
+}
+
+fn wfah_actions(commit: &wfe_core::v22::ports::TransitionCommit) -> Vec<&str> {
+    commit.wfah_entries.iter().map(|e| e.action.as_str()).collect()
+}
+
+#[tokio::test]
+async fn start_review_forks_into_three_branches() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let coord = actor_with_role("coordinator");
+    let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
+
+    let commit = engine
+        .apply(&paralel(), &wfes, &coord, "start_review", &json!({}), None)
+        .await
+        .unwrap();
+
+    let CommitOutcome::ForkTo { branches, join } = &commit.outcome else {
+        panic!("ForkTo bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(
+        branches,
+        &["self__financeApprover", "self__legalApprover", "self__hrApprover"]
+    );
+    assert_eq!(join, &join_node());
+    // aday cache'i üç kolun rollerinin birleşimi
+    for role in ["financeApprover", "legalApprover", "hrApprover"] {
+        assert!(commit.resolved_c_a.iter().any(|c| c.role == role), "{role} eksik");
+    }
+    // `_fork` marker'ı engine tarafından staged (system aktörle)
+    assert_eq!(wfah_actions(&commit), vec!["start_review", "_fork"]);
+    let fork = commit.wfah_entries.last().unwrap();
+    assert_eq!(fork.actor.role, "system");
+    assert_eq!(fork.input.as_ref().unwrap()["branches"][1], json!("self__legalApprover"));
+    assert_eq!(fork.input.as_ref().unwrap()["join"], json!({"node": "self__resultCoordinator"}));
+}
+
+#[tokio::test]
+async fn single_mode_node_hint_must_match_current_node() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let coord = actor_with_role("coordinator");
+    let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
+
+    let err = engine
+        .apply(&paralel(), &wfes, &coord, "start_review", &json!({}), Some("self__hrApprover"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+}
+
+#[tokio::test]
+async fn branch_approve_arrives_without_occupying_join() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node } if from_node == "self__financeApprover"),
+        "{:?}", commit.outcome
+    );
+    // kol transition effect'i staged
+    assert!(commit.new_dynctx["finans_onay_zamani"].is_string());
+    assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+    assert_eq!(
+        commit.wfah_entries[1].input.as_ref().unwrap()["node"],
+        json!("self__financeApprover")
+    );
+    // varış WFE'yi taşımaz — aday cache boş kalır (kol havuzu T3'te branch satırından)
+    assert!(commit.resolved_c_a.is_empty());
+}
+
+#[tokio::test]
+async fn ambiguous_action_without_node_hint_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    // `approve` üç kolun da transition'ıyla eşleşir — node ipucu yoksa belirsiz
+    let err = engine
+        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), None)
+        .await
+        .unwrap_err();
+    match err {
+        EngineError::AmbiguousAction { action, candidates } => {
+            assert_eq!(action, "approve");
+            assert_eq!(candidates.len(), 3);
+            assert!(candidates.contains(&"self__legalApprover".to_string()));
+        }
+        other => panic!("AmbiguousAction bekleniyordu: {other}"),
+    }
+
+    // geçersiz ipucu: aktif kol değil
+    let err = engine
+        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__coordinator"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+}
+
+#[tokio::test]
+async fn parallel_apply_enforces_branch_claim_ownership() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+
+    // kol claim edilmemiş → NotClaimed
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let err = engine
+        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::NotClaimed), "{err}");
+
+    // başka kullanıcı claim etmiş → NotOwner
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(Uuid::new_v4())),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let err = engine
+        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::NotOwner), "{err}");
+}
+
+#[tokio::test]
+async fn last_branch_arrival_completes_join_to_node() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let hr = actor_with_role("hrApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Arrived, None),
+            branch("self__legalApprover", BranchStatus::Arrived, None),
+            branch("self__hrApprover", BranchStatus::Active, Some(hr.user_id)),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    // tek aktif kol kaldığından node ipucu GEREKMEZ (belirsizlik yok)
+    let commit = engine
+        .apply(&paralel(), &wfes, &hr, "approve", &json!({}), None)
+        .await
+        .unwrap();
+
+    let CommitOutcome::JoinComplete { from_node, next } = &commit.outcome else {
+        panic!("JoinComplete bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(from_node, "self__hrApprover");
+    assert!(
+        matches!(next.as_ref(), CommitOutcome::MoveTo { node } if node == "self__resultCoordinator"),
+        "{next:?}"
+    );
+    // join node'un adayları promotion için resolve edilir
+    assert!(commit.resolved_c_a.iter().any(|c| c.role == "resultCoordinator"));
+    // engine `_branch_arrived` staged eder; `_join` ADAPTER'ın işidir (T3)
+    assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+}
+
+#[tokio::test]
+async fn last_branch_arrival_completes_join_to_terminal() {
+    // join hedefi terminal olan varyant: kol wft'leri de aynı terminale çözülür,
+    // son varışta JoinComplete{next: Terminal} üretilmeli.
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["transitions"][0]["wft"]["parallel"]["join"] = json!({"terminal": "terminal_approved"});
+    for idx in [1, 3, 5] {
+        // t_finance_approve / t_legal_approve / t_hr_approve
+        v["transitions"][idx]["wft"] = json!({"terminal": "terminal_approved"});
+    }
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let hr = actor_with_role("hrApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Arrived, None),
+            branch("self__legalApprover", BranchStatus::Arrived, None),
+            branch("self__hrApprover", BranchStatus::Active, Some(hr.user_id)),
+        ],
+        WftTarget::Terminal { terminal: "terminal_approved".into() },
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(&wfd, &wfes, &hr, "approve", &json!({}), None)
+        .await
+        .unwrap();
+
+    let CommitOutcome::JoinComplete { from_node, next } = &commit.outcome else {
+        panic!("JoinComplete bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(from_node, "self__hrApprover");
+    let CommitOutcome::Terminal { end_response } = next.as_ref() else {
+        panic!("Terminal next bekleniyordu: {next:?}");
+    };
+    assert_eq!(end_response["status"], json!("approved"));
+    assert_eq!(end_response["request_title"], json!("Sunucu alımı"));
+    assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+}
+
+#[tokio::test]
+async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let legal = actor_with_role("legalApprover");
+    // finance hâlâ aktif, hr çoktan vardı — yalnız AKTİF sibling iptal edilir
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__legalApprover", BranchStatus::Active, Some(legal.user_id)),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(&paralel(), &wfes, &legal, "reject", &json!({}), Some("self__legalApprover"))
+        .await
+        .unwrap();
+
+    let CommitOutcome::Terminal { end_response } = &commit.outcome else {
+        panic!("Terminal bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(end_response["status"], json!("rejected"));
+    assert_eq!(end_response["request_title"], json!("Sunucu alımı"));
+    // yalnız aktif sibling (finance) iptal marker'ı alır; hr arrived — iptal edilmez
+    assert_eq!(wfah_actions(&commit), vec!["reject", "_branch_cancelled"]);
+    let cancel = &commit.wfah_entries[1];
+    assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__financeApprover"));
+    assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
+    assert_eq!(cancel.actor.role, "system");
+}
+
+fn paralel_with_delegate_step() -> Wfd {
+    // finance koluna kol-içi ara node ekler: delegate → self__financeSenior,
+    // oradan approve → join. Kol hareketi (BranchMoveTo) testi için.
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["nodes"]["self__financeSenior"] = json!({
+        "label": "Finans Kıdemli",
+        "description": "Kol-içi ara durak (test).",
+        "c_a": {"c_orgu": "self", "c_r": ["financeSenior"]}
+    });
+    v["actions"]["delegate"] =
+        json!({"label": "Devret", "input": {"required": [], "optional": []}});
+    let ts = v["transitions"].as_array_mut().unwrap();
+    ts.push(json!({
+        "id": "t_finance_delegate",
+        "from": "self__financeApprover",
+        "action": "delegate",
+        "wft": {"node": "self__financeSenior"}
+    }));
+    ts.push(json!({
+        "id": "t_senior_approve",
+        "from": "self__financeSenior",
+        "action": "approve",
+        "wft": {"node": "self__resultCoordinator"}
+    }));
+    Wfd::from_value(v).unwrap()
+}
+
+#[tokio::test]
+async fn branch_moves_to_normal_node_and_stays_parallel() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    // `delegate` yalnız finance kolunda tanımlı → ipucu gerekmez
+    let commit = engine
+        .apply(&paralel_with_delegate_step(), &wfes, &fin, "delegate", &json!({}), None)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            &commit.outcome,
+            CommitOutcome::BranchMoveTo { from_node, node }
+                if from_node == "self__financeApprover" && node == "self__financeSenior"
+        ),
+        "{:?}", commit.outcome
+    );
+    // yeni kol node'unun adayları resolve edilir
+    assert!(commit.resolved_c_a.iter().any(|c| c.role == "financeSenior"));
+    // kol hareketi paralel marker üretmez
+    assert_eq!(wfah_actions(&commit), vec!["delegate"]);
+}
+
+#[tokio::test]
+async fn nested_parallel_at_runtime_is_rejected() {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    // t_finance_approve'un wft'ini parallel yap (validator dışı, runtime koruması)
+    v["transitions"][1]["wft"] = json!({
+        "parallel": {
+            "branches": ["self__legalApprover", "self__hrApprover"],
+            "join": {"node": "self__resultCoordinator"}
+        }
+    });
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let err = engine
+        .apply(&wfd, &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidWfd(m) if m.contains("nested")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn start_wft_parallel_is_rejected_at_runtime() {
+    // Validator start'ta parallel'i reddeder; runtime koruması bağımsız çalışmalı.
+    let mut wfd = paralel();
+    wfd.start[0].wft = wfd.transitions[0].wft.clone(); // t_fork'un parallel wft'i
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let req = actor_with_role("requester");
+
+    let err = engine
+        .start(
+            &wfd,
+            &req,
+            Uuid::nil(),
+            None,
+            &json!({"request": {"title": "X", "amount": 1}}),
+            Uuid::new_v4(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidWfd(m) if m.contains("start")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn branch_claim_timeout_measured_from_branch_claim() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfd = paralel();
+    wfd.nodes.get_mut("self__financeApprover").unwrap().claim_timeout =
+        Some(ClaimTimeout { after: "PT2H".into(), wft: None });
+
+    let fin = Uuid::new_v4();
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let claimed_at = wfes.branches[0].claimed_at.unwrap();
+
+    // kol sayacı kol claimed_at'ından ölçülür
+    assert!(!engine
+        .claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1), Some("self__financeApprover"))
+        .unwrap());
+    let now = claimed_at + Duration::hours(2) + Duration::seconds(1);
+    assert!(engine
+        .claim_timeout_due(&wfd, &wfes, now, Some("self__financeApprover"))
+        .unwrap());
+    // claim'siz kol asla due değil
+    assert!(!engine
+        .claim_timeout_due(&wfd, &wfes, now, Some("self__legalApprover"))
+        .unwrap());
+    // wfe-seviyesi sayaç paralel modda yok (claimed_at NULL)
+    assert!(!engine.claim_timeout_due(&wfd, &wfes, now, None).unwrap());
+
+    // wft'siz kol → Release (kol claim'inin sıfırlanması T3'te kol-farkında persist edilir)
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, Some("self__financeApprover"))
+        .await
+        .unwrap()
+    {
+        ClaimTimeoutOutcome::Release(entry) => {
+            assert_eq!(entry.action, "claim_timeout:self__financeApprover");
+            assert_eq!(entry.actor.role, "system");
+        }
+        ClaimTimeoutOutcome::Move(_) => panic!("wft yokken Release bekleniyordu"),
+    }
+}
+
+#[tokio::test]
+async fn branch_escalation_fires_from_branch_entered_at() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfd = paralel();
+    wfd.nodes
+        .get_mut("self__financeApprover")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P1D".into(),
+            wfes_effects: None,
+            wft: Some(Wft::Node { node: "self__resultCoordinator".into() }),
+            terminate: None,
+        });
+
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let entered_at = wfes.branches[0].entered_at;
+
+    // dwell KOL girişinden ölçülür
+    assert_eq!(
+        engine
+            .due_escalation(&wfd, &wfes, entered_at + Duration::hours(12), Some("self__financeApprover"))
+            .unwrap(),
+        None
+    );
+    let now = entered_at + Duration::days(1) + Duration::seconds(1);
+    assert_eq!(
+        engine
+            .due_escalation(&wfd, &wfes, now, Some("self__financeApprover"))
+            .unwrap(),
+        Some(0)
+    );
+    // wfe-seviyesi görünüm paralel modda dwell izlemez (current_node NULL)
+    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), None);
+
+    // escalation wft'i join'i hedefliyor → kol VARIŞ sayılır (2 aktif kol kaldı)
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, Some("self__financeApprover"))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node } if from_node == "self__financeApprover"),
+        "{:?}", commit.outcome
+    );
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["escalate:self__financeApprover:0", "_branch_arrived"]
+    );
+}
+
+#[tokio::test]
+async fn branch_escalation_terminate_cancels_sibling_branches() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfd = paralel();
+    wfd.nodes
+        .get_mut("self__financeApprover")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P1D".into(),
+            wfes_effects: None,
+            wft: None,
+            terminate: Some(true),
+        });
+
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let now = wfes.branches[0].entered_at + Duration::days(1) + Duration::seconds(1);
+
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, Some("self__financeApprover"))
+        .await
+        .unwrap();
+    let CommitOutcome::Terminated { end_response } = &commit.outcome else {
+        panic!("Terminated bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(end_response["reason"], json!("SLA.Dwell"));
+    assert_eq!(end_response["node"], json!("self__financeApprover"));
+    // yalnız DİĞER aktif kol (legal) iptal marker'ı alır
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["escalate:self__financeApprover:0", "_branch_cancelled"]
+    );
+    let cancel = &commit.wfah_entries[1];
+    assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
+    assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("terminated"));
+}
+
+#[tokio::test]
+async fn deadline_in_parallel_mode_cancels_all_active_branches() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let now = Utc::now();
+    wfes.deadline = Some(now - Duration::hours(1));
+    assert!(engine.deadline_due(&wfes, now));
+
+    let commit = engine.fire_deadline_timeout(&wfes, now);
+    let CommitOutcome::Terminated { end_response } = &commit.outcome else {
+        panic!("Terminated bekleniyordu");
+    };
+    assert_eq!(end_response["reason"], json!("SLA.Deadline"));
+    // her AKTİF kol için `_branch_cancelled` (arrived hr hariç)
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["timeout:deadline", "_branch_cancelled", "_branch_cancelled"]
+    );
+    let nodes: Vec<&Value> = commit.wfah_entries[1..]
+        .iter()
+        .map(|e| &e.input.as_ref().unwrap()["node"])
+        .collect();
+    assert_eq!(nodes, vec![&json!("self__financeApprover"), &json!("self__legalApprover")]);
+    assert_eq!(
+        commit.wfah_entries[1].input.as_ref().unwrap()["reason"],
+        json!("terminated")
+    );
 }

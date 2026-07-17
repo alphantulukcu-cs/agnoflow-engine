@@ -11,10 +11,11 @@ use axum::{
     Json, Router,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
+use wfe_core::v22::matcher::{authorize, MatchEnv};
 use wfe_core::v22::ports::WfdStore;
 
 pub fn router(state: AppState) -> Router {
@@ -49,6 +50,20 @@ struct PoolRow {
     claimed_at: Option<DateTime<Utc>>,
 }
 
+/// WOR-31 T4: paralel modda aktif bir kol satırı (`wf.wfe_branch` × `wf.wfe`).
+#[derive(Debug, sqlx::FromRow)]
+struct BranchPoolRow {
+    id: Uuid,
+    title: String,
+    workflow_id: Uuid,
+    wfd_version: i32,
+    branch_node: String,
+    created_at: DateTime<Utc>,
+    claimed_by: Option<Value>,
+    deadline: Option<DateTime<Utc>>,
+    claimed_at: Option<DateTime<Utc>>,
+}
+
 /// Response şekli — SLA görünüm alanları (2026-07-16): `priority` (1-10,
 /// otomatik) ve `claim_deadline` (claimed_at + node.claim_timeout).
 #[derive(Debug, Serialize)]
@@ -64,6 +79,11 @@ pub struct PoolTask {
     pub claimed_at: Option<DateTime<Utc>>,
     pub claim_deadline: Option<DateTime<Utc>>,
     pub priority: i32,
+    /// WOR-31 T4: paralel mod kol node'u — `Some` ise bu satır belirli bir
+    /// aktif kolu temsil eder (claim/action bu `node`'u geri geçirmelidir).
+    /// Paralel değilse `None` (geriye uyumlu — eski istemciler bu alanı yok sayar).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
 }
 
 async fn list_pool(
@@ -176,6 +196,130 @@ async fn list_pool(
             claimed_at: row.claimed_at,
             claim_deadline,
             priority,
+            node: None,
+        });
+    }
+
+    // WOR-31 T4: paralel WFE'ler yukarıdaki sorguda GÖRÜNMEZ — fork'ta wfe-seviyesi
+    // current_c_a/current_node/claimed_by temizlenir (current_c_a '[]' olur, hiçbir
+    // containment filtresi eşleşmez). Paralel her AKTİF kol ayrı bir satır olarak
+    // eklenir; kolun kendi `current_c_a` cache'i YOKTUR (v1 — minimal query
+    // uzantısı: schema değişikliği yerine adaylık burada matcher ile hesaplanır).
+    let branch_rows = sqlx::query_as::<_, BranchPoolRow>(
+        "SELECT e.wfe_id       AS id,
+                m.name         AS title,
+                e.wfd_id       AS workflow_id,
+                e.wfd_version,
+                b.branch_node,
+                e.created_at,
+                b.claimed_by,
+                e.deadline,
+                b.claimed_at
+         FROM wf.wfe_branch b
+         JOIN wf.wfe e
+           ON e.wfe_id = b.wfe_id
+         JOIN wf.wfd_meta m
+           ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
+         WHERE b.status     = 'active'
+           AND e.status     = 'active'
+           AND e.orgtnt_id  = $1
+           AND (e.deadline IS NULL OR e.deadline > now())
+         ORDER BY e.created_at ASC, b.branch_node ASC",
+    )
+    .bind(actor.orgtnt_id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    let portal_as_actor = to_actor(&actor);
+    // WFE başına TEK `load` (kol sayısınca DEĞİL) — dynctx/wfah adaylık matcher'ının
+    // (c_orgu ifadesi $ctx/$wfah'a bakabilir) ihtiyacı olan bağlamdır.
+    let mut wfes_cache: std::collections::HashMap<Uuid, wfe_core::v22::ports::Wfes> =
+        std::collections::HashMap::new();
+    for row in branch_rows {
+        if !wfes_cache.contains_key(&row.id) {
+            match s.executor.wfe.load(row.id).await {
+                Ok(w) => {
+                    wfes_cache.insert(row.id, w);
+                }
+                // silinmiş/tutarsız tek bir WFE tüm listeyi düşürmesin.
+                Err(_) => continue,
+            }
+        }
+        let wfes = wfes_cache.get(&row.id).unwrap();
+
+        let key = (row.workflow_id, row.wfd_version);
+        let wfd = match wfd_cache.get(&key) {
+            Some(w) => w,
+            None => match s.wfd.fetch(row.workflow_id, row.wfd_version).await {
+                Ok(w) => {
+                    wfd_cache.insert(key, w);
+                    wfd_cache.get(&key).unwrap()
+                }
+                Err(_) => continue,
+            },
+        };
+        let Some(node_def) = wfd.nodes.get(&row.branch_node) else {
+            continue;
+        };
+
+        let owner_match = row
+            .claimed_by
+            .as_ref()
+            .and_then(|cb| cb.get("user_id"))
+            .and_then(|u| u.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            == Some(actor.user_id);
+        // Rol/user eşleşmesi node.c_a üzerinden ANLIK hesaplanır (bkz. yukarıdaki
+        // yorum — kol-seviyesi denormalize cache yok); zaten claim edilmiş
+        // OLMASI eşleşmeyi ENGELLEMEZ (tek-node WFE'lerdeki mevcut davranışla
+        // aynı — pool "görünürlük", "claim edilebilirlik" değildir).
+        // listable[] grant'leri de tek-node yolundakiyle AYNI semantikle dahildir
+        // (pipeline::node_candidates fold'u — `when` guard'ı pool'da yok sayılır,
+        // over-inclusive cache kabulü; detay VIEW'ı can_view'da when'i değerlendirir).
+        let env = MatchEnv {
+            ctx: wfes.dynctx.as_value(),
+            wfah: &wfes.wfah,
+            orgtnt_id: wfes.orgtnt_id,
+        };
+        let mut candidate_match = owner_match
+            || authorize(&node_def.c_a, &portal_as_actor, env, &*s.executor.org)
+                .await
+                .unwrap_or(false);
+        if !candidate_match {
+            for rule in &wfd.listable {
+                if authorize(&rule.c_a, &portal_as_actor, env, &*s.executor.org)
+                    .await
+                    .unwrap_or(false)
+                {
+                    candidate_match = true;
+                    break;
+                }
+            }
+        }
+        if !candidate_match {
+            continue;
+        }
+
+        let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
+        let claim_deadline = wf_wfe::executor::compute_claim_deadline(
+            wfd,
+            Some(&row.branch_node),
+            row.claimed_at,
+        );
+        tasks.push(PoolTask {
+            id: row.id,
+            title: row.title,
+            workflow_id: row.workflow_id,
+            status: "active".into(),
+            current_node: Some(row.branch_node.clone()),
+            created_at: row.created_at,
+            claimed_by: row.claimed_by,
+            deadline: row.deadline,
+            claimed_at: row.claimed_at,
+            claim_deadline,
+            priority,
+            node: Some(row.branch_node),
         });
     }
 
@@ -202,14 +346,23 @@ struct CanClaimResponse {
     reason: Option<String>,
 }
 
+/// WOR-31 T4: paralel modda kol seçimi — `?node=<branch_node>`; birden fazla
+/// aktif kol varsa hangi kolun sorulduğunu belirtmek için gereklidir.
+#[derive(Deserialize)]
+struct NodeQuery {
+    #[serde(default)]
+    node: Option<String>,
+}
+
 async fn can_claim(
     State(s): State<AppState>,
     actor: PortalActor,
     Path(wfe_id): Path<Uuid>,
+    axum::extract::Query(q): axum::extract::Query<NodeQuery>,
 ) -> Result<Json<CanClaimResponse>, AppError> {
     let (can_claim, reason) = s
         .executor
-        .can_claim(wfe_id, &to_actor(&actor))
+        .can_claim(wfe_id, &to_actor(&actor), q.node.as_deref())
         .await
         .map_err(AppError::from)?;
     Ok(Json(CanClaimResponse { can_claim, reason }))
@@ -222,14 +375,29 @@ struct ClaimResponse {
     reason: Option<String>,
 }
 
+/// WOR-31 T4: gövde opsiyonel (bkz. `routes/wfe.rs::parse_claim_body`) — eski
+/// istemciler hiç body göndermez, `{"node": "..."}` paralel kol ipucu taşır.
+#[derive(Deserialize, Default)]
+struct ClaimBody {
+    #[serde(default)]
+    node: Option<String>,
+}
+
 async fn claim(
     State(s): State<AppState>,
     actor: PortalActor,
     Path(wfe_id): Path<Uuid>,
+    body: axum::body::Bytes,
 ) -> Result<Json<ClaimResponse>, AppError> {
+    let claim_body: ClaimBody = if body.is_empty() {
+        ClaimBody::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| AppError(format!("invalid claim body: {e}"), StatusCode::BAD_REQUEST))?
+    };
     let outcome = s
         .executor
-        .claim(wfe_id, &to_actor(&actor))
+        .claim(wfe_id, &to_actor(&actor), claim_body.node.as_deref())
         .await
         .map_err(AppError::from)?;
     if !outcome.success {

@@ -7,6 +7,7 @@ pub mod priority;
 pub mod repo;
 pub mod sim;
 pub mod runner;
+pub mod timer;
 pub mod wfe_adapter;
 
 pub use executor::WfeExecutor;

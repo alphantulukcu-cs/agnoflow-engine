@@ -107,6 +107,25 @@ v2.1 ile aynı: escalation zamanlayıcısı node-giriş anından başlar (WFAH't
 - Tanınmayan `wfd_version` = yükleme reddi. Root'ta bilinmeyen alan yasak.
 - Çalışan WFE'ler başladıkları WFD (id+version)'a sabitlenir; kural değişikliği yeni WFD versiyonu doğurur — node slug'ları bu sayede WFE ömrü boyunca kararlıdır. Versiyon-aşırı metrikler `label` üzerinden agregat edilmelidir.
 
+## 5b. Parallel Fork/Join Validation (WOR-31)
+
+`wft`'in 4. formu: `{"parallel": {"branches": [...], "join": {node|terminal}}}` (bkz.
+DECISIONS_v2_2.md WOR-31 — eski `WftRule::Parallel`'in WOR-25'te kaldırılışını
+yeniden tasarlayarak supersede eder; `join_when` YOK, join deklaratif bir hedef).
+`wfe-core/src/validator.rs::check_parallel`:
+
+- Parallel wft `start[].wft`'te YASAK.
+- `branches` ≥2 ve distinct; `join` kollardan biriyle aynı olamaz.
+- Branch subgraph'ları (fork'tan join/terminal'e kadar transition `wft` kenarları
+  izlenerek BFS) pairwise AYRIK olmalı; içlerinde nested Parallel YASAK; her biri
+  join node'a veya bir terminal'e ulaşabilmeli.
+- `check_graph` (§5) Parallel'i kenar kaynağı sayar: fork node → her branch +
+  fork → join hedefi (aksi halde branch/join node'ları hatalı biçimde
+  `WFD.Unreachable` görünür).
+
+Runtime yürütme semantiği (branch token, AND-join, iptal/SLA davranışı) T2 işinde
+kodlanacak; bu commit yalnızca model + validator + spec'i getirir.
+
 ## Symmetric start (v2.2)
 
 `start[]` artık `transitions[]` ile simetriktir: `{ id, from, action, wfes_effects?, trigger?, wft }`. `action` start aksiyonunun gerçek adıdır (ör. `"Akışı Hazırla"`) — rezerve sabit değildir, `actions{}` içinde normal bir ACT olarak tanımlanır. `c_a` startRule'dan kaldırılmıştır; `start[].from` ile referans edilen `nodes` girdisinin `c_a`'sı taşır. Start-node kimliği türetilmiştir — node'un kendisinde `kind` alanı YOKTUR; bir node, sadece bir `start[].from` tarafından referans edilerek start node olur.

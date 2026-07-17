@@ -22,6 +22,12 @@ impl From<EngineError> for AppError {
             EngineError::TransitionNotFound(_) => StatusCode::BAD_REQUEST,
             EngineError::WfeTerminal => StatusCode::CONFLICT,
             EngineError::WfeExpired => StatusCode::CONFLICT,
+            // WOR-31 T4: paralel modda aksiyon ≥2 aktif kolla eşleşip node hint
+            // verilmediğinde — mesajda aday kol node'ları taşınır (bkz. EngineError Display).
+            EngineError::AmbiguousAction { .. } => StatusCode::CONFLICT,
+            // WOR-31 T4: adapter'ın FOR UPDATE + CAS uyumsuzluğu — executor zaten
+            // 3 kez retry eder (bkz. WfeExecutor::apply); buraya sızarsa tükenmiştir.
+            EngineError::Conflict => StatusCode::CONFLICT,
             EngineError::StartNotEligible => StatusCode::FORBIDDEN,
             EngineError::NotClaimed => StatusCode::FORBIDDEN,
             EngineError::NotOwner => StatusCode::FORBIDDEN,

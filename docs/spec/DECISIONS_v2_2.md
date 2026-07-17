@@ -114,6 +114,65 @@ ZORUNDA — boş bildirim "start input almaz" demektir). Tüketici sözleşmesi:
 formları context şemasından değil, start aksiyonunun `input` tanımından üretilir
 (work-pool-portal `WorkflowsPage` buna geçirildi).
 
+## WOR-31 — Parallel fork/join yeniden tasarlandı
+
+**Not:** Spec kaynağı olan WFD-EDITOR reposu `docs/spec/`'inin bu değişiklikle
+senkronize edilmesi gerekir (follow-up iş).
+
+**Karar:** WOR-25'in kaldırdığı `WftRule::Parallel` **yeniden eklendi** — ama eski
+tasarım değil, sıfırdan: eski `Parallel` bir `join_when` ifadesi parse edip hiç
+kullanmıyordu (WOR-8 bug'ı); yeni tasarımda `join_when` YOK, join tamamen
+**deklaratif bir hedeftir** (`{node}` veya `{terminal}`), engine kendisi
+"son kol vardı mı" sayar — evaluate edilecek bir ifade yok, dolayısıyla o bug
+sınıfı kökten kapanır.
+
+**Şekil (WFT'nin 4. formu):**
+```json
+{"parallel": {"branches": ["node-a", "node-b"], "join": {"node": "x"}}}
+```
+`branches` paralel kollara giriş node id'leridir (≥2, distinct). `join`,
+`{node}` veya `{terminal}` — AND-join hedefi.
+
+**Çalışma zamanı semantiği (kısa özet — tam akış T2'de kodlanacak):**
+- Fork: bir transition'ın `wft`'i Parallel'e çözülünce WFE paralel moda girer;
+  her branch için ayrı bir "branch token" oluşur, her biri kendi branch
+  başlangıç node'undadır. `wfe.current_node` paralel modda `NULL`'dır.
+- Kol hareketi: bir kol normal bir node'a geçerse sadece o kolun token'ı hareket
+  eder (paralel mod devam eder).
+- Kol join'e varış: bir kolun `wft`'i join node'una eşit bir hedefe çözülürse o
+  kol **join node'a taşınmaz**, `arrived` işaretlenir. SON aktif kol vardığında
+  WFE paralel moddan çıkar: `current_node = join node` (join hedefi terminal ise
+  WFE o terminal'de biter). AND-join: cancel edilmemiş TÜM kolların varması
+  gerekir.
+- Kol terminal'e varış: bir kolun `wft`'i bir terminal'e çözülürse (ör. red
+  transition'ı) TÜM WFE o terminal'de biter; diğer TÜM kollar `cancelled`
+  olur (+ `_branch_cancelled` wfah kaydı). Bu, "bir kol reddederse akış durur"
+  semantiğinin modelidir — red, bir terminal'e transition olarak modellenir.
+- SLA/Fail/Terminated: WFE deadline'ı dolarsa veya trigger fail ederse tüm
+  kollar cancel edilir. Escalation/claim_timeout paralel modda **kol-bazlı**
+  hale gelir (her kolun kendi `claimed_by`/`claimed_at`/`entered_at`'ı vardır).
+- wfah system marker'ları: `_fork`, `_branch_arrived`, `_join`,
+  `_branch_cancelled` (aynı paylaşımlı seq counter).
+
+**Kısıtlar (v1, validator-enforced — `wfe-core/src/validator.rs::check_parallel`):**
+- Parallel wft `start[].wft`'te YASAK.
+- `branches` ≥2 ve distinct; her branch var olan bir node'a referans vermeli.
+- `join` var olan bir node/terminal'e referans vermeli; kollardan biriyle AYNI
+  OLAMAZ.
+- Nested fork YASAK: bir branch subgraph'ı (fork'tan join/terminal'e kadar,
+  transition `wft` kenarları izlenerek) içinde ikinci bir Parallel bulunamaz.
+- Branch subgraph'ları birbirinden AYRIK (disjoint node set) olmalı.
+- Her branch subgraph'ı join node'a veya bir terminal'e ulaşabilmeli (dead-end
+  yasak).
+- `check_graph` (§5, BFS reachability) Parallel'i de kenar kaynağı sayar: fork
+  node → her branch + fork → join hedefi.
+
+**Golden fixture (`example-wfd_kredi-basvuru_v2_2.json`) DEĞİŞMEDİ** — WOR-31
+ayrı bir fixture ile örneklenir: `docs/spec/example-wfd_paralel-onay_v2_2.json`
+(satın alma onayı: review node'undan finans/hukuk/ik kollarına fork, her kolda
+bir onay node'u — approve → join, reject → red terminal — join'de sonuç node'u
+ve nihai transition ile başarı terminal'i).
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

@@ -21,8 +21,8 @@ use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{
-    ActionDef, AutoexecDef, CandidateActor, EscalationStep, TriggerInvocation, Wfd, Wft,
-    WftTarget,
+    ActionDef, AutoexecDef, CandidateActor, EscalationStep, Transition, TriggerInvocation, Wfd,
+    Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
@@ -30,7 +30,8 @@ use crate::v22::effects::{apply_effects, get_path, resolve_value, set_path, Effe
 use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize, MatchEnv};
 use crate::v22::ports::{
-    AutoexecRunner, CommitOutcome, ExecEnv, ExecFailure, NewWfe, TransitionCommit, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, NewWfe,
+    TransitionCommit, Wfes,
 };
 use crate::v22::resolver::resolve_c_orgu;
 use chrono::{DateTime, Utc};
@@ -149,8 +150,8 @@ impl<'a> Engine<'a> {
         let mut seq = 1u32;
 
         // SLA-3: efektif deadline çözümü — deadline verildi → now+parse(deadline)
-        // (timeout tavanına tabi); verilmedi ve wfd.timeout var → now+parse(timeout);
-        // ikisi de yok → NULL.
+        // (wfd.timeout tavanına tabi DEĞİL, çağıran serbestçe uzatabilir);
+        // verilmedi ve wfd.timeout var → now+parse(timeout); ikisi de yok → NULL.
         // Çağıran girdisindeki parse hatası InvalidInput'tur (InvalidWfd değil —
         // kusur WFD'de değil, istekte) ve beklenen biçimi tarif etmelidir.
         let parse_caller_deadline = |d: &str| {
@@ -161,17 +162,7 @@ impl<'a> Engine<'a> {
             })
         };
         let resolved_deadline: Option<DateTime<Utc>> = match (deadline, &wfd.timeout) {
-            (Some(d), Some(t)) => {
-                let dur = parse_caller_deadline(d)?;
-                let ceiling = parse_iso8601_duration(t)?;
-                if dur > ceiling {
-                    return Err(EngineError::InvalidInput(format!(
-                        "deadline '{d}' WFD timeout '{t}' değerini aşamaz"
-                    )));
-                }
-                Some(now + dur)
-            }
-            (Some(d), None) => Some(now + parse_caller_deadline(d)?),
+            (Some(d), _) => Some(now + parse_caller_deadline(d)?),
             (None, Some(t)) => Some(now + parse_iso8601_duration(t)?),
             (None, None) => None,
         };
@@ -225,6 +216,7 @@ impl<'a> Engine<'a> {
                 wfe_id,
                 Some(input),
                 orgtnt_id,
+                WftMode::Start,
             )
             .await?;
 
@@ -248,6 +240,10 @@ impl<'a> Engine<'a> {
 
     // ---------------------------------------------------------------- apply
 
+    /// `node_hint`: WOR-31 — paralel modda aksiyon birden fazla aktif kolun
+    /// transition'ıyla eşleşebilir; çağıran kol node'unu vererek belirsizliği
+    /// çözer. Paralel mod dışında `None` eski davranıştır; verilirse
+    /// current_node ile örtüşmek zorundadır.
     pub async fn apply(
         &self,
         wfd: &Wfd,
@@ -255,6 +251,7 @@ impl<'a> Engine<'a> {
         actor: &Actor,
         action: &str,
         input: &Value,
+        node_hint: Option<&str>,
     ) -> Result<TransitionCommit, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Err(EngineError::WfeTerminal);
@@ -265,10 +262,24 @@ impl<'a> Engine<'a> {
         if self.deadline_due(wfes, Utc::now()) {
             return Err(EngineError::WfeExpired);
         }
+        // WOR-31: paralel mod — adaylar tek current_node yerine TÜM aktif kol
+        // node'ları üzerinden aranır (kol-bazlı assignment kontrolüyle).
+        if wfes.join_target.is_some() {
+            return self
+                .apply_parallel(wfd, wfes, actor, action, input, node_hint)
+                .await;
+        }
         let current_node = wfes
             .current_node
             .as_deref()
             .ok_or_else(|| EngineError::InvalidWfd("aktif WFE'nin current_node'u yok".into()))?;
+        if let Some(hint) = node_hint {
+            if hint != current_node {
+                return Err(EngineError::InvalidInput(format!(
+                    "node '{hint}' bu WFE'nin aktif node'u değil ('{current_node}')"
+                )));
+            }
+        }
 
         // §7.1 — assignment / owner kontrolü
         match wfes.assigned_to {
@@ -372,8 +383,183 @@ impl<'a> Engine<'a> {
                 wfes.wfe_id,
                 Some(input),
                 wfes.orgtnt_id,
+                WftMode::Single,
             )
             .await?;
+
+        // WOR-31: wft Parallel'e çözüldüyse `_fork` marker'ı engine tarafından staged.
+        stage_parallel_markers(wfes, None, &outcome, &mut wfah_entries, &mut seq, now);
+
+        Ok(TransitionCommit {
+            wfe_id: wfes.wfe_id,
+            orgtnt_id: wfes.orgtnt_id,
+            new_dynctx: final_ctx,
+            wfah_entries,
+            outcome,
+            resolved_c_a,
+        })
+    }
+
+    // ------------------------------------------------------- apply (parallel)
+
+    /// WOR-31 — paralel modda apply: aday transitions TÜM aktif kol node'ları
+    /// üzerinden aranır; her kol için array sırasında ilk when-match geçerlidir.
+    /// Aksiyon ≥2 farklı kolun transition'ıyla eşleşir ve `node_hint` verilmemişse
+    /// `AmbiguousAction` (kol subgraph'ları ayrık olduğundan tek kol eşleşmesi
+    /// kesin sahiplik verir). Assignment/owner kontrolü KOL-bazlıdır.
+    async fn apply_parallel(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        actor: &Actor,
+        action: &str,
+        input: &Value,
+        node_hint: Option<&str>,
+    ) -> Result<TransitionCommit, EngineError> {
+        let join = wfes
+            .join_target
+            .as_ref()
+            .expect("apply_parallel yalnız paralel modda çağrılır");
+        let active: Vec<&BranchState> = wfes
+            .branches
+            .iter()
+            .filter(|b| b.status == BranchStatus::Active)
+            .collect();
+        if let Some(hint) = node_hint {
+            if !active.iter().any(|b| b.branch_node == hint) {
+                return Err(EngineError::InvalidInput(format!(
+                    "node '{hint}' aktif bir paralel kol değil"
+                )));
+            }
+        }
+
+        // §7.3–7.4 kol-bazlı aday seçimi
+        let ctx = wfes.dynctx.as_value().clone();
+        let mut matched: Vec<(&BranchState, &Transition)> = Vec::new();
+        for b in active.iter().copied() {
+            if node_hint.is_some_and(|h| h != b.branch_node) {
+                continue;
+            }
+            for t in &wfd.transitions {
+                if t.action != action || !t.from.contains(&b.branch_node) {
+                    continue;
+                }
+                let matches = match &t.when {
+                    None => true,
+                    Some(expr) => {
+                        let env = EvalEnv::new(&ctx)
+                            .with_wfah(&wfes.wfah)
+                            .with_node(Some(&b.branch_node))
+                            .with_actor(actor)
+                            .with_wfe_id(wfes.wfe_id)
+                            .with_action_input(input);
+                        evaluate_bool(expr, &env)?
+                    }
+                };
+                if matches {
+                    matched.push((b, t));
+                    break;
+                }
+            }
+        }
+        let (branch, transition) = match matched.len() {
+            0 => return Err(EngineError::TransitionNotFound(action.to_string())),
+            1 => matched[0],
+            _ => {
+                return Err(EngineError::AmbiguousAction {
+                    action: action.to_string(),
+                    candidates: matched.iter().map(|(b, _)| b.branch_node.clone()).collect(),
+                })
+            }
+        };
+        let branch_node = branch.branch_node.as_str();
+
+        // §7.1 — assignment/owner kontrolü KOL üzerinden (paralel modda
+        // wfe-seviyesi assigned_to NULL'dır).
+        match branch.claimed_by {
+            None => return Err(EngineError::NotClaimed),
+            Some(owner) if owner != actor.user_id => return Err(EngineError::NotOwner),
+            _ => {}
+        }
+
+        // §7.2 — ek yetki kısıtı
+        if let Some(extra_rule) = &transition.c_a {
+            let env = MatchEnv { ctx: &ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+            if !authorize(extra_rule, actor, env, self.org).await? {
+                return Err(EngineError::PermissionDenied(action.to_string()));
+            }
+        }
+
+        // §7.5 — input validation + declared path'lerin ctx'e yazımı
+        let action_def = wfd
+            .actions
+            .get(action)
+            .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
+        let mut staged = merge_action_input(&ctx, action_def, input)?;
+
+        let now = Utc::now();
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let mut wfah_entries: Vec<WfahEntry> = Vec::new();
+
+        // §7.6 — transition effects STAGED
+        if let Some(effects) = &transition.wfes_effects {
+            let env = EffectEnv {
+                actor,
+                wfe_id: wfes.wfe_id,
+                node: Some(branch_node),
+                action_input: Some(input),
+                exec_result: None,
+                now,
+            };
+            staged = apply_effects(&staged, effects, &env)?;
+        }
+
+        wfah_entries.push(WfahEntry {
+            seq,
+            action: action.to_string(),
+            actor: actor.clone(),
+            input: Some(input.clone()),
+            applied_at: now,
+        });
+        seq += 1;
+
+        // §7.7 — trigger'lar (node bağlamı = kol node'u)
+        self.run_triggers(
+            &transition.trigger,
+            wfd,
+            &mut staged,
+            &mut wfah_entries,
+            &mut seq,
+            actor,
+            wfes.wfe_id,
+            Some(branch_node),
+            Some(input),
+            &wfes.wfah,
+            wfes.orgtnt_id,
+        )
+        .await?;
+
+        // §7.8 — wft, kol bağlamıyla (varış / kol hareketi / WFE-terminal ayrımı)
+        let (outcome, resolved_c_a, final_ctx) = self
+            .resolve_wft(
+                &transition.wft,
+                wfd,
+                staged,
+                &wfes.wfah,
+                actor,
+                wfes.wfe_id,
+                Some(input),
+                wfes.orgtnt_id,
+                WftMode::Branch {
+                    join,
+                    from_node: branch_node,
+                    others_active: active.len() - 1,
+                },
+            )
+            .await?;
+
+        // WOR-31 marker'ları: `_branch_arrived` / sibling `_branch_cancelled`
+        stage_parallel_markers(wfes, Some(branch_node), &outcome, &mut wfah_entries, &mut seq, now);
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -387,11 +573,17 @@ impl<'a> Engine<'a> {
 
     // ---------------------------------------------------------------- claim
 
+    /// `branch`: WOR-31 — paralel modda claim KOL-bazlıdır (node adıyla). Kol
+    /// node'u verilirse uygunluk O KOLUN node'unun c_a'sına göre + o kolun kendi
+    /// claim durumuna göre değerlendirilir (wfe-seviyesi assigned_to yerine).
+    /// `None` paralel-olmayan davranıştır: paralel modda `None` gelirse
+    /// current_node NULL olduğundan `NotEligible` döner.
     pub async fn can_claim(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         actor: &Actor,
+        branch: Option<&str>,
     ) -> Result<ClaimCheck, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Ok(ClaimCheck::Terminal);
@@ -402,11 +594,28 @@ impl<'a> Engine<'a> {
         if self.deadline_due(wfes, Utc::now()) {
             return Ok(ClaimCheck::Expired);
         }
-        if wfes.assigned_to.is_some() {
-            return Ok(ClaimCheck::AlreadyClaimed);
-        }
-        let Some(node_key) = wfes.current_node.as_deref() else {
-            return Ok(ClaimCheck::NotEligible);
+        // WOR-31: paralel modda claim KOL-bazlıdır (node adıyla). Kol claim'i
+        // o kolun `BranchState.claimed_by`'ından okunur; wfe-seviyesi assigned_to
+        // paralel modda NULL'dır.
+        let node_key = match branch {
+            Some(b) => {
+                let Some(bs) = active_branch(wfes, b) else {
+                    return Ok(ClaimCheck::NotEligible);
+                };
+                if bs.claimed_by.is_some() {
+                    return Ok(ClaimCheck::AlreadyClaimed);
+                }
+                b
+            }
+            None => {
+                if wfes.assigned_to.is_some() {
+                    return Ok(ClaimCheck::AlreadyClaimed);
+                }
+                let Some(node_key) = wfes.current_node.as_deref() else {
+                    return Ok(ClaimCheck::NotEligible);
+                };
+                node_key
+            }
         };
         let Some(node) = wfd.nodes.get(node_key) else {
             return Ok(ClaimCheck::NotEligible);
@@ -423,25 +632,44 @@ impl<'a> Engine<'a> {
     // ------------------------------------------------------ possible actions
 
     /// Owner'ın şu an gerçekleştirebileceği action adları.
+    /// `branch`: WOR-31 — paralel modda kol node'u verilirse mümkün aksiyonlar
+    /// O KOLUN node'una ve KOLUN claimed_by'ına göre hesaplanır (wfe-seviyesi
+    /// current_node/assigned_to yerine). `None` paralel-olmayan eski davranış;
+    /// paralel modda `None` ile çağrılırsa current_node NULL olduğundan boş
+    /// döner — T4 (executor/route seviyesi) aktif kollar üzerinden birleşim
+    /// kurmak için bu fonksiyonu her aktif kol için ayrı çağırır.
     pub async fn possible_actions(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         actor: &Actor,
+        branch: Option<&str>,
     ) -> Result<Vec<String>, EngineError> {
-        if is_terminal_class(&wfes.status) || wfes.assigned_to != Some(actor.user_id) {
+        if is_terminal_class(&wfes.status) {
             return Ok(vec![]);
         }
         if self.deadline_due(wfes, Utc::now()) {
             return Ok(vec![]);
         }
-        let Some(current_node) = wfes.current_node.as_deref() else {
-            return Ok(vec![]);
+        let (node_key, owner) = match branch {
+            Some(b) => match active_branch(wfes, b) {
+                Some(bs) => (b, bs.claimed_by),
+                None => return Ok(vec![]),
+            },
+            None => {
+                let Some(nk) = wfes.current_node.as_deref() else {
+                    return Ok(vec![]);
+                };
+                (nk, wfes.assigned_to)
+            }
         };
+        if owner != Some(actor.user_id) {
+            return Ok(vec![]);
+        }
         let ctx = wfes.dynctx.as_value().clone();
         let mut actions = Vec::new();
         for t in &wfd.transitions {
-            if !t.from.contains(current_node) || actions.contains(&t.action) {
+            if !t.from.contains(node_key) || actions.contains(&t.action) {
                 continue;
             }
             let when_ok = match &t.when {
@@ -449,7 +677,7 @@ impl<'a> Engine<'a> {
                 Some(expr) => {
                     let env = EvalEnv::new(&ctx)
                         .with_wfah(&wfes.wfah)
-                        .with_node(Some(current_node))
+                        .with_node(Some(node_key))
                         .with_actor(actor)
                         .with_wfe_id(wfes.wfe_id);
                     // input'a bağlı guard'lar input'suz değerlendirilemez — aday sayılır
@@ -477,33 +705,47 @@ impl<'a> Engine<'a> {
     /// `due_escalation` ortak temeli. Node'a giriş anı son WFAH kaydından
     /// türetilir; ateşlenen adımlar `escalate:<node>:<idx>` WFAH kayıtlarıyla
     /// izlenir.
+    /// `branch`: WOR-31 — paralel modda dwell KOL-bazlıdır; kol node'u verilirse
+    /// giriş anı `BranchState.entered_at`'tan okunur (WFAH türetimi değil).
+    /// `None` paralel mod dışındaki eski davranıştır (paralel modda `None` ile
+    /// çağrılırsa `current_node` NULL olduğundan `None` döner).
     pub fn next_escalation(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         now: DateTime<Utc>,
+        branch: Option<&str>,
     ) -> Result<Option<EscalationForecast>, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Ok(None);
         }
-        let Some(node_key) = wfes.current_node.as_deref() else {
-            return Ok(None);
+        let (node_key, entered_at) = match branch {
+            Some(b) => match active_branch(wfes, b) {
+                Some(bs) => (b, bs.entered_at),
+                None => return Ok(None),
+            },
+            None => {
+                let Some(node_key) = wfes.current_node.as_deref() else {
+                    return Ok(None);
+                };
+                // Node giriş zamanı = current_node'a taşınmadan sonraki son insan/sistem eylemi;
+                // escalation marker'ları HARİÇ tutulur, aksi halde her adım bir öncekinin
+                // marker'ından ölçülür ve N≥1 adımların `after`'ı kayar (spec: hepsi node
+                // girişinden ölçülür).
+                let Some(entered_at) = wfes
+                    .wfah
+                    .entries()
+                    .iter()
+                    .filter(|e| !e.action.starts_with("escalate:"))
+                    .last()
+                    .map(|e| e.applied_at)
+                else {
+                    return Ok(None);
+                };
+                (node_key, entered_at)
+            }
         };
         let Some(node) = wfd.nodes.get(node_key) else {
-            return Ok(None);
-        };
-        // Node giriş zamanı = current_node'a taşınmadan sonraki son insan/sistem eylemi;
-        // escalation marker'ları HARİÇ tutulur, aksi halde her adım bir öncekinin
-        // marker'ından ölçülür ve N≥1 adımların `after`'ı kayar (spec: hepsi node
-        // girişinden ölçülür).
-        let Some(entered_at) = wfes
-            .wfah
-            .entries()
-            .iter()
-            .filter(|e| !e.action.starts_with("escalate:"))
-            .last()
-            .map(|e| e.applied_at)
-        else {
             return Ok(None);
         };
         for (idx, step) in node.escalation.iter().enumerate() {
@@ -530,14 +772,16 @@ impl<'a> Engine<'a> {
     }
 
     /// Süresi dolan ilk escalation adımının index'i (M6/§8).
+    /// `branch`: bkz. `next_escalation`.
     pub fn due_escalation(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         now: DateTime<Utc>,
+        branch: Option<&str>,
     ) -> Result<Option<usize>, EngineError> {
         Ok(self
-            .next_escalation(wfd, wfes, now)?
+            .next_escalation(wfd, wfes, now, branch)?
             .filter(|f| f.overdue)
             .map(|f| f.step_idx))
     }
@@ -546,17 +790,30 @@ impl<'a> Engine<'a> {
     /// taşımada assignment temizlenir (store commit'i her MoveTo'da temizler).
     /// SLA-2 (2026-07-16): `terminate: true` ise wft'e bakılmaksızın instance
     /// `terminated` olur (end_response `{"reason":"SLA.Dwell","node":...}`).
+    /// `branch`: WOR-31 — paralel modda escalation KOL-bazlı ateşlenir; kol
+    /// node'u verilirse adım o kolun node tanımından okunur ve wft çözümü
+    /// paralel-farkında yapılır (varış / kol hareketi / WFE-terminal).
     pub async fn fire_escalation(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         step_idx: usize,
         now: DateTime<Utc>,
+        branch: Option<&str>,
     ) -> Result<TransitionCommit, EngineError> {
-        let node_key = wfes
-            .current_node
-            .as_deref()
-            .ok_or_else(|| EngineError::InvalidWfd("escalation için current_node yok".into()))?;
+        let node_key = match branch {
+            Some(b) => {
+                if active_branch(wfes, b).is_none() {
+                    return Err(EngineError::InvalidWfd(format!(
+                        "escalation için aktif kol yok: '{b}'"
+                    )));
+                }
+                b
+            }
+            None => wfes.current_node.as_deref().ok_or_else(|| {
+                EngineError::InvalidWfd("escalation için current_node yok".into())
+            })?,
+        };
         let step: &EscalationStep = wfd
             .nodes
             .get(node_key)
@@ -579,24 +836,28 @@ impl<'a> Engine<'a> {
             staged = apply_effects(&staged, effects, &env)?;
         }
 
-        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
-        let wfah_entries = vec![WfahEntry {
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let mut wfah_entries = vec![WfahEntry {
             seq,
             action: escalation_marker(node_key, step_idx),
             actor: system.clone(),
             input: Some(json!({"after": step.after})),
             applied_at: now,
         }];
+        seq += 1;
 
         if step.terminate == Some(true) {
+            let outcome = CommitOutcome::Terminated {
+                end_response: json!({"reason": "SLA.Dwell", "node": node_key}),
+            };
+            // WOR-31: paralel modda terminate diğer aktif kolları da iptal eder.
+            stage_parallel_markers(wfes, branch, &outcome, &mut wfah_entries, &mut seq, now);
             return Ok(TransitionCommit {
                 wfe_id: wfes.wfe_id,
                 orgtnt_id: wfes.orgtnt_id,
                 new_dynctx: staged,
                 wfah_entries,
-                outcome: CommitOutcome::Terminated {
-                    end_response: json!({"reason": "SLA.Dwell", "node": node_key}),
-                },
+                outcome,
                 resolved_c_a: vec![],
             });
         }
@@ -607,9 +868,34 @@ impl<'a> Engine<'a> {
                 "escalation adımı wft veya terminate içermeli: {node_key}[{step_idx}]"
             ))
         })?;
+        let mode = match (branch, wfes.join_target.as_ref()) {
+            (Some(b), Some(join)) => WftMode::Branch {
+                join,
+                from_node: b,
+                others_active: active_others(wfes, b),
+            },
+            (Some(_), None) => {
+                return Err(EngineError::InvalidWfd(
+                    "kol escalation'ı için WFE paralel modda değil".into(),
+                ))
+            }
+            (None, _) => WftMode::Single,
+        };
         let (outcome, resolved_c_a, final_ctx) = self
-            .resolve_wft(wft, wfd, staged, &wfes.wfah, &system, wfes.wfe_id, None, wfes.orgtnt_id)
+            .resolve_wft(
+                wft,
+                wfd,
+                staged,
+                &wfes.wfah,
+                &system,
+                wfes.wfe_id,
+                None,
+                wfes.orgtnt_id,
+                mode,
+            )
             .await?;
+
+        stage_parallel_markers(wfes, branch, &outcome, &mut wfah_entries, &mut seq, now);
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -636,22 +922,27 @@ impl<'a> Engine<'a> {
     /// Engine-defined SLA sonlanması: WFE `terminated`'a alınır (§5'teki
     /// `Failed`/`error`'dan AYRI — SLA ihlali hata değildir).
     pub fn fire_deadline_timeout(&self, wfes: &Wfes, now: DateTime<Utc>) -> TransitionCommit {
-        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let system = system_actor();
+        let mut wfah_entries = vec![WfahEntry {
+            seq,
+            action: "timeout:deadline".into(),
+            actor: system,
+            input: Some(json!({"deadline": wfes.deadline})),
+            applied_at: now,
+        }];
+        seq += 1;
+        let outcome = CommitOutcome::Terminated {
+            end_response: json!({"reason": "SLA.Deadline"}),
+        };
+        // WOR-31: paralel modda deadline TÜM aktif kolları iptal eder.
+        stage_parallel_markers(wfes, None, &outcome, &mut wfah_entries, &mut seq, now);
         TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: wfes.dynctx.as_value().clone(),
-            wfah_entries: vec![WfahEntry {
-                seq,
-                action: "timeout:deadline".into(),
-                actor: system,
-                input: Some(json!({"deadline": wfes.deadline})),
-                applied_at: now,
-            }],
-            outcome: CommitOutcome::Terminated {
-                end_response: json!({"reason": "SLA.Deadline"}),
-            },
+            wfah_entries,
+            outcome,
             resolved_c_a: vec![],
         }
     }
@@ -661,20 +952,32 @@ impl<'a> Engine<'a> {
     /// Claim timeout (SLA-1) süresi doldu mu? — node'un `claim_timeout.after`'ı
     /// `wfes.claimed_at`'tan itibaren ölçülür; unassigned/terminal-class/
     /// claim_timeout tanımsız node'da her zaman false.
+    /// `branch`: WOR-31 — paralel modda claim KOL-bazlıdır; kol node'u verilirse
+    /// sayaç `BranchState.claimed_at`'tan ölçülür.
     pub fn claim_timeout_due(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         now: DateTime<Utc>,
+        branch: Option<&str>,
     ) -> Result<bool, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Ok(false);
         }
-        let Some(claimed_at) = wfes.claimed_at else {
-            return Ok(false);
-        };
-        let Some(node_key) = wfes.current_node.as_deref() else {
-            return Ok(false);
+        let (node_key, claimed_at) = match branch {
+            Some(b) => match active_branch(wfes, b).and_then(|bs| bs.claimed_at) {
+                Some(c) => (b, c),
+                None => return Ok(false),
+            },
+            None => {
+                let Some(claimed_at) = wfes.claimed_at else {
+                    return Ok(false);
+                };
+                let Some(node_key) = wfes.current_node.as_deref() else {
+                    return Ok(false);
+                };
+                (node_key, claimed_at)
+            }
         };
         let Some(node) = wfd.nodes.get(node_key) else {
             return Ok(false);
@@ -689,16 +992,29 @@ impl<'a> Engine<'a> {
     /// benzeri node/terminal taşıması (assignment zaten commit'te temizlenir);
     /// verilmemişse yalnızca claimed_by/claimed_at CAS ile temizlenir (sayaç
     /// sıfırlanır, node DEĞİŞMEZ) — `WfeStore::release_claim` ile persist edilir.
+    /// `branch`: WOR-31 — paralel modda kol node'u verilir; Release yolu kolun
+    /// claim'inin sıfırlanmasını temsil eder (persist T3'te kol-farkında),
+    /// Move yolu paralel-farkında wft çözümünden geçer.
     pub async fn fire_claim_timeout(
         &self,
         wfd: &Wfd,
         wfes: &Wfes,
         now: DateTime<Utc>,
+        branch: Option<&str>,
     ) -> Result<ClaimTimeoutOutcome, EngineError> {
-        let node_key = wfes
-            .current_node
-            .as_deref()
-            .ok_or_else(|| EngineError::InvalidWfd("claim timeout için current_node yok".into()))?;
+        let node_key = match branch {
+            Some(b) => {
+                if active_branch(wfes, b).is_none() {
+                    return Err(EngineError::InvalidWfd(format!(
+                        "claim timeout için aktif kol yok: '{b}'"
+                    )));
+                }
+                b
+            }
+            None => wfes.current_node.as_deref().ok_or_else(|| {
+                EngineError::InvalidWfd("claim timeout için current_node yok".into())
+            })?,
+        };
         let node = wfd
             .nodes
             .get(node_key)
@@ -707,7 +1023,7 @@ impl<'a> Engine<'a> {
             EngineError::InvalidWfd(format!("node '{node_key}' claim_timeout taşımıyor"))
         })?;
         let system = system_actor();
-        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let marker = format!("claim_timeout:{node_key}");
 
         match &ct.wft {
@@ -729,13 +1045,27 @@ impl<'a> Engine<'a> {
                 } else {
                     Wft::Terminal { terminal: target.clone() }
                 };
-                let wfah_entries = vec![WfahEntry {
+                let mut wfah_entries = vec![WfahEntry {
                     seq,
                     action: marker,
                     actor: system.clone(),
                     input: Some(json!({"after": ct.after, "wft": target})),
                     applied_at: now,
                 }];
+                seq += 1;
+                let mode = match (branch, wfes.join_target.as_ref()) {
+                    (Some(b), Some(join)) => WftMode::Branch {
+                        join,
+                        from_node: b,
+                        others_active: active_others(wfes, b),
+                    },
+                    (Some(_), None) => {
+                        return Err(EngineError::InvalidWfd(
+                            "kol claim timeout'u için WFE paralel modda değil".into(),
+                        ))
+                    }
+                    (None, _) => WftMode::Single,
+                };
                 let staged = wfes.dynctx.as_value().clone();
                 let (outcome, resolved_c_a, final_ctx) = self
                     .resolve_wft(
@@ -747,8 +1077,10 @@ impl<'a> Engine<'a> {
                         wfes.wfe_id,
                         None,
                         wfes.orgtnt_id,
+                        mode,
                     )
                     .await?;
+                stage_parallel_markers(wfes, branch, &outcome, &mut wfah_entries, &mut seq, now);
                 Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
                     wfe_id: wfes.wfe_id,
                     orgtnt_id: wfes.orgtnt_id,
@@ -939,6 +1271,8 @@ impl<'a> Engine<'a> {
 
     /// §7.8 — WFT çözümü. Terminal'de terminal.wfes_effects uygulanır ve
     /// wfe_end_response $-string'leri FINAL staged ctx ile çözülür (M9/WOR-42).
+    /// `mode`: WOR-31 — Parallel hedefin ve paralel kol bağlamının sınıflaması
+    /// (bkz. `WftMode`).
     #[allow(clippy::too_many_arguments)]
     async fn resolve_wft(
         &self,
@@ -950,10 +1284,54 @@ impl<'a> Engine<'a> {
         wfe_id: Uuid,
         action_input: Option<&Value>,
         orgtnt_id: Uuid,
+        mode: WftMode<'_>,
     ) -> Result<(CommitOutcome, Vec<ResolvedCandidate>, Value), EngineError> {
         let target = match wft {
             Wft::Node { node } => Target::Node(node.clone()),
             Wft::Terminal { terminal } => Target::Terminal(terminal.clone()),
+            // WOR-31: fork — yalnız tekil modda geçerli. Start'ta ve paralel
+            // modda (nested) validator zaten reddeder; runtime yine de korunur.
+            Wft::Parallel { parallel } => {
+                return match mode {
+                    WftMode::Start => Err(EngineError::InvalidWfd(
+                        "start wft'i parallel olamaz (WOR-31)".into(),
+                    )),
+                    WftMode::Branch { .. } => Err(EngineError::InvalidWfd(
+                        "nested parallel çalıştırılamaz (WOR-31)".into(),
+                    )),
+                    WftMode::Single => {
+                        // Aday cache'i tüm kol giriş node'larının birleşimi —
+                        // kol-bazlı havuz görünümü T3'te wfe_branch satırlarından
+                        // türetilir; buradaki union liste görünürlüğü içindir.
+                        let mut resolved = Vec::new();
+                        for b in &parallel.branches {
+                            let node = wfd.nodes.get(b).ok_or_else(|| {
+                                EngineError::InvalidWfd(format!(
+                                    "parallel branch bilinmeyen node '{b}'"
+                                ))
+                            })?;
+                            let mut extra = self
+                                .resolve_candidates(&node.c_a, &staged, wfah, actor, orgtnt_id)
+                                .await?;
+                            resolved.append(&mut extra);
+                        }
+                        for listable in &wfd.listable {
+                            let mut extra = self
+                                .resolve_candidates(&listable.c_a, &staged, wfah, actor, orgtnt_id)
+                                .await?;
+                            resolved.append(&mut extra);
+                        }
+                        Ok((
+                            CommitOutcome::ForkTo {
+                                branches: parallel.branches.clone(),
+                                join: parallel.join.clone(),
+                            },
+                            resolved,
+                            staged,
+                        ))
+                    }
+                };
+            }
             Wft::Conditional {
                 conditions,
                 default,
@@ -991,61 +1369,156 @@ impl<'a> Engine<'a> {
             }
         };
 
+        // WOR-31 kol bağlamı: hedef join'e EŞİTSE varış (kol arrived, join node
+        // işgal edilmez); normal node ise kol hareketi; join'den FARKLI bir
+        // terminal ise aşağıdaki normal terminal yoluna düşer — TÜM WFE orada
+        // biter (sibling `_branch_cancelled` marker'ları çağıranda staged edilir).
+        if let WftMode::Branch { join, from_node, others_active } = mode {
+            let arrived = match (&target, join) {
+                (Target::Node(n), WftTarget::Node { node }) => n == node,
+                (Target::Terminal(t), WftTarget::Terminal { terminal }) => t == terminal,
+                _ => false,
+            };
+            if arrived {
+                if others_active > 0 {
+                    // Engine'in görüşü: başka aktif kol var — yarış varsa adapter
+                    // doğrulaması + executor retry düzeltir (T3).
+                    return Ok((
+                        CommitOutcome::BranchArrived { from_node: from_node.to_string() },
+                        vec![],
+                        staged,
+                    ));
+                }
+                // Son varış: paralel mod biter, join hedefine promotion.
+                return match join {
+                    WftTarget::Node { node } => {
+                        let resolved = self
+                            .node_candidates(node, wfd, &staged, wfah, actor, orgtnt_id)
+                            .await?;
+                        Ok((
+                            CommitOutcome::JoinComplete {
+                                from_node: from_node.to_string(),
+                                next: Box::new(CommitOutcome::MoveTo { node: node.clone() }),
+                            },
+                            resolved,
+                            staged,
+                        ))
+                    }
+                    WftTarget::Terminal { terminal } => {
+                        let (end_response, final_ctx) = self.terminal_outcome(
+                            terminal,
+                            wfd,
+                            staged,
+                            actor,
+                            wfe_id,
+                            action_input,
+                        )?;
+                        Ok((
+                            CommitOutcome::JoinComplete {
+                                from_node: from_node.to_string(),
+                                next: Box::new(CommitOutcome::Terminal { end_response }),
+                            },
+                            vec![],
+                            final_ctx,
+                        ))
+                    }
+                };
+            }
+            if let Target::Node(node_key) = &target {
+                // Normal kol hareketi — paralel mod sürer; kol claim'i +
+                // entered_at adapter'da sıfırlanır (T3).
+                let resolved = self
+                    .node_candidates(node_key, wfd, &staged, wfah, actor, orgtnt_id)
+                    .await?;
+                return Ok((
+                    CommitOutcome::BranchMoveTo {
+                        from_node: from_node.to_string(),
+                        node: node_key.clone(),
+                    },
+                    resolved,
+                    staged,
+                ));
+            }
+        }
+
         match target {
             Target::Node(node_key) => {
-                let node = wfd.nodes.get(&node_key).ok_or_else(|| {
-                    EngineError::InvalidWfd(format!("wft hedefi bilinmeyen node '{node_key}'"))
-                })?;
-                let mut resolved = self
-                    .resolve_candidates(&node.c_a, &staged, wfah, actor, orgtnt_id)
+                let resolved = self
+                    .node_candidates(&node_key, wfd, &staged, wfah, actor, orgtnt_id)
                     .await?;
-                // WOR-44: wfd.listable[] grants union into the pool cache too (VIEW-only;
-                // `when` guards are ignored here — over-inclusive cache is acceptable since
-                // claim/act stay matcher-gated on the real rule).
-                for listable in &wfd.listable {
-                    let mut extra = self
-                        .resolve_candidates(&listable.c_a, &staged, wfah, actor, orgtnt_id)
-                        .await?;
-                    resolved.append(&mut extra);
-                }
                 Ok((CommitOutcome::MoveTo { node: node_key }, resolved, staged))
             }
             Target::Terminal(terminal_id) => {
-                let terminal = wfd
-                    .terminals
-                    .iter()
-                    .find(|t| t.id == terminal_id)
-                    .ok_or_else(|| {
-                        EngineError::InvalidWfd(format!(
-                            "wft hedefi bilinmeyen terminal '{terminal_id}'"
-                        ))
-                    })?;
-                let now = Utc::now();
-                let env = EffectEnv {
-                    actor,
-                    wfe_id,
-                    node: None,
-                    action_input,
-                    exec_result: None,
-                    now,
-                };
-                let final_ctx = match &terminal.wfes_effects {
-                    Some(effects) => apply_effects(&staged, effects, &env)?,
-                    None => staged,
-                };
-                let mut end_response = Map::new();
-                for (k, raw) in &terminal.wfe_end_response {
-                    end_response.insert(k.clone(), resolve_value(raw, &final_ctx, &env)?);
-                }
-                Ok((
-                    CommitOutcome::Terminal {
-                        end_response: Value::Object(end_response),
-                    },
-                    vec![],
-                    final_ctx,
-                ))
+                let (end_response, final_ctx) =
+                    self.terminal_outcome(&terminal_id, wfd, staged, actor, wfe_id, action_input)?;
+                Ok((CommitOutcome::Terminal { end_response }, vec![], final_ctx))
             }
         }
+    }
+
+    /// Node hedefinin aday cache'i: node c_a + WOR-44 listable[] union'ı
+    /// (VIEW-only; `when` guard'ları burada yok sayılır — over-inclusive cache
+    /// kabul edilir, claim/act gerçek kuralda matcher-gated kalır).
+    async fn node_candidates(
+        &self,
+        node_key: &str,
+        wfd: &Wfd,
+        staged: &Value,
+        wfah: &Wfah,
+        actor: &Actor,
+        orgtnt_id: Uuid,
+    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
+        let node = wfd.nodes.get(node_key).ok_or_else(|| {
+            EngineError::InvalidWfd(format!("wft hedefi bilinmeyen node '{node_key}'"))
+        })?;
+        let mut resolved = self
+            .resolve_candidates(&node.c_a, staged, wfah, actor, orgtnt_id)
+            .await?;
+        for listable in &wfd.listable {
+            let mut extra = self
+                .resolve_candidates(&listable.c_a, staged, wfah, actor, orgtnt_id)
+                .await?;
+            resolved.append(&mut extra);
+        }
+        Ok(resolved)
+    }
+
+    /// Terminal hedefi: terminal.wfes_effects uygulanır, wfe_end_response
+    /// $-string'leri FINAL ctx ile çözülür (M9/WOR-42). `(end_response, final_ctx)`.
+    fn terminal_outcome(
+        &self,
+        terminal_id: &str,
+        wfd: &Wfd,
+        staged: Value,
+        actor: &Actor,
+        wfe_id: Uuid,
+        action_input: Option<&Value>,
+    ) -> Result<(Value, Value), EngineError> {
+        let terminal = wfd
+            .terminals
+            .iter()
+            .find(|t| t.id == terminal_id)
+            .ok_or_else(|| {
+                EngineError::InvalidWfd(format!("wft hedefi bilinmeyen terminal '{terminal_id}'"))
+            })?;
+        let now = Utc::now();
+        let env = EffectEnv {
+            actor,
+            wfe_id,
+            node: None,
+            action_input,
+            exec_result: None,
+            now,
+        };
+        let final_ctx = match &terminal.wfes_effects {
+            Some(effects) => apply_effects(&staged, effects, &env)?,
+            None => staged,
+        };
+        let mut end_response = Map::new();
+        for (k, raw) in &terminal.wfe_end_response {
+            end_response.insert(k.clone(), resolve_value(raw, &final_ctx, &env)?);
+        }
+        Ok((Value::Object(end_response), final_ctx))
     }
 
     /// Yeni node'un c_a'sını (orgu × rol, orgu × user) aday listesine çözer —
@@ -1102,6 +1575,94 @@ impl<'a> Engine<'a> {
 enum Target {
     Node(String),
     Terminal(String),
+}
+
+/// WOR-31 — `resolve_wft`'in çalıştığı bağlam.
+#[derive(Clone, Copy)]
+enum WftMode<'p> {
+    /// Start kuralı: Parallel hedef yasak (validator da reddeder).
+    Start,
+    /// Tekil (paralel olmayan) mod: Parallel hedef `ForkTo` üretir.
+    Single,
+    /// Paralel mod, tek kolun wft'i: hedef join'e eşitse varış
+    /// (`BranchArrived`/`JoinComplete`), normal node ise `BranchMoveTo`,
+    /// join'den farklı terminal ise WFE-terminal (sibling'ler iptal).
+    Branch {
+        join: &'p WftTarget,
+        from_node: &'p str,
+        others_active: usize,
+    },
+}
+
+/// Kol node'una göre AKTİF branch state'i.
+fn active_branch<'w>(wfes: &'w Wfes, node: &str) -> Option<&'w BranchState> {
+    wfes.branches
+        .iter()
+        .find(|b| b.status == BranchStatus::Active && b.branch_node == node)
+}
+
+/// Verilen kol DIŞINDAKİ aktif kol sayısı.
+fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
+    wfes.branches
+        .iter()
+        .filter(|b| b.status == BranchStatus::Active && b.branch_node != branch_node)
+        .count()
+}
+
+/// WOR-31 sistem marker'ları — ENGINE tarafından staged edilir; tek istisna
+/// `_join`: o, son-varış doğrulamasıyla aynı transaction'da ADAPTER tarafından
+/// eklenir (dokümante edilmiş istisna).
+/// - `ForkTo` → `_fork` {branches, join}
+/// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node}
+/// - paralel modda Terminal/Failed/Terminated → acting kol DIŞINDAKİ her aktif
+///   kol için `_branch_cancelled` {node, reason}
+fn stage_parallel_markers(
+    wfes: &Wfes,
+    acting_branch: Option<&str>,
+    outcome: &CommitOutcome,
+    wfah_entries: &mut Vec<WfahEntry>,
+    seq: &mut u32,
+    now: DateTime<Utc>,
+) {
+    let system = system_actor();
+    let mut push = |action: &str, input: Value| {
+        wfah_entries.push(WfahEntry {
+            seq: *seq,
+            action: action.to_string(),
+            actor: system.clone(),
+            input: Some(input),
+            applied_at: now,
+        });
+        *seq += 1;
+    };
+    match outcome {
+        CommitOutcome::ForkTo { branches, join } => {
+            push("_fork", json!({"branches": branches, "join": join}));
+        }
+        CommitOutcome::BranchArrived { from_node }
+        | CommitOutcome::JoinComplete { from_node, .. } => {
+            push("_branch_arrived", json!({"node": from_node}));
+        }
+        CommitOutcome::Terminal { .. }
+        | CommitOutcome::Failed { .. }
+        | CommitOutcome::Terminated { .. }
+            if wfes.join_target.is_some() =>
+        {
+            let reason = match outcome {
+                CommitOutcome::Terminal { .. } => "sibling_terminal",
+                CommitOutcome::Failed { .. } => "failed",
+                _ => "terminated",
+            };
+            for b in &wfes.branches {
+                if b.status == BranchStatus::Active
+                    && Some(b.branch_node.as_str()) != acting_branch
+                {
+                    push("_branch_cancelled", json!({"node": b.branch_node, "reason": reason}));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn escalation_marker(node_key: &str, idx: usize) -> String {

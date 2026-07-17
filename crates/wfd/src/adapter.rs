@@ -1,4 +1,4 @@
-use crate::{repo, storage};
+use crate::{project, repo, storage};
 use async_trait::async_trait;
 use opendal::Operator;
 use serde_json::Value;
@@ -39,11 +39,28 @@ impl WfdAdapter {
         crate::error::WfdError::InvalidJson(format!("validator: {summary}"))
     }
 
+    /// project_id verilmişse tenant'a aitliğini doğrular, verilmemişse
+    /// tenant'ın varsayılan projesini çözer (eski istemci uyumluluğu).
+    async fn resolve_project(
+        &self,
+        orgtnt_id: Uuid,
+        project_id: Option<Uuid>,
+    ) -> Result<Uuid, crate::error::WfdError> {
+        match project_id {
+            Some(id) => {
+                project::assert_in_tenant(&self.pool, id, orgtnt_id).await?;
+                Ok(id)
+            }
+            None => project::resolve_default(&self.pool, orgtnt_id).await,
+        }
+    }
+
     /// Upload a new WFD — v2.2 yükleme kapısı (M14) + custom validator,
     /// sonra JSON OpenDAL'a, metadata PostgreSQL'e.
     pub async fn upload(
         &self,
         orgtnt_id: Uuid,
+        project_id: Option<Uuid>,
         wfd_json: &Value,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
         let wfd = Wfd::from_value(wfd_json.clone())
@@ -59,7 +76,8 @@ impl WfdAdapter {
         } else {
             &wfd.name
         };
-        let version = repo::next_version(&self.pool, orgtnt_id, name).await?;
+        let project_id = self.resolve_project(orgtnt_id, project_id).await?;
+        let version = repo::next_version(&self.pool, project_id, name).await?;
         let wfd_id = Uuid::new_v4();
         let key = storage::s3_key(wfd_id, version);
 
@@ -71,7 +89,7 @@ impl WfdAdapter {
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
         repo::insert(
-            &self.pool, wfd_id, orgtnt_id, name, version, &key,
+            &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
             "published", None, &[], "admin",
         ).await?;
@@ -92,12 +110,14 @@ impl WfdAdapter {
     pub async fn create_draft(
         &self,
         orgtnt_id:   Uuid,
+        project_id:  Option<Uuid>,
         name:        &str,
         description: Option<&str>,
         tags:        &[String],
         wfd_json:    Option<&Value>,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
-        let version = repo::next_version(&self.pool, orgtnt_id, name).await?;
+        let project_id = self.resolve_project(orgtnt_id, project_id).await?;
+        let version = repo::next_version(&self.pool, project_id, name).await?;
         let wfd_id = Uuid::new_v4();
         let key = storage::s3_key(wfd_id, version);
 
@@ -116,7 +136,7 @@ impl WfdAdapter {
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
         repo::insert(
-            &self.pool, wfd_id, orgtnt_id, name, version, &key,
+            &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
             "draft", description, tags, "admin",
         ).await?;
@@ -196,7 +216,8 @@ impl WfdAdapter {
         let json: Value = serde_json::from_slice(&bytes)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.create_draft(
-            src.orgtnt_id, &src.name, src.description.as_deref(), &src.tags, Some(&json),
+            src.orgtnt_id, Some(src.project_id), &src.name,
+            src.description.as_deref(), &src.tags, Some(&json),
         ).await
     }
 

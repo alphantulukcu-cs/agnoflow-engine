@@ -38,6 +38,8 @@ pub fn router(state: AppState) -> Router {
 #[derive(Deserialize)]
 struct ListQuery {
     orgtnt_id: Uuid,
+    /// Verilirse liste bu projeyle sınırlanır.
+    project_id: Option<Uuid>,
     limit: Option<i64>,
     offset: Option<i64>,
 }
@@ -48,7 +50,7 @@ async fn list_wfd(
 ) -> Result<Json<Vec<wf_wfd::models::WfdMeta>>, AppError> {
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
-    wf_wfd::repo::list(&s.pool, q.orgtnt_id, limit, offset)
+    wf_wfd::repo::list(&s.pool, q.orgtnt_id, q.project_id, limit, offset)
         .await
         .map(Json)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))
@@ -57,6 +59,9 @@ async fn list_wfd(
 #[derive(Deserialize)]
 struct UploadBody {
     orgtnt_id: Uuid,
+    /// Verilmezse tenant'ın varsayılan projesi kullanılır (eski istemci uyumu).
+    #[serde(default)]
+    project_id: Option<Uuid>,
     /// v2.2 WFD dokümanı — yükleme kapısı + custom validator uygulanır (M14).
     wfd: Value,
 }
@@ -67,7 +72,7 @@ async fn upload_wfd(
 ) -> Result<Json<Value>, AppError> {
     let (wfd_id, version) = s
         .wfd
-        .upload(body.orgtnt_id, &body.wfd)
+        .upload(body.orgtnt_id, body.project_id, &body.wfd)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
     Ok(Json(
@@ -110,6 +115,9 @@ async fn get_wfd(
 #[derive(Deserialize)]
 struct CreateDraftBody {
     orgtnt_id: Uuid,
+    /// Verilmezse tenant'ın varsayılan projesi kullanılır (eski istemci uyumu).
+    #[serde(default)]
+    project_id: Option<Uuid>,
     name: String,
     #[serde(default)]
     description: Option<String>,
@@ -128,6 +136,7 @@ async fn create_draft(
         .wfd
         .create_draft(
             b.orgtnt_id,
+            b.project_id,
             &b.name,
             b.description.as_deref(),
             &b.tags,
@@ -593,7 +602,7 @@ async fn dashboard_summary(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<Json<DashboardSummary>, AppError> {
-    let wfds = wf_wfd::repo::list(&s.pool, q.orgtnt_id, 1_000, 0)
+    let wfds = wf_wfd::repo::list(&s.pool, q.orgtnt_id, q.project_id, 1_000, 0)
         .await
         .map_err(map_wfd_err)?;
     let active_by_wfd = load_usage_summary(&s.pool, q.orgtnt_id)

@@ -28,4 +28,10 @@ pub struct WfdMeta {
     pub tags:        Vec<String>,
     pub owner:       String,
     pub updated_at:  DateTime<Utc>,
+    /// Türetildiği predefined şablon versiyonu (varsa).
+    pub source_template_id: Option<Uuid>,
+    /// Son ret gerekçesi (reject sonrası draft'ta gösterilir).
+    pub review_note: Option<String>,
+    /// Onaya gönderen kullanıcı (e-posta) — pending satırda dolu.
+    pub submitted_by: Option<String>,
 }

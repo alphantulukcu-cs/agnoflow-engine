@@ -91,7 +91,7 @@ impl WfdAdapter {
         repo::insert(
             &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
-            "published", None, &[], "admin",
+            "published", None, &[], "admin", None,
         ).await?;
         Ok((wfd_id, version))
     }
@@ -115,6 +115,7 @@ impl WfdAdapter {
         description: Option<&str>,
         tags:        &[String],
         wfd_json:    Option<&Value>,
+        source_template_id: Option<Uuid>,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
         let project_id = self.resolve_project(orgtnt_id, project_id).await?;
         let version = repo::next_version(&self.pool, project_id, name).await?;
@@ -138,7 +139,7 @@ impl WfdAdapter {
         repo::insert(
             &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
-            "draft", description, tags, "admin",
+            "draft", description, tags, "admin", source_template_id,
         ).await?;
         Ok((wfd_id, version))
     }
@@ -201,6 +202,54 @@ impl WfdAdapter {
         Ok(())
     }
 
+    /// Draft'ı onaya gönderir: tam v2.2 validator (yayınla ile AYNI kapı),
+    /// geçerse pending_approval. Geçmezse draft kalır, hata döner.
+    pub async fn submit_draft(&self, wfd_id: Uuid, version: i32, submitted_by: &str)
+        -> Result<(), crate::error::WfdError>
+    {
+        let json = self.fetch_draft_json(wfd_id, version).await?;
+        let wfd = Wfd::from_value(json)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        let report = validator::validate(&wfd);
+        if !report.is_valid() {
+            return Err(Self::validation_error(&report));
+        }
+        repo::set_pending(&self.pool, wfd_id, version, submitted_by).await
+    }
+
+    /// Onay bekleyeni yayınlar. Validator yeniden koşar (pending JSON immutable
+    /// olmalı ama savunmacı davranıyoruz); geçerse published.
+    pub async fn approve_draft(&self, wfd_id: Uuid, version: i32)
+        -> Result<(), crate::error::WfdError>
+    {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        if meta.status != "pending_approval" {
+            return Err(crate::error::WfdError::Conflict(
+                format!("{wfd_id} v{version} onay beklemiyor (status={})", meta.status)));
+        }
+        let bytes = self.storage.read(&meta.s3_key).await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
+            .to_bytes();
+        let json: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        let wfd = Wfd::from_value(json)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        let report = validator::validate(&wfd);
+        if !report.is_valid() {
+            return Err(Self::validation_error(&report));
+        }
+        repo::set_published_from_pending(&self.pool, wfd_id, version).await?;
+        self.cache.write().await.remove(&(wfd_id, version));
+        Ok(())
+    }
+
+    /// Onay bekleyeni reddeder: draft'a döner, gerekçe kaydedilir.
+    pub async fn reject_draft(&self, wfd_id: Uuid, version: i32, note: Option<&str>)
+        -> Result<(), crate::error::WfdError>
+    {
+        repo::set_rejected(&self.pool, wfd_id, version, note).await
+    }
+
     /// Published bir versiyonu edit'e açar: JSON'unu kopyalayıp yeni draft (max+1) yaratır.
     pub async fn new_draft_from(&self, src_id: Uuid, src_version: i32)
         -> Result<(Uuid, i32), crate::error::WfdError>
@@ -218,6 +267,7 @@ impl WfdAdapter {
         self.create_draft(
             src.orgtnt_id, Some(src.project_id), &src.name,
             src.description.as_deref(), &src.tags, Some(&json),
+            src.source_template_id,
         ).await
     }
 

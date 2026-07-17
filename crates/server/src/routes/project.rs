@@ -1,6 +1,11 @@
+// Proje uçları — tamamı auth ister.
+// list: tenant admin hepsini, üye yalnız atandıklarını görür.
+// create: yalnız tenant admin. update: tenant admin ya da o projenin admin'i.
+
+use super::auth::{require_can_design, require_can_manage_project, AppAuth};
 use crate::{error::AppError, state::AppState};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::StatusCode,
     routing::{get, patch},
     Json, Router,
@@ -14,27 +19,70 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(list_projects).post(create_project))
         .route("/:id", get(get_project))
         .route("/:id", patch(update_project))
+        .route("/:id/members", get(list_members))
         .with_state(state)
 }
 
-#[derive(Deserialize)]
-struct ListQuery {
-    orgtnt_id: Uuid,
+#[derive(serde::Serialize)]
+struct MemberRow {
+    user_id: Uuid,
+    display_name: String,
+    email: String,
+    role: String,
+}
+
+/// Projenin üyeleri — görünürlük seçimi için; proje admini de görebilir.
+async fn list_members(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<MemberRow>>, AppError> {
+    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    if project.orgtnt_id != auth.orgtnt_id {
+        return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
+    }
+    require_can_manage_project(&s.pool, &auth, id).await?;
+    let rows: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "SELECT u.user_id, u.display_name, u.email, m.role
+         FROM wf.project_member m JOIN wf.app_user u USING (user_id)
+         WHERE m.project_id = $1 AND u.is_active = true ORDER BY u.display_name",
+    )
+    .bind(id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(user_id, display_name, email, role)| MemberRow { user_id, display_name, email, role })
+            .collect(),
+    ))
 }
 
 async fn list_projects(
     State(s): State<AppState>,
-    Query(q): Query<ListQuery>,
+    auth: AppAuth,
 ) -> Result<Json<Vec<Project>>, AppError> {
-    wf_wfd::project::list(&s.pool, q.orgtnt_id)
+    let all = wf_wfd::project::list(&s.pool, auth.orgtnt_id)
         .await
-        .map(Json)
-        .map_err(map_wfd_err)
+        .map_err(map_wfd_err)?;
+    if auth.role == "admin" {
+        return Ok(Json(all));
+    }
+    let member_of: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT project_id FROM wf.project_member WHERE user_id = $1",
+    )
+    .bind(auth.user_id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(all.into_iter().filter(|p| member_of.contains(&p.project_id)).collect()))
 }
 
 #[derive(Deserialize)]
 struct CreateBody {
-    orgtnt_id: Uuid,
+    /// Geriye uyum için kabul edilir ama token'daki tenant esas alınır.
+    #[serde(default)]
+    orgtnt_id: Option<Uuid>,
     name: String,
     #[serde(default)]
     description: Option<String>,
@@ -42,13 +90,20 @@ struct CreateBody {
 
 async fn create_project(
     State(s): State<AppState>,
+    auth: AppAuth,
     Json(b): Json<CreateBody>,
 ) -> Result<(StatusCode, Json<Project>), AppError> {
+    auth.require_admin()?;
+    if let Some(body_tenant) = b.orgtnt_id {
+        if body_tenant != auth.orgtnt_id {
+            return Err(AppError("Tenant uyuşmuyor".into(), StatusCode::FORBIDDEN));
+        }
+    }
     let name = b.name.trim();
     if name.is_empty() {
         return Err(AppError("Proje adı boş olamaz".into(), StatusCode::BAD_REQUEST));
     }
-    wf_wfd::project::create(&s.pool, b.orgtnt_id, name, b.description.as_deref())
+    wf_wfd::project::create(&s.pool, auth.orgtnt_id, name, b.description.as_deref())
         .await
         .map(|p| (StatusCode::CREATED, Json(p)))
         .map_err(map_wfd_err)
@@ -56,12 +111,15 @@ async fn create_project(
 
 async fn get_project(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Project>, AppError> {
-    wf_wfd::project::get(&s.pool, id)
-        .await
-        .map(Json)
-        .map_err(map_wfd_err)
+    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    if project.orgtnt_id != auth.orgtnt_id {
+        return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
+    }
+    require_can_design(&s.pool, &auth, id).await?;
+    Ok(Json(project))
 }
 
 #[derive(Deserialize)]
@@ -74,9 +132,15 @@ struct UpdateBody {
 
 async fn update_project(
     State(s): State<AppState>,
+    auth: AppAuth,
     Path(id): Path<Uuid>,
     Json(b): Json<UpdateBody>,
 ) -> Result<Json<Project>, AppError> {
+    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    if project.orgtnt_id != auth.orgtnt_id {
+        return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
+    }
+    require_can_manage_project(&s.pool, &auth, id).await?;
     let name = b.name.as_deref().map(str::trim).filter(|v| !v.is_empty());
     if b.name.is_some() && name.is_none() {
         return Err(AppError("Proje adı boş olamaz".into(), StatusCode::BAD_REQUEST));

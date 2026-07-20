@@ -180,6 +180,13 @@ impl SimState {
                 self.join_target = None;
                 self.branches.clear();
             }
+            // WOR-56: node hedefli collapse — paralel mod biter (kardeşler iptal,
+            // marker'lar engine'de staged), WFE `node`'a geçer (current_node
+            // outcome_parts'ta set edilir); kol satırları sim'de temizlenir.
+            CommitOutcome::CollapseTo { .. } => {
+                self.join_target = None;
+                self.branches.clear();
+            }
             CommitOutcome::MoveTo { .. } => {}
         }
     }
@@ -211,5 +218,7 @@ fn outcome_parts(
         | CommitOutcome::BranchMoveTo { .. }
         | CommitOutcome::BranchArrived { .. } => (WfeStatus::Active, None, None),
         CommitOutcome::JoinComplete { next, .. } => outcome_parts(next),
+        // WOR-56: node hedefli collapse — paralel mod biter, WFE tekil modda `node`'a.
+        CommitOutcome::CollapseTo { node, .. } => (WfeStatus::Active, Some(node.clone()), None),
     }
 }

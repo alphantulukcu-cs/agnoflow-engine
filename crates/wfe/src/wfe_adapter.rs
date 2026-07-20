@@ -236,7 +236,8 @@ impl WfeStore for WfeAdapter {
             CommitOutcome::ForkTo { .. }
             | CommitOutcome::BranchMoveTo { .. }
             | CommitOutcome::BranchArrived { .. }
-            | CommitOutcome::JoinComplete { .. } => {
+            | CommitOutcome::JoinComplete { .. }
+            | CommitOutcome::CollapseTo { .. } => {
                 return Err(EngineError::WfePort(
                     "create paralel outcome alamaz (WOR-31: start'ta fork yasak)".into(),
                 ))
@@ -507,6 +508,28 @@ impl WfeStore for WfeAdapter {
                         )))
                     }
                 }
+            }
+            // WOR-56: node hedefli collapse — paralel mod biter, WFE `node`'a
+            // UNASSIGNED girer. Aktif kollar `cancelled` (audit için satır kalır;
+            // engine `_branch_cancelled` marker'larını zaten wfah'a staged etti),
+            // join_target temizlenir. Kol-arrival sayımı/CAS YOK: collapse
+            // otoriterdir (mevcut branch→Terminal yolu ile aynı model).
+            CommitOutcome::CollapseTo { node, .. } => {
+                cancel_active_branches(&mut tx, commit.wfe_id).await?;
+                let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
+                sqlx::query(
+                    "UPDATE wf.wfe
+                     SET current_node = $1, current_c_a = $2, claimed_by = NULL,
+                         claimed_at = NULL, join_target = NULL, updated_at = now()
+                     WHERE wfe_id = $3 AND orgtnt_id = $4",
+                )
+                .bind(node)
+                .bind(&c_a_json)
+                .bind(commit.wfe_id)
+                .bind(commit.orgtnt_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
             }
         }
 

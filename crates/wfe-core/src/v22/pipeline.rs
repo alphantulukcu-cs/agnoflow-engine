@@ -1286,6 +1286,41 @@ impl<'a> Engine<'a> {
         orgtnt_id: Uuid,
         mode: WftMode<'_>,
     ) -> Result<(CommitOutcome, Vec<ResolvedCandidate>, Value), EngineError> {
+        // WOR-56: collapse — yalnız kol bağlamında. Kardeşleri düşürüp WFE'yi
+        // hedefe götürür. Terminal hedef = mevcut Terminal yolu (paralel modda
+        // stage_parallel_markers zaten kardeşleri iptal eder). Node hedef =
+        // yeni CollapseTo (paralel mod biter, current_node = node).
+        if let Wft::Collapse { collapse } = wft {
+            let from_node = match mode {
+                WftMode::Branch { from_node, .. } => from_node.to_string(),
+                _ => {
+                    return Err(EngineError::InvalidWfd(
+                        "collapse wft yalnızca paralel dal içinde geçerli (WOR-56)".into(),
+                    ))
+                }
+            };
+            return match collapse {
+                WftTarget::Terminal { terminal } => {
+                    let (end_response, final_ctx) = self.terminal_outcome(
+                        terminal, wfd, staged, actor, wfe_id, action_input,
+                    )?;
+                    Ok((CommitOutcome::Terminal { end_response }, vec![], final_ctx))
+                }
+                WftTarget::Node { node } => {
+                    let resolved = self
+                        .node_candidates(node, wfd, &staged, wfah, actor, orgtnt_id)
+                        .await?;
+                    Ok((
+                        CommitOutcome::CollapseTo {
+                            from_node,
+                            node: node.clone(),
+                        },
+                        resolved,
+                        staged,
+                    ))
+                }
+            };
+        }
         let target = match wft {
             Wft::Node { node } => Target::Node(node.clone()),
             Wft::Terminal { terminal } => Target::Terminal(terminal.clone()),
@@ -1367,6 +1402,8 @@ impl<'a> Engine<'a> {
                     (None, None) => return Err(EngineError::NoConditionMatched),
                 }
             }
+            // WOR-56: yukarıda erken return ile ele alındı.
+            Wft::Collapse { .. } => unreachable!("collapse resolve_wft başında işlenir"),
         };
 
         // WOR-31 kol bağlamı: hedef join'e EŞİTSE varış (kol arrived, join node
@@ -1658,6 +1695,17 @@ fn stage_parallel_markers(
                     && Some(b.branch_node.as_str()) != acting_branch
                 {
                     push("_branch_cancelled", json!({"node": b.branch_node, "reason": reason}));
+                }
+            }
+        }
+        // WOR-56: node hedefli collapse — acting kol DIŞINDAKİ her aktif kol iptal.
+        // (Terminal hedefli collapse yukarıdaki Terminal arm'ına düşer.)
+        CommitOutcome::CollapseTo { .. } => {
+            for b in &wfes.branches {
+                if b.status == BranchStatus::Active
+                    && Some(b.branch_node.as_str()) != acting_branch
+                {
+                    push("_branch_cancelled", json!({"node": b.branch_node, "reason": "collapsed"}));
                 }
             }
         }

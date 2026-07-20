@@ -1350,6 +1350,88 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     assert_eq!(cancel.actor.role, "system");
 }
 
+#[tokio::test]
+async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
+    // WOR-56: kol collapse aksiyonu bir NODE hedefine (fork-initiator = restart).
+    // Paralel mod biter, WFE o node'a geçer, AKTİF kardeşler iptal marker'ı alır.
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    // finance "reject" transition'ını collapse-to-node yap (hedef: self__coordinator).
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
+            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
+        }
+    }
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    // finance acting; legal aktif (iptal edilecek); hr çoktan vardı (iptal EDİLMEZ).
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(&wfd, &wfes, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap();
+
+    let CommitOutcome::CollapseTo { from_node, node } = &commit.outcome else {
+        panic!("CollapseTo bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(from_node, "self__financeApprover");
+    assert_eq!(node, "self__coordinator");
+    // hedef node'un adayları promotion için resolve edilir
+    assert!(commit.resolved_c_a.iter().any(|c| c.role == "coordinator"));
+    // yalnız aktif sibling (legal) iptal marker'ı alır; hr arrived — iptal edilmez;
+    // acting kol (finance) da marker almaz.
+    assert_eq!(wfah_actions(&commit), vec!["reject", "_branch_cancelled"]);
+    let cancel = &commit.wfah_entries[1];
+    assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
+    assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("collapsed"));
+    assert_eq!(cancel.actor.role, "system");
+}
+
+#[tokio::test]
+async fn collapse_outside_parallel_is_rejected() {
+    // WOR-56: collapse yalnız kol bağlamında geçerli — tekil modda hata.
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    // coordinator'ın fork transition'ını collapse'a çevir (tekil modda uygulanır).
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["from"] == json!("self__coordinator") {
+            t["action"] = json!("collapse_here");
+            t["wft"] = json!({"collapse": {"node": "self__requester"}});
+        }
+    }
+    v["actions"]["collapse_here"] =
+        json!({"label": "X", "input": {"required": [], "optional": []}});
+    // validator collapse'ı reddetmesin diye şema kontrolünü atlayıp doğrudan runtime'ı
+    // sınıyoruz — Wfd::from_value validator çalıştırmaz (yalnız parse).
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let coord = actor_with_role("coordinator");
+    let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
+
+    let err = engine
+        .apply(&wfd, &wfes, &coord, "collapse_here", &json!({}), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidWfd(m) if m.contains("collapse")),
+        "collapse tekil modda InvalidWfd vermeli: {err:?}"
+    );
+}
+
 fn paralel_with_delegate_step() -> Wfd {
     // finance koluna kol-içi ara node ekler: delegate → self__financeSenior,
     // oradan approve → join. Kol hareketi (BranchMoveTo) testi için.

@@ -98,6 +98,16 @@ pub enum CommitOutcome {
         from_node: String,
         next: Box<CommitOutcome>,
     },
+    /// WOR-56: kol collapse aksiyonu bir NODE hedefine — paralel mod biter,
+    /// diğer TÜM aktif kollar `cancelled` (engine `_branch_cancelled` marker'ları
+    /// stage eder), `current_node = node`. Kol-arrival sayımı YOK: collapse
+    /// otoriterdir (JoinComplete'in aksine kalan aktif kolları beklemez).
+    /// (Terminal hedefli collapse ayrı bir varyant değildir — mevcut `Terminal`
+    /// yolu zaten paralel modda kardeşleri iptal eder.)
+    CollapseTo {
+        from_node: String,
+        node: String,
+    },
 }
 
 /// Tek transaction'da persist edilecek transition sonucu (M8).

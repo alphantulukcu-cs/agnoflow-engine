@@ -283,6 +283,18 @@ impl WfeStore for ParStore {
                 });
                 apply_next(w, next);
             }
+            CommitOutcome::CollapseTo { node, .. } => {
+                // WOR-56: paralel mod biter, WFE `node`'a; aktif kollar iptal.
+                for b in &mut w.branches {
+                    if b.status == BranchStatus::Active {
+                        b.status = BranchStatus::Cancelled;
+                    }
+                }
+                w.join_target = None;
+                w.current_node = Some(node.clone());
+                w.assigned_to = None;
+                w.claimed_at = None;
+            }
         }
         Ok(())
     }

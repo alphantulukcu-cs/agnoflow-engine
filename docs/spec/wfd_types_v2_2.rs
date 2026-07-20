@@ -235,6 +235,12 @@ pub enum Wft {
     // WOR-31: fork/join. branches >= 2, distinct (custom validator); join = AND-join
     // hedefi (son aktif kol vardiginda). Start kuralinda yasak, nested fork yasak.
     Parallel { parallel: ParallelSpec },
+    // WOR-56: paralel dalda sonlandiran aksiyon (collapse+goto). Alininca TUM kardes
+    // kollar cancelled, WFE paralel moddan cikip `collapse` hedefine gider (node ya da
+    // terminal, RASTGELE). Node hedef = paralel modu bitirir (BranchMoveTo DEGIL);
+    // terminal hedef = WOR-31 kol->terminal collapse'unun ozel hali. Yalniz kol
+    // baglaminda gecerli (start'ta yasak).
+    Collapse { collapse: WftTarget },
 }
 
 #[derive(Debug, Deserialize)]

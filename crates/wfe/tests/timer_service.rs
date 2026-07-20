@@ -111,6 +111,7 @@ fn outcome_parts(outcome: &CommitOutcome) -> (WfeStatus, Option<String>, Option<
         | CommitOutcome::BranchMoveTo { .. }
         | CommitOutcome::BranchArrived { .. } => (WfeStatus::Active, None, None),
         CommitOutcome::JoinComplete { next, .. } => outcome_parts(next),
+        CommitOutcome::CollapseTo { node, .. } => (WfeStatus::Active, Some(node.clone()), None),
     }
 }
 

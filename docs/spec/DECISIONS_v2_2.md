@@ -173,6 +173,84 @@ ayrı bir fixture ile örneklenir: `docs/spec/example-wfd_paralel-onay_v2_2.json
 bir onay node'u — approve → join, reject → red terminal — join'de sonuç node'u
 ve nihai transition ile başarı terminal'i).
 
+## WOR-56 — Paralel dalda "sonlandıran aksiyon" (collapse + goto, rastgele hedef)
+
+**Bağlam:** WOR-31'de bir kolun terminal'e transition'ı tüm WFE'yi o terminal'de
+bitirir ("red" senaryosu). Genelleştirme ihtiyacı: bir kol aksiyonu paraleli
+bitirip **rastgele bir node'a** (terminal ŞART DEĞİL) gidebilmeli. Kanonik örnek:
+kredi için 3 ayrı c_a'dan review beklenirken bir tanesi review yerine
+`başa_gonder` alır → paralel biter, WFE başvuru node'una döner. Bu aksiyon **kola
+üyedir ama join'e bağlanmaz** ve hedefi paralel kapsamı dışındadır.
+
+**Karar — `collapse` transition (explicit, topolojiden türetilmez):**
+
+Salt topoloji yetmez: "kola üye + join'e bağlanmaz" iki ayrı şeyi kapsar —
+(1) çok-seviye koldaki **interior** aksiyon (kapsam içinde kalır, devam eder),
+(2) **collapse** aksiyonu (kapsamdan çıkar, kardeşleri düşürür). İkisinin de
+hedefi rastgele node olabildiğinden ayrım ancak **explicit işaretle** yapılır.
+
+- **Wire (LANDED):** collapse transition'ının `wft`'i `{"collapse": {node|terminal}}`
+  sarmalayıcısıdır — `Wft` enum'unun 5. formu (`wfd_v22.rs`; şemada `wftCollapse`,
+  `wft` oneOf'una eklendi). `Wft::Node`'dan AYRIDIR: normal node hedefi kolu
+  ilerletir (BranchMoveTo), collapse-node hedefi paralel modu bitirir. Editör ayrıca
+  `collapsesParallel` sidecar bayrağını (`isReject` gibi, engine şemasına gitmez)
+  UI için taşır; export bu bayrakla wft'yi collapse sarmalayıcısına alır, import
+  hem `wft.collapse` hem `== entry` sentinel'iyle bayrağı geri kurar.
+
+**Çalışma zamanı semantiği (WOR-31 collapse kuralının genişletilmesi):**
+- Kol collapse aksiyonu alınca: TÜM diğer aktif kollar `cancelled`
+  (+ `_branch_cancelled` wfah). WFE paralel moddan çıkar.
+- Hedef `{node}` ise `current_node = hedef` (paralel-dışı normal node);
+  `{terminal}` ise WFE o terminal'de biter (= WOR-31'in mevcut red davranışı,
+  artık genel kuralın özel hali).
+- WOR-31'deki "kol terminal'e varış" maddesi bunun terminal-hedefli örneğidir;
+  collapse hedefi artık node OLABİLİR.
+
+**Validator (WOR-31 kısıtlarının collapse istisnası):**
+- Collapse transition'ının hedefi **disjoint branch-subgraph** ve "join'e/terminal'e
+  ulaş" (dead-end) kurallarından **muaf** — BFS (`check_parallel` / editörde
+  `validateParallelRules.ts`) collapse kenarını **izlemez** (kapsamı büyütmez).
+- Collapse hedefi paralel dışındaki normal grafın parçasıysa `check_graph`
+  reachability onu ayrı bir kenar kaynağı sayar.
+- Collapse transition'ı yalnızca bir branch-subgraph node'undan çıkabilir
+  (paralel-dışı node'da collapse anlamsız → hata).
+
+**Görsel gösterim (editör, keşfedilebilir):**
+- Collapse işaretli aksiyon node'unda `⊗` rozet + çıkan kenar ayrı stil
+  (uyarı rengi/kalın) + etiket ("paraleli bitirir → <hedef>"). Hedef nereye
+  giderse gitsin görünür; join bracket'ine girmez.
+- PropertiesPanel'de tek satır uyarı: "Bu aksiyon paraleli sonlandırır; diğer
+  kollar iptal olur."
+
+**Auto-when — ters polarite (KRİTİK, "kapsam dışı" DEĞİL):**
+
+Collapse aksiyonu auto-when'den muaf tutulmaz; **ters polariteli** bir auto-when
+alır. Gerekçe: collapse aksiyonunun node'u paralel dışından da girilebiliyorsa,
+o node paralel-dışıyken bu aksiyon **alınamamalı** (paralel yokken "paraleli
+bitir" anlamsız) → bir `when` gate şarttır.
+
+- **Independent** interior aksiyon (WOR-31, mevcut): paralel bağlamdayken
+  **gizle** → `$wfah[len($wfah) - 1].action != "<entry>"`.
+- **Collapse** aksiyonu (WOR-56): yalnızca paralel bağlamdayken **göster** →
+  `$wfah[len($wfah) - 1].action == "<entry>"`. Tam ters operatör, **aynı**
+  entry-action hesabı (interior BFS: direkt dal node'unda entry=fork; derin
+  node'da entry=oraya götüren dal aksiyonu; birden çok entry → OR:
+  `==e1 or ==e2`).
+- Kullanıcı kendi when'ini yazarsa `(user) and (auto ==)` düz top-level AND.
+- Neden aynı `entry` sinyali: motor ZEN'e paralel-durumunu açmaz
+  (`current_node=NULL`, kollar `wfe_branch` tablosunda); ZEN yalnızca
+  DynCtx + WFAH görür → "paralel içindeyim" ancak "önceki aksiyon == entry"
+  ile türetilir. Independent bunun `!=`'ini, collapse `==`'ini kullanır.
+- Import round-trip: sentinel regex (`wfdImport.ts`) `!=` VE `==` varyantlarını
+  yakalamalı; strip mantığı aynı (her clause ayrı top-level terim).
+
+**Durum (LANDED, uçtan uca):** editör (bayrak + görsel + export/import + validator)
+VE engine (`Wft::Collapse` + `CommitOutcome::CollapseTo` runtime: cancel_active_branches
++ current_node=hedef + join_target NULL; validator: start-ban + BFS skip; sim + adapter)
+tamamlandı. Testler: editör `parallel.joinin.test.ts` (collapse export/import/şema/validator),
+engine `pipeline.rs::branch_collapse_to_node_ends_parallel_and_moves_wfe` +
+`collapse_outside_parallel_is_rejected`. WOR-31 collapse kuralının genelleştirilmesi.
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

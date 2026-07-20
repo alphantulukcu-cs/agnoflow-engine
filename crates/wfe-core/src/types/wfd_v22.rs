@@ -343,6 +343,15 @@ pub enum Wft {
     Parallel {
         parallel: ParallelSpec,
     },
+    /// WOR-56: paralel dalda "sonlandıran aksiyon" (collapse+goto). Yalnız kol
+    /// bağlamında geçerli: alındığında TÜM kardeş kollar `cancelled`, WFE paralel
+    /// moddan çıkar ve `collapse` hedefine gider — hedef RASTGELE node ya da
+    /// terminal olabilir (WOR-31'deki "kol→terminal" collapse'un genellenmişi;
+    /// terminal-hedef artık özel hal). Normal `Wft::Node`'dan farkı: node hedefli
+    /// collapse paralel modu bitirir + kardeşleri düşürür (BranchMoveTo DEĞİL).
+    Collapse {
+        collapse: WftTarget,
+    },
 }
 
 /// WOR-31: `Wft::Parallel`'in gövdesi.

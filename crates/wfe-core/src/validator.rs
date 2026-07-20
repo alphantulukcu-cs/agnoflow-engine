@@ -279,6 +279,15 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
                 }
             }
         }
+        // WOR-56: collapse hedefi bir çıkış kenarıdır (cross_ref + graf
+        // reachability kapsasın); ama branch subgraph BFS'i bu kenarı İZLEMEZ
+        // (aşağıda check_parallel'de atlanır — kapsam dışına çıkar).
+        Wft::Collapse { collapse } => match collapse {
+            WftTarget::Node { node } => out.push((TargetKind::Node, node.as_str())),
+            WftTarget::Terminal { terminal } => {
+                out.push((TargetKind::Terminal, terminal.as_str()))
+            }
+        },
     }
     out
 }
@@ -528,6 +537,14 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                 "Parallel wft start kuralında kullanılamaz".into(),
             );
         }
+        // WOR-56: collapse yalnız paralel dal içinde anlamlıdır — start'ta yasak.
+        if matches!(&s.wft, Wft::Collapse { .. }) {
+            report.error(
+                "collapse_start",
+                format!("start[{}].wft", s.id),
+                "Collapse wft start kuralında kullanılamaz (WOR-56)".into(),
+            );
+        }
     }
 
     // Fork noktalarını topla (yalnızca transitions.wft — start zaten yasak;
@@ -634,6 +651,13 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                             format!("transitions[{}].wft", t.id),
                             "branch subgraph içinde iç içe (nested) Parallel yasak".into(),
                         );
+                        continue;
+                    }
+                    // WOR-56: collapse kenarı subgraph dışına çıkar (kardeşleri düşürüp
+                    // WFE'yi rastgele hedefe götürür) → BFS izlemez, disjoint/dead-end
+                    // kurallarından muaf. Kol subgraph'ı normal (join/terminal) kenarlarla
+                    // çıkışa ulaşmalıdır; collapse tek başına reaches_exit üretmez.
+                    if matches!(&t.wft, Wft::Collapse { .. }) {
                         continue;
                     }
                     for (kind, target) in wft_targets(&t.wft) {

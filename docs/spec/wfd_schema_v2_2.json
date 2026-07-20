@@ -892,15 +892,25 @@
         },
         {
           "$ref": "#/$defs/wftParallel"
+        },
+        {
+          "$ref": "#/$defs/wftCollapse"
         }
       ]
     },
     "startRule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "from", "action", "wft"],
+      "required": [
+        "id",
+        "from",
+        "action",
+        "wft"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/idName" },
+        "id": {
+          "$ref": "#/$defs/idName"
+        },
         "from": {
           "$ref": "#/$defs/idName",
           "description": "Bu start kuralinin giris node id'si (nodes katalogunda; initiator c_a'sini tasir). Tekil — her initiator havuzu ayri start kurali."
@@ -909,9 +919,15 @@
           "$ref": "#/$defs/idName",
           "description": "Start aksiyonunun gercek adi (ornek: \"Akisi Hazirla\") — actions{} icinde normal bir ACT olarak tanimlanir, sabit deger degildir."
         },
-        "wfes_effects": { "$ref": "#/$defs/wfesEffects" },
-        "trigger": { "$ref": "#/$defs/triggerList" },
-        "wft": { "$ref": "#/$defs/wft" }
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects"
+        },
+        "trigger": {
+          "$ref": "#/$defs/triggerList"
+        },
+        "wft": {
+          "$ref": "#/$defs/wft"
+        }
       }
     },
     "transition": {
@@ -1042,6 +1058,20 @@
           "$ref": "#/$defs/expression"
         }
       }
+    },
+    "wftCollapse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collapse"
+      ],
+      "properties": {
+        "collapse": {
+          "$ref": "#/$defs/wftDefault",
+          "description": "WOR-56: collapse hedefi (node veya terminal). Kol aksiyonu alininca TUM kardes kollar iptal, WFE paralel moddan cikip bu hedefe gider. Yalniz paralel dal icinde gecerli (custom validator)."
+        }
+      },
+      "description": "WOR-56: paralel dalda sonlandiran aksiyon (collapse+goto). Start'ta YASAK."
     }
   }
 }

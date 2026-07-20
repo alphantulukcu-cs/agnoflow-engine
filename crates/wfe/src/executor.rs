@@ -109,6 +109,8 @@ fn outcome_view(outcome: &CommitOutcome) -> (bool, Option<String>, Option<Value>
         | CommitOutcome::BranchMoveTo { .. }
         | CommitOutcome::BranchArrived { .. } => (false, None, None),
         CommitOutcome::JoinComplete { next, .. } => outcome_view(next),
+        // WOR-56: node hedefli collapse — paralel mod biter, WFE aktif olarak `node`'a.
+        CommitOutcome::CollapseTo { node, .. } => (false, Some(node.clone()), None),
     }
 }
 

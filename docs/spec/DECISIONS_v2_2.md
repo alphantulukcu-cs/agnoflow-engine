@@ -152,7 +152,7 @@ sınıfı kökten kapanır.
   kollar cancel edilir. Escalation/claim_timeout paralel modda **kol-bazlı**
   hale gelir (her kolun kendi `claimed_by`/`claimed_at`/`entered_at`'ı vardır).
 - wfah system marker'ları: `_fork`, `_branch_arrived`, `_join`,
-  `_branch_cancelled` (aynı paylaşımlı seq counter).
+  `_branch_cancelled`, `_branch_superseded` (aynı paylaşımlı seq counter).
 
 **Kısıtlar (v1, validator-enforced — `wfe-core/src/validator.rs::check_parallel`):**
 - Parallel wft `start[].wft`'te YASAK.
@@ -250,6 +250,35 @@ VE engine (`Wft::Collapse` + `CommitOutcome::CollapseTo` runtime: cancel_active_
 tamamlandı. Testler: editör `parallel.joinin.test.ts` (collapse export/import/şema/validator),
 engine `pipeline.rs::branch_collapse_to_node_ends_parallel_and_moves_wfe` +
 `collapse_outside_parallel_is_rejected`. WOR-31 collapse kuralının genelleştirilmesi.
+
+## WOR-60 — Geçersizleşen kol onayı: yeni statü DEĞİL, marker (2026-07-20)
+
+**Sorun:** Bir kol join'e varıp `arrived` olduktan sonra kardeş bir kol collapse/
+terminate ederse, o onayın geçersizleştiği hiçbir yere yazılmıyordu.
+`cancel_active_branches` yalnız `status = 'active'` satırları vurur, marker döngüsü
+de yalnız aktif kardeşleri gezerdi. Onay WFAH'ta duruyor ama "artık hükümsüz"
+bilgisi yok — onaylanmış kol yan etki (kayıt açma, mail) üretmiş olabileceği için
+enterprise audit'te kritik.
+
+**Karar:** Kol satırının statüsü `arrived` OLARAK KALIR. `wf.wfe_branch` CHECK
+constraint'i (`active|arrived|cancelled`, migration `20260717000006`) değişmez;
+`superseded` diye yeni bir statü EKLENMEDİ. Gerekçe: statü, kolun join'e karşı
+konumunu anlatır ve o konum gerçekten "vardı"dır — geçersizleşme kolun kendi
+durumu değil, WFE'nin başına gelen bir OLAYdır. Olay WFAH'a yazılır:
+
+- Aktif kol → `_branch_cancelled {node, reason, claimed_by, claimed_at}` (WOR-59)
+- Arrived kol → `_branch_superseded {node, reason, approved_by, approved_at}`
+
+İki marker net ayrılır; portal "yarıda kalan iş" ile "boşa giden onay"ı ayırt eder.
+`reason` her iki markerda da AYNI değeri taşır (collapse yolunda `collapsed`,
+diğerlerinde `sibling_terminal` / `failed` / `terminated`) — tetikleyen olay tek.
+
+**approved_by nereden geliyor:** `mark_branch_arrived` varışta kolun claim'ini
+düşürür, yani onaylayan runtime state'te DURMAZ. Bu yüzden `_branch_arrived`
+marker'ı `approved_by` (tam Actor) + `approved_at` alanlarıyla zenginleştirildi ve
+`_branch_superseded` bu kaydı WFAH'tan geri okur. WOR-60 öncesi yazılmış
+`_branch_arrived` kayıtlarında alanlar yoktur → marker yine üretilir, alanları
+`null` kalır (geriye dönük kırılma yok).
 
 ## Ek kararlar (bağımsız issue'lar)
 

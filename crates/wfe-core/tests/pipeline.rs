@@ -1342,12 +1342,19 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     };
     assert_eq!(end_response["status"], json!("rejected"));
     assert_eq!(end_response["request_title"], json!("Sunucu alımı"));
-    // yalnız aktif sibling (finance) iptal marker'ı alır; hr arrived — iptal edilmez
-    assert_eq!(wfah_actions(&commit), vec!["reject", "_branch_cancelled"]);
+    // aktif sibling (finance) iptal marker'ı; hr arrived — WOR-60: iptal DEĞİL,
+    // superseded marker'ı alır (kol satırı `arrived` kalır).
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["reject", "_branch_cancelled", "_branch_superseded"]
+    );
     let cancel = &commit.wfah_entries[1];
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__financeApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
     assert_eq!(cancel.actor.role, "system");
+    let superseded = &commit.wfah_entries[2];
+    assert_eq!(superseded.input.as_ref().unwrap()["node"], json!("self__hrApprover"));
+    assert_eq!(superseded.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
 }
 
 #[tokio::test]
@@ -1390,9 +1397,12 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     assert_eq!(node, "self__coordinator");
     // hedef node'un adayları promotion için resolve edilir
     assert!(commit.resolved_c_a.iter().any(|c| c.role == "coordinator"));
-    // yalnız aktif sibling (legal) iptal marker'ı alır; hr arrived — iptal edilmez;
-    // acting kol (finance) da marker almaz.
-    assert_eq!(wfah_actions(&commit), vec!["reject", "_branch_cancelled"]);
+    // aktif sibling (legal) iptal marker'ı; hr arrived → superseded (WOR-60);
+    // acting kol (finance) hiç marker almaz.
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["reject", "_branch_cancelled", "_branch_superseded"]
+    );
     let cancel = &commit.wfah_entries[1];
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("collapsed"));
@@ -1757,11 +1767,18 @@ async fn branch_escalation_terminate_cancels_sibling_branches() {
     // yalnız DİĞER aktif kol (legal) iptal marker'ı alır
     assert_eq!(
         wfah_actions(&commit),
-        vec!["escalate:self__financeApprover:0", "_branch_cancelled"]
+        vec![
+            "escalate:self__financeApprover:0",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
     );
     let cancel = &commit.wfah_entries[1];
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("terminated"));
+    // WOR-60: SLA-2 terminate de arrived kolun onayını geçersizleştirir
+    let superseded = &commit.wfah_entries[2];
+    assert_eq!(superseded.input.as_ref().unwrap()["node"], json!("self__hrApprover"));
 }
 
 #[tokio::test]
@@ -1787,16 +1804,28 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
         panic!("Terminated bekleniyordu");
     };
     assert_eq!(end_response["reason"], json!("SLA.Deadline"));
-    // her AKTİF kol için `_branch_cancelled` (arrived hr hariç)
+    // her AKTİF kol için `_branch_cancelled`, arrived hr için `_branch_superseded`
     assert_eq!(
         wfah_actions(&commit),
-        vec!["timeout:deadline", "_branch_cancelled", "_branch_cancelled"]
+        vec![
+            "timeout:deadline",
+            "_branch_cancelled",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
     );
     let nodes: Vec<&Value> = commit.wfah_entries[1..]
         .iter()
         .map(|e| &e.input.as_ref().unwrap()["node"])
         .collect();
-    assert_eq!(nodes, vec![&json!("self__financeApprover"), &json!("self__legalApprover")]);
+    assert_eq!(
+        nodes,
+        vec![
+            &json!("self__financeApprover"),
+            &json!("self__legalApprover"),
+            &json!("self__hrApprover")
+        ]
+    );
     assert_eq!(
         commit.wfah_entries[1].input.as_ref().unwrap()["reason"],
         json!("terminated")

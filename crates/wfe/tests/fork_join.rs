@@ -560,6 +560,80 @@ async fn collapse_drops_sibling_claims_and_records_them() {
     }
 }
 
+/// WOR-60: onaylanıp `arrived` olmuş kol, kardeşten gelen collapse ile
+/// geçersizleşir → `_branch_superseded` marker'ı (onaylayan + onay zamanı ile).
+#[tokio::test]
+async fn arrived_branch_gets_superseded_marker_on_collapse() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    for (role, node) in [
+        ("financeApprover", "self__financeApprover"),
+        ("legalApprover", "self__legalApprover"),
+        ("hrApprover", "self__hrApprover"),
+    ] {
+        let a = actor(role);
+        assert!(exec.claim(wfe_id, &a, Some(node)).await.unwrap().success, "{node} claim");
+    }
+
+    // legal onaylar → kol `arrived` (hâlâ 2 aktif kol var, join tamamlanmaz)
+    let legal = claim_owner(&store, wfe_id, "self__legalApprover");
+    let legal = Actor { role: "legalApprover".into(), ..legal };
+    let r = exec
+        .apply(wfe_id, &legal, "approve", &json!({}), Some("self__legalApprover"))
+        .await
+        .unwrap();
+    assert!(!r.terminal);
+    let arrived = store
+        .snapshot(wfe_id)
+        .branches
+        .iter()
+        .find(|b| b.branch_node == "self__legalApprover")
+        .map(|b| b.status)
+        .unwrap();
+    assert_eq!(arrived, BranchStatus::Arrived);
+
+    // finance reddeder → WFE-terminal; legal'in ONAYI boşa gitti
+    let fin = claim_owner(&store, wfe_id, "self__financeApprover");
+    let fin = Actor { role: "financeApprover".into(), ..fin };
+    exec.apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap();
+
+    let w = store.snapshot(wfe_id);
+    // kol satırı `arrived` KALIR (yeni statü yok — bkz. DECISIONS_v2_2.md)
+    let legal_row = w
+        .branches
+        .iter()
+        .find(|b| b.branch_node == "self__legalApprover")
+        .unwrap();
+    assert_eq!(legal_row.status, BranchStatus::Arrived);
+
+    let superseded: Vec<&WfahEntry> = w
+        .wfah
+        .entries()
+        .iter()
+        .filter(|e| e.action == "_branch_superseded")
+        .collect();
+    assert_eq!(superseded.len(), 1, "yalnız arrived kol superseded marker'ı alır");
+    let input = superseded[0].input.as_ref().unwrap();
+    assert_eq!(input["node"], json!("self__legalApprover"));
+    assert_eq!(input["reason"], json!("sibling_terminal"));
+    assert_eq!(input["approved_by"]["user_id"], json!(legal.user_id));
+    assert_eq!(input["approved_by"]["role"], json!("legalApprover"));
+    assert!(!input["approved_at"].is_null(), "onay zamanı taşınmalı");
+    // hr hâlâ aktifti → cancelled marker'ı; iki marker karışmaz
+    let cancels: Vec<&WfahEntry> = w
+        .wfah
+        .entries()
+        .iter()
+        .filter(|e| e.action == "_branch_cancelled")
+        .collect();
+    assert_eq!(cancels.len(), 1);
+    assert_eq!(cancels[0].input.as_ref().unwrap()["node"], json!("self__hrApprover"));
+}
+
 /// Executor retry döngüsü: adapter Conflict döndürdüğünde reload + engine
 /// yeniden koşulur. İlk commit Conflict, ikinci başarı → apply başarılı.
 #[tokio::test]

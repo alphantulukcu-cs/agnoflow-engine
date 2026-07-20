@@ -605,6 +605,23 @@ async fn collapse_drops_sibling_claims_and_records_them() {
         assert_eq!(input["claimed_by"], json!(expected), "marker claim sahibi");
         assert!(!input["claimed_at"].is_null(), "marker claimed_at taşımalı");
     }
+
+    // WOR-67: collapse'ı TETİKLEYEN (acting = finance) kolun düşen claim'i de
+    // audit'lenmeli — kardeş kollarda olduğu gibi. Ayrı marker yok; `_collapse`
+    // manşetinde `trigger_claimed_by` + `trigger_claimed_at`.
+    let summary = w
+        .wfah
+        .entries()
+        .iter()
+        .find(|e| e.action == "_collapse")
+        .and_then(|e| e.input.as_ref())
+        .expect("_collapse özeti");
+    assert_eq!(summary["trigger_branch"], json!("self__financeApprover"));
+    assert_eq!(summary["trigger_claimed_by"], json!(fin.user_id), "acting claim sahibi");
+    assert!(
+        !summary["trigger_claimed_at"].is_null(),
+        "acting kolun claimed_at'i manşette olmalı (hold süresi hesabı için)"
+    );
 }
 
 /// WOR-60: onaylanıp `arrived` olmuş kol, kardeşten gelen collapse ile
@@ -696,6 +713,9 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     assert_eq!(s["kind"], json!("terminal"));
     assert_eq!(s["cancelled"], json!(["self__hrApprover"]));
     assert_eq!(s["superseded"], json!(["self__legalApprover"]));
+    // WOR-67: acting (finance) kolun düşen claim'i manşette
+    assert_eq!(s["trigger_claimed_by"], json!(fin.user_id), "acting claim sahibi");
+    assert!(!s["trigger_claimed_at"].is_null(), "acting kolun claimed_at'i manşette");
 }
 
 /// Executor retry döngüsü: adapter Conflict döndürdüğünde reload + engine

@@ -1703,6 +1703,11 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 /// WOR-63: kol marker'larının `reason`'ı tek başına "neden düştü"yü anlatmıyordu
 /// (sabit, dar bir string). Tetikleyen kol/aksiyon/actor ek alanlar olarak eklendi;
 /// `reason` alanı DEĞİŞMEDİ — mevcut tüketiciler kırılmaz.
+///
+/// WOR-67: acting kol (collapse'ı tetikleyen) marker döngüsünden dışlanır ama
+/// adapter onun da claim'ini düşürür. Düşen claim `_collapse` manşetine
+/// `trigger_claimed_by`/`trigger_claimed_at` olarak yazılır (ayrı marker YOK) —
+/// yoksa "reddeden kişi claim'i ne kadar tuttu" collapse anında kaybolur.
 fn stage_parallel_markers(
     wfes: &Wfes,
     trigger: &Trigger<'_>,
@@ -1782,6 +1787,14 @@ fn stage_parallel_markers(
         bs.iter().map(|b| b.branch_node.as_str()).collect()
     }
 
+    // WOR-67: collapse'ı TETİKLEYEN (acting) kolun düşen claim'i. Acting kol marker
+    // döngüsünden dışlanır (aksiyon kaydı zaten WFAH'ta) ama adapter onun claim'ini de
+    // NULL'lar; sahip + başlangıç yalnız burada kalır. Ayrı marker YOK (bkz. WOR-67 a′):
+    // manşet zaten `trigger_*` taşıyor, claim de doğal olarak buraya ait. Kardeş
+    // kollarla simetri için `claimed_by` de yazılır (çoğu yolda == trigger_actor).
+    // Snapshot commit ÖNCESİ olduğu için acting kolun claim'i hâlâ duruyor.
+    let acting = acting_branch
+        .and_then(|n| wfes.branches.iter().find(|b| b.branch_node.as_str() == n));
     // WOR-61 manşet: collapse'ın tamamı tek kayıtta. Detaylar (aşağıdaki kol-başına
     // marker'lar) KALIR — bu özet onların yerine değil, üstüne geçer.
     push(
@@ -1790,6 +1803,8 @@ fn stage_parallel_markers(
             "trigger_branch": acting_branch,
             "trigger_action": trigger.action,
             "trigger_actor": actor,
+            "trigger_claimed_by": acting.and_then(|b| b.claimed_by),
+            "trigger_claimed_at": acting.and_then(|b| b.claimed_at),
             "kind": collapse_kind,
             "reason": cancel_reason,
             "target": target,

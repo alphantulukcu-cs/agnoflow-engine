@@ -475,6 +475,34 @@ yanıltıcı `already_claimed` / `not_eligible` gerekçesi yerine.
   "code": "conflict.stale_revision" }
 ```
 
+## WOR-67 — Acting (collapse'ı tetikleyen) kolun düşen claim'i: `_collapse` manşetine (2026-07-20)
+
+**Sorun:** WOR-59 kardeş kolların düşen claim'ini (`claimed_by`/`claimed_at`)
+`_branch_cancelled` marker'ına yazdı. Ama collapse'ı TETİKLEYEN kol (`acting_branch`)
+marker döngüsünden dışlanır (`stage_parallel_markers`, gerekçe: aksiyon kaydı zaten
+WFAH'ta, ikinci "iptal edildi" kaydı gürültü). Oysa adapter (`cancel_active_branches`)
+acting kol için istisna yapmaz — onun da claim'i DB'de NULL'lanır. Sonuç: acting kol
+DB'de `cancelled` + claim düşmüş ama düşen claim'i kaydeden hiçbir marker yok. Audit
+asimetrisi: "reddeden kişi claim'i ne kadar tuttu" collapse anında kaybolur.
+
+**Karar — (a′): claim `_collapse` manşetine, AYRI MARKER YOK.** Değerlendirilen yollar:
+
+| Seçenek | Karar | Neden |
+|---|---|---|
+| (b) acting için de `_branch_cancelled` yaz | RED | aynı olaya iki kayıt (aksiyon + iptal); dışlamanın orijinal gerekçesine ters. |
+| (a) acting kolun AKSİYON kaydını zenginleştir | RED | o kayıt `stage_parallel_markers` dışında (primary action entry); claim'i oraya taşımak + `action.input` namespace'ine engine metadata karıştırmak (kullanıcı payload alan adlarıyla çakışma). |
+| **(a′) `_collapse` manşetine ek alan (SEÇİLDİ)** | ✅ | manşet zaten `trigger_*` taşıyor; yeni marker yok (gürültü hedefi korunur), user input namespace'ine dokunmaz, TÜM collapse yolları otomatik kapsanır (manşet koşulsuz yazılır), portal geriye uyumlu (`_collapse`'ı zaten tüketir). |
+
+`_collapse` özetine iki alan eklendi: `trigger_claimed_by` + `trigger_claimed_at`. Claim,
+acting kolun `BranchState`'inden commit-öncesi snapshot'ta okunur (kardeş kolların
+`_branch_cancelled` için okuduğu yerin aynısı — adapter clear'ından önce). `trigger_actor
+== trigger_claimed_by` çoğu yolda (reddeden = claim sahibi); asıl kıymetli alan
+`trigger_claimed_at` (hold süresi = `now − claimed_at`). `claimed_by` kardeş marker'larıyla
+simetri için tutulur. Sistem yollarında (SLA/escalation) acting kol yoksa iki alan da `null`.
+
+Portal tarafında iş YOK — tüketilen marker ŞEKLİ değişmedi, alan EKLENDİ (WOR-64 etkisiz).
+(`pipeline.rs::stage_parallel_markers`, test `fork_join.rs`.)
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

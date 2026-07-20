@@ -32,6 +32,24 @@ pub fn compute_claim_deadline(
     Some(claimed_at + after)
 }
 
+/// WOR-65: istemcinin taşıdığı revizyon token'ı (`expected_rev`) yüklenen durumun
+/// revizyonuyla (`Wfes::rev()` — son WFAH seq'i) uyuşuyor mu?
+///
+/// `None` = istemci token göndermedi → kontrol YOK, bugünkü davranış aynen sürer
+/// (geriye dönük uyumluluk sözleşmesi). `Some(n)` ve uyuşmazlık → kalıcı bir
+/// precondition ihlali: durum istemcinin okuduğu andan beri değişmiştir
+/// (collapse, kardeş kol, escalation, timer, başka bir kullanıcının aksiyonu…).
+/// Retry ANLAMSIZDIR — reload aynı uyuşmazlığı üretir — bu yüzden çağıranlar
+/// `Conflict(StaleRevision)`'ı retry döngüsüne SOKMADAN yukarı verir.
+fn check_rev(wfes: &Wfes, expected_rev: Option<u32>) -> Result<(), EngineError> {
+    match expected_rev {
+        Some(expected) if expected != wfes.rev() => {
+            Err(EngineError::Conflict(ConflictKind::StaleRevision))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// İdempotent re-claim kontrolü: verilen aktör zaten sahip mi? Paralel modda
 /// (`node` verilir) o kolun `claimed_by`'ı, aksi halde wfe-seviyesi `assigned_to`.
 fn branch_owner_is(wfes: &Wfes, node: Option<&str>, user_id: Uuid) -> bool {
@@ -166,6 +184,11 @@ pub struct WfeView {
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     pub join_target: Option<WftTarget>,
+    /// WOR-65: WFE revizyon token'ı (bkz. `Wfes::rev()`). İstemci bunu okuyup
+    /// bir sonraki apply/claim'de `expected_rev` olarak geri gönderirse, arada
+    /// durum değişmişse 409 `conflict.stale_revision` alır. WFE-seviyesidir —
+    /// paralel modda TÜM kollar için aynı değerdir.
+    pub rev: u32,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -246,6 +269,10 @@ impl WfeExecutor {
     }
 
     /// `node_hint`: WOR-31 — paralel modda kol seçimi (API body `node`; T4 bağlar).
+    ///
+    /// `expected_rev`: WOR-65 — istemcinin okuduğu WFE revizyon token'ı (API body
+    /// `expected_rev`). `None` = kontrol yok (bugünkü davranış). `Some(n)` ve durum
+    /// bu arada ilerlediyse hiçbir şey uygulanmaz, `Conflict(StaleRevision)` döner.
     pub async fn apply(
         &self,
         wfe_id: Uuid,
@@ -253,6 +280,7 @@ impl WfeExecutor {
         action: &str,
         input: &Value,
         node_hint: Option<&str>,
+        expected_rev: Option<u32>,
     ) -> Result<WfeApplyResult, EngineError> {
         // WOR-31: paralel modda eşzamanlı kol hareketleri (BranchMoveTo/
         // BranchArrived/JoinComplete/CollapseTo) adapter FOR UPDATE + kol CAS +
@@ -272,6 +300,13 @@ impl WfeExecutor {
         let mut last_err = None;
         for _ in 0..MAX_ATTEMPTS {
             let wfes = self.wfe.load(wfe_id).await?;
+            // WOR-65: revizyon kapısı engine'i koşturmadan ÖNCE — istemcinin
+            // gördüğü durum artık geçerli değilse hiçbir yan etki üretilmemeli.
+            // `?` ile ERKEN döner: retry döngüsüne GİRMEZ (bkz. `check_rev`).
+            // Retry turlarında da geçerlidir ve orada asıl işini yapar: örtük bir
+            // seq çakışmasından sonra reload taze duruma bakar, istemcinin
+            // precondition'ı artık tutmadığı için aksiyon SESSİZCE uygulanmaz.
+            check_rev(&wfes, expected_rev)?;
             let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
 
             let commit = self
@@ -326,12 +361,26 @@ impl WfeExecutor {
 
     /// Atomik claim: uygunluk matcher ile doğrulanır, yazım CAS ile yapılır.
     /// `node`: WOR-31 — paralel modda kol node'u (CAS o kolda yapılır).
+    ///
+    /// `expected_rev`: WOR-65 — opsiyonel revizyon token'ı. Claim'in KENDİ CAS'ı
+    /// (`claimed_by IS NULL`) eşzamanlı claim yarışını zaten çözer; revizyon
+    /// kapısının çözdüğü AYRI bir sorundur: kullanıcının listede gördüğü satır
+    /// bu arada geçersizleşmiş olabilir (collapse kolu `cancelled` yaptı, WFE
+    /// başka node'a geçti). Kapı olmadan bu durum ayırt edilemeyen bir
+    /// `already_claimed` / `not_eligible` gerekçesine düşer; kapıyla NET bir
+    /// `conflict.stale_revision` olur. `None` = kontrol yok, ek sorgu da yok.
     pub async fn claim(
         &self,
         wfe_id: Uuid,
         actor: &Actor,
         node: Option<&str>,
+        expected_rev: Option<u32>,
     ) -> Result<ClaimOutcome, EngineError> {
+        // Revizyon kapısı uygunluk kontrolünden ÖNCE: stale bir istek için
+        // "başkası aldı" demek yanıltıcıdır, doğru cevap "durum değişti"dir.
+        if expected_rev.is_some() {
+            check_rev(&self.wfe.load(wfe_id).await?, expected_rev)?;
+        }
         let (eligible, reason) = self.can_claim(wfe_id, actor, node).await?;
         if !eligible {
             return Ok(ClaimOutcome { success: false, reason });
@@ -376,6 +425,8 @@ impl WfeExecutor {
         let priority = crate::priority::compute_priority(wfes.created_at, wfes.deadline, now);
         let claim_deadline =
             compute_claim_deadline(&wfd, wfes.current_node.as_deref(), wfes.claimed_at);
+        // `wfes` aşağıda parça parça taşınıyor — revizyon ÖNCE okunmalı (WOR-65).
+        let rev = wfes.rev();
 
         Ok(WfeView {
             wfe_id,
@@ -389,6 +440,7 @@ impl WfeExecutor {
             claimed_at: wfes.claimed_at,
             claim_deadline,
             priority,
+            rev,
             branches: wfes.branches,
             join_target: wfes.join_target,
         })

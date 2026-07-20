@@ -99,6 +99,18 @@ struct ApplyBody {
     /// transition'ıyla eşleşiyorsa zorunlu (aksi halde `AmbiguousAction`/409).
     #[serde(default)]
     node: Option<String>,
+    /// WOR-65: istemcinin okuduğu WFE revizyon token'ı (`GET /wfe/:id` →`rev`,
+    /// `GET /wfe` → satır başına `rev`). OPSİYONEL — göndermeyen istemci bugünkü
+    /// davranışı görür. Verilirse ve durum bu arada ilerlemişse hiçbir şey
+    /// uygulanmaz: 409 + `code: "conflict.stale_revision"`.
+    ///
+    /// Neden gövde alanı, `If-Match` başlığı değil: token opak bir entity-tag
+    /// değil, düz bir tamsayıdır; `If-Match`'in weak/strong karşılaştırma, `*`
+    /// ve liste semantiğinin yarısını uygulamak yanıltıcı olurdu. Ayrıca bu
+    /// endpoint'in gövdesinde zaten opsiyonel alanlar var (`node`) — token da
+    /// aynı yerde, aynı tipte, tek bir sözleşmede durur.
+    #[serde(default)]
+    expected_rev: Option<u32>,
 }
 
 async fn apply_action(
@@ -109,7 +121,14 @@ async fn apply_action(
 ) -> Result<Json<wf_wfe::executor::WfeApplyResult>, AppError> {
     let actor = extract_actor(&headers)?;
     s.executor
-        .apply(wfe_id, &actor, &body.action, &body.input, body.node.as_deref())
+        .apply(
+            wfe_id,
+            &actor,
+            &body.action,
+            &body.input,
+            body.node.as_deref(),
+            body.expected_rev,
+        )
         .await
         .map(Json)
         .map_err(AppError::from)
@@ -123,6 +142,12 @@ async fn apply_action(
 struct ClaimBody {
     #[serde(default)]
     node: Option<String>,
+    /// WOR-65: opsiyonel revizyon token'ı (bkz. `ApplyBody::expected_rev`).
+    /// Claim'in kendi CAS'ı yarışı zaten çözer; bu kapı "listede gördüğüm satır
+    /// hâlâ geçerli mi" sorusunu yanıtlar. Göndermeyen istemci için claim akışı
+    /// HİÇ DEĞİŞMEZ (200 + `{success:false, reason:"already_claimed"}`).
+    #[serde(default)]
+    expected_rev: Option<u32>,
 }
 
 fn parse_claim_body(bytes: &axum::body::Bytes) -> Result<ClaimBody, AppError> {
@@ -142,7 +167,12 @@ async fn claim_wfe(
     let actor = extract_actor(&headers)?;
     let claim_body = parse_claim_body(&body)?;
     s.executor
-        .claim(wfe_id, &actor, claim_body.node.as_deref())
+        .claim(
+            wfe_id,
+            &actor,
+            claim_body.node.as_deref(),
+            claim_body.expected_rev,
+        )
         .await
         .map(Json)
         .map_err(AppError::from)
@@ -189,6 +219,11 @@ struct WfeListItem {
     row: wf_wfe::models::WfeRow,
     priority: i32,
     claim_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    /// WOR-65: WFE revizyon token'ı. Listede AÇIKÇA döner çünkü buraya `wfah`
+    /// dizisi dahil değildir — portal'ın revizyonu türetebileceği başka bir alan
+    /// YOK. `priority`/`claim_deadline` gibi hesaplanmış bir alandır (`wf.wfe`
+    /// kolonu DEĞİL), bu yüzden `WfeRow`'a değil buraya konur.
+    rev: i32,
 }
 
 async fn list_wfe(
@@ -207,6 +242,12 @@ async fn list_wfe(
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
     let rows = wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id, limit, offset)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    // WOR-65: revizyonlar TEK toplu sorguda (satır başına sorgu YOK).
+    let wfe_ids: Vec<Uuid> = rows.iter().map(|r| r.wfe_id).collect();
+    let revs = wf_wfe::repo::wfah::max_seq_by_wfe(&s.pool, &wfe_ids)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
@@ -241,7 +282,8 @@ async fn list_wfe(
         } else {
             None
         };
-        out.push(WfeListItem { priority, claim_deadline, row });
+        let rev = revs.get(&row.wfe_id).copied().unwrap_or(0);
+        out.push(WfeListItem { priority, claim_deadline, rev, row });
     }
     Ok(Json(out))
 }

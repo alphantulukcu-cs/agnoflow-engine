@@ -352,7 +352,10 @@ API sözleşmesinin parçasıdır (`wfe-core/src/error.rs`):
 | `BranchArrival` | `conflict.branch_arrival` | evet | kol-varış sayımı engine görüşüyle uyuşmadı |
 | `WfeGone` | `conflict.wfe_gone` | hayır | wfe satırı yok / tenant uyuşmuyor |
 | `AlreadyClaimed` | `conflict.already_claimed` | hayır | claim CAS'ı kaybedildi |
-| `StaleRevision` | `conflict.stale_revision` | evet | **WOR-65 rezervi** — revizyon token'ı eskimiş |
+| `StaleRevision` | `conflict.stale_revision` | evet\* | revizyon token'ı eskimiş (WOR-65'te devreye alındı) |
+
+\* `StaleRevision`'ın retry'ı yalnız ÖRTÜK yol (seq çakışması) içindir; istemci
+`expected_rev` gönderdiyse retry edilmez. Bkz. WOR-65 Karar 4.
 
 **Karar 4 — her Conflict retry edilmez.** `WfeExecutor::apply` retry döngüsü
 (MAX_ATTEMPTS = 3, WOR-31'den değişmedi) artık `ConflictKind::is_retryable()`'a
@@ -374,12 +377,103 @@ conflict aynen yukarı verilir.
 girer: `conflict.ambiguous_action` (`AmbiguousAction`), `conflict.terminal`
 (`WfeTerminal`), `conflict.expired` (`WfeExpired`).
 
-**WOR-65 için bırakılan kancalar:** revizyon token'ı + stale-write koruması yeni
-bir hata TİPİ açmaz — `ConflictKind::StaleRevision` (kodu ve retry semantiği
-yukarıda tanımlı) kullanılır. `From<EngineError> for AppError` yeni varyantlar
-için değişiklik gerektirmez (kod `kind.code()`'tan gelir). Claim yarışının bugünkü
-yolu 409 DEĞİLDİR (`ClaimOutcome { success: false, reason: "already_claimed" }`,
-HTTP 200); 409'a taşınırsa kodu `conflict.already_claimed`'dir.
+**WOR-65 için bırakılan kancalar (hepsi kullanıldı — bkz. bir sonraki bölüm):**
+revizyon token'ı + stale-write koruması yeni bir hata TİPİ açmadı,
+`ConflictKind::StaleRevision` kullanıldı ve `From<EngineError> for AppError`
+gerçekten değişmedi (kod `kind.code()`'tan gelir). Claim yarışının bugünkü yolu
+409 DEĞİLDİR (`ClaimOutcome { success: false, reason: "already_claimed" }`,
+HTTP 200) ve WOR-65'te de 409'a TAŞINMADI.
+
+## WOR-65 — WFE revizyon token'ı + stale-write reddi (2026-07-20)
+
+`work-pool-portal`'ın motorla tek senkron kanalı polling'dir (`refetchInterval: 4000ms`,
+`staleTime: 10000ms`; WebSocket/SSE/webhook YOK). Motor durumu "sessizce" değiştirir —
+en keskini collapse: paralel bir kolda sonlandıran aksiyon alınınca kardeş kollar
+`cancelled` olur, WFE hedefe gider. `claimWfe`/`applyAction` hiçbir revizyon taşımadığı
+için portal "altımdan durum değişti"yi tespit edemiyordu: collapse'tan sonra ~4-10s
+boyunca kullanıcı hâlâ Claim/Apply gönderebiliyor, tek backstop motorun reddiydi ve o
+red ayırt edilemiyordu (hangi node'a collapse edildiğine göre `TransitionNotFound` /
+`AmbiguousAction` / `PermissionDenied` — hepsi jenerik toast).
+
+**Karar 1 — revizyon token'ı = son WFAH `seq`'i. Yeni kolon/migration YOK.**
+Değerlendirilen seçenekler ve gerekçe:
+
+| Seçenek | Karar | Neden |
+|---|---|---|
+| `updated_at timestamptz` | RED | timestamptz precision/çakışma riski; aynı tx içinde `now()` sabittir, iki commit ayırt edilemeyebilir. Semantik olarak da "revizyon" değil. |
+| yeni `rev integer` kolonu | RED | aynı gerçeği ikinci kez saklar + senkron tutma yükü; aşağıdaki gözlem karşısında gereksiz. |
+| **WFAH `seq` (SEÇİLDİ)** | ✅ | `wf.wfah` zaten WFE başına monotonik, `UNIQUE (wfe_id, seq)` ile korunan bir sayaç tutar; her transition ≥1 kayıt yazar ve `commit` tek transaction'dır. |
+
+Kodda doğrulandı (dogma olarak kabul EDİLMEDİ): `Engine::apply`/`start` ve escalation/
+timeout yolları seq'i `wfes.wfah.entries().last().seq + 1`'den başlatır ve her yol en az
+bir kayıt push eder — yani `Wfes::rev()` (son seq, WFAH boşsa 0) gerçekten monotonik bir
+revizyon sayacıdır.
+
+**Karar 2 — kapsam istisnası: `claim` revizyonu ARTIRMAZ (bilinçli).**
+`WfeStore::claim` `commit()`'ten geçmez; saf bir CAS UPDATE'tir ve WFAH'a yazmaz.
+Dolayısıyla seq tabanlı revizyon yalnız *transition*'ları kapsar. Bu bölünme kabul
+edildi, çünkü claim yarışı zaten kendi CAS'ıyla (`claimed_by IS NULL`) çözülüyor ve
+claim'i WFAH'a yazdırmak audit izini kirletir + `$wfah` ZEN namespace'inin anlamını
+değiştirirdi (spec etkisi olurdu). `release_claim` ise WFAH marker'ı yazdığı için
+revizyonu ARTIRIR — asimetrik ama doğru: claim salt atama, release gözlemlenebilir bir
+SLA olayıdır.
+
+**Karar 3 — wire biçimi: gövde alanı `expected_rev` (tamsayı), `If-Match` başlığı DEĞİL.**
+Token opak bir entity-tag değil düz bir tamsayıdır; `If-Match`'in weak/strong
+karşılaştırma, `*` ve liste semantiğinin yarısını uygulamak sözleşmeyi yanıltıcı
+kılardı. Ayrıca ilgili endpoint'lerin gövdesinde zaten opsiyonel alanlar var (`node`) —
+token da aynı yerde, aynı tipte durur. **OPSİYONEL**: göndermeyen istemci bugünkü
+davranışı birebir görür.
+
+Okuma tarafı (revizyon AÇIKÇA döner — liste endpoint'lerinde `wfah` YOKTUR, portal'ın
+türetebileceği başka alan yok):
+
+| Endpoint | Alan |
+|---|---|
+| `GET /wfe/:id` | `rev` (kök) |
+| `GET /wfe` | satır başına `rev` |
+| `GET /portal/wfe/:id` | `rev` (kök) |
+| `GET /portal/pool` | satır başına `rev` |
+
+Yazma tarafı: `POST /wfe/:id/actions`, `POST /wfe/:id/claim`,
+`POST /portal/wfe/:id/action`, `POST /portal/pool/:id/claim` → gövdede `expected_rev`.
+
+Revizyon **WFE-seviyesidir**: paralel modda tüm kollar aynı `rev`'i taşır (kol-bazlı
+revizyon YOKTUR). Havuz listesinde aynı WFE'nin farklı kolları için üretilen satırlar
+bu yüzden aynı `rev`'i gösterir.
+
+**Karar 4 — iki katmanlı koruma; sunucu-içi retry ile istemciye dönen 409 ayrımı.**
+
+*Açık katman:* `expected_rev` verilmişse `WfeExecutor::apply`/`claim` engine'i
+koşturmadan ÖNCE `Wfes::rev()` ile karşılaştırır; uyuşmazlıkta hiçbir yan etki
+üretmeden `Conflict(StaleRevision)`. Bu kontrol retry döngüsünün İÇİNDEDİR ama `?` ile
+erken döner — yani **sunucu-içi retry yapılmaz**. Gerekçe: reload aynı uyuşmazlığı
+üretir, 3 tur sadece gecikmeyi üçe katlardı. If-Match semantiği de bunu gerektirir:
+durum değiştiyse aksiyon SESSİZCE uygulanmamalıdır.
+
+*Örtük katman:* `UNIQUE (wfe_id, seq)` ihlali (Postgres 23505) artık `WfePort` (→ 500)
+değil `Conflict(StaleRevision)`'a eşlenir (`wfe_adapter.rs::insert_err`). Bu, token
+GÖNDERMEYEN istemciler için de lost-update korumasıdır ve özellikle **tekil
+(paralel-olmayan) modda tek yarış korumasıdır**: `CommitOutcome::MoveTo` yolunda ne
+`FOR UPDATE` ne de CAS vardır. Bu katman retry-EDİLEBİLİR (`is_retryable() == true`):
+reload taze seq verir, aksiyon meşru biçimde uygulanabilir.
+
+İkisi birlikte tutarlıdır: istemci `expected_rev` gönderdiyse örtük katmanın retry'ı
+tek turda biter, çünkü reload sonrası açık kontrol uymaz ve `StaleRevision` döner.
+
+**Karar 5 — claim akışı token'sız istemci için DEĞİŞMEDİ.** `expected_rev` yokken claim
+bugünkü gibi HTTP 200 + `ClaimOutcome { success: false, reason: "already_claimed" }`
+döner; 409'a taşınMADI (portal'ın mevcut claim akışını kırardı). `expected_rev` VARSA ve
+eskimişse `Conflict(StaleRevision)` → 409. Yani portal, claim'i 409'a taşımadan, yalnız
+token göndererek "listede gördüğüm satır artık geçersiz" durumunu ayırt edebilir —
+yanıltıcı `already_claimed` / `not_eligible` gerekçesi yerine.
+
+409 gövdesi WOR-62'deki şekliyle aynıdır, yeni hata TİPİ açılmadı:
+
+```json
+{ "error": "optimistic concurrency conflict [conflict.stale_revision]: state changed under commit",
+  "code": "conflict.stale_revision" }
+```
 
 ## Ek kararlar (bağımsız issue'lar)
 

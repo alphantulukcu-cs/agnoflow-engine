@@ -66,6 +66,12 @@ struct WfeDetailResponse {
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     join_target: Option<WftTarget>,
+    /// WOR-65: WFE revizyon token'ı — `/wfe/:id` (WfeView) ile AYNI değer.
+    /// Portal bunu saklayıp `POST /portal/wfe/:id/action` gövdesinde
+    /// `expected_rev` olarak geri gönderir; arada durum değiştiyse 409 +
+    /// `conflict.stale_revision` alır ve jenerik toast yerine "bu görev artık
+    /// sizde değil, sayfa yenileniyor" diyebilir.
+    rev: u32,
 }
 
 #[derive(sqlx::FromRow)]
@@ -146,6 +152,7 @@ async fn get_wfe_detail(
         available_actions,
         branches: view.branches,
         join_target: view.join_target,
+        rev: view.rev,
     }))
 }
 
@@ -157,6 +164,11 @@ struct ActionRequest {
     /// WOR-31 T4: paralel modda kol seçimi (bkz. `AvailableAction.node`).
     #[serde(default)]
     node: Option<String>,
+    /// WOR-65: `WfeDetailResponse.rev`'den okunan revizyon token'ı. OPSİYONEL —
+    /// göndermeyen istemci bugünkü davranışı görür. Uyuşmazlıkta hiçbir yan etki
+    /// üretilmeden 409 + `code: "conflict.stale_revision"`.
+    #[serde(default)]
+    expected_rev: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -183,6 +195,7 @@ async fn submit_action(
             &body.action,
             &body.input,
             body.node.as_deref(),
+            body.expected_rev,
         )
         .await
         .map_err(AppError::from)?;

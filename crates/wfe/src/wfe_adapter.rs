@@ -41,6 +41,26 @@ fn db_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::WfePort(e.to_string())
 }
 
+/// WOR-65: `wf.wfah` ve `wf.wfe_dynctx`'in `UNIQUE (wfe_id, seq)` kısıtı ZATEN bir
+/// optimistic lock'tur — engine seq'i yüklediği snapshot'tan hesaplar, araya başka
+/// bir commit girerse aynı seq ikinci kez yazılmak istenir ve Postgres 23505
+/// (unique_violation) döner. Bu, tekil (paralel-olmayan) modda TEK yarış
+/// korumasıdır: `CommitOutcome::MoveTo` yolunda ne `FOR UPDATE` ne de CAS vardır.
+///
+/// Önceden bu ihlal `WfePort` (→ HTTP 500) olarak sızıyordu; artık `StaleRevision`
+/// conflict'ine eşlenir — böylece hem doğru HTTP kodu (409 + `conflict.stale_revision`)
+/// hem de executor'ın retry döngüsü (reload → taze seq) devreye girer.
+///
+/// 23505 DIŞINDAKİ tüm DB hataları eskisi gibi `WfePort`'tur.
+fn insert_err(e: sqlx::Error) -> EngineError {
+    if let sqlx::Error::Database(db) = &e {
+        if db.code().as_deref() == Some("23505") {
+            return EngineError::Conflict(ConflictKind::StaleRevision);
+        }
+    }
+    EngineError::WfePort(e.to_string())
+}
+
 async fn insert_wfah_entries(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     wfe_id: Uuid,
@@ -60,7 +80,8 @@ async fn insert_wfah_entries(
         .bind(entry.applied_at)
         .execute(&mut **tx)
         .await
-        .map_err(db_err)?;
+        // WOR-65: seq çakışması = eşzamanlı commit (bkz. `insert_err`).
+        .map_err(insert_err)?;
     }
     Ok(())
 }
@@ -331,7 +352,8 @@ impl WfeStore for WfeAdapter {
             .bind(&commit.new_dynctx)
             .execute(&mut *tx)
             .await
-            .map_err(db_err)?;
+            // WOR-65: seq çakışması = eşzamanlı commit (bkz. `insert_err`).
+            .map_err(insert_err)?;
 
         insert_wfah_entries(&mut tx, commit.wfe_id, &commit.wfah_entries).await?;
 

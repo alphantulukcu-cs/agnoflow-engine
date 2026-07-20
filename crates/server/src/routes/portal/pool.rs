@@ -84,6 +84,11 @@ pub struct PoolTask {
     /// Paralel değilse `None` (geriye uyumlu — eski istemciler bu alanı yok sayar).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node: Option<String>,
+    /// WOR-65: WFE revizyon token'ı. Havuz listesinde AÇIKÇA döner çünkü burada
+    /// `wfah` YOKTUR — portal'ın revizyonu türetebileceği başka alan yok.
+    /// **WFE-seviyesidir:** aynı paralel WFE'nin farklı kolları için üretilen
+    /// satırlar AYNI `rev`'i taşır (kol-bazlı revizyon yoktur).
+    pub rev: i32,
 }
 
 async fn list_pool(
@@ -197,6 +202,7 @@ async fn list_pool(
             claim_deadline,
             priority,
             node: None,
+            rev: 0, // WOR-65: iki döngü de bittikten sonra tek toplu sorguyla doldurulur
         });
     }
 
@@ -320,7 +326,25 @@ async fn list_pool(
             claim_deadline,
             priority,
             node: Some(row.branch_node),
+            rev: 0, // aşağıda doldurulur
         });
+    }
+
+    // WOR-65: revizyon token'ları TEK toplu sorguda — iki döngü de aynı WFE'yi
+    // (paralel modda kol başına bir satır) üretebildiği için doldurma işlemi
+    // döngülerin İÇİNDE değil, birleşik liste üzerinde yapılır; böylece ne N+1
+    // sorgu ne de aynı WFE için tekrarlanan sorgu olur.
+    let rev_ids: Vec<Uuid> = {
+        let mut ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let revs = wf_wfe::repo::wfah::max_seq_by_wfe(&s.pool, &rev_ids)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    for task in &mut tasks {
+        task.rev = revs.get(&task.id).copied().unwrap_or(0);
     }
 
     // priority DESC, deadline ASC NULLS LAST, created_at ASC (sözleşme sırası).
@@ -381,6 +405,12 @@ struct ClaimResponse {
 struct ClaimBody {
     #[serde(default)]
     node: Option<String>,
+    /// WOR-65: `PoolTask.rev`'den okunan revizyon token'ı. OPSİYONEL —
+    /// göndermeyen istemci için claim akışı HİÇ DEĞİŞMEZ. Verilirse ve havuz
+    /// satırı bu arada geçersizleştiyse (collapse kolu iptal etti, WFE taşındı)
+    /// yanıt yanıltıcı `already_claimed` yerine 409 + `conflict.stale_revision`.
+    #[serde(default)]
+    expected_rev: Option<u32>,
 }
 
 async fn claim(
@@ -397,7 +427,12 @@ async fn claim(
     };
     let outcome = s
         .executor
-        .claim(wfe_id, &to_actor(&actor), claim_body.node.as_deref())
+        .claim(
+            wfe_id,
+            &to_actor(&actor),
+            claim_body.node.as_deref(),
+            claim_body.expected_rev,
+        )
         .await
         .map_err(AppError::from)?;
     if !outcome.success {

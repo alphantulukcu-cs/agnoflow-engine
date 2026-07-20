@@ -68,6 +68,27 @@ pub struct Wfes {
     pub join_target: Option<WftTarget>,
 }
 
+impl Wfes {
+    /// WOR-65: WFE **revizyon token'ı** = son WFAH kaydının `seq`'i.
+    ///
+    /// Neden yeni bir kolon değil: `wf.wfah` zaten WFE başına monotonik bir sayaç
+    /// tutar (`UNIQUE (wfe_id, seq)`), her transition en az bir kayıt ekler ve
+    /// `commit` tek transaction'dır — yani "revizyon" bilgisi zaten kalıcı,
+    /// atomik ve çakışmaya karşı DB kısıtıyla korunuyor. Ayrı bir `rev` kolonu
+    /// aynı gerçeği ikinci kez saklayıp senkron tutma yükü getirirdi.
+    ///
+    /// **Kapsam istisnası (bilinçli):** `WfeStore::claim` WFAH'a yazmaz (saf CAS
+    /// UPDATE'tir), dolayısıyla claim revizyonu ARTIRMAZ. Claim yarışları kendi
+    /// `claimed_by IS NULL` CAS'ıyla korunur. `release_claim` ise WFAH marker'ı
+    /// yazdığı için revizyonu artırır. Ayrıntı: `docs/spec/DECISIONS_v2_2.md`.
+    ///
+    /// WFAH boşsa 0 — pratikte olmaz (`Engine::start` daima ≥1 kayıt stage eder),
+    /// ama 0 "hiç revizyon yok" olarak güvenli biçimde okunur.
+    pub fn rev(&self) -> u32 {
+        self.wfah.entries().last().map(|e| e.seq).unwrap_or(0)
+    }
+}
+
 /// Transition sonucunun gideceği yer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommitOutcome {

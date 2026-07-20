@@ -226,6 +226,19 @@ impl WfeStore for ParStore {
             return Err(EngineError::Conflict(ConflictKind::Collapsed));
         }
 
+        // WOR-65: `wf.wfah` (ve `wf.wfe_dynctx`) `UNIQUE (wfe_id, seq)` kısıtının
+        // taklidi. Engine seq'i yüklediği snapshot'tan hesaplar; araya başka bir
+        // commit girdiyse aynı seq ikinci kez yazılmak istenir. Gerçek adapter'da
+        // Postgres 23505 döner ve `insert_err` bunu `StaleRevision`'a eşler —
+        // burada aynı verdikt doğrudan üretilir. Bu, TEKİL (paralel-olmayan)
+        // moddaki `MoveTo` yolunun tek yarış korumasıdır: orada ne FOR UPDATE
+        // ne de CAS vardır.
+        if let (Some(first), Some(last)) = (commit.wfah_entries.first(), w.wfah.entries().last()) {
+            if first.seq <= last.seq {
+                return Err(EngineError::Conflict(ConflictKind::StaleRevision));
+            }
+        }
+
         w.dynctx = DynCtx(commit.new_dynctx.clone());
         w.wfah.0.extend(commit.wfah_entries.iter().cloned());
 
@@ -438,10 +451,10 @@ async fn fork_setup(exec: &WfeExecutor) -> Uuid {
     let wfe_id = started.wfe_id;
     assert_eq!(started.current_node.as_deref(), Some("self__coordinator"));
     let coord = actor("coordinator");
-    let c = exec.claim(wfe_id, &coord, None).await.unwrap();
+    let c = exec.claim(wfe_id, &coord, None, None).await.unwrap();
     assert!(c.success, "coordinator claim");
     let res = exec
-        .apply(wfe_id, &coord, "start_review", &json!({}), None)
+        .apply(wfe_id, &coord, "start_review", &json!({}), None, None)
         .await
         .unwrap();
     assert!(!res.terminal);
@@ -470,7 +483,7 @@ async fn happy_path_fork_join_finalize() {
     // her kolu claim et
     for (role, node) in branches {
         let a = actor(role);
-        let c = exec.claim(wfe_id, &a, Some(node)).await.unwrap();
+        let c = exec.claim(wfe_id, &a, Some(node), None).await.unwrap();
         assert!(c.success, "{node} claim");
     }
 
@@ -478,7 +491,7 @@ async fn happy_path_fork_join_finalize() {
     for (role, node) in &branches[..2] {
         let a = claim_owner(&store, wfe_id, node);
         let a = Actor { role: (*role).into(), ..a };
-        let r = exec.apply(wfe_id, &a, "approve", &json!({}), Some(node)).await.unwrap();
+        let r = exec.apply(wfe_id, &a, "approve", &json!({}), Some(node), None).await.unwrap();
         assert!(!r.terminal);
         assert_eq!(r.current_node, None);
     }
@@ -488,7 +501,7 @@ async fn happy_path_fork_join_finalize() {
     let (role, node) = branches[2];
     let a = claim_owner(&store, wfe_id, node);
     let a = Actor { role: role.into(), ..a };
-    let r = exec.apply(wfe_id, &a, "approve", &json!({}), Some(node)).await.unwrap();
+    let r = exec.apply(wfe_id, &a, "approve", &json!({}), Some(node), None).await.unwrap();
     assert!(!r.terminal, "join node terminal değil");
     let w = store.snapshot(wfe_id);
     assert_eq!(w.current_node.as_deref(), Some("self__resultCoordinator"));
@@ -498,9 +511,9 @@ async fn happy_path_fork_join_finalize() {
 
     // finalize → terminal_approved
     let rc = actor("resultCoordinator");
-    let c = exec.claim(wfe_id, &rc, None).await.unwrap();
+    let c = exec.claim(wfe_id, &rc, None, None).await.unwrap();
     assert!(c.success, "resultCoordinator claim");
-    let r = exec.apply(wfe_id, &rc, "finalize", &json!({}), None).await.unwrap();
+    let r = exec.apply(wfe_id, &rc, "finalize", &json!({}), None, None).await.unwrap();
     assert!(r.terminal, "finalize terminal olmalı");
     assert_eq!(store.snapshot(wfe_id).status, WfeStatus::Terminal);
 }
@@ -514,9 +527,9 @@ async fn branch_reject_terminates_and_cancels_siblings() {
     let wfe_id = fork_setup(&exec).await;
 
     let fin = actor("financeApprover");
-    exec.claim(wfe_id, &fin, Some("self__financeApprover")).await.unwrap();
+    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None).await.unwrap();
     let r = exec
-        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"), None)
         .await
         .unwrap();
     assert!(r.terminal, "red WFE-terminal");
@@ -550,7 +563,7 @@ async fn collapse_drops_sibling_claims_and_records_them() {
         ("hrApprover", "self__hrApprover"),
     ] {
         let a = actor(role);
-        assert!(exec.claim(wfe_id, &a, Some(node)).await.unwrap().success, "{node} claim");
+        assert!(exec.claim(wfe_id, &a, Some(node), None).await.unwrap().success, "{node} claim");
     }
     let legal_owner = claim_owner(&store, wfe_id, "self__legalApprover").user_id;
     let hr_owner = claim_owner(&store, wfe_id, "self__hrApprover").user_id;
@@ -558,7 +571,7 @@ async fn collapse_drops_sibling_claims_and_records_them() {
     let fin = claim_owner(&store, wfe_id, "self__financeApprover");
     let fin = Actor { role: "financeApprover".into(), ..fin };
     let r = exec
-        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"), None)
         .await
         .unwrap();
     assert!(r.terminal);
@@ -608,14 +621,14 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         ("hrApprover", "self__hrApprover"),
     ] {
         let a = actor(role);
-        assert!(exec.claim(wfe_id, &a, Some(node)).await.unwrap().success, "{node} claim");
+        assert!(exec.claim(wfe_id, &a, Some(node), None).await.unwrap().success, "{node} claim");
     }
 
     // legal onaylar → kol `arrived` (hâlâ 2 aktif kol var, join tamamlanmaz)
     let legal = claim_owner(&store, wfe_id, "self__legalApprover");
     let legal = Actor { role: "legalApprover".into(), ..legal };
     let r = exec
-        .apply(wfe_id, &legal, "approve", &json!({}), Some("self__legalApprover"))
+        .apply(wfe_id, &legal, "approve", &json!({}), Some("self__legalApprover"), None)
         .await
         .unwrap();
     assert!(!r.terminal);
@@ -631,7 +644,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     // finance reddeder → WFE-terminal; legal'in ONAYI boşa gitti
     let fin = claim_owner(&store, wfe_id, "self__financeApprover");
     let fin = Actor { role: "financeApprover".into(), ..fin };
-    exec.apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"))
+    exec.apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"), None)
         .await
         .unwrap();
 
@@ -693,12 +706,12 @@ async fn apply_retries_on_conflict_then_succeeds() {
     let exec = executor(store.clone());
     let wfe_id = fork_setup(&exec).await;
     let fin = actor("financeApprover");
-    exec.claim(wfe_id, &fin, Some("self__financeApprover")).await.unwrap();
+    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None).await.unwrap();
 
     // ilk commit çağrısı Conflict → executor reload edip yeniden dener
     store.fail_commits.store(1, Ordering::SeqCst);
     let r = exec
-        .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"), None)
         .await
         .unwrap();
     assert!(!r.terminal);
@@ -714,11 +727,11 @@ async fn apply_gives_up_after_three_conflicts() {
     let exec = executor(store.clone());
     let wfe_id = fork_setup(&exec).await;
     let fin = actor("financeApprover");
-    exec.claim(wfe_id, &fin, Some("self__financeApprover")).await.unwrap();
+    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None).await.unwrap();
 
     store.fail_commits.store(5, Ordering::SeqCst);
     let err = exec
-        .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"), None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::Conflict(ConflictKind::BranchArrival)));
@@ -735,13 +748,13 @@ async fn branch_claim_is_exclusive_per_branch() {
 
     let a1 = actor("financeApprover");
     let a2 = actor("financeApprover");
-    assert!(exec.claim(wfe_id, &a1, Some("self__financeApprover")).await.unwrap().success);
-    let second = exec.claim(wfe_id, &a2, Some("self__financeApprover")).await.unwrap();
+    assert!(exec.claim(wfe_id, &a1, Some("self__financeApprover"), None).await.unwrap().success);
+    let second = exec.claim(wfe_id, &a2, Some("self__financeApprover"), None).await.unwrap();
     assert!(!second.success);
     assert_eq!(second.reason.as_deref(), Some("already_claimed"));
 
     // farklı kol hâlâ claim edilebilir
-    assert!(exec.claim(wfe_id, &actor("legalApprover"), Some("self__legalApprover")).await.unwrap().success);
+    assert!(exec.claim(wfe_id, &actor("legalApprover"), Some("self__legalApprover"), None).await.unwrap().success);
 }
 
 // ---- WOR-62: CollapseTo yarış serileştirmesi -----------------------------------
@@ -779,7 +792,7 @@ async fn claim_all_branches(exec: &WfeExecutor, store: &ParStore, wfe_id: Uuid) 
         ("hrApprover", "self__hrApprover"),
     ] {
         let a = actor(role);
-        assert!(exec.claim(wfe_id, &a, Some(node)).await.unwrap().success, "{node} claim");
+        assert!(exec.claim(wfe_id, &a, Some(node), None).await.unwrap().success, "{node} claim");
         let owner = claim_owner(store, wfe_id, node);
         out.push(Actor { role: role.into(), ..owner });
     }
@@ -808,8 +821,8 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
 
     // `join!` future'ları SIRAYLA poll eder: collapse önce commit'e girer.
     let input = json!({});
-    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
-    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"));
+    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
+    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"), None);
     let (collapse_res, sibling_res) = tokio::join!(collapse, sibling);
 
     // KAZANAN: collapse — WFE hedef node'a taşındı, paralel mod bitti.
@@ -860,8 +873,8 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
     // Bu kez ÖNCE kardeş varışı commit eder (100ms), collapse sonra (200ms).
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"));
-    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
+    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"), None);
+    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
     let (sibling_res, collapse_res) = tokio::join!(sibling, collapse);
 
     sibling_res.expect("kardeş varışı önce commit etti, başarılı olmalı");
@@ -889,8 +902,8 @@ async fn two_concurrent_collapses_exactly_one_wins() {
 
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let a = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
-    let b = exec.apply(wfe_id, &legal, "reject", &input, Some("self__legalApprover"));
+    let a = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
+    let b = exec.apply(wfe_id, &legal, "reject", &input, Some("self__legalApprover"), None);
     let (a_res, b_res) = tokio::join!(a, b);
 
     a_res.expect("ilk collapse kazanmalı");
@@ -915,8 +928,8 @@ async fn collapsed_conflict_is_not_retried() {
 
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
-    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"));
+    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
+    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"), None);
     let (_, sibling_res) = tokio::join!(collapse, sibling);
 
     assert!(matches!(
@@ -1037,4 +1050,274 @@ fn claim_owner(store: &ParStore, wfe_id: Uuid, node: &str) -> Actor {
         user_id: b.claimed_by.expect("kol claim'li olmalı"),
         role: "placeholder".into(),
     }
+}
+
+// ---- WOR-65: revizyon token'ı + stale-write reddi -----------------------------
+
+/// Revizyon token'ı = son WFAH `seq`'i (`Wfes::rev()`). Her transition en az bir
+/// WFAH kaydı yazdığı için token her aksiyonda KESİN artar — yeni bir kolon
+/// olmadan monotonik bir revizyon sayacı elde edilir.
+#[tokio::test]
+async fn rev_is_monotonic_across_transitions() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+
+    let requester = actor("requester");
+    let started = exec
+        .start(
+            Uuid::new_v4(),
+            1,
+            &requester,
+            None,
+            &json!({"request": {"title": "t", "amount": 1}}),
+            None,
+        )
+        .await
+        .unwrap();
+    let wfe_id = started.wfe_id;
+
+    let after_start = store.snapshot(wfe_id).rev();
+    assert!(after_start >= 1, "start en az bir WFAH kaydı yazar");
+
+    let coord = actor("coordinator");
+    exec.claim(wfe_id, &coord, None, None).await.unwrap();
+    assert_eq!(
+        store.snapshot(wfe_id).rev(),
+        after_start,
+        "claim WFAH'a yazmaz → revizyon ARTMAZ (bilinçli kapsam istisnası)"
+    );
+
+    exec.apply(wfe_id, &coord, "start_review", &json!({}), None, None)
+        .await
+        .unwrap();
+    let after_fork = store.snapshot(wfe_id).rev();
+    assert!(
+        after_fork > after_start,
+        "transition revizyonu artırmalı: {after_start} → {after_fork}"
+    );
+}
+
+/// Token GÖNDERMEYEN istemci bugünkü davranışı aynen görür (geriye uyumluluk),
+/// TAZE token gönderen istemcinin aksiyonu normal biçimde uygulanır.
+#[tokio::test]
+async fn omitted_and_fresh_rev_both_apply_normally() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+
+    // taze token ile: uygulanır
+    let rev = store.snapshot(wfe_id).rev();
+    exec.apply(
+        wfe_id,
+        &actors[0],
+        "approve",
+        &json!({}),
+        Some("self__financeApprover"),
+        Some(rev),
+    )
+    .await
+    .expect("taze revizyonla apply geçmeli");
+
+    // token'sız: uygulanır (eski istemci yolu)
+    exec.apply(
+        wfe_id,
+        &actors[1],
+        "approve",
+        &json!({}),
+        Some("self__legalApprover"),
+        None,
+    )
+    .await
+    .expect("revizyonsuz apply bugünkü gibi geçmeli");
+}
+
+/// ANA KABUL: eskimiş revizyonla gelen apply `Conflict(StaleRevision)` alır ve
+/// HİÇBİR yan etki üretmez — durum aksiyondan önceki hâlinde kalır.
+#[tokio::test]
+async fn stale_rev_apply_is_rejected_without_side_effects() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+
+    // İstemci bu revizyonu okur…
+    let stale_rev = store.snapshot(wfe_id).rev();
+    // …sonra motor durumu "sessizce" ilerletir (başka bir kol onaylar).
+    exec.apply(
+        wfe_id,
+        &actors[0],
+        "approve",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let before = store.snapshot(wfe_id);
+    assert!(before.rev() > stale_rev, "durum ilerlemiş olmalı");
+
+    let err = exec
+        .apply(
+            wfe_id,
+            &actors[1],
+            "approve",
+            &json!({}),
+            Some("self__legalApprover"),
+            Some(stale_rev),
+        )
+        .await
+        .expect_err("eskimiş revizyon reddedilmeli");
+    assert!(
+        matches!(err, EngineError::Conflict(ConflictKind::StaleRevision)),
+        "beklenen StaleRevision, alınan: {err:?}"
+    );
+    assert_eq!(
+        EngineError::Conflict(ConflictKind::StaleRevision).to_string(),
+        "optimistic concurrency conflict [conflict.stale_revision]: state changed under commit",
+    );
+
+    let after = store.snapshot(wfe_id);
+    assert_eq!(after.rev(), before.rev(), "reddedilen apply WFAH'a yazmamalı");
+    assert_eq!(
+        active_count(&after),
+        active_count(&before),
+        "reddedilen apply kol durumuna dokunmamalı"
+    );
+}
+
+/// WOR-65'in asıl senaryosu: collapse WFE'yi kullanıcının altından aldı; portal
+/// 4-10s boyunca eski revizyonu taşıyor. Token'lı apply artık ayırt edilebilir
+/// `conflict.stale_revision` alır — token'sız yolda düşülen KEYFİ engine hatası
+/// (TransitionNotFound/AmbiguousAction/PermissionDenied) yerine.
+#[tokio::test]
+async fn stale_rev_after_collapse_is_distinguishable() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+
+    // portal'ın elindeki revizyon
+    let stale_rev = store.snapshot(wfe_id).rev();
+
+    // finans kolu reddeder → collapse; kardeş kollar cancelled, WFE hedefe gider
+    exec.apply(
+        wfe_id,
+        &actors[0],
+        "reject",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(store.snapshot(wfe_id).join_target.is_none(), "collapse oldu");
+
+    let err = exec
+        .apply(
+            wfe_id,
+            &actors[1],
+            "approve",
+            &json!({}),
+            Some("self__legalApprover"),
+            Some(stale_rev),
+        )
+        .await
+        .expect_err("collapse sonrası eski revizyon reddedilmeli");
+    assert!(
+        matches!(err, EngineError::Conflict(ConflictKind::StaleRevision)),
+        "beklenen StaleRevision, alınan: {err:?}"
+    );
+}
+
+/// Claim de opsiyonel token kabul eder. Token YOKSA akış hiç değişmez
+/// (`ClaimOutcome`, HTTP 200); token VARSA ve eskimişse `Conflict(StaleRevision)`
+/// — yanıltıcı `already_claimed` / `not_eligible` gerekçesi yerine.
+#[tokio::test]
+async fn stale_rev_claim_is_rejected_but_untokened_claim_is_untouched() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+
+    let stale_rev = store.snapshot(wfe_id).rev();
+    exec.apply(
+        wfe_id,
+        &actors[0],
+        "reject",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+    )
+    .await
+    .unwrap();
+
+    // token'lı: NET conflict
+    let latecomer = actor("legalApprover");
+    let err = exec
+        .claim(wfe_id, &latecomer, Some("self__legalApprover"), Some(stale_rev))
+        .await
+        .expect_err("eskimiş revizyonlu claim reddedilmeli");
+    assert!(
+        matches!(err, EngineError::Conflict(ConflictKind::StaleRevision)),
+        "beklenen StaleRevision, alınan: {err:?}"
+    );
+
+    // token'sız: bugünkü yol — hata DEĞİL, `success:false` + gerekçe
+    let outcome = exec
+        .claim(wfe_id, &latecomer, Some("self__legalApprover"), None)
+        .await
+        .expect("token'sız claim hata döndürmemeli (geriye uyumluluk)");
+    assert!(!outcome.success, "iptal edilmiş kol claim edilemez");
+    assert!(outcome.reason.is_some(), "gerekçe taşımalı");
+}
+
+/// Örtük koruma: token GÖNDERMEYEN istemciler için bile `UNIQUE (wfe_id, seq)`
+/// bir optimistic lock'tur. Tekil (paralel-olmayan) modda `MoveTo` yolunda başka
+/// hiçbir CAS/kilit yoktur — iki eşzamanlı apply aynı snapshot'tan aynı seq'i
+/// hesaplar; kaybeden 500 yerine `Conflict(StaleRevision)` alır.
+///
+/// İki taraf da AYNI `expected_rev`'i taşıdığı için sonuç deterministiktir:
+/// tam olarak biri kazanır, diğeri (ister commit'teki seq çakışmasından ister
+/// retry turundaki revizyon kapısından) `StaleRevision` görür.
+#[tokio::test(start_paused = true)]
+async fn concurrent_single_mode_applies_exactly_one_wins() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+
+    let requester = actor("requester");
+    let started = exec
+        .start(
+            Uuid::new_v4(),
+            1,
+            &requester,
+            None,
+            &json!({"request": {"title": "t", "amount": 1}}),
+            None,
+        )
+        .await
+        .unwrap();
+    let wfe_id = started.wfe_id;
+    let coord = actor("coordinator");
+    exec.claim(wfe_id, &coord, None, None).await.unwrap();
+
+    let rev = store.snapshot(wfe_id).rev();
+    store.commit_delays_ms.lock().unwrap().extend([100, 200]);
+    let input = json!({});
+    let a = exec.apply(wfe_id, &coord, "start_review", &input, None, Some(rev));
+    let b = exec.apply(wfe_id, &coord, "start_review", &input, None, Some(rev));
+    let (a_res, b_res) = tokio::join!(a, b);
+
+    let (winner, loser) = match (a_res, b_res) {
+        (Ok(_), Err(e)) => (1, e),
+        (Err(e), Ok(_)) => (2, e),
+        (Ok(_), Ok(_)) => panic!("iki apply de kazanamaz — lost update"),
+        (Err(x), Err(y)) => panic!("en az biri kazanmalı: {x:?} / {y:?}"),
+    };
+    assert!(
+        matches!(loser, EngineError::Conflict(ConflictKind::StaleRevision)),
+        "kaybeden StaleRevision almalı (kazanan #{winner}), alınan: {loser:?}"
+    );
+    assert_eq!(active_count(&store.snapshot(wfe_id)), 3, "fork TEK kez uygulandı");
 }

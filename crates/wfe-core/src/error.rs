@@ -22,7 +22,16 @@ pub enum ConflictKind {
     WfeGone,
     /// Claim CAS'ı kaybedildi: kol/WFE bu arada başkasına atanmış.
     AlreadyClaimed,
-    /// WOR-65 rezervi: WFE revizyon token'ı eskimiş, stale write reddedildi.
+    /// WOR-65: WFE revizyon token'ı (`Wfes::rev()` — son WFAH seq'i) eskimiş,
+    /// stale write reddedildi. İki yoldan üretilir:
+    ///   1. **Açık** — istemci `expected_rev` gönderdi, yüklenen durumun revizyonu
+    ///      farklı. Precondition ihlali; `WfeExecutor` retry ETMEZ (reload aynı
+    ///      uyuşmazlığı üretir), doğrudan 409.
+    ///   2. **Örtük** — commit sırasında `wf.wfah`/`wf.wfe_dynctx`'in
+    ///      `UNIQUE (wfe_id, seq)` kısıtı ihlal edildi: engine'in seq'i eskimiş
+    ///      bir load'dan hesaplanmış, araya başka bir commit girmiş. `expected_rev`
+    ///      GÖNDERMEYEN istemciler için de lost-update koruması; bu yol retry
+    ///      edilebilir (aşağıdaki `is_retryable`).
     StaleRevision,
 }
 
@@ -42,6 +51,13 @@ impl ConflictKind {
     /// Reload + engine'i yeniden koşmak sonucu DEĞİŞTİREBİLİR mi?
     /// (bkz. `WfeExecutor::apply` retry döngüsü). `false` olanlar kalıcı bir
     /// durum geçişini bildirir: tekrar denemek aynı cevabı verir, doğrudan 409.
+    ///
+    /// WOR-65 notu — `StaleRevision` `true`'dur ama bu YALNIZ örtük (seq çakışması)
+    /// yolu içindir: reload taze seq verir, aksiyon meşru biçimde uygulanabilir.
+    /// İstemci `expected_rev` GÖNDERDİYSE retry pratikte tek turda biter: döngü
+    /// reload eder, `expected_rev` artık taze duruma uymaz ve döngünün başındaki
+    /// açık kontrol `StaleRevision` ile ERKEN döner. Yani If-Match semantiği
+    /// (durum değiştiyse uygulama) retry döngüsüne rağmen korunur.
     pub fn is_retryable(self) -> bool {
         match self {
             Self::BranchMoved | Self::BranchArrival | Self::StaleRevision => true,

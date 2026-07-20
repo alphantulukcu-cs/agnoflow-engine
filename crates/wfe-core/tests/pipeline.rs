@@ -14,7 +14,8 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
-    AutoexecDef, AutoexecType, ClaimTimeout, EscalationStep, Wfd, Wft, WftTarget,
+    AutoexecDef, AutoexecType, CandidateActor, ClaimTimeout, COrgu, EscalationStep, Wfd, Wft,
+    WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
@@ -1971,4 +1972,150 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
         commit.wfah_entries[2].input.as_ref().unwrap()["reason"],
         json!("terminated")
     );
+}
+
+// ================================================================ Madde 7: claim devri (reassign)
+
+/// self__creditAnalyst node'una reassign kuralı ekleyen golden varyantı: bu
+/// node'daki claim'i yalnız branchManager (amir) devredebilir.
+fn golden_with_reassign() -> Wfd {
+    let mut wfd = golden();
+    wfd.nodes.get_mut("self__creditAnalyst").unwrap().reassign = Some(CandidateActor {
+        c_orgu: COrgu::Selector("self".into()),
+        c_r: Some(vec!["branchManager".into()]),
+        c_u: None,
+    });
+    wfd
+}
+
+#[tokio::test]
+async fn reassign_by_authorized_manager_to_eligible_target() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_reassign();
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu); // mevcut sahip
+    let mgr = manager(orgu); // amir (reassign kuralına uyar)
+    let target = analyst(orgu); // node c_a'ya uygun yeni sahip
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entry = engine
+        .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
+        .await
+        .expect("yetkili amir uygun hedefe devredebilmeli");
+
+    assert_eq!(entry.action, "reassign");
+    assert_eq!(entry.actor.user_id, mgr.user_id, "marker aktörü amir olmalı");
+    let input = entry.input.as_ref().unwrap();
+    assert_eq!(input["from"], json!(owner.user_id.to_string()));
+    assert_eq!(input["to"], json!(target.user_id.to_string()));
+}
+
+#[tokio::test]
+async fn reassign_to_pool_writes_unclaim_marker() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_reassign();
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let mgr = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entry = engine
+        .reassign(&wfd, &wfes, &mgr, None, None, Utc::now())
+        .await
+        .expect("amir havuza bırakabilmeli");
+
+    assert_eq!(entry.action, "unclaim");
+    let input = entry.input.as_ref().unwrap();
+    assert_eq!(input["from"], json!(owner.user_id.to_string()));
+    assert_eq!(input["to"], Value::Null, "havuza bırakmada hedef null");
+}
+
+#[tokio::test]
+async fn reassign_by_unauthorized_actor_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_reassign();
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let intruder = analyst(orgu); // reassign kuralı branchManager ister — analyst uymaz
+    let target = analyst(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let err = engine
+        .reassign(&wfd, &wfes, &intruder, Some(&target), None, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Unauthorized), "beklenen Unauthorized, gelen: {err:?}");
+}
+
+#[tokio::test]
+async fn reassign_on_node_without_rule_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    // reassign kuralı EKLENMEMİŞ düz golden — devir tamamen kapalı.
+    let wfd = golden();
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let mgr = manager(orgu);
+    let target = analyst(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let err = engine
+        .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::Unauthorized), "kural yoksa devir kapalı olmalı");
+}
+
+#[tokio::test]
+async fn reassign_to_ineligible_target_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_reassign();
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let mgr = manager(orgu);
+    let target = clerk(orgu); // branchClerk — node c_a creditAnalyst'e uymaz
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let err = engine
+        .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, EngineError::TargetNotEligible),
+        "beklenen TargetNotEligible, gelen: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn reassign_on_terminal_wfe_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let wfd = golden_with_reassign();
+
+    let orgu = Uuid::new_v4();
+    let mgr = manager(orgu);
+    let target = analyst(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    wfes.status = WfeStatus::Terminal;
+
+    let err = engine
+        .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
+        .await
+        .unwrap_err();
+    assert!(matches!(err, EngineError::WfeTerminal), "terminal WFE'de devir reddedilmeli");
 }

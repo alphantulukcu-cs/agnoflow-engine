@@ -45,6 +45,8 @@ pub struct NodeDef {
     pub description: Option<String>,
     pub c_a: CandidateActor,          // v2.2: TEK kural
     #[serde(default)]
+    pub reassign: Option<CandidateActor>, // Madde 7: opsiyonel claim devri yetkisi (amir)
+    #[serde(default)]
     pub escalation: Vec<EscalationStep>,
 }
 

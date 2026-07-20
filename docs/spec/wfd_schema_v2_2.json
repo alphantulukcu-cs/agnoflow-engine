@@ -706,6 +706,10 @@
           "$ref": "#/$defs/candidateActor",
           "description": "Bu node'da bekleyen WFE'yi claim edebilecek candidate actor havuzu."
         },
+        "reassign": {
+          "$ref": "#/$defs/candidateActor",
+          "description": "Madde 7: opsiyonel claim devri yetkisi (c_a ile ayni C_A sekli, ayni matcher). Bu kurala uyan aktor (amir) node'daki claim'i node c_a'sina uygun baska bir kullaniciya devredebilir ya da havuza birakabilir. Verilmezse devir bu node'da kapalidir."
+        },
         "escalation": {
           "type": "array",
           "minItems": 1,

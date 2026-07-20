@@ -199,6 +199,24 @@ impl WfeStore for MemStore {
         wfes.wfah.0.push(wfah_entry.clone());
         Ok(())
     }
+
+    async fn reassign(
+        &self,
+        wfe_id: Uuid,
+        _orgtnt_id: Uuid,
+        target: Option<Uuid>,
+        wfah_entry: &WfahEntry,
+        _branch: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let mut map = self.wfes.lock().unwrap();
+        let wfes = map
+            .get_mut(&wfe_id)
+            .ok_or_else(|| EngineError::WfePort(format!("not found: {wfe_id}")))?;
+        wfes.assigned_to = target;
+        wfes.claimed_at = target.map(|_| chrono::Utc::now());
+        wfes.wfah.0.push(wfah_entry.clone());
+        Ok(())
+    }
 }
 
 #[async_trait]

@@ -718,4 +718,62 @@ impl WfeStore for WfeAdapter {
 
         tx.commit().await.map_err(db_err)
     }
+
+    /// Madde 7: yetkili devir. `release_claim` ile aynı desen ama `claimed_by`
+    /// hedefe (veya havuza) ayarlanır. `target = Some`: claimed_by = {user_id},
+    /// claimed_at = now(); `None`: her ikisi NULL (havuz). Uygunluk
+    /// `Engine::reassign`'da doğrulanmıştır — burada yalnızca `status = 'active'`
+    /// kapısı vardır (claim CAS'ının `claimed_by IS NULL` koşulu YOK: override).
+    async fn reassign(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        target: Option<Uuid>,
+        wfah_entry: &WfahEntry,
+        branch: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let claimed_by =
+            target.map(|user_id| json!({ "user_id": user_id.to_string() }));
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        match branch {
+            // WOR-31: paralel modda yalnız o kolun sahipliği değişir (node DEĞİŞMEZ).
+            Some(branch_node) => {
+                sqlx::query(
+                    "UPDATE wf.wfe_branch b
+                     SET claimed_by = $1,
+                         claimed_at = CASE WHEN $1 IS NULL THEN NULL ELSE now() END,
+                         updated_at = now()
+                     FROM wf.wfe w
+                     WHERE b.wfe_id = $2 AND b.branch_node = $3 AND b.status = 'active'
+                       AND w.wfe_id = b.wfe_id AND w.orgtnt_id = $4 AND w.status = 'active'",
+                )
+                .bind(&claimed_by)
+                .bind(wfe_id)
+                .bind(branch_node)
+                .bind(orgtnt_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            }
+            None => {
+                sqlx::query(
+                    "UPDATE wf.wfe
+                     SET claimed_by = $1,
+                         claimed_at = CASE WHEN $1 IS NULL THEN NULL ELSE now() END,
+                         updated_at = now()
+                     WHERE wfe_id = $2 AND orgtnt_id = $3 AND status = 'active'",
+                )
+                .bind(&claimed_by)
+                .bind(wfe_id)
+                .bind(orgtnt_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            }
+        }
+
+        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
+
+        tx.commit().await.map_err(db_err)
+    }
 }

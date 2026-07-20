@@ -201,6 +201,20 @@ pub trait WfeStore: Send + Sync {
         wfah_entry: &WfahEntry,
         branch: Option<&str>,
     ) -> Result<(), EngineError>;
+    /// Madde 7: yetkili devir. `claim`'in CAS'ının aksine zaten sahipli (ya da
+    /// havuzdaki) bir satırı override eder — uygunluk `Engine::reassign`'da
+    /// (reassign c_a + hedef node c_a) doğrulanmıştır. `target = Some` belirli
+    /// kullanıcıya devir (claimed_at = now()), `None` havuza bırakma (claimed_by/
+    /// claimed_at NULL). WFAH marker + assignment TEK transaction'da yazılır.
+    /// `branch`: WOR-31 — paralel modda yalnız o kolun sahipliği değişir.
+    async fn reassign(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        target: Option<Uuid>,
+        wfah_entry: &WfahEntry,
+        branch: Option<&str>,
+    ) -> Result<(), EngineError>;
 }
 
 /// Autoexec çalıştırma hatası — WFD.* hata taksonomisi (M9).

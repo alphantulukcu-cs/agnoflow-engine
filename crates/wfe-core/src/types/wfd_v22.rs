@@ -80,6 +80,11 @@ pub struct NodeDef {
     pub description: Option<String>,
     /// v2.2: TEK kural (obje). Eski array formu deserialize edilmez.
     pub c_a: CandidateActor,
+    /// Madde 7: opsiyonel claim devri yetkisi. `c_a` ile birebir aynı C_A şekli;
+    /// bu kurala uyan aktör (amir) bu node'daki claim'i başkasına devredebilir ya da
+    /// havuza bırakabilir. Verilmezse devir bu node'da tamamen kapalıdır (403).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reassign: Option<CandidateActor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub escalation: Vec<EscalationStep>,
     /// SLA-1 (2026-07-16): claim eden aktör `after` içinde aksiyon almazsa tetiklenir.

@@ -635,6 +635,87 @@ impl<'a> Engine<'a> {
         }
     }
 
+    // -------------------------------------------------------------- reassign
+
+    /// Madde 7: yetkili claim devri — SAF. İki `authorize` koşar ve persist
+    /// edilecek WFAH marker'ını döner (asıl yazım `WfeStore::reassign`):
+    /// 1. Aktif node (paralel modda `branch` kolu) çözülür; `reassign` kuralı
+    ///    yoksa devir bu node'da kapalıdır → `Unauthorized`.
+    /// 2. `reassigner` node.reassign kuralına uymalı → aksi `Unauthorized`.
+    /// 3. `target = Some` ise hedef node.c_a'ya uygun olmalı → aksi
+    ///    `TargetNotEligible`; `target = None` (havuza bırakma) bu adımı atlar.
+    /// Marker: `action` = "reassign" (hedefli) / "unclaim" (havuz), `actor` =
+    /// reassigner, `input` = `{from, to}` (önceki/yeni owner uuid veya null).
+    pub async fn reassign(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        reassigner: &Actor,
+        target: Option<&Actor>,
+        branch: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<WfahEntry, EngineError> {
+        if is_terminal_class(&wfes.status) {
+            return Err(EngineError::WfeTerminal);
+        }
+        if self.deadline_due(wfes, now) {
+            return Err(EngineError::WfeExpired);
+        }
+        // Aktif node + o an geçerli owner (paralel modda kol-bazlı).
+        let (node_key, from_owner) = match branch {
+            Some(b) => {
+                let Some(bs) = active_branch(wfes, b) else {
+                    return Err(EngineError::InvalidWfd(format!(
+                        "reassign için aktif kol yok: '{b}'"
+                    )));
+                };
+                (b, bs.claimed_by)
+            }
+            None => {
+                let Some(nk) = wfes.current_node.as_deref() else {
+                    return Err(EngineError::InvalidWfd(
+                        "reassign için current_node yok".into(),
+                    ));
+                };
+                (nk, wfes.assigned_to)
+            }
+        };
+        let node = wfd
+            .nodes
+            .get(node_key)
+            .ok_or_else(|| EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'")))?;
+
+        // 1+2. reassign kuralı VAR olmalı VE reassigner uymalı.
+        let Some(reassign_rule) = node.reassign.as_ref() else {
+            return Err(EngineError::Unauthorized);
+        };
+        let ctx = wfes.dynctx.as_value();
+        let env = MatchEnv { ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+        if !authorize(reassign_rule, reassigner, env, self.org).await? {
+            return Err(EngineError::Unauthorized);
+        }
+
+        // 3. Hedef (varsa) node.c_a'ya uygun olmalı.
+        if let Some(t) = target {
+            if !authorize(&node.c_a, t, env, self.org).await? {
+                return Err(EngineError::TargetNotEligible);
+            }
+        }
+
+        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let action = if target.is_some() { "reassign" } else { "unclaim" };
+        Ok(WfahEntry {
+            seq,
+            action: action.to_string(),
+            actor: reassigner.clone(),
+            input: Some(json!({
+                "from": from_owner.map(|u| u.to_string()),
+                "to": target.map(|t| t.user_id.to_string()),
+            })),
+            applied_at: now,
+        })
+    }
+
     // ------------------------------------------------------ possible actions
 
     /// Owner'ın şu an gerçekleştirebileceği action adları.

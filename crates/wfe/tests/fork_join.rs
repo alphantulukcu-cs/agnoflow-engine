@@ -417,6 +417,34 @@ impl WfeStore for ParStore {
         w.wfah.0.push(wfah_entry.clone());
         Ok(())
     }
+
+    async fn reassign(
+        &self,
+        wfe_id: Uuid,
+        _orgtnt_id: Uuid,
+        target: Option<Uuid>,
+        wfah_entry: &WfahEntry,
+        branch: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let mut map = self.wfes.lock().unwrap();
+        let w = map.get_mut(&wfe_id).unwrap();
+        match branch {
+            Some(node) => {
+                for b in &mut w.branches {
+                    if b.status == BranchStatus::Active && b.branch_node == node {
+                        b.claimed_by = target;
+                        b.claimed_at = target.map(|_| chrono::Utc::now());
+                    }
+                }
+            }
+            None => {
+                w.assigned_to = target;
+                w.claimed_at = target.map(|_| chrono::Utc::now());
+            }
+        }
+        w.wfah.0.push(wfah_entry.clone());
+        Ok(())
+    }
 }
 
 // ---- yardımcılar --------------------------------------------------------------

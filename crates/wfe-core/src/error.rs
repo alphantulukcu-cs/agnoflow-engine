@@ -93,6 +93,8 @@ pub enum EngineError {
     NotOwner,
     #[error("actor is not authorized to view this wfe")]
     Unauthorized,
+    #[error("reassign target is not eligible for the current node's candidate actor")]
+    TargetNotEligible,
     #[error("WFD.NoConditionMatched: no wft condition matched and no default given")]
     NoConditionMatched,
     #[error("invalid action input: {0}")]

@@ -63,6 +63,7 @@ impl From<EngineError> for AppError {
             EngineError::NotClaimed => StatusCode::FORBIDDEN,
             EngineError::NotOwner => StatusCode::FORBIDDEN,
             EngineError::Unauthorized => StatusCode::FORBIDDEN,
+            EngineError::TargetNotEligible => StatusCode::BAD_REQUEST,
             EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
             EngineError::UnsupportedWfdVersion(_) => StatusCode::UNPROCESSABLE_ENTITY,
             EngineError::InvalidWfd(_) => StatusCode::UNPROCESSABLE_ENTITY,

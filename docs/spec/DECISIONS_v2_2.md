@@ -584,3 +584,23 @@ sonucu izleyebilmelidir. Bu kapı ACT/claim/listability ÜRETMEZ — yalnız VIE
   döner (executor'ları sonraki iş).
 - Eski `crates/wfe-core/src/types/wfd.rs` modeli ve ona bağlı tüm deprecated yollar
   bu branch'in sonunda silindi; `$ctx.status` konvansiyonu kalktı (M1).
+
+## Madde 7 — Yetkili claim devri (node.reassign)
+
+**Sorun:** Bir WFE adımını claim eden kişi izne çıkınca / iş yanlış kişideyken, claim'i
+başkasına devretmenin ya da havuza geri almanın yolu yoktu. `POST /wfe/:id/claim` yalnız
+boş claim'i CAS ile alıyordu; `release_claim` sadece SLA-1 claim_timeout'un iç yoluydu.
+
+**Karar:** Node'a opsiyonel `reassign` C_A kuralı eklendi (node `c_a` ile birebir aynı
+şekil, AYNI `authorize()` matcher'ı → "C_A tek kuraldır" korunur). Bu kurala uyan aktör
+(amir), `POST /wfe/:id/reassign` ile:
+- belirli bir kullanıcıya devredebilir (`{"to": {orgu_id,user_id,role}}`) — hedef, o
+  node'un `c_a`'sına uygun olmalıdır (aksi `TargetNotEligible`/400);
+- havuza bırakabilir (`{"to": null}`) — sahiplik temizlenir, herkes yeniden claim edebilir.
+
+`reassign` kuralı tanımlı değilse devir o node'da tamamen kapalıdır (`Unauthorized`/403).
+Her başarılı devir append-only WFAH marker'ı yazar: `action` = `reassign` (hedefli) /
+`unclaim` (havuz), `actor` = amir, `input` = `{from, to}`. Paralel modda (WOR-31) devir
+kol-bazlıdır (`node` alanı). Alan opsiyonel olduğundan golden fixture değişmeden geçerli.
+(`wfe-core/src/v22/pipeline.rs::reassign`, `wfe/src/wfe_adapter.rs::reassign`,
+`server/src/routes/wfe.rs`, testler `tests/pipeline.rs` reassign_*.)

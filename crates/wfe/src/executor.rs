@@ -198,6 +198,15 @@ pub struct ClaimOutcome {
     pub reason: Option<String>,
 }
 
+/// Madde 7: devir sonucu. Reddetmeler (yetkisiz / hedef uygun değil / terminal)
+/// `EngineError` olarak döner (HTTP 4xx); başarı her zaman `success: true`.
+#[derive(Debug, serde::Serialize)]
+pub struct ReassignOutcome {
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 impl WfeExecutor {
     pub fn new(
         org: Arc<dyn OrgPort>,
@@ -400,6 +409,36 @@ impl WfeExecutor {
             success: won,
             reason: if won { None } else { Some("already_claimed".into()) },
         })
+    }
+
+    /// Madde 7: yetkili claim devri. `reassigner` = X-Actor-* (amir), `target` =
+    /// devralacak tam aktör üçlüsü (`None` = havuza bırakma). Uygunluk
+    /// `Engine::reassign`'da doğrulanır (reassign c_a + hedef node c_a); denetim
+    /// için WFAH marker yazılır. `node`: WOR-31 paralel modda kol seçimi.
+    pub async fn reassign(
+        &self,
+        wfe_id: Uuid,
+        reassigner: &Actor,
+        target: Option<&Actor>,
+        node: Option<&str>,
+    ) -> Result<ReassignOutcome, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        let entry = self
+            .engine()
+            .reassign(&wfd, &wfes, reassigner, target, node, Utc::now())
+            .await?;
+        self.wfe
+            .reassign(
+                wfe_id,
+                wfes.orgtnt_id,
+                target.map(|a| a.user_id),
+                &entry,
+                node,
+            )
+            .await?;
+        self.nudge_timers(); // hedefli devirde claim_timeout sayacı (SLA-1) yeniden başladı
+        Ok(ReassignOutcome { success: true, reason: None })
     }
 
     /// WFE görünümü — önce WFE-seviyesi VIEW kapısı (owner / node c_a / listable,

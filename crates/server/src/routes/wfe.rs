@@ -17,6 +17,7 @@ pub fn router(state: AppState) -> Router {
         .route("/:id/actions", post(apply_action))
         .route("/:id", get(query_wfe))
         .route("/:id/claim", post(claim_wfe))
+        .route("/:id/reassign", post(reassign_wfe))
         .route("/:id/possible-actions", get(possible_actions))
         .with_state(state)
 }
@@ -173,6 +174,42 @@ async fn claim_wfe(
             claim_body.node.as_deref(),
             claim_body.expected_rev,
         )
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+/// Madde 7: yetkili claim devri. `to` = devralacak tam aktör üçlüsü; `null`/atlanırsa
+/// havuza bırakma (force-unclaim). `node` = WOR-31 paralel modda kol seçimi.
+#[derive(Deserialize)]
+struct ReassignBody {
+    #[serde(default)]
+    to: Option<TargetActor>,
+    #[serde(default)]
+    node: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TargetActor {
+    orgu_id: Uuid,
+    user_id: Uuid,
+    role: String,
+}
+
+async fn reassign_wfe(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<ReassignBody>,
+) -> Result<Json<wf_wfe::executor::ReassignOutcome>, AppError> {
+    let reassigner = extract_actor(&headers)?;
+    let target = body.to.map(|t| Actor {
+        orgu_id: t.orgu_id,
+        user_id: t.user_id,
+        role: t.role,
+    });
+    s.executor
+        .reassign(wfe_id, &reassigner, target.as_ref(), body.node.as_deref())
         .await
         .map(Json)
         .map_err(AppError::from)

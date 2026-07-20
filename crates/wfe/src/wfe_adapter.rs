@@ -65,17 +65,26 @@ async fn insert_wfah_entries(
     Ok(())
 }
 
+/// WOR-59: kol claim'ini düşüren TEK SET fragmanı. `cancel_active_branches`,
+/// `mark_branch_arrived`, `BranchMoveTo` ve `release_claim` aynı ifadeyi paylaşır —
+/// "kol claim'i nasıl düşer" kuralının tek doğru yeri burasıdır.
+const CLEAR_BRANCH_CLAIM: &str = "claimed_by = NULL, claimed_at = NULL";
+
 /// WOR-31: WFE terminal/terminated/failed olurken paralel modda aktif TÜM kolları
 /// `cancelled` işaretler (audit için satırlar kalır) — çağıran ayrıca wfe satırında
 /// `join_target = NULL` yapar. Paralel modda değilse 0 satır etkiler (no-op).
+///
+/// WOR-59: statü ile BİRLİKTE claim de düşürülür. Ayrı iki UPDATE olamaz — statü
+/// `cancelled` olduktan sonra `status = 'active'` filtresi artık eşleşmez. Düşen
+/// claim'in sahibi engine'in `_branch_cancelled` marker'ında zaten kayıtlıdır.
 async fn cancel_active_branches(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     wfe_id: Uuid,
 ) -> Result<(), EngineError> {
-    sqlx::query(
-        "UPDATE wf.wfe_branch SET status = 'cancelled', updated_at = now()
-         WHERE wfe_id = $1 AND status = 'active'",
-    )
+    sqlx::query(&format!(
+        "UPDATE wf.wfe_branch SET status = 'cancelled', {CLEAR_BRANCH_CLAIM}, updated_at = now()
+         WHERE wfe_id = $1 AND status = 'active'"
+    ))
     .bind(wfe_id)
     .execute(&mut **tx)
     .await
@@ -92,11 +101,10 @@ async fn mark_branch_arrived(
     wfe_id: Uuid,
     from_node: &str,
 ) -> Result<(), EngineError> {
-    let res = sqlx::query(
-        "UPDATE wf.wfe_branch SET status = 'arrived', claimed_by = NULL,
-             claimed_at = NULL, updated_at = now()
-         WHERE wfe_id = $1 AND branch_node = $2 AND status = 'active'",
-    )
+    let res = sqlx::query(&format!(
+        "UPDATE wf.wfe_branch SET status = 'arrived', {CLEAR_BRANCH_CLAIM}, updated_at = now()
+         WHERE wfe_id = $1 AND branch_node = $2 AND status = 'active'"
+    ))
     .bind(wfe_id)
     .bind(from_node)
     .execute(&mut **tx)
@@ -394,12 +402,12 @@ impl WfeStore for WfeAdapter {
             // WOR-31: tek kol token hareketi — kol CAS'ı (status='active'), claim +
             // entered_at sıfırlanır. Eşleşme yoksa yarış → Conflict.
             CommitOutcome::BranchMoveTo { from_node, node } => {
-                let res = sqlx::query(
+                let res = sqlx::query(&format!(
                     "UPDATE wf.wfe_branch
-                     SET branch_node = $1, claimed_by = NULL, claimed_at = NULL,
+                     SET branch_node = $1, {CLEAR_BRANCH_CLAIM},
                          entered_at = now(), updated_at = now()
-                     WHERE wfe_id = $2 AND branch_node = $3 AND status = 'active'",
-                )
+                     WHERE wfe_id = $2 AND branch_node = $3 AND status = 'active'"
+                ))
                 .bind(node)
                 .bind(commit.wfe_id)
                 .bind(from_node)
@@ -598,11 +606,11 @@ impl WfeStore for WfeAdapter {
             // WOR-31: paralel modda yalnızca o kolun claim'i sıfırlanır (node
             // DEĞİŞMEZ; kol `active` kalır).
             Some(branch_node) => {
-                sqlx::query(
+                sqlx::query(&format!(
                     "UPDATE wf.wfe_branch
-                     SET claimed_by = NULL, claimed_at = NULL, updated_at = now()
-                     WHERE wfe_id = $1 AND branch_node = $2 AND status = 'active'",
-                )
+                     SET {CLEAR_BRANCH_CLAIM}, updated_at = now()
+                     WHERE wfe_id = $1 AND branch_node = $2 AND status = 'active'"
+                ))
                 .bind(wfe_id)
                 .bind(branch_node)
                 .execute(&mut *tx)

@@ -1651,8 +1651,12 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 /// eklenir (dokümante edilmiş istisna).
 /// - `ForkTo` → `_fork` {branches, join}
 /// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node}
-/// - paralel modda Terminal/Failed/Terminated → acting kol DIŞINDAKİ her aktif
-///   kol için `_branch_cancelled` {node, reason}
+/// - paralel modda Terminal/Failed/Terminated/CollapseTo → acting kol DIŞINDAKİ
+///   her aktif kol için `_branch_cancelled` {node, reason, claimed_by, claimed_at}
+///
+/// WOR-59: iptal edilen kolun claim'i adapter tarafında düşürülür (`claimed_by`
+/// NULL'lanır) — düşen claim'in SAHİBİ ve TUTULMA BAŞLANGICI bu marker'a yazılır,
+/// yoksa "kim ne kadar süre tutuyordu" bilgisi collapse anında kaybolur.
 fn stage_parallel_markers(
     wfes: &Wfes,
     acting_branch: Option<&str>,
@@ -1680,36 +1684,36 @@ fn stage_parallel_markers(
         | CommitOutcome::JoinComplete { from_node, .. } => {
             push("_branch_arrived", json!({"node": from_node}));
         }
-        CommitOutcome::Terminal { .. }
-        | CommitOutcome::Failed { .. }
-        | CommitOutcome::Terminated { .. }
-            if wfes.join_target.is_some() =>
-        {
-            let reason = match outcome {
-                CommitOutcome::Terminal { .. } => "sibling_terminal",
-                CommitOutcome::Failed { .. } => "failed",
-                _ => "terminated",
-            };
-            for b in &wfes.branches {
-                if b.status == BranchStatus::Active
-                    && Some(b.branch_node.as_str()) != acting_branch
-                {
-                    push("_branch_cancelled", json!({"node": b.branch_node, "reason": reason}));
-                }
-            }
-        }
-        // WOR-56: node hedefli collapse — acting kol DIŞINDAKİ her aktif kol iptal.
-        // (Terminal hedefli collapse yukarıdaki Terminal arm'ına düşer.)
-        CommitOutcome::CollapseTo { .. } => {
-            for b in &wfes.branches {
-                if b.status == BranchStatus::Active
-                    && Some(b.branch_node.as_str()) != acting_branch
-                {
-                    push("_branch_cancelled", json!({"node": b.branch_node, "reason": "collapsed"}));
-                }
-            }
-        }
         _ => {}
+    }
+
+    // Paralel modu bitiren yolların ORTAK iptal nedeni. WOR-56'da collapse ayrı bir
+    // arm'dı; iptal semantiği Terminal/Failed/Terminated ile birebir aynı olduğu için
+    // tek yerde toplandı (WOR-59: claim düşürme bilgisi de tek yerden yazılsın).
+    let cancel_reason = match outcome {
+        CommitOutcome::Terminal { .. } if wfes.join_target.is_some() => "sibling_terminal",
+        CommitOutcome::Failed { .. } if wfes.join_target.is_some() => "failed",
+        CommitOutcome::Terminated { .. } if wfes.join_target.is_some() => "terminated",
+        // Node hedefli collapse (WOR-56). Terminal hedefli collapse yukarıya düşer.
+        CommitOutcome::CollapseTo { .. } => "collapsed",
+        _ => return,
+    };
+
+    for b in &wfes.branches {
+        if b.status != BranchStatus::Active || Some(b.branch_node.as_str()) == acting_branch {
+            continue;
+        }
+        push(
+            "_branch_cancelled",
+            json!({
+                "node": b.branch_node,
+                "reason": cancel_reason,
+                // WOR-59: cancel ANINDAKİ claim sahibi/başlangıcı — adapter bu
+                // alanları hemen ardından NULL'ladığı için tek kayıt yeri burası.
+                "claimed_by": b.claimed_by,
+                "claimed_at": b.claimed_at,
+            }),
+        );
     }
 }
 

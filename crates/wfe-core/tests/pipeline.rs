@@ -1397,6 +1397,53 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("collapsed"));
     assert_eq!(cancel.actor.role, "system");
+    // WOR-59: claim'siz kolda alanlar açıkça null (alan HER ZAMAN var)
+    assert!(cancel.input.as_ref().unwrap()["claimed_by"].is_null());
+    assert!(cancel.input.as_ref().unwrap()["claimed_at"].is_null());
+}
+
+#[tokio::test]
+async fn collapse_marker_carries_dropped_claim_owner() {
+    // WOR-59: iptal edilen kolun claim'i adapter'da düşürülür; sahibinin ve
+    // claimed_at'in TEK kaydı `_branch_cancelled` marker'ıdır.
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
+            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
+        }
+    }
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    let legal_owner = Uuid::new_v4();
+    let legal = branch("self__legalApprover", BranchStatus::Active, Some(legal_owner));
+    let legal_claimed_at = legal.claimed_at.unwrap();
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            legal,
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(&wfd, &wfes, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap();
+
+    let cancel = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "_branch_cancelled")
+        .expect("_branch_cancelled marker");
+    let input = cancel.input.as_ref().unwrap();
+    assert_eq!(input["node"], json!("self__legalApprover"));
+    assert_eq!(input["claimed_by"], json!(legal_owner));
+    assert_eq!(input["claimed_at"], json!(legal_claimed_at));
 }
 
 #[tokio::test]

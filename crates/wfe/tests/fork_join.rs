@@ -111,6 +111,18 @@ fn active_count(w: &Wfes) -> usize {
         .count()
 }
 
+/// `WfeAdapter::cancel_active_branches` taklidi — WOR-59: statü ile BİRLİKTE
+/// claim de düşer (aksi halde iptal edilmiş kol "hâlâ birine atanmış" görünür).
+fn cancel_active_branches(w: &mut Wfes) {
+    for b in &mut w.branches {
+        if b.status == BranchStatus::Active {
+            b.status = BranchStatus::Cancelled;
+            b.claimed_by = None;
+            b.claimed_at = None;
+        }
+    }
+}
+
 fn apply_next(w: &mut Wfes, next: &CommitOutcome) {
     match next {
         CommitOutcome::MoveTo { node } => {
@@ -202,11 +214,7 @@ impl WfeStore for ParStore {
                 w.assigned_to = None;
                 w.claimed_at = None;
                 // paralel modda aktif kolları iptal et + join_target temizle
-                for b in &mut w.branches {
-                    if b.status == BranchStatus::Active {
-                        b.status = BranchStatus::Cancelled;
-                    }
-                }
+                cancel_active_branches(w);
                 w.join_target = None;
             }
             CommitOutcome::ForkTo { branches, join } => {
@@ -285,11 +293,7 @@ impl WfeStore for ParStore {
             }
             CommitOutcome::CollapseTo { node, .. } => {
                 // WOR-56: paralel mod biter, WFE `node`'a; aktif kollar iptal.
-                for b in &mut w.branches {
-                    if b.status == BranchStatus::Active {
-                        b.status = BranchStatus::Cancelled;
-                    }
-                }
+                cancel_active_branches(w);
                 w.join_target = None;
                 w.current_node = Some(node.clone());
                 w.assigned_to = None;
@@ -495,6 +499,65 @@ async fn branch_reject_terminates_and_cancels_siblings() {
         .filter(|e| e.action == "_branch_cancelled")
         .count();
     assert_eq!(cancels, 2, "iki kardeş kol iptal marker'ı");
+}
+
+/// WOR-59: collapse (burada branch-reject → WFE-terminal) kardeş kolların
+/// claim'ini DB'de düşürür ve düşen claim `_branch_cancelled` marker'ına yazılır.
+#[tokio::test]
+async fn collapse_drops_sibling_claims_and_records_them() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    // üç kolun da claim'i alınır — reject edilince ikisi iptal olacak
+    for (role, node) in [
+        ("financeApprover", "self__financeApprover"),
+        ("legalApprover", "self__legalApprover"),
+        ("hrApprover", "self__hrApprover"),
+    ] {
+        let a = actor(role);
+        assert!(exec.claim(wfe_id, &a, Some(node)).await.unwrap().success, "{node} claim");
+    }
+    let legal_owner = claim_owner(&store, wfe_id, "self__legalApprover").user_id;
+    let hr_owner = claim_owner(&store, wfe_id, "self__hrApprover").user_id;
+
+    let fin = claim_owner(&store, wfe_id, "self__financeApprover");
+    let fin = Actor { role: "financeApprover".into(), ..fin };
+    let r = exec
+        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap();
+    assert!(r.terminal);
+
+    let w = store.snapshot(wfe_id);
+    // KABUL 1: cancel sonrası hiçbir kolda asılı claim kalmaz
+    for b in &w.branches {
+        assert!(
+            b.claimed_by.is_none() && b.claimed_at.is_none(),
+            "kol {} claim'i düşmemiş: {:?}",
+            b.branch_node,
+            b.claimed_by
+        );
+    }
+
+    // KABUL 2: marker düşen claim'in sahibini + claimed_at'ini taşır
+    let cancels: Vec<&WfahEntry> = w
+        .wfah
+        .entries()
+        .iter()
+        .filter(|e| e.action == "_branch_cancelled")
+        .collect();
+    assert_eq!(cancels.len(), 2, "iki kardeş kol iptal marker'ı");
+    for m in cancels {
+        let input = m.input.as_ref().unwrap();
+        let expected = match input["node"].as_str().unwrap() {
+            "self__legalApprover" => legal_owner,
+            "self__hrApprover" => hr_owner,
+            other => panic!("beklenmeyen kol: {other}"),
+        };
+        assert_eq!(input["claimed_by"], json!(expected), "marker claim sahibi");
+        assert!(!input["claimed_at"].is_null(), "marker claimed_at taşımalı");
+    }
 }
 
 /// Executor retry döngüsü: adapter Conflict döndürdüğünde reload + engine

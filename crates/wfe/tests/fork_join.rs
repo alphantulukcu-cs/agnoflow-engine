@@ -24,7 +24,7 @@ use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, NewWfe,
     TransitionCommit, WfdStore, WfeStore, Wfes,
 };
-use wfe_core::EngineError;
+use wfe_core::{ConflictKind, EngineError};
 
 const PARALLEL_FIXTURE: &str =
     include_str!("../../wfe-core/tests/fixtures/example-wfd_paralel-onay_v2_2.json");
@@ -83,6 +83,17 @@ struct ParStore {
     /// Conflict döner (adapter'ın FOR UPDATE/CAS uyumsuzluğunun karşılığı) —
     /// executor retry döngüsünü doğrulamak için.
     fail_commits: AtomicU32,
+    /// WOR-62 yarış penceresi enjeksiyonu: SIRADAKİ `commit` çağrısı, state'e
+    /// dokunmadan ÖNCE kuyruğun başındaki kadar (sanal) ms bekler; kuyruk
+    /// boşsa beklemez.
+    ///
+    /// `start_paused` altında bu, iki eşzamanlı `apply`'ın load→commit
+    /// pencerelerini deterministik olarak ÜST ÜSTE bindirir: ikisi de aynı
+    /// (paralel-mod) snapshot'ı okur, sonra farklı uyanma anlarında sırayla
+    /// commit ederler — yani gerçek yarışın tam olarak istediğimiz kesiti.
+    /// Gerçek adapter'da bu pencereyi `SELECT ... FOR UPDATE` kapatır; burada
+    /// aynı rolü mutex + paralel-mod kapısı üstlenir.
+    commit_delays_ms: Mutex<std::collections::VecDeque<u64>>,
 }
 
 impl ParStore {
@@ -186,12 +197,35 @@ impl WfeStore for ParStore {
     async fn commit(&self, commit: &TransitionCommit) -> Result<(), EngineError> {
         if self.fail_commits.load(Ordering::SeqCst) > 0 {
             self.fail_commits.fetch_sub(1, Ordering::SeqCst);
-            return Err(EngineError::Conflict);
+            return Err(EngineError::Conflict(ConflictKind::BranchArrival));
+        }
+        // WOR-62: yarış penceresi (bkz. `commit_delays_ms`). Bekleme state
+        // mutex'ini ALMADAN önce olur — bekleyen commit hiçbir şeyi tutmaz,
+        // tıpkı henüz `FOR UPDATE` almamış bir tx gibi.
+        let delay = self.commit_delays_ms.lock().unwrap().pop_front();
+        if let Some(ms) = delay.filter(|ms| *ms > 0) {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
         }
         let mut map = self.wfes.lock().unwrap();
         let w = map
             .get_mut(&commit.wfe_id)
             .ok_or_else(|| EngineError::WfePort("not found".into()))?;
+
+        // WOR-62: `WfeAdapter::lock_wfe_parallel` taklidi — kol satırlarına
+        // dokunan outcome'lar, mutex ALTINDA hâlâ paralel modda olmayı şart
+        // koşar. Paralel mod bu arada bittiyse bir kardeş kazanmıştır →
+        // `Conflict(Collapsed)` (retry-edilemez, doğrudan 409).
+        let needs_parallel = matches!(
+            &commit.outcome,
+            CommitOutcome::BranchMoveTo { .. }
+                | CommitOutcome::BranchArrived { .. }
+                | CommitOutcome::JoinComplete { .. }
+                | CommitOutcome::CollapseTo { .. }
+        );
+        if needs_parallel && w.join_target.is_none() {
+            return Err(EngineError::Conflict(ConflictKind::Collapsed));
+        }
+
         w.dynctx = DynCtx(commit.new_dynctx.clone());
         w.wfah.0.extend(commit.wfah_entries.iter().cloned());
 
@@ -240,7 +274,7 @@ impl WfeStore for ParStore {
                     .iter_mut()
                     .find(|b| b.status == BranchStatus::Active && &b.branch_node == from_node)
                 else {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchMoved));
                 };
                 b.branch_node = node.clone();
                 b.claimed_by = None;
@@ -254,13 +288,13 @@ impl WfeStore for ParStore {
                     .iter_mut()
                     .find(|b| b.status == BranchStatus::Active && &b.branch_node == from_node)
                 else {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchMoved));
                 };
                 b.status = BranchStatus::Arrived;
                 b.claimed_by = None;
                 b.claimed_at = None;
                 if remaining <= 1 {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchArrival));
                 }
             }
             CommitOutcome::JoinComplete { from_node, next } => {
@@ -270,11 +304,11 @@ impl WfeStore for ParStore {
                     .iter_mut()
                     .find(|b| b.status == BranchStatus::Active && &b.branch_node == from_node)
                 else {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchMoved));
                 };
                 b.status = BranchStatus::Arrived;
                 if remaining != 1 {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchArrival));
                 }
                 // `_join` marker (adapter istisnası)
                 let seq = commit.wfah_entries.last().map(|e| e.seq + 1).unwrap_or(1);
@@ -687,7 +721,7 @@ async fn apply_gives_up_after_three_conflicts() {
         .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"))
         .await
         .unwrap_err();
-    assert!(matches!(err, EngineError::Conflict));
+    assert!(matches!(err, EngineError::Conflict(ConflictKind::BranchArrival)));
     // tam 3 deneme tüketildi (5 - 3 = 2 kaldı)
     assert_eq!(store.fail_commits.load(Ordering::SeqCst), 2);
 }
@@ -708,6 +742,193 @@ async fn branch_claim_is_exclusive_per_branch() {
 
     // farklı kol hâlâ claim edilebilir
     assert!(exec.claim(wfe_id, &actor("legalApprover"), Some("self__legalApprover")).await.unwrap().success);
+}
+
+// ---- WOR-62: CollapseTo yarış serileştirmesi -----------------------------------
+
+/// TÜM `reject` transition'larını node hedefli collapse'a çeviren fixture varyantı
+/// (WOR-56 `{"collapse": {"node": ...}}`) — `CommitOutcome::CollapseTo` üretir.
+/// Fixture'ın kendi `reject`'i terminal hedeflidir; terminal yolu paralel modu
+/// başka bir arm'dan bitirir, biz burada tam olarak CollapseTo'yu test ediyoruz.
+fn paralel_with_collapse_to_node() -> Wfd {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("reject") {
+            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
+        }
+    }
+    Wfd::from_value(v).unwrap()
+}
+
+fn collapse_executor(store: Arc<ParStore>) -> WfeExecutor {
+    WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(paralel_with_collapse_to_node())),
+        store,
+        Arc::new(MockRunner),
+    )
+}
+
+/// Üç kolu da claim eder; her kolun (claim sahibi user_id'sini taşıyan) aktörünü
+/// rolüyle birlikte döndürür.
+async fn claim_all_branches(exec: &WfeExecutor, store: &ParStore, wfe_id: Uuid) -> Vec<Actor> {
+    let mut out = Vec::new();
+    for (role, node) in [
+        ("financeApprover", "self__financeApprover"),
+        ("legalApprover", "self__legalApprover"),
+        ("hrApprover", "self__hrApprover"),
+    ] {
+        let a = actor(role);
+        assert!(exec.claim(wfe_id, &a, Some(node)).await.unwrap().success, "{node} claim");
+        let owner = claim_owner(store, wfe_id, node);
+        out.push(Actor { role: role.into(), ..owner });
+    }
+    out
+}
+
+/// WOR-62 ANA KABUL: collapse ile eşzamanlı kardeş aksiyonu DETERMİNİSTİK
+/// sonuçlanır. İki `apply` aynı (paralel-mod) snapshot'ı okur; collapse önce
+/// commit eder ve KAZANIR, kaybeden kardeş `Conflict(Collapsed)` alır — sessizce
+/// yutulmaz, tutarsız ara durum kalmaz.
+///
+/// `start_paused`: `commit_delays_ms` sanal zamanda ilerler, testte gerçek
+/// bekleme yok.
+#[tokio::test(start_paused = true)]
+async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+    let (fin, legal) = (actors[0].clone(), actors[1].clone());
+
+    // 1. commit (collapse) 100ms'de, 2. commit (kardeş varışı) 200ms'de uyanır.
+    // İkisi de ÖNCE load eder → ikisi de paralel modu görür → sonra sırayla
+    // commit'e girer. Yarışın kesiti tam olarak bu.
+    store.commit_delays_ms.lock().unwrap().extend([100, 200]);
+
+    // `join!` future'ları SIRAYLA poll eder: collapse önce commit'e girer.
+    let input = json!({});
+    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
+    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"));
+    let (collapse_res, sibling_res) = tokio::join!(collapse, sibling);
+
+    // KAZANAN: collapse — WFE hedef node'a taşındı, paralel mod bitti.
+    let r = collapse_res.expect("collapse kazanmalı");
+    assert!(!r.terminal);
+    assert_eq!(r.current_node.as_deref(), Some("self__coordinator"));
+
+    // KAYBEDEN: kardeş varışı — NET Conflict(Collapsed) (409 conflict.collapsed).
+    let err = sibling_res.expect_err("kaybeden kardeş Conflict almalı");
+    assert!(
+        matches!(err, EngineError::Conflict(ConflictKind::Collapsed)),
+        "kaybeden kardeş `Collapsed` conflict'i almalı, alınan: {err:?}"
+    );
+    assert_eq!(
+        EngineError::Conflict(ConflictKind::Collapsed).to_string(),
+        format!("optimistic concurrency conflict [{}]: state changed under commit",
+                ConflictKind::Collapsed.code()),
+    );
+
+    // Kaybeden aksiyon HİÇBİR iz bırakmadı: legal kolu `arrived` OLMADI, WFE
+    // collapse durumunda tutarlı (tek kaynak: kazanan commit).
+    let w = store.snapshot(wfe_id);
+    assert!(w.join_target.is_none(), "paralel mod bitti");
+    assert_eq!(active_count(&w), 0, "collapse tüm aktif kolları düşürdü");
+    let legal_row = w.branches.iter().find(|b| b.branch_node == "self__legalApprover").unwrap();
+    assert_eq!(
+        legal_row.status,
+        BranchStatus::Cancelled,
+        "kaybeden kol `arrived` değil, collapse ile `cancelled` olmalı"
+    );
+    assert!(
+        !w.wfah.entries().iter().any(|e| e.action == "_branch_superseded"),
+        "kaybeden varış commit edilmediği için superseded marker'ı da olmamalı"
+    );
+}
+
+/// WOR-62 tersi yön: kardeş varışı ÖNCE commit ederse collapse yine de KAZANIR —
+/// serileştirme collapse'ı gereksiz yere reddetmez ("otoriter" davranış korunur,
+/// yalnız sıraya sokulur).
+#[tokio::test(start_paused = true)]
+async fn sibling_arrival_first_then_collapse_still_wins() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+    let (fin, legal) = (actors[0].clone(), actors[1].clone());
+
+    // Bu kez ÖNCE kardeş varışı commit eder (100ms), collapse sonra (200ms).
+    store.commit_delays_ms.lock().unwrap().extend([100, 200]);
+    let input = json!({});
+    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"));
+    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
+    let (sibling_res, collapse_res) = tokio::join!(sibling, collapse);
+
+    sibling_res.expect("kardeş varışı önce commit etti, başarılı olmalı");
+    let r = collapse_res.expect("collapse hâlâ paralel modda, kazanmalı");
+    assert_eq!(r.current_node.as_deref(), Some("self__coordinator"));
+
+    let w = store.snapshot(wfe_id);
+    assert!(w.join_target.is_none());
+    assert_eq!(active_count(&w), 0);
+    // Önce varan kol `arrived` KALIR (WOR-60: statü değişmez, marker eklenir).
+    let legal_row = w.branches.iter().find(|b| b.branch_node == "self__legalApprover").unwrap();
+    assert_eq!(legal_row.status, BranchStatus::Arrived);
+}
+
+/// İki kardeş AYNI ANDA collapse ederse tam olarak BİRİ kazanır; ikincisi
+/// `Conflict(Collapsed)` alır. "İlk kilidi alan kazanır" kuralı collapse-collapse
+/// yarışında da geçerlidir (aksi halde ikisi de yazıp WFE'yi iki kez taşırdı).
+#[tokio::test(start_paused = true)]
+async fn two_concurrent_collapses_exactly_one_wins() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+    let (fin, legal) = (actors[0].clone(), actors[1].clone());
+
+    store.commit_delays_ms.lock().unwrap().extend([100, 200]);
+    let input = json!({});
+    let a = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
+    let b = exec.apply(wfe_id, &legal, "reject", &input, Some("self__legalApprover"));
+    let (a_res, b_res) = tokio::join!(a, b);
+
+    a_res.expect("ilk collapse kazanmalı");
+    let err = b_res.expect_err("ikinci collapse Conflict almalı");
+    assert!(
+        matches!(err, EngineError::Conflict(ConflictKind::Collapsed)),
+        "beklenen Collapsed, alınan: {err:?}"
+    );
+    assert_eq!(store.snapshot(wfe_id).current_node.as_deref(), Some("self__coordinator"));
+}
+
+/// `Collapsed` retry EDİLMEZ: reload aynı verdikti üretir. Retry sayacı
+/// (`fail_commits`) hiç tüketilmeden conflict aynen yukarı verilir — executor
+/// 3 tur dönüp keyfi bir engine hatasına dönüşmez.
+#[tokio::test(start_paused = true)]
+async fn collapsed_conflict_is_not_retried() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+    let (fin, legal) = (actors[0].clone(), actors[1].clone());
+
+    store.commit_delays_ms.lock().unwrap().extend([100, 200]);
+    let input = json!({});
+    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"));
+    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"));
+    let (_, sibling_res) = tokio::join!(collapse, sibling);
+
+    assert!(matches!(
+        sibling_res.unwrap_err(),
+        EngineError::Conflict(ConflictKind::Collapsed)
+    ));
+    // Kuyrukta bekleyen gecikme kalmadıysa retry olmamıştır: retry her turda
+    // yeni bir commit çağrısı yapardı ve kuyruk zaten boş olduğundan bunu
+    // doğrudan `is_retryable` sözleşmesinden okuyoruz.
+    assert!(!ConflictKind::Collapsed.is_retryable(), "Collapsed retry-edilemez olmalı");
+    assert!(ConflictKind::BranchArrival.is_retryable(), "kol-varış yarışı retry-edilebilir");
+    assert!(ConflictKind::BranchMoved.is_retryable(), "kol taşınması retry-edilebilir");
 }
 
 // ---- timer kol iterasyonu -----------------------------------------------------

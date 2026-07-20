@@ -15,7 +15,7 @@ use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::v22::ports::{
     BranchState, BranchStatus, CommitOutcome, NewWfe, TransitionCommit, WfeStore, Wfes,
 };
-use wfe_core::EngineError;
+use wfe_core::{ConflictKind, EngineError};
 
 use crate::repo;
 
@@ -111,27 +111,61 @@ async fn mark_branch_arrived(
     .await
     .map_err(db_err)?;
     if res.rows_affected() != 1 {
-        return Err(EngineError::Conflict);
+        return Err(EngineError::Conflict(ConflictKind::BranchMoved));
     }
     Ok(())
 }
 
-/// FOR UPDATE ile wfe satırını kilitler (eşzamanlı varış commit'lerini serialize
-/// eder) ve kilit ALTINDA kalan aktif kol sayısını döner.
-async fn lock_and_count_active(
+/// WOR-62: **kilit sırası sözleşmesi** — kol satırlarına dokunan HER commit yolu
+/// önce bu fonksiyonla `wf.wfe` satırını `FOR UPDATE` alır, SONRA `wf.wfe_branch`
+/// satırlarını günceller. Sıra daima **wfe → wfe_branch**'tir; ters sıra iki
+/// eşzamanlı commit arasında deadlock üretir (collapse kolları kilitleyip wfe'yi
+/// beklerken join wfe'yi kilitleyip kolları bekler).
+///
+/// Kilit ALTINDA okunan "hâlâ paralel modda mı" (`join_target IS NOT NULL`)
+/// bilgisini döner. WFE satırı yoksa/tenant uymuyorsa `Conflict(WfeGone)`.
+async fn lock_wfe(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     wfe_id: Uuid,
     orgtnt_id: Uuid,
-) -> Result<i64, EngineError> {
-    sqlx::query_scalar::<_, Uuid>(
-        "SELECT wfe_id FROM wf.wfe WHERE wfe_id = $1 AND orgtnt_id = $2 FOR UPDATE",
+) -> Result<bool, EngineError> {
+    sqlx::query_scalar::<_, bool>(
+        "SELECT join_target IS NOT NULL FROM wf.wfe
+         WHERE wfe_id = $1 AND orgtnt_id = $2 FOR UPDATE",
     )
     .bind(wfe_id)
     .bind(orgtnt_id)
     .fetch_optional(&mut **tx)
     .await
     .map_err(db_err)?
-    .ok_or(EngineError::Conflict)?;
+    .ok_or(EngineError::Conflict(ConflictKind::WfeGone))
+}
+
+/// WOR-62: `lock_wfe` + "hâlâ paralel modda olmalı" kapısı. Engine'in görüşü
+/// (bir kolda duruyorum) kilit altında doğrulanır; paralel mod bu arada bittiyse
+/// bir kardeş (collapse/join/terminal) kazanmıştır → kaybeden aksiyon
+/// `Conflict(Collapsed)` alır. Bu KALICI bir verdikttir: executor retry ETMEZ,
+/// çağrı doğrudan 409 `conflict.collapsed` olarak döner.
+async fn lock_wfe_parallel(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    wfe_id: Uuid,
+    orgtnt_id: Uuid,
+) -> Result<(), EngineError> {
+    if lock_wfe(tx, wfe_id, orgtnt_id).await? {
+        Ok(())
+    } else {
+        Err(EngineError::Conflict(ConflictKind::Collapsed))
+    }
+}
+
+/// Paralel-mod kilidi (bkz. `lock_wfe_parallel`) + kilit ALTINDA kalan aktif kol
+/// sayısı — eşzamanlı varış commit'lerini serialize eder.
+async fn lock_and_count_active(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    wfe_id: Uuid,
+    orgtnt_id: Uuid,
+) -> Result<i64, EngineError> {
+    lock_wfe_parallel(tx, wfe_id, orgtnt_id).await?;
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT count(*) FROM wf.wfe_branch WHERE wfe_id = $1 AND status = 'active'",
     )
@@ -322,6 +356,12 @@ impl WfeStore for WfeAdapter {
             CommitOutcome::Terminal { end_response } => {
                 // WOR-31: paralel modda WFE-terminal aktif kolları da iptal eder
                 // (`_branch_cancelled` marker'ları engine tarafından staged edildi).
+                // WOR-62: kol satırlarına dokunmadan ÖNCE wfe kilidi — kilit sırası
+                // wfe → wfe_branch (bkz. `lock_wfe`). Paralel modda olmak ŞART
+                // değil (tekil modda terminal de bu yoldan geçer), yalnız sıra
+                // korunur. Terminal otoriterdir: eşzamanlı kardeşler kilit
+                // arkasında bekler, sonra kendi CAS'larında Conflict alır.
+                lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 sqlx::query(
                     "UPDATE wf.wfe
@@ -339,6 +379,8 @@ impl WfeStore for WfeAdapter {
             }
             CommitOutcome::Failed { end_response } => {
                 // Engine-defined fail (§5): terminal DEĞİL, `error` durumu.
+                // WOR-62: kilit sırası wfe → wfe_branch.
+                lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 sqlx::query(
                     "UPDATE wf.wfe
@@ -356,6 +398,8 @@ impl WfeStore for WfeAdapter {
             }
             CommitOutcome::Terminated { end_response } => {
                 // SLA ihlali (§5 2026-07-16): `error` DEĞİL, `terminated` durumu.
+                // WOR-62: kilit sırası wfe → wfe_branch.
+                lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 sqlx::query(
                     "UPDATE wf.wfe
@@ -401,7 +445,11 @@ impl WfeStore for WfeAdapter {
             }
             // WOR-31: tek kol token hareketi — kol CAS'ı (status='active'), claim +
             // entered_at sıfırlanır. Eşleşme yoksa yarış → Conflict.
+            // WOR-62: kol CAS'ından ÖNCE wfe kilidi + paralel-mod doğrulaması.
+            // Böylece "eşzamanlı kardeş collapse" senaryosu kol CAS'ının belirsiz
+            // 0-satır sonucuna değil, NET `Conflict(Collapsed)`'a düşer.
             CommitOutcome::BranchMoveTo { from_node, node } => {
+                lock_wfe_parallel(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 let res = sqlx::query(&format!(
                     "UPDATE wf.wfe_branch
                      SET branch_node = $1, {CLEAR_BRANCH_CLAIM},
@@ -415,7 +463,7 @@ impl WfeStore for WfeAdapter {
                 .await
                 .map_err(db_err)?;
                 if res.rows_affected() != 1 {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchMoved));
                 }
             }
             // WOR-31: kol join'e vardı, engine'in görüşüne göre ≥1 başka aktif kol
@@ -428,7 +476,7 @@ impl WfeStore for WfeAdapter {
                 mark_branch_arrived(&mut tx, commit.wfe_id, from_node).await?;
                 // bu kolu düştükten sonra ≥1 aktif kalmalı
                 if remaining <= 1 {
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchArrival));
                 }
             }
             // WOR-31: varan kol engine'in görüşüne göre SONUNCU — paralel mod biter.
@@ -441,7 +489,7 @@ impl WfeStore for WfeAdapter {
                 mark_branch_arrived(&mut tx, commit.wfe_id, from_node).await?;
                 if remaining != 1 {
                     // bu kol dışında hâlâ aktif kol var → henüz son değil
-                    return Err(EngineError::Conflict);
+                    return Err(EngineError::Conflict(ConflictKind::BranchArrival));
                 }
                 // `_join` sistem marker'ı (dokümante istisna: adapter ekler) —
                 // seq = son staged wfah seq + 1.
@@ -520,9 +568,22 @@ impl WfeStore for WfeAdapter {
             // WOR-56: node hedefli collapse — paralel mod biter, WFE `node`'a
             // UNASSIGNED girer. Aktif kollar `cancelled` (audit için satır kalır;
             // engine `_branch_cancelled` marker'larını zaten wfah'a staged etti),
-            // join_target temizlenir. Kol-arrival sayımı/CAS YOK: collapse
-            // otoriterdir (mevcut branch→Terminal yolu ile aynı model).
+            // join_target temizlenir.
+            //
+            // WOR-62: collapse "otoriter"dir ama SERİLEŞTİRİLMEK zorundadır.
+            // Kol-arrival SAYIMI hâlâ yok (JoinComplete'in aksine kalan aktif
+            // kolları beklemez) — eklenen şey kilit + paralel-mod doğrulaması:
+            //   - `FOR UPDATE`: eşzamanlı kardeş commit'leri (BranchMoveTo /
+            //     BranchArrived / JoinComplete / diğer collapse) bu tx'in
+            //     arkasında sıraya girer; iki taraf da kolları yarı yolda
+            //     görmez, tutarsız ara durum oluşmaz.
+            //   - paralel-mod kapısı: bu tx kilidi aldığında `join_target` NULL
+            //     ise bir kardeş ÖNCE davranmıştır (o da collapse/join/terminal
+            //     yapmıştır) → bu collapse kaybeder, `Conflict(Collapsed)`.
+            //     "İlk kilidi alan kazanır" tek ve deterministik kuraldır.
+            // Kilit sırası wfe → wfe_branch (bkz. `lock_wfe`).
             CommitOutcome::CollapseTo { node, .. } => {
+                lock_wfe_parallel(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
                 sqlx::query(

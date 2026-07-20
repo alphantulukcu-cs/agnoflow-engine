@@ -104,6 +104,11 @@ pub enum CommitOutcome {
     /// otoriterdir (JoinComplete'in aksine kalan aktif kolları beklemez).
     /// (Terminal hedefli collapse ayrı bir varyant değildir — mevcut `Terminal`
     /// yolu zaten paralel modda kardeşleri iptal eder.)
+    ///
+    /// WOR-62: "otoriter" ≠ "serileştirilmemiş". Store commit'i tx başında
+    /// `FOR UPDATE` alıp kilit altında hâlâ paralel modda olduğunu doğrular;
+    /// bir kardeş önce davrandıysa bu collapse `Conflict(ConflictKind::Collapsed)`
+    /// ile kaybeder. Kural: ilk kilidi alan kazanır.
     CollapseTo {
         from_node: String,
         node: String,

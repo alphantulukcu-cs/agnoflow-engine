@@ -15,7 +15,7 @@ use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CommitOutcome, WfdStore, WfeStore, Wfes,
 };
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
-use wfe_core::{EngineError, OrgPort};
+use wfe_core::{ConflictKind, EngineError, OrgPort};
 
 /// SLA-1 (2026-07-16): `claimed_at + node.claim_timeout.after`; claim yoksa,
 /// current_node yoksa veya node claim_timeout taşımıyorsa `None`. `WfeView` ve
@@ -254,11 +254,20 @@ impl WfeExecutor {
         input: &Value,
         node_hint: Option<&str>,
     ) -> Result<WfeApplyResult, EngineError> {
-        // WOR-31: paralel modda eşzamanlı kol varışları (BranchArrived/JoinComplete)
-        // adapter FOR UPDATE + kol CAS + aktif-kol sayımı ile serialize edilir;
-        // uyumsuzlukta `Conflict` döner. Engine SAFtır (yalnız kendi görüşünü emit
-        // eder), yarış burada reload + yeniden-koşma ile çözülür. En çok 3 deneme:
-        // her tur bir kolu kesin ilerletir, sonlu kol sayısı sonluluğu garanti eder.
+        // WOR-31: paralel modda eşzamanlı kol hareketleri (BranchMoveTo/
+        // BranchArrived/JoinComplete/CollapseTo) adapter FOR UPDATE + kol CAS +
+        // aktif-kol sayımı ile serialize edilir; uyumsuzlukta `Conflict(kind)`
+        // döner. Engine SAFtır (yalnız kendi görüşünü emit eder), yarış burada
+        // reload + yeniden-koşma ile çözülür. En çok 3 deneme: her tur bir kolu
+        // kesin ilerletir, sonlu kol sayısı sonluluğu garanti eder.
+        //
+        // WOR-62: her Conflict retry EDİLMEZ. `ConflictKind::is_retryable()`
+        // false ise (örn. `Collapsed`: paralel mod kalıcı olarak bitti) reload
+        // aynı verdikti üretir — boşuna 3 tur dönüp KEYFİ bir engine hatası
+        // (TransitionNotFound / AmbiguousAction / PermissionDenied, hangi node'a
+        // collapse edildiğine bağlı) döndürmek yerine conflict'i AYNEN yukarı
+        // verir. Kaybeden kardeş aksiyon böylece deterministik olarak
+        // 409 + `code: "conflict.collapsed"` alır.
         const MAX_ATTEMPTS: u32 = 3;
         let mut last_err = None;
         for _ in 0..MAX_ATTEMPTS {
@@ -281,14 +290,14 @@ impl WfeExecutor {
                         current_c_a: commit.resolved_c_a,
                     });
                 }
-                Err(EngineError::Conflict) => {
-                    last_err = Some(EngineError::Conflict);
+                Err(EngineError::Conflict(kind)) if kind.is_retryable() => {
+                    last_err = Some(EngineError::Conflict(kind));
                     continue;
                 }
                 Err(e) => return Err(e),
             }
         }
-        Err(last_err.unwrap_or(EngineError::Conflict))
+        Err(last_err.unwrap_or(EngineError::Conflict(ConflictKind::BranchArrival)))
     }
 
     /// Claim uygunluğu — matcher tabanlı (§7.1); c_u kuralları dahil doğru çalışır.

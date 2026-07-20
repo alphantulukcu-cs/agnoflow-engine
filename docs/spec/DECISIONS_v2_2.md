@@ -319,6 +319,68 @@ bağlam YALNIZCA ek alanlarla verilir:
 durur (WOR-61 sözleşmesi); kol marker'larında `trigger_node`'dur, çünkü o
 kayıtlarda `node` zaten ETKİLENEN kolu gösterir ve iki alan ayırt edilmelidir.
 
+## WOR-62 — CollapseTo yarış serileştirmesi + `conflict.*` hata kodları (2026-07-20)
+
+`CollapseTo` "otoriter" kabul edildiği için commit'inde ne `SELECT ... FOR UPDATE`
+ne de bir CAS vardı. Bir kol collapse ederken eşzamanlı bir kardeş kolda
+apply/varış koşarsa iki işlem serialize edilmiyordu: kaybeden kardeşin akıbeti
+tanımsızdı (sessizce yutulabilir veya tutarsız ara durum bırakabilirdi).
+
+**Karar 1 — collapse otoriter KALIR, ama serileştirilir.** Kol-arrival SAYIMI
+eklenmedi (collapse hâlâ kalan aktif kolları beklemez). Eklenen: commit tx'inin
+başında `SELECT ... FOR UPDATE` + kilit ALTINDA "hâlâ paralel modda mıyım"
+(`join_target IS NOT NULL`) doğrulaması. Kural tek ve deterministiktir:
+**ilk kilidi alan kazanır**; kilidi sonra alan taraf paralel modun bittiğini
+görür ve `Conflict(Collapsed)` alır. Aynı kapı `BranchMoveTo`, `BranchArrived`
+ve `JoinComplete` için de geçerlidir — yani "kardeş collapse etti" durumu artık
+kol CAS'ının belirsiz 0-satır sonucuna değil, NET bir koda düşer.
+
+**Karar 2 — kilit sırası sözleşmesi: `wf.wfe` → `wf.wfe_branch`.** Kol satırlarına
+dokunan HER commit yolu önce wfe satırını kilitler. `Terminal`/`Failed`/`Terminated`
+arm'ları kolları wfe kilidini almadan güncelliyordu (ters sıra) — deadlock
+potansiyeli; bu yollara da `lock_wfe` eklendi. Yeni bir kilit stratejisi
+icat EDİLMEDİ, mevcut `JoinComplete` kalıbı genelleştirildi.
+
+**Karar 3 — `EngineError::Conflict` artık sebep taşır: `Conflict(ConflictKind)`.**
+Portal'ın "ne oldu" ayrımını hata METNİNİ parse etmeden yapabilmesi için. Kodlar
+API sözleşmesinin parçasıdır (`wfe-core/src/error.rs`):
+
+| `ConflictKind` | wire kod | retry? | anlamı |
+|---|---|---|---|
+| `Collapsed` | `conflict.collapsed` | hayır | paralel mod bitti (kardeş collapse/join/terminal kazandı) |
+| `BranchMoved` | `conflict.branch_moved` | evet | kol node'u değişti / kol artık `active` değil |
+| `BranchArrival` | `conflict.branch_arrival` | evet | kol-varış sayımı engine görüşüyle uyuşmadı |
+| `WfeGone` | `conflict.wfe_gone` | hayır | wfe satırı yok / tenant uyuşmuyor |
+| `AlreadyClaimed` | `conflict.already_claimed` | hayır | claim CAS'ı kaybedildi |
+| `StaleRevision` | `conflict.stale_revision` | evet | **WOR-65 rezervi** — revizyon token'ı eskimiş |
+
+**Karar 4 — her Conflict retry edilmez.** `WfeExecutor::apply` retry döngüsü
+(MAX_ATTEMPTS = 3, WOR-31'den değişmedi) artık `ConflictKind::is_retryable()`'a
+bakar. `Collapsed` kalıcı bir durum geçişidir: reload aynı verdikti üretir, üstelik
+3 tur sonunda KEYFİ bir engine hatası (`TransitionNotFound` / `AmbiguousAction` /
+`PermissionDenied` — collapse hedefine göre değişir) dönerdi. Retry edilmez,
+conflict aynen yukarı verilir.
+
+**Karar 5 — 409 gövdesi `code` alanı kazandı (additive).** `AppError` üçüncü bir
+`code: Option<&'static str>` alanı taşır; gövde:
+
+```json
+{ "error": "optimistic concurrency conflict [conflict.collapsed]: state changed under commit",
+  "code": "conflict.collapsed" }
+```
+
+`error` alanı DEĞİŞMEDİ (geriye uyumlu); `code` yalnızca eklenir ve yalnızca
+409 sınıfında doldurulur. `ConflictKind` dışındaki 409'lar da aynı namespace'e
+girer: `conflict.ambiguous_action` (`AmbiguousAction`), `conflict.terminal`
+(`WfeTerminal`), `conflict.expired` (`WfeExpired`).
+
+**WOR-65 için bırakılan kancalar:** revizyon token'ı + stale-write koruması yeni
+bir hata TİPİ açmaz — `ConflictKind::StaleRevision` (kodu ve retry semantiği
+yukarıda tanımlı) kullanılır. `From<EngineError> for AppError` yeni varyantlar
+için değişiklik gerektirmez (kod `kind.code()`'tan gelir). Claim yarışının bugünkü
+yolu 409 DEĞİLDİR (`ClaimOutcome { success: false, reason: "already_claimed" }`,
+HTTP 200); 409'a taşınırsa kodu `conflict.already_claimed`'dir.
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

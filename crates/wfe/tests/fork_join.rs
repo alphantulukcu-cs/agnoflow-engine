@@ -632,6 +632,19 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         .collect();
     assert_eq!(cancels.len(), 1);
     assert_eq!(cancels[0].input.as_ref().unwrap()["node"], json!("self__hrApprover"));
+
+    // WOR-61: collapse başına TEK özet kaydı; detay marker'ları onun üstünde değil
+    // altında kalır (ikisi de WFAH'ta).
+    let summaries: Vec<&WfahEntry> =
+        w.wfah.entries().iter().filter(|e| e.action == "_collapse").collect();
+    assert_eq!(summaries.len(), 1, "collapse başına tek özet");
+    let s = summaries[0].input.as_ref().unwrap();
+    assert_eq!(s["trigger_branch"], json!("self__financeApprover"));
+    assert_eq!(s["trigger_action"], json!("reject"));
+    assert_eq!(s["trigger_actor"]["user_id"], json!(fin.user_id));
+    assert_eq!(s["kind"], json!("terminal"));
+    assert_eq!(s["cancelled"], json!(["self__hrApprover"]));
+    assert_eq!(s["superseded"], json!(["self__legalApprover"]));
 }
 
 /// Executor retry döngüsü: adapter Conflict döndürdüğünde reload + engine

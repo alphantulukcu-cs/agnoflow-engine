@@ -152,7 +152,7 @@ sınıfı kökten kapanır.
   kollar cancel edilir. Escalation/claim_timeout paralel modda **kol-bazlı**
   hale gelir (her kolun kendi `claimed_by`/`claimed_at`/`entered_at`'ı vardır).
 - wfah system marker'ları: `_fork`, `_branch_arrived`, `_join`,
-  `_branch_cancelled`, `_branch_superseded` (aynı paylaşımlı seq counter).
+  `_branch_cancelled`, `_branch_superseded`, `_collapse` (aynı paylaşımlı seq counter).
 
 **Kısıtlar (v1, validator-enforced — `wfe-core/src/validator.rs::check_parallel`):**
 - Parallel wft `start[].wft`'te YASAK.
@@ -279,6 +279,25 @@ marker'ı `approved_by` (tam Actor) + `approved_at` alanlarıyla zenginleştiril
 `_branch_superseded` bu kaydı WFAH'tan geri okur. WOR-60 öncesi yazılmış
 `_branch_arrived` kayıtlarında alanlar yoktur → marker yine üretilir, alanları
 `null` kalır (geriye dönük kırılma yok).
+
+## WOR-61 — Collapse özet kaydı: `_collapse` (2026-07-20)
+
+Collapse anında "ne olduğu" tek yerden okunamıyordu; audit WFAH'a kol-başına
+dağılmış marker'lar hâlindeydi. Her collapse için TEK bir manşet kaydı eklendi:
+
+`_collapse {trigger_branch, trigger_action, trigger_actor, kind, reason, target,
+cancelled[], superseded[]}`
+
+- Kol-başına detay marker'ları (`_branch_cancelled` / `_branch_superseded`) KALIR —
+  özet onların yerine değil ÜSTÜNE geçer.
+- Özet, detay marker'larından ÖNCE yazılır (seq olarak manşet önce gelir).
+- `kind`: `collapse_to` | `terminal` | `failed` | `terminated` — hangi yolun
+  collapse'ı tetiklediği. `reason` ise kol marker'larındaki değerle aynıdır
+  (`collapsed` / `sibling_terminal` / `failed` / `terminated`).
+- `target`: yalnız node hedefli collapse'ta node slug'ı; terminal yollarında
+  `null` (akış bir node'a gitmez, sonuç `wfe.end_response`'tadır).
+- `trigger_branch`: SLA-3 deadline gibi WFE-geneli yollarda `null` (tek bir
+  koldan tetiklenmez).
 
 ## Ek kararlar (bağımsız issue'lar)
 

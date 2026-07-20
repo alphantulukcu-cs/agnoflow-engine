@@ -388,7 +388,10 @@ impl<'a> Engine<'a> {
             .await?;
 
         // WOR-31: wft Parallel'e çözüldüyse `_fork` marker'ı engine tarafından staged.
-        stage_parallel_markers(wfes, None, actor, &outcome, &mut wfah_entries, &mut seq, now);
+        stage_parallel_markers(
+            wfes,
+            &Trigger { branch: None, action: Some(action), actor },
+            &outcome, &mut wfah_entries, &mut seq, now);
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -559,7 +562,10 @@ impl<'a> Engine<'a> {
             .await?;
 
         // WOR-31 marker'ları: `_branch_arrived` / sibling `_branch_cancelled`
-        stage_parallel_markers(wfes, Some(branch_node), actor, &outcome, &mut wfah_entries, &mut seq, now);
+        stage_parallel_markers(
+            wfes,
+            &Trigger { branch: Some(branch_node), action: Some(action), actor },
+            &outcome, &mut wfah_entries, &mut seq, now);
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -837,9 +843,11 @@ impl<'a> Engine<'a> {
         }
 
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        // WOR-63: collapse marker'larına tetikleyici olarak da yazılır.
+        let trigger_action = escalation_marker(node_key, step_idx);
         let mut wfah_entries = vec![WfahEntry {
             seq,
-            action: escalation_marker(node_key, step_idx),
+            action: trigger_action.clone(),
             actor: system.clone(),
             input: Some(json!({"after": step.after})),
             applied_at: now,
@@ -851,7 +859,14 @@ impl<'a> Engine<'a> {
                 end_response: json!({"reason": "SLA.Dwell", "node": node_key}),
             };
             // WOR-31: paralel modda terminate diğer aktif kolları da iptal eder.
-            stage_parallel_markers(wfes, branch, &system, &outcome, &mut wfah_entries, &mut seq, now);
+            stage_parallel_markers(
+                wfes,
+                &Trigger { branch, action: Some(&trigger_action), actor: &system },
+                &outcome,
+                &mut wfah_entries,
+                &mut seq,
+                now,
+            );
             return Ok(TransitionCommit {
                 wfe_id: wfes.wfe_id,
                 orgtnt_id: wfes.orgtnt_id,
@@ -895,7 +910,14 @@ impl<'a> Engine<'a> {
             )
             .await?;
 
-        stage_parallel_markers(wfes, branch, &system, &outcome, &mut wfah_entries, &mut seq, now);
+        stage_parallel_markers(
+                wfes,
+                &Trigger { branch, action: Some(&trigger_action), actor: &system },
+                &outcome,
+                &mut wfah_entries,
+                &mut seq,
+                now,
+            );
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -936,7 +958,10 @@ impl<'a> Engine<'a> {
             end_response: json!({"reason": "SLA.Deadline"}),
         };
         // WOR-31: paralel modda deadline TÜM aktif kolları iptal eder.
-        stage_parallel_markers(wfes, None, &system, &outcome, &mut wfah_entries, &mut seq, now);
+        stage_parallel_markers(
+            wfes,
+            &Trigger { branch: None, action: Some("timeout:deadline"), actor: &system },
+            &outcome, &mut wfah_entries, &mut seq, now);
         TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
@@ -1047,7 +1072,7 @@ impl<'a> Engine<'a> {
                 };
                 let mut wfah_entries = vec![WfahEntry {
                     seq,
-                    action: marker,
+                    action: marker.clone(),
                     actor: system.clone(),
                     input: Some(json!({"after": ct.after, "wft": target})),
                     applied_at: now,
@@ -1080,7 +1105,14 @@ impl<'a> Engine<'a> {
                         mode,
                     )
                     .await?;
-                stage_parallel_markers(wfes, branch, &system, &outcome, &mut wfah_entries, &mut seq, now);
+                stage_parallel_markers(
+                    wfes,
+                    &Trigger { branch, action: Some(&marker), actor: &system },
+                    &outcome,
+                    &mut wfah_entries,
+                    &mut seq,
+                    now,
+                );
                 Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
                     wfe_id: wfes.wfe_id,
                     orgtnt_id: wfes.orgtnt_id,
@@ -1663,15 +1695,18 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 /// `cancel_active_branches` yalnız `active` satırları vurur, marker döngüsü de
 /// yalnız aktif kardeşleri gezerdi. Onay WFAH'ta duruyor ama "bu onay geçersizleşti"
 /// bilgisi yoktu; onaylanmış kol yan etki üretmiş olabileceği için kritik.
+///
+/// WOR-61: kol-başına marker'ların ÜSTÜNE tek bir `_collapse` özeti eklenir —
+/// "ne oldu" sorusu tek kayıttan cevaplanır (detay marker'ları KALIR).
 fn stage_parallel_markers(
     wfes: &Wfes,
-    acting_branch: Option<&str>,
-    actor: &Actor,
+    trigger: &Trigger<'_>,
     outcome: &CommitOutcome,
     wfah_entries: &mut Vec<WfahEntry>,
     seq: &mut u32,
     now: DateTime<Utc>,
 ) {
+    let (acting_branch, actor) = (trigger.branch, trigger.actor);
     let system = system_actor();
     let mut push = |action: &str, input: Value| {
         wfah_entries.push(WfahEntry {
@@ -1700,53 +1735,100 @@ fn stage_parallel_markers(
         _ => {}
     }
 
-    // Paralel modu bitiren yolların ORTAK iptal nedeni. WOR-56'da collapse ayrı bir
-    // arm'dı; iptal semantiği Terminal/Failed/Terminated ile birebir aynı olduğu için
-    // tek yerde toplandı (WOR-59: claim düşürme bilgisi de tek yerden yazılsın).
-    let cancel_reason = match outcome {
-        CommitOutcome::Terminal { .. } if wfes.join_target.is_some() => "sibling_terminal",
-        CommitOutcome::Failed { .. } if wfes.join_target.is_some() => "failed",
-        CommitOutcome::Terminated { .. } if wfes.join_target.is_some() => "terminated",
+    // Paralel modu bitiren yolların ORTAK iptal nedeni + hedefi. WOR-56'da collapse
+    // ayrı bir arm'dı; iptal semantiği Terminal/Failed/Terminated ile birebir aynı
+    // olduğu için tek yerde toplandı (WOR-59: claim düşürme bilgisi tek yerden yazılsın).
+    // `target`: yalnız node hedefli collapse'ta anlamlı — terminal yollarında akış
+    // bir node'a GİTMEZ, sonucu `wfe.end_response` taşır.
+    let (cancel_reason, collapse_kind, target) = match outcome {
+        CommitOutcome::Terminal { .. } if wfes.join_target.is_some() => {
+            ("sibling_terminal", "terminal", Value::Null)
+        }
+        CommitOutcome::Failed { .. } if wfes.join_target.is_some() => {
+            ("failed", "failed", Value::Null)
+        }
+        CommitOutcome::Terminated { .. } if wfes.join_target.is_some() => {
+            ("terminated", "terminated", Value::Null)
+        }
         // Node hedefli collapse (WOR-56). Terminal hedefli collapse yukarıya düşer.
-        CommitOutcome::CollapseTo { .. } => "collapsed",
+        CommitOutcome::CollapseTo { node, .. } => ("collapsed", "collapse_to", json!(node)),
         _ => return,
     };
 
+    // Etkilenen kolları ÖNCE sınıflandır: WOR-61 özet marker'ı listeleri taşıdığı
+    // için detay marker'larından ÖNCE (manşet olarak) yazılmak zorunda.
+    let mut cancelled = Vec::new();
+    let mut superseded = Vec::new();
     for b in &wfes.branches {
         if Some(b.branch_node.as_str()) == acting_branch {
             continue;
         }
         match b.status {
             // Henüz çalışılan kol: işi yarıda kaldı.
-            BranchStatus::Active => push(
-                "_branch_cancelled",
-                json!({
-                    "node": b.branch_node,
-                    "reason": cancel_reason,
-                    // WOR-59: cancel ANINDAKİ claim sahibi/başlangıcı — adapter bu
-                    // alanları hemen ardından NULL'ladığı için tek kayıt yeri burası.
-                    "claimed_by": b.claimed_by,
-                    "claimed_at": b.claimed_at,
-                }),
-            ),
+            BranchStatus::Active => cancelled.push(b),
             // WOR-60: onaylanmış ama join'lenmemiş kol: onayı geçersizleşti.
             // Kol satırının statüsü `arrived` KALIR (bkz. DECISIONS_v2_2.md) —
             // izlenebilirlik marker ile sağlanır, şema değişmez.
-            BranchStatus::Arrived => {
-                let (approved_by, approved_at) = branch_approval(&wfes.wfah, &b.branch_node);
-                push(
-                    "_branch_superseded",
-                    json!({
-                        "node": b.branch_node,
-                        "reason": cancel_reason,
-                        "approved_by": approved_by,
-                        "approved_at": approved_at,
-                    }),
-                )
-            }
+            BranchStatus::Arrived => superseded.push(b),
             BranchStatus::Cancelled => {}
         }
     }
+    fn nodes<'b>(bs: &[&'b BranchState]) -> Vec<&'b str> {
+        bs.iter().map(|b| b.branch_node.as_str()).collect()
+    }
+
+    // WOR-61 manşet: collapse'ın tamamı tek kayıtta. Detaylar (aşağıdaki kol-başına
+    // marker'lar) KALIR — bu özet onların yerine değil, üstüne geçer.
+    push(
+        "_collapse",
+        json!({
+            "trigger_branch": acting_branch,
+            "trigger_action": trigger.action,
+            "trigger_actor": actor,
+            "kind": collapse_kind,
+            "reason": cancel_reason,
+            "target": target,
+            "cancelled": nodes(&cancelled),
+            "superseded": nodes(&superseded),
+        }),
+    );
+
+    for b in cancelled {
+        push(
+            "_branch_cancelled",
+            json!({
+                "node": b.branch_node,
+                "reason": cancel_reason,
+                // WOR-59: cancel ANINDAKİ claim sahibi/başlangıcı — adapter bu
+                // alanları hemen ardından NULL'ladığı için tek kayıt yeri burası.
+                "claimed_by": b.claimed_by,
+                "claimed_at": b.claimed_at,
+            }),
+        );
+    }
+    for b in superseded {
+        let (approved_by, approved_at) = branch_approval(&wfes.wfah, &b.branch_node);
+        push(
+            "_branch_superseded",
+            json!({
+                "node": b.branch_node,
+                "reason": cancel_reason,
+                "approved_by": approved_by,
+                "approved_at": approved_at,
+            }),
+        );
+    }
+}
+
+/// WOR-61/WOR-63: collapse marker'larına yazılan TETİKLEYİCİ bağlam — "bu collapse'ı
+/// kim, hangi koldan, hangi aksiyonla başlattı". Sistem yollarında (SLA deadline /
+/// escalation / claim timeout) `actor` system aktörüdür ve `action` ilgili sistem
+/// marker'ının adıdır (`timeout:deadline`, `escalate:<node>:<idx>` gibi).
+struct Trigger<'a> {
+    /// Aksiyonu uygulayan kol node'u; paralel-olmayan veya WFE-geneli yollarda None.
+    branch: Option<&'a str>,
+    action: Option<&'a str>,
+    actor: &'a Actor,
 }
 
 /// WOR-60: bir kolun onay bilgisini (`approved_by`/`approved_at`) kendi

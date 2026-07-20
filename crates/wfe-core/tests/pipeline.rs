@@ -1346,13 +1346,13 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     // superseded marker'ı alır (kol satırı `arrived` kalır).
     assert_eq!(
         wfah_actions(&commit),
-        vec!["reject", "_branch_cancelled", "_branch_superseded"]
+        vec!["reject", "_collapse", "_branch_cancelled", "_branch_superseded"]
     );
-    let cancel = &commit.wfah_entries[1];
+    let cancel = &commit.wfah_entries[2];
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__financeApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
     assert_eq!(cancel.actor.role, "system");
-    let superseded = &commit.wfah_entries[2];
+    let superseded = &commit.wfah_entries[3];
     assert_eq!(superseded.input.as_ref().unwrap()["node"], json!("self__hrApprover"));
     assert_eq!(superseded.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
 }
@@ -1401,9 +1401,9 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     // acting kol (finance) hiç marker almaz.
     assert_eq!(
         wfah_actions(&commit),
-        vec!["reject", "_branch_cancelled", "_branch_superseded"]
+        vec!["reject", "_collapse", "_branch_cancelled", "_branch_superseded"]
     );
-    let cancel = &commit.wfah_entries[1];
+    let cancel = &commit.wfah_entries[2];
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("collapsed"));
     assert_eq!(cancel.actor.role, "system");
@@ -1454,6 +1454,89 @@ async fn collapse_marker_carries_dropped_claim_owner() {
     assert_eq!(input["node"], json!("self__legalApprover"));
     assert_eq!(input["claimed_by"], json!(legal_owner));
     assert_eq!(input["claimed_at"], json!(legal_claimed_at));
+}
+
+#[tokio::test]
+async fn collapse_summary_marker_describes_whole_event() {
+    // WOR-61: collapse'ın tamamı tek `_collapse` kaydından okunabilmeli —
+    // tetikleyen kol/aksiyon, hedef, iptal edilen ve geçersizleşen kollar.
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
+            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
+        }
+    }
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let fin = actor_with_role("financeApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(&wfd, &wfes, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .await
+        .unwrap();
+
+    // manşet DETAY marker'larından önce gelir, detaylar KALIR
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["reject", "_collapse", "_branch_cancelled", "_branch_superseded"]
+    );
+    let summary = &commit.wfah_entries[1];
+    assert_eq!(summary.actor.role, "system");
+    let input = summary.input.as_ref().unwrap();
+    assert_eq!(input["trigger_branch"], json!("self__financeApprover"));
+    assert_eq!(input["trigger_action"], json!("reject"));
+    assert_eq!(input["trigger_actor"]["user_id"], json!(fin.user_id));
+    assert_eq!(input["kind"], json!("collapse_to"));
+    assert_eq!(input["reason"], json!("collapsed"));
+    assert_eq!(input["target"], json!("self__coordinator"));
+    assert_eq!(input["cancelled"], json!(["self__legalApprover"]));
+    assert_eq!(input["superseded"], json!(["self__hrApprover"]));
+}
+
+#[tokio::test]
+async fn collapse_summary_on_terminal_path_has_null_target() {
+    // WOR-61: terminal yollarında akış bir node'a gitmez → `target` null,
+    // `kind` outcome'u ayırt eder. Sistem yolunda tetikleyici system aktördür.
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let now = Utc::now();
+    wfes.deadline = Some(now - Duration::hours(1));
+
+    let commit = engine.fire_deadline_timeout(&wfes, now);
+    let summary = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "_collapse")
+        .expect("_collapse marker");
+    let input = summary.input.as_ref().unwrap();
+    assert!(input["trigger_branch"].is_null(), "SLA-3 tek bir koldan tetiklenmez");
+    assert_eq!(input["trigger_action"], json!("timeout:deadline"));
+    assert_eq!(input["trigger_actor"]["role"], json!("system"));
+    assert_eq!(input["kind"], json!("terminated"));
+    assert!(input["target"].is_null());
+    assert_eq!(input["cancelled"], json!(["self__financeApprover"]));
+    assert_eq!(input["superseded"], json!(["self__hrApprover"]));
 }
 
 #[tokio::test]
@@ -1769,15 +1852,16 @@ async fn branch_escalation_terminate_cancels_sibling_branches() {
         wfah_actions(&commit),
         vec![
             "escalate:self__financeApprover:0",
+            "_collapse",
             "_branch_cancelled",
             "_branch_superseded"
         ]
     );
-    let cancel = &commit.wfah_entries[1];
+    let cancel = &commit.wfah_entries[2];
     assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("terminated"));
     // WOR-60: SLA-2 terminate de arrived kolun onayını geçersizleştirir
-    let superseded = &commit.wfah_entries[2];
+    let superseded = &commit.wfah_entries[3];
     assert_eq!(superseded.input.as_ref().unwrap()["node"], json!("self__hrApprover"));
 }
 
@@ -1809,12 +1893,13 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
         wfah_actions(&commit),
         vec![
             "timeout:deadline",
+            "_collapse",
             "_branch_cancelled",
             "_branch_cancelled",
             "_branch_superseded"
         ]
     );
-    let nodes: Vec<&Value> = commit.wfah_entries[1..]
+    let nodes: Vec<&Value> = commit.wfah_entries[2..]
         .iter()
         .map(|e| &e.input.as_ref().unwrap()["node"])
         .collect();
@@ -1827,7 +1912,7 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
         ]
     );
     assert_eq!(
-        commit.wfah_entries[1].input.as_ref().unwrap()["reason"],
+        commit.wfah_entries[2].input.as_ref().unwrap()["reason"],
         json!("terminated")
     );
 }

@@ -1503,6 +1503,62 @@ async fn collapse_summary_marker_describes_whole_event() {
     assert_eq!(input["target"], json!("self__coordinator"));
     assert_eq!(input["cancelled"], json!(["self__legalApprover"]));
     assert_eq!(input["superseded"], json!(["self__hrApprover"]));
+
+    // WOR-63: kol marker'ları da tetikleyici bağlamı taşır; `reason` DEĞİŞMEZ.
+    for detail in &commit.wfah_entries[2..] {
+        let d = detail.input.as_ref().unwrap();
+        assert_eq!(d["reason"], json!("collapsed"), "{}", detail.action);
+        assert_eq!(d["trigger_node"], json!("self__financeApprover"), "{}", detail.action);
+        assert_eq!(d["trigger_action"], json!("reject"), "{}", detail.action);
+        assert_eq!(d["trigger_actor"]["user_id"], json!(fin.user_id), "{}", detail.action);
+        assert_eq!(d["trigger_actor"]["role"], json!("financeApprover"), "{}", detail.action);
+    }
+}
+
+#[tokio::test]
+async fn system_triggered_collapse_markers_carry_system_trigger() {
+    // WOR-63: sistem yollarında (SLA-2 dwell escalation) tetikleyici aksiyon,
+    // ilgili sistem marker'ının adıdır; actor system aktörüdür.
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine { org: &org, exec: &runner };
+    let mut wfd = paralel();
+    wfd.nodes
+        .get_mut("self__financeApprover")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P1D".into(),
+            wfes_effects: None,
+            wft: None,
+            terminate: Some(true),
+        });
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch("self__legalApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let now = wfes.branches[0].entered_at + Duration::days(1) + Duration::seconds(1);
+
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, Some("self__financeApprover"))
+        .await
+        .unwrap();
+
+    let cancel = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "_branch_cancelled")
+        .expect("_branch_cancelled");
+    let input = cancel.input.as_ref().unwrap();
+    // geriye dönük alan korunur
+    assert_eq!(input["reason"], json!("terminated"));
+    assert_eq!(input["trigger_node"], json!("self__financeApprover"));
+    assert_eq!(input["trigger_action"], json!("escalate:self__financeApprover:0"));
+    assert_eq!(input["trigger_actor"]["role"], json!("system"));
 }
 
 #[tokio::test]

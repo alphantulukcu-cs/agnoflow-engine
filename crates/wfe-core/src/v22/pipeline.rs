@@ -1683,9 +1683,10 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 /// eklenir (dokümante edilmiş istisna).
 /// - `ForkTo` → `_fork` {branches, join}
 /// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node, approved_by, approved_at}
-/// - paralel modda Terminal/Failed/Terminated/CollapseTo → acting kol DIŞINDAKİ
-///   her AKTİF kol için `_branch_cancelled` {node, reason, claimed_by, claimed_at},
-///   her ARRIVED kol için `_branch_superseded` {node, reason, approved_by, approved_at}
+/// - paralel modda Terminal/Failed/Terminated/CollapseTo → önce `_collapse` özeti,
+///   sonra acting kol DIŞINDAKİ her AKTİF kol için `_branch_cancelled`
+///   {node, reason, claimed_by, claimed_at, trigger_*}, her ARRIVED kol için
+///   `_branch_superseded` {node, reason, approved_by, approved_at, trigger_*}
 ///
 /// WOR-59: iptal edilen kolun claim'i adapter tarafında düşürülür (`claimed_by`
 /// NULL'lanır) — düşen claim'in SAHİBİ ve TUTULMA BAŞLANGICI bu marker'a yazılır,
@@ -1698,6 +1699,10 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 ///
 /// WOR-61: kol-başına marker'ların ÜSTÜNE tek bir `_collapse` özeti eklenir —
 /// "ne oldu" sorusu tek kayıttan cevaplanır (detay marker'ları KALIR).
+///
+/// WOR-63: kol marker'larının `reason`'ı tek başına "neden düştü"yü anlatmıyordu
+/// (sabit, dar bir string). Tetikleyen kol/aksiyon/actor ek alanlar olarak eklendi;
+/// `reason` alanı DEĞİŞMEDİ — mevcut tüketiciler kırılmaz.
 fn stage_parallel_markers(
     wfes: &Wfes,
     trigger: &Trigger<'_>,
@@ -1803,6 +1808,10 @@ fn stage_parallel_markers(
                 // alanları hemen ardından NULL'ladığı için tek kayıt yeri burası.
                 "claimed_by": b.claimed_by,
                 "claimed_at": b.claimed_at,
+                // WOR-63: tetikleyici bağlam (bkz. `Trigger`).
+                "trigger_node": acting_branch,
+                "trigger_action": trigger.action,
+                "trigger_actor": actor,
             }),
         );
     }
@@ -1815,6 +1824,9 @@ fn stage_parallel_markers(
                 "reason": cancel_reason,
                 "approved_by": approved_by,
                 "approved_at": approved_at,
+                "trigger_node": acting_branch,
+                "trigger_action": trigger.action,
+                "trigger_actor": actor,
             }),
         );
     }

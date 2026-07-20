@@ -299,6 +299,26 @@ cancelled[], superseded[]}`
 - `trigger_branch`: SLA-3 deadline gibi WFE-geneli yollarda `null` (tek bir
   koldan tetiklenmez).
 
+## WOR-63 — Kol marker'larında tetikleyici bağlam (2026-07-20)
+
+`_branch_cancelled` / `_branch_superseded` marker'larının `reason` alanı sabit ve
+dar bir string'di (`collapsed` / `sibling_terminal` / `failed` / `terminated`);
+collapse'ı hangi kolun, hangi aksiyonun, hangi actor'ün tetiklediğini taşımıyordu.
+
+**Karar:** `reason` alanı AYNEN korunur (geriye dönük kırılma yok); tetikleyici
+bağlam YALNIZCA ek alanlarla verilir:
+
+- `trigger_node` — tetikleyen kol node'u (WFE-geneli yollarda `null`)
+- `trigger_action` — tetikleyen aksiyon adı; sistem yollarında ilgili sistem
+  marker'ının adı (`timeout:deadline`, `escalate:<node>:<idx>`,
+  `claim_timeout:<node>`) — insan ve sistem tetikleri aynı alandan okunur
+- `trigger_actor` — tam Actor objesi (`{orgu_id, user_id, role}`); sistem
+  yollarında `role: "system"`, id'ler nil UUID
+
+**İsimlendirme notu:** `_collapse` özetinde aynı bilgi `trigger_branch` adıyla
+durur (WOR-61 sözleşmesi); kol marker'larında `trigger_node`'dur, çünkü o
+kayıtlarda `node` zaten ETKİLENEN kolu gösterir ve iki alan ayırt edilmelidir.
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

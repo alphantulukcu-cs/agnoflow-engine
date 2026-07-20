@@ -623,6 +623,10 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     assert_eq!(input["approved_by"]["user_id"], json!(legal.user_id));
     assert_eq!(input["approved_by"]["role"], json!("legalApprover"));
     assert!(!input["approved_at"].is_null(), "onay zamanı taşınmalı");
+    // WOR-63: geçersizleşmeyi TETİKLEYEN kol/aksiyon/actor
+    assert_eq!(input["trigger_node"], json!("self__financeApprover"));
+    assert_eq!(input["trigger_action"], json!("reject"));
+    assert_eq!(input["trigger_actor"]["user_id"], json!(fin.user_id));
     // hr hâlâ aktifti → cancelled marker'ı; iki marker karışmaz
     let cancels: Vec<&WfahEntry> = w
         .wfah

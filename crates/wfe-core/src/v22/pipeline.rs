@@ -1682,7 +1682,8 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 /// `_join`: o, son-varış doğrulamasıyla aynı transaction'da ADAPTER tarafından
 /// eklenir (dokümante edilmiş istisna).
 /// - `ForkTo` → `_fork` {branches, join}
-/// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node, approved_by, approved_at}
+/// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node, approved_by,
+///   approved_at, claimed_at} (WOR-68: claim başlangıcı; hold = approved_at − claimed_at)
 /// - paralel modda Terminal/Failed/Terminated/CollapseTo → önce `_collapse` özeti,
 ///   sonra acting kol DIŞINDAKİ her AKTİF kol için `_branch_cancelled`
 ///   {node, reason, claimed_by, claimed_at, trigger_*}, her ARRIVED kol için
@@ -1737,9 +1738,24 @@ fn stage_parallel_markers(
             // WOR-60: varış anındaki onaylayan + zaman burada kalıcılaşır. Kol satırı
             // varışta claim'ini kaybettiği (`mark_branch_arrived`) için sonradan
             // collapse olursa "kimin onayı geçersizleşti" YALNIZCA buradan okunabilir.
+            //
+            // WOR-68: claim BAŞLANGICI (`claimed_at`) da burada kalıcılaşır — adapter
+            // varışta NULL'ladığı için "onaylayan kolu ne kadar tuttu" (hold süresi =
+            // approved_at − claimed_at) sonradan yalnız bu marker'dan hesaplanabilir.
+            // Snapshot (`wfes.branches`) commit ÖNCESİ olduğu için claim hâlâ duruyor.
+            let claimed_at = wfes
+                .branches
+                .iter()
+                .find(|b| b.branch_node.as_str() == from_node.as_str())
+                .and_then(|b| b.claimed_at);
             push(
                 "_branch_arrived",
-                json!({"node": from_node, "approved_by": actor, "approved_at": now}),
+                json!({
+                    "node": from_node,
+                    "approved_by": actor,
+                    "approved_at": now,
+                    "claimed_at": claimed_at,
+                }),
             );
         }
         _ => {}

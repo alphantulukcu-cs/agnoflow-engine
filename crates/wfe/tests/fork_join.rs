@@ -716,6 +716,30 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     // WOR-67: acting (finance) kolun düşen claim'i manşette
     assert_eq!(s["trigger_claimed_by"], json!(fin.user_id), "acting claim sahibi");
     assert!(!s["trigger_claimed_at"].is_null(), "acting kolun claimed_at'i manşette");
+
+    // WOR-68: arrived (legal) kolun `_branch_arrived` marker'ı claim BAŞLANGICINI
+    // taşımalı — kol varışta claim'ini kaybettiği için hold süresi (approved_at −
+    // claimed_at) yalnız buradan hesaplanabilir.
+    let arrived_marker = w
+        .wfah
+        .entries()
+        .iter()
+        .find(|e| {
+            e.action == "_branch_arrived"
+                && e.input.as_ref().map(|i| i["node"] == json!("self__legalApprover"))
+                    == Some(true)
+        })
+        .and_then(|e| e.input.as_ref())
+        .expect("legal için _branch_arrived marker'ı");
+    assert!(
+        !arrived_marker["claimed_at"].is_null(),
+        "arrived marker claimed_at taşımalı (hold süresi hesabı için)"
+    );
+    assert!(!arrived_marker["approved_at"].is_null());
+    // hold süresi hesaplanabilir: approved_at ≥ claimed_at
+    let claimed = arrived_marker["claimed_at"].as_str().unwrap();
+    let approved = arrived_marker["approved_at"].as_str().unwrap();
+    assert!(approved >= claimed, "approved_at ({approved}) ≥ claimed_at ({claimed})");
 }
 
 /// Executor retry döngüsü: adapter Conflict döndürdüğünde reload + engine

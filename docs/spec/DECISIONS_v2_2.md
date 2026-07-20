@@ -503,6 +503,23 @@ simetri için tutulur. Sistem yollarında (SLA/escalation) acting kol yoksa iki 
 Portal tarafında iş YOK — tüketilen marker ŞEKLİ değişmedi, alan EKLENDİ (WOR-64 etkisiz).
 (`pipeline.rs::stage_parallel_markers`, test `fork_join.rs`.)
 
+## WOR-68 — Arrived kolun claim hold süresi: `_branch_arrived` marker'ına `claimed_at` (2026-07-20)
+
+**Sorun:** WOR-67 acting kolu, WOR-59 aktif kardeşleri kapattı. Ama join'e VARMIŞ
+(`arrived`) kolun claim hold süresi hâlâ hesaplanamıyordu: `mark_branch_arrived` varışta
+claim'i düşürür, `_branch_arrived` marker'ı yalnız onay anını (`approved_at`) yazardı —
+claim BAŞLANGICI (`claimed_at`) hiçbir yere yazılmadan siliniyordu. "Onaylayan kişi kolu
+onaylamadan önce ne kadar tuttu" WFAH'tan çıkmıyordu (sonradan collapse olsa
+`_branch_superseded` de yalnız `approved_at` taşır).
+
+**Karar:** `_branch_arrived` marker'ına `claimed_at` alanı eklendi (varış anında,
+`CLEAR_BRANCH_CLAIM` clear'ından ÖNCE `wfes.branches` snapshot'ından okunur). Hold süresi =
+`approved_at − claimed_at`. Bu "şu an tutuyor" değil, GEÇMİŞ hold metriğidir (arrived kol
+claim'i bırakmıştır) — iş yükü/gecikme analizi için. Alan yazılmadan önceki eski
+`_branch_arrived` kayıtlarında `claimed_at` yoktur → tüketici `null` görür (WOR-60'daki
+`approved_by`/`approved_at` geriye uyum deseniyle tutarlı). Portal geriye uyumlu (alan
+eklendi, şekil değişmedi). (`pipeline.rs::stage_parallel_markers`, test `fork_join.rs`.)
+
 ## Ek kararlar (bağımsız issue'lar)
 
 - **WOR-10:** /org admin API'si `X-Admin-Key` başlığı ile korunur (`ADMIN_API_KEY` env).

@@ -14,11 +14,13 @@
 -- ================================================================
 
 -- Migration tek başına koşabilmeli (org/initial ile aynı gerekçe).
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+-- NOT: uuid_generate_v4() (uuid-ossp) yerine çekirdek gen_random_uuid() (PG13+,
+-- pg_catalog) kullanılır — eklenti/search_path bağımlılığı yoktur; tek bir CREATE
+-- TABLE ifadesi izole çalıştırılsa bile çözülür.
 CREATE SCHEMA IF NOT EXISTS org;
 
 CREATE TABLE IF NOT EXISTS org.delegation (
-    delegation_id     uuid        PRIMARY KEY DEFAULT uuid_generate_v4(),
+    delegation_id     uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     orgtnt_id         uuid        NOT NULL REFERENCES org.orgtnt(orgtnt_id),
     -- Şapka sahibi: c_u node'ları için kimlik + audit + koltuk sahipliği doğrulaması.
     delegator_user_id uuid        NOT NULL REFERENCES org.u(u_id),

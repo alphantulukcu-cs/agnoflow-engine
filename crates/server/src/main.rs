@@ -109,6 +109,7 @@ async fn main() {
         .nest("/wfd", routes::wfd::router(state.clone()))
         .nest("/wfe/simulate", routes::simulate::router(state.clone()))
         .nest("/wfe", routes::wfe::router(state.clone()))
+        .nest("/delegation", routes::delegation::router(state.clone()))
         .nest("/autoexec", routes::autoexec::router(state.clone()))
         .nest("/portal", routes::portal::router(state.clone()))
         .layer(cors_layer(&cfg));

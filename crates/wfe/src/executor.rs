@@ -9,7 +9,8 @@ use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
 use wfe_core::types::wfd_v22::{Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
-use wfe_core::v22::matcher::MatchEnv;
+use wfe_core::types::wfah::WfahEntry;
+use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CommitOutcome, WfdStore, WfeStore, Wfes,
@@ -398,9 +399,34 @@ impl WfeExecutor {
         if branch_owner_is(&wfes, node, actor.user_id) {
             return Ok(ClaimOutcome { success: true, reason: None });
         }
+        // Madde 6: claim DOĞRUDAN mı VEKALETEN mi uygun? Vekaletense CAS kazanılınca
+        // aynı transaction'da `claim:delegated` audit marker'ı yazılır.
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        let marker = match self.engine().claim_decision(&wfd, &wfes, actor, node).await? {
+            AuthDecision::Delegated {
+                delegation_id,
+                delegator_user_id,
+                seat_orgu_id,
+                seat_role,
+            } => {
+                let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+                Some(WfahEntry {
+                    seq,
+                    action: "claim:delegated".into(),
+                    actor: actor.clone(),
+                    input: Some(serde_json::json!({
+                        "delegation_id": delegation_id.to_string(),
+                        "delegator": delegator_user_id.to_string(),
+                        "seat": { "orgu_id": seat_orgu_id.to_string(), "role": seat_role },
+                    })),
+                    applied_at: Utc::now(),
+                })
+            }
+            _ => None,
+        };
         let won = self
             .wfe
-            .claim(wfe_id, wfes.orgtnt_id, actor.user_id, node)
+            .claim(wfe_id, wfes.orgtnt_id, actor.user_id, node, marker.as_ref())
             .await?;
         if won {
             self.nudge_timers(); // claim_timeout sayacı şimdi başladı (SLA-1)

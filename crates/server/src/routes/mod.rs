@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod autoexec;
 pub mod db;
+pub mod delegation;
 pub mod org;
 pub mod portal;
 pub mod project;

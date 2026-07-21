@@ -1,5 +1,9 @@
-use crate::{error::EngineError, types::actor::OrgUnit};
+use crate::{
+    error::EngineError,
+    types::{actor::OrgUnit, delegation::DelegationGrant},
+};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 /// Organizasyon katmanı portu — ORGTRVLANG çözümleme + rol/kimlik doğrulama.
@@ -27,5 +31,19 @@ pub trait OrgPort: Send + Sync {
     /// v2.2 c_u listeleri username veya UUID string içerebilir.
     async fn user_ident(&self, _user_id: Uuid) -> Result<Option<String>, EngineError> {
         Ok(None)
+    }
+
+    /// Madde 6: `claimant`'a o an (now) geçerli — aktif + zaman penceresi içinde —
+    /// vekaletlerin aday listesi. Alıcı (grantee) eşleşmesi matcher'da
+    /// (`authorize_with_delegation`) yapılır; bu yüzden dönen liste bir üst kümedir
+    /// (adapter tenant + zaman + kaba grantee-c_u/havuz filtresiyle daraltabilir).
+    /// Default `Ok(vec![])` — vekalet desteklemeyen port'lar (sim/mock) için geriye uyum.
+    async fn active_delegations_for(
+        &self,
+        _claimant_user_id: Uuid,
+        _orgtnt_id: Uuid,
+        _now: DateTime<Utc>,
+    ) -> Result<Vec<DelegationGrant>, EngineError> {
+        Ok(vec![])
     }
 }

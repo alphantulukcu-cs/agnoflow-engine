@@ -183,12 +183,15 @@ pub trait WfeStore: Send + Sync {
     /// `branch`: WOR-31 — paralel modda kol node'u verilir; CAS o kolun
     /// `wf.wfe_branch` satırında yapılır (status='active' AND claimed_by IS NULL);
     /// `None` paralel-olmayan wfe-seviyesi claim (mevcut davranış).
+    /// `marker`: Madde 6 — vekaleten claim'de CAS kazanılırsa AYNI transaction'da
+    /// yazılacak WFAH audit kaydı (`claim:delegated`). Doğrudan claim'de `None`.
     async fn claim(
         &self,
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         user_id: Uuid,
         branch: Option<&str>,
+        marker: Option<&WfahEntry>,
     ) -> Result<bool, EngineError>;
     /// SLA-1 claim timeout (wft'siz kol): node DEĞİŞMEDEN claimed_by/claimed_at
     /// temizlenir + WFAH marker eklenir — `commit()`'ten ayrı çünkü node/status

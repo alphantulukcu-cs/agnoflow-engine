@@ -28,7 +28,7 @@ use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::effects::{apply_effects, get_path, resolve_value, set_path, EffectEnv};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
-use crate::v22::matcher::{authorize, MatchEnv};
+use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
 use crate::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, NewWfe,
     TransitionCommit, Wfes,
@@ -628,11 +628,41 @@ impl<'a> Engine<'a> {
         };
         let ctx = wfes.dynctx.as_value();
         let env = MatchEnv { ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
-        if authorize(&node.c_a, actor, env, self.org).await? {
+        // Madde 6: doğrudan VEYA vekaleten uygun (vekil işi görür + claim'ler).
+        if authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now())
+            .await?
+            .is_authorized()
+        {
             Ok(ClaimCheck::Ok)
         } else {
             Ok(ClaimCheck::NotEligible)
         }
+    }
+
+    /// Madde 6: bir claim'in DOĞRUDAN mı VEKALETEN mi uygun olduğunu döner (audit
+    /// marker'ı için provenance). `can_claim` uygunluğu zaten kapıladıktan sonra
+    /// executor bunu çağırır; node çözümü `can_claim` ile aynıdır. Uygun değilse
+    /// `Denied`.
+    pub async fn claim_decision(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        actor: &Actor,
+        branch: Option<&str>,
+    ) -> Result<AuthDecision, EngineError> {
+        let node_key = match branch {
+            Some(b) => b,
+            None => match wfes.current_node.as_deref() {
+                Some(nk) => nk,
+                None => return Ok(AuthDecision::Denied),
+            },
+        };
+        let Some(node) = wfd.nodes.get(node_key) else {
+            return Ok(AuthDecision::Denied);
+        };
+        let ctx = wfes.dynctx.as_value();
+        let env = MatchEnv { ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+        authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now()).await
     }
 
     // -------------------------------------------------------------- reassign

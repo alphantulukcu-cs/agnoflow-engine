@@ -633,13 +633,17 @@ impl WfeStore for WfeAdapter {
         orgtnt_id: Uuid,
         user_id: Uuid,
         branch: Option<&str>,
+        marker: Option<&WfahEntry>,
     ) -> Result<bool, EngineError> {
         // CAS: yalnızca unassigned aktif VE deadline'ı geçmemiş WFE claim edilebilir —
         // eşzamanlı claim'lerden yalnızca biri satırı günceller (V1 stateless claim'in
         // kalıcı çözümü). `deadline` kontrolü DB seviyesinde tekrarlanır (2026-07-16 fix):
         // Engine::can_claim aynı kontrolü zaten yapar ama sweeper'ın henüz `terminated`'a
         // taşımadığı bir satırda check-then-write arasında güvenlik ağı sağlar.
+        // Madde 6: tx içinde — CAS kazanılır VE `marker` verilirse (vekaleten claim)
+        // audit WFAH kaydı AYNI transaction'da yazılır.
         let claimed_by = json!({ "user_id": user_id.to_string() });
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
         let result = match branch {
             // WOR-31: paralel modda CAS o kolun `wf.wfe_branch` satırında; deadline
             // wfe-seviyesidir (join'e sabit) → wfe satırına JOIN ile kontrol edilir.
@@ -656,7 +660,7 @@ impl WfeStore for WfeAdapter {
             .bind(wfe_id)
             .bind(branch_node)
             .bind(orgtnt_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(db_err)?,
             None => sqlx::query(
@@ -668,11 +672,18 @@ impl WfeStore for WfeAdapter {
             .bind(&claimed_by)
             .bind(wfe_id)
             .bind(orgtnt_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(db_err)?,
         };
-        Ok(result.rows_affected() == 1)
+        let won = result.rows_affected() == 1;
+        if won {
+            if let Some(entry) = marker {
+                insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(entry)).await?;
+            }
+        }
+        tx.commit().await.map_err(db_err)?;
+        Ok(won)
     }
 
     /// SLA-1 claim timeout (wft'siz kol, bkz. `Engine::fire_claim_timeout`):

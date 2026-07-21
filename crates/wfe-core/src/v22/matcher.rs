@@ -16,6 +16,7 @@ use crate::types::actor::Actor;
 use crate::types::wfah::Wfah;
 use crate::types::wfd_v22::CandidateActor;
 use crate::v22::resolver::resolve_c_orgu;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -72,6 +73,83 @@ pub async fn authorize(
     }
 
     Ok(false)
+}
+
+/// Madde 6: yetki kararı — doğrudan mı, vekaleten mi (audit için provenance taşır).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AuthDecision {
+    Denied,
+    /// Aktör kurala DOĞRUDAN uyuyor (bugünkü davranış).
+    Direct,
+    /// Aktör kurala VEKALETEN uyuyor: bir vekâlet vereni (delegator) temsil ediyor.
+    Delegated {
+        delegation_id: Uuid,
+        delegator_user_id: Uuid,
+        seat_orgu_id: Uuid,
+        seat_role: String,
+    },
+}
+
+impl AuthDecision {
+    pub fn is_authorized(&self) -> bool {
+        !matches!(self, AuthDecision::Denied)
+    }
+}
+
+/// Madde 6: vekalet-farkında yetkilendirme. Önce doğrudan `authorize`; olmazsa
+/// claimant'a o an geçerli her vekâlet için (a) claimant `grantee`'ye uyuyor mu VE
+/// (b) delegator'ın koltuğunu temsil eden SENTETİK aktör kurala uyuyor mu.
+///
+/// İki iç çağrı da düz `authorize`'dır (vekalet-farkında DEĞİL) → tek seviye; zincir
+/// (transitif vekalet) oluşmaz. `grantee` claimant'ın kendi anchor'ıyla değerlendirilir
+/// (kişi = c_u eşleşmesi; havuz = claimant'ın rol/orgu'su).
+pub async fn authorize_with_delegation(
+    rule: &CandidateActor,
+    actor: &Actor,
+    env: MatchEnv<'_>,
+    org: &dyn OrgPort,
+    now: DateTime<Utc>,
+) -> Result<AuthDecision, EngineError> {
+    if authorize(rule, actor, env, org).await? {
+        return Ok(AuthDecision::Direct);
+    }
+    let grants = org
+        .active_delegations_for(actor.user_id, env.orgtnt_id, now)
+        .await?;
+    for g in grants {
+        // (a) claimant gerçekten bu vekâletin alıcısı mı? (kişi veya havuz)
+        if !authorize(&g.grantee, actor, env, org).await? {
+            continue;
+        }
+        // (b) delegator'ın koltuğu bu kurala uyuyor mu? (sentetik aktör)
+        let synthetic = Actor {
+            orgu_id: g.seat_orgu_id,
+            user_id: g.delegator_user_id,
+            role: g.seat_role.clone(),
+        };
+        if authorize(rule, &synthetic, env, org).await? {
+            return Ok(AuthDecision::Delegated {
+                delegation_id: g.delegation_id,
+                delegator_user_id: g.delegator_user_id,
+                seat_orgu_id: g.seat_orgu_id,
+                seat_role: g.seat_role,
+            });
+        }
+    }
+    Ok(AuthDecision::Denied)
+}
+
+/// `authorize_with_delegation`'ın bool kısayolu — provenance gerekmeyen çağıranlar
+/// (visibility, listable, field x-visibility) için. `now = Utc::now()`.
+pub async fn authorize_or_delegated(
+    rule: &CandidateActor,
+    actor: &Actor,
+    env: MatchEnv<'_>,
+    org: &dyn OrgPort,
+) -> Result<bool, EngineError> {
+    Ok(authorize_with_delegation(rule, actor, env, org, Utc::now())
+        .await?
+        .is_authorized())
 }
 
 #[cfg(test)]

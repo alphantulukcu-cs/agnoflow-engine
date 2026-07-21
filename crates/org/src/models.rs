@@ -98,3 +98,21 @@ impl From<Orgu> for OrgUnit {
         Self { orgu_id: o.orgu_id, orgu_type: o.orgu_type, path: o.path }
     }
 }
+
+/// Madde 6: vekalet/delegasyon kaydı. `grantee` bir CandidateActor JSONB'dir
+/// (kişi {c_u:[...]} veya havuz {c_orgu, c_r:[...]}); alıcı eşleşmesi wfe-core
+/// matcher'ında yapılır. Koltuk = (seat_orgu_id, seat_role).
+#[derive(Debug, Serialize, FromRow)]
+pub struct Delegation {
+    pub delegation_id:     Uuid,
+    pub orgtnt_id:         Uuid,
+    pub delegator_user_id: Uuid,
+    pub seat_orgu_id:      Uuid,
+    pub seat_role:         String,
+    pub grantee:           serde_json::Value,
+    pub valid_from:        DateTime<Utc>,
+    pub valid_to:          DateTime<Utc>,
+    pub active:            bool,
+    pub created_by:        Uuid,
+    pub created_at:        DateTime<Utc>,
+}

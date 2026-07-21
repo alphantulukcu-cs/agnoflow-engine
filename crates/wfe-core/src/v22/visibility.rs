@@ -15,7 +15,7 @@ use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::{CandidateActor, COrgu, Wfd};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
-use crate::v22::matcher::{authorize, MatchEnv};
+use crate::v22::matcher::{authorize_or_delegated, MatchEnv};
 use crate::v22::ports::{BranchStatus, Wfes};
 use crate::v22::resolver::resolve_c_orgu;
 use serde::Deserialize;
@@ -64,7 +64,7 @@ pub async fn visible(
         }
     }
     if let Some(c_a) = &vis.c_a {
-        if authorize(c_a, actor, env, org).await? {
+        if authorize_or_delegated(c_a, actor, env, org).await? {
             return Ok(true);
         }
     }
@@ -174,7 +174,7 @@ pub async fn can_view(
                 wfah: &wfes.wfah,
                 orgtnt_id: wfes.orgtnt_id,
             };
-            if authorize(&node.c_a, viewer, env, org).await? {
+            if authorize_or_delegated(&node.c_a, viewer, env, org).await? {
                 return Ok(true);
             }
         }
@@ -187,7 +187,7 @@ pub async fn can_view(
             wfah: &wfes.wfah,
             orgtnt_id: wfes.orgtnt_id,
         };
-        if !authorize(&rule.c_a, viewer, env, org).await? {
+        if !authorize_or_delegated(&rule.c_a, viewer, env, org).await? {
             continue;
         }
         let when_ok = match &rule.when {

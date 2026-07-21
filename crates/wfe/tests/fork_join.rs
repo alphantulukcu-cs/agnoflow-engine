@@ -356,6 +356,7 @@ impl WfeStore for ParStore {
         _orgtnt_id: Uuid,
         user_id: Uuid,
         branch: Option<&str>,
+        marker: Option<&WfahEntry>,
     ) -> Result<bool, EngineError> {
         let mut map = self.wfes.lock().unwrap();
         let Some(w) = map.get_mut(&wfe_id) else {
@@ -364,7 +365,7 @@ impl WfeStore for ParStore {
         if w.status != WfeStatus::Active {
             return Ok(false);
         }
-        match branch {
+        let won = match branch {
             Some(node) => {
                 let Some(b) = w
                     .branches
@@ -378,7 +379,7 @@ impl WfeStore for ParStore {
                 }
                 b.claimed_by = Some(user_id);
                 b.claimed_at = Some(chrono::Utc::now());
-                Ok(true)
+                true
             }
             None => {
                 if w.assigned_to.is_some() {
@@ -386,9 +387,15 @@ impl WfeStore for ParStore {
                 }
                 w.assigned_to = Some(user_id);
                 w.claimed_at = Some(chrono::Utc::now());
-                Ok(true)
+                true
+            }
+        };
+        if won {
+            if let Some(entry) = marker {
+                w.wfah.0.push(entry.clone());
             }
         }
+        Ok(won)
     }
 
     async fn release_claim(

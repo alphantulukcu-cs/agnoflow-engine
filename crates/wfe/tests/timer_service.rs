@@ -170,6 +170,7 @@ impl WfeStore for MemStore {
         _orgtnt_id: Uuid,
         user_id: Uuid,
         _branch: Option<&str>,
+        _marker: Option<&WfahEntry>,
     ) -> Result<bool, EngineError> {
         let mut map = self.wfes.lock().unwrap();
         let Some(wfes) = map.get_mut(&wfe_id) else {

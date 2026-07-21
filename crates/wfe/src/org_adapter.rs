@@ -1,7 +1,10 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
-use wf_org::repo::user_role;
+use wf_org::repo::{delegation, user_role};
+use wfe_core::types::delegation::DelegationGrant;
+use wfe_core::types::wfd_v22::CandidateActor;
 use wfe_core::{types::actor::OrgUnit, EngineError, OrgPort};
 
 pub struct OrgAdapter {
@@ -69,5 +72,35 @@ impl OrgPort for OrgAdapter {
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| EngineError::OrgPort(e.to_string()))
+    }
+
+    async fn active_delegations_for(
+        &self,
+        claimant_user_id: Uuid,
+        orgtnt_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<DelegationGrant>, EngineError> {
+        let rows = delegation::active_candidates(&self.pool, claimant_user_id, orgtnt_id, now)
+            .await
+            .map_err(|e| EngineError::OrgPort(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|d| {
+                // grantee JSONB → wfe-core CandidateActor (kişi veya havuz kuralı).
+                let grantee: CandidateActor = serde_json::from_value(d.grantee).map_err(|e| {
+                    EngineError::OrgPort(format!(
+                        "delegation {} grantee parse: {e}",
+                        d.delegation_id
+                    ))
+                })?;
+                Ok(DelegationGrant {
+                    delegation_id: d.delegation_id,
+                    delegator_user_id: d.delegator_user_id,
+                    seat_orgu_id: d.seat_orgu_id,
+                    seat_role: d.seat_role,
+                    grantee,
+                })
+            })
+            .collect()
     }
 }

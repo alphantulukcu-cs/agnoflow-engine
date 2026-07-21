@@ -84,19 +84,49 @@ async fn create_delegation(
         ));
     }
 
+    let seat = body.seat.map(|s| (s.orgu_id, s.role));
+    let created = create_delegations(
+        &s.pool,
+        orgtnt_id,
+        delegator,
+        seat,
+        body.all,
+        &body.grantee,
+        body.valid_from,
+        body.valid_to,
+        actor_user, // created_by = işlemi yapan
+    )
+    .await?;
+    Ok(Json(created))
+}
+
+/// Vekalet oluşturmanın ortak çekirdeği — hem self-service (`/delegation`) hem de
+/// admin yönetim ekranı (`/org/orgtnt/:id/delegations`) bunu kullanır. Koltuk(lar)ı
+/// çözer, sahipliği doğrular, grantee'yi parse eder ve satır(lar)ı yazar.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_delegations(
+    pool: &sqlx::PgPool,
+    orgtnt_id: Uuid,
+    delegator: Uuid,
+    seat: Option<(Uuid, String)>,
+    all: bool,
+    grantee: &Value,
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    valid_to: chrono::DateTime<chrono::Utc>,
+    created_by: Uuid,
+) -> Result<Vec<wf_org::models::Delegation>, AppError> {
     // grantee geçerli bir CandidateActor mı? (auth anında parse hatası olmasın)
-    serde_json::from_value::<CandidateActor>(body.grantee.clone())
+    serde_json::from_value::<CandidateActor>(grantee.clone())
         .map_err(|e| AppError(format!("grantee geçersiz CandidateActor: {e}"), StatusCode::BAD_REQUEST))?;
 
-    let valid_from = body.valid_from.unwrap_or_else(chrono::Utc::now);
-    if body.valid_to <= valid_from {
+    let valid_from = valid_from.unwrap_or_else(chrono::Utc::now);
+    if valid_to <= valid_from {
         return Err(AppError("valid_to, valid_from'dan sonra olmalı".into(), StatusCode::BAD_REQUEST));
     }
 
     // Delege edilecek koltuk(lar).
-    let seats: Vec<(Uuid, String)> = if body.all {
-        // Delegator'ın mevcut (orgu,rol) üyelikleri.
-        let roles = wf_org::repo::user_role::list_user_roles(&s.pool, delegator, 1000, 0)
+    let seats: Vec<(Uuid, String)> = if all {
+        let roles = wf_org::repo::user_role::list_user_roles(pool, delegator, 1000, 0)
             .await
             .map_err(AppError::from)?;
         let mut v: Vec<(Uuid, String)> = roles
@@ -110,17 +140,15 @@ async fn create_delegation(
         }
         v
     } else {
-        let seat = body
-            .seat
-            .as_ref()
-            .ok_or_else(|| AppError("seat veya all zorunlu".into(), StatusCode::BAD_REQUEST))?;
-        vec![(seat.orgu_id, seat.role.clone())]
+        let (orgu_id, role) =
+            seat.ok_or_else(|| AppError("seat veya all zorunlu".into(), StatusCode::BAD_REQUEST))?;
+        vec![(orgu_id, role)]
     };
 
     let mut created = Vec::with_capacity(seats.len());
     for (seat_orgu_id, seat_role) in seats {
         // Koltuk sahipliği: delegator bu koltuğu gerçekten taşımalı.
-        if !delegation::delegator_holds_seat(&s.pool, delegator, seat_orgu_id, &seat_role)
+        if !delegation::delegator_holds_seat(pool, delegator, seat_orgu_id, &seat_role)
             .await
             .map_err(AppError::from)?
         {
@@ -130,21 +158,21 @@ async fn create_delegation(
             ));
         }
         let d = delegation::create(
-            &s.pool,
+            pool,
             orgtnt_id,
             delegator,
             seat_orgu_id,
             &seat_role,
-            &body.grantee,
+            grantee,
             valid_from,
-            body.valid_to,
-            actor_user, // created_by
+            valid_to,
+            created_by,
         )
         .await
         .map_err(AppError::from)?;
         created.push(d);
     }
-    Ok(Json(created))
+    Ok(created)
 }
 
 async fn list_mine(

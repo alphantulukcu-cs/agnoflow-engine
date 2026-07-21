@@ -60,6 +60,22 @@ pub async fn list_by_delegator(
     .map_err(OrgError::Database)
 }
 
+/// Tenant'taki TÜM vekaletler (admin yönetim görünümü), en yeni önce.
+pub async fn list_by_tenant(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+) -> Result<Vec<Delegation>, OrgError> {
+    sqlx::query_as::<_, Delegation>(&format!(
+        "SELECT {COLS} FROM org.delegation
+         WHERE orgtnt_id = $1
+         ORDER BY created_at DESC"
+    ))
+    .bind(orgtnt_id)
+    .fetch_all(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
 /// Matcher için aday aktif vekaletler: tenant + zaman penceresi + `active`, ve
 /// kaba alıcı filtresi — grantee ya bir HAVUZ olabilir (`c_r` taşır, rol eşleşmesi
 /// matcher'da) ya da bu claimant'ı ADIYLA (username/uuid) c_u'da içerir. Kesin

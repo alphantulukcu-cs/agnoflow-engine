@@ -24,6 +24,11 @@ pub fn router(pool: PgPool) -> Router {
         .route("/orgtnt/:id/roles", get(list_roles_by_tenant))
         .route("/orgtnt/:id/actors", get(list_actors))
         .route("/orgtnt/:id/assignments", post(create_assignment))
+        .route(
+            "/orgtnt/:id/delegations",
+            get(list_delegations).post(create_delegation_admin),
+        )
+        .route("/orgtnt/:id/delegations/:did", axum::routing::delete(revoke_delegation_admin))
         .route("/orgt/:id/orgu", get(list_orgu_by_tree))
         .route("/users/:id/orgu", get(list_user_orgu))
         .route("/users/:id/roles", get(list_user_roles))
@@ -276,5 +281,74 @@ fn normalize_traverse_expr(expr: &str) -> String {
         expr.to_string()
     } else {
         format!("self.{expr}")
+    }
+}
+
+// ── Madde 6: vekalet/delegasyon (admin yönetim; /org X-Admin-Key kapısı altında) ──
+
+async fn list_delegations(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+) -> Result<Json<Vec<wf_org::models::Delegation>>, AppError> {
+    repo::delegation::list_by_tenant(&pool, orgtnt_id)
+        .await
+        .map(Json)
+        .map_err(AppError::from)
+}
+
+#[derive(Deserialize)]
+struct SeatBody {
+    orgu_id: Uuid,
+    role: String,
+}
+
+#[derive(Deserialize)]
+struct AdminDelegationBody {
+    delegator_user_id: Uuid,
+    #[serde(default)]
+    seat: Option<SeatBody>,
+    #[serde(default)]
+    all: bool,
+    grantee: serde_json::Value,
+    #[serde(default)]
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    valid_to: chrono::DateTime<chrono::Utc>,
+}
+
+async fn create_delegation_admin(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<AdminDelegationBody>,
+) -> Result<Json<Vec<wf_org::models::Delegation>>, AppError> {
+    let seat = body.seat.map(|s| (s.orgu_id, s.role));
+    let created = crate::routes::delegation::create_delegations(
+        &pool,
+        orgtnt_id,
+        body.delegator_user_id,
+        seat,
+        body.all,
+        &body.grantee,
+        body.valid_from,
+        body.valid_to,
+        body.delegator_user_id, // admin yolunda created_by = delegator
+    )
+    .await?;
+    Ok(Json(created))
+}
+
+async fn revoke_delegation_admin(
+    State(pool): State<PgPool>,
+    Path((orgtnt_id, did)): Path<(Uuid, Uuid)>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let ok = repo::delegation::revoke(&pool, did, orgtnt_id)
+        .await
+        .map_err(AppError::from)?;
+    if ok {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError(
+            "vekalet bulunamadı".into(),
+            axum::http::StatusCode::NOT_FOUND,
+        ))
     }
 }

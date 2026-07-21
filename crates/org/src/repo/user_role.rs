@@ -250,3 +250,28 @@ pub async fn grant_assignment(
 
     Ok(())
 }
+
+/// `grant_assignment`'ın tersi: bir kullanıcının bir orgu'daki 'granted' rol
+/// atamasını (org.ur) kaldırır. Org üyeliği (org.u_orgu) KORUNUR — kullanıcı
+/// başka rollerle o birimde kalabilir. Etkilenen satır varsa true.
+pub async fn revoke_assignment(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    u_id: Uuid,
+    orgu_id: Uuid,
+    role_name: &str,
+) -> Result<bool, OrgError> {
+    let r = sqlx::query(
+        "DELETE FROM org.ur
+         WHERE orgtnt_id = $1 AND u_id = $2 AND orgu_id = $3 AND ur_type = 'granted'
+           AND r_id = (SELECT r_id FROM org.r WHERE orgtnt_id = $1 AND name = $4)",
+    )
+    .bind(orgtnt_id)
+    .bind(u_id)
+    .bind(orgu_id)
+    .bind(role_name)
+    .execute(pool)
+    .await
+    .map_err(OrgError::Database)?;
+    Ok(r.rows_affected() > 0)
+}

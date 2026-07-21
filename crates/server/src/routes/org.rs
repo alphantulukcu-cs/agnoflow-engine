@@ -23,7 +23,10 @@ pub fn router(pool: PgPool) -> Router {
         )
         .route("/orgtnt/:id/roles", get(list_roles_by_tenant))
         .route("/orgtnt/:id/actors", get(list_actors))
-        .route("/orgtnt/:id/assignments", post(create_assignment))
+        .route(
+            "/orgtnt/:id/assignments",
+            post(create_assignment).delete(revoke_assignment),
+        )
         .route(
             "/orgtnt/:id/delegations",
             get(list_delegations).post(create_delegation_admin),
@@ -195,6 +198,29 @@ async fn create_assignment(
     .await
     .map(Json)
     .map_err(|e| AppError(e.to_string(), axum::http::StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Atama kaldırma: (u_id, orgu_id, role_name) query paramlarıyla granted rolü siler.
+#[derive(Deserialize)]
+struct RevokeAssignQuery {
+    u_id: Uuid,
+    orgu_id: Uuid,
+    role_name: String,
+}
+
+async fn revoke_assignment(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Query(q): Query<RevokeAssignQuery>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let removed = repo::user_role::revoke_assignment(&pool, orgtnt_id, q.u_id, q.orgu_id, &q.role_name)
+        .await
+        .map_err(AppError::from)?;
+    if removed {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError("atama bulunamadı".into(), axum::http::StatusCode::NOT_FOUND))
+    }
 }
 
 async fn list_orgu_by_tree(

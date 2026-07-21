@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
-use wfe_core::v22::ports::WfdStore;
+use wfe_core::v22::ports::{BranchState, BranchStatus, WfdStore};
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -249,7 +249,8 @@ struct WfeListQuery {
 
 /// `WfeRow` + SLA görünüm alanları (2026-07-16): `priority` (1-10, otomatik) ve
 /// `claim_deadline` (claimed_at + node.claim_timeout, hesaplanmış). `deadline` /
-/// `claimed_at` zaten `WfeRow` kolonları — flatten ile response'a dahil olur.
+/// `claimed_at` / `join_target` zaten `WfeRow` kolonları — flatten ile response'a
+/// dahil olur.
 #[derive(serde::Serialize)]
 struct WfeListItem {
     #[serde(flatten)]
@@ -261,6 +262,34 @@ struct WfeListItem {
     /// YOK. `priority`/`claim_deadline` gibi hesaplanmış bir alandır (`wf.wfe`
     /// kolonu DEĞİL), bu yüzden `WfeRow`'a değil buraya konur.
     rev: i32,
+    /// WOR-31 T4: paralel modda bu WFE'nin AKTİF kolları (`[{node, status,
+    /// claimed_by, claimed_at, entered_at}]`, `GET /wfe/:id` ile aynı şekil).
+    /// Paralel değilken (join_target NULL) BOŞ dizi — liste tüketicisi kol-başına
+    /// satır fan-out'u için bunu okur (current_node paralel modda NULL'dır).
+    branches: Vec<BranchState>,
+}
+
+/// WOR-31 T4: liste kol satırı (`BranchListRow`) → API görünümü (`BranchState`,
+/// `node` alan adıyla serialize olur). `claimed_by` jsonb `{"user_id": "<uuid>"}`
+/// biçiminden Uuid'e çözülür (wfe_adapter `parse_claimed_by` ile aynı sözleşme);
+/// `status` metni enum'a eşlenir (aktif dışı zaten sorguda süzülür).
+fn branch_list_row_to_state(r: wf_wfe::models::BranchListRow) -> BranchState {
+    BranchState {
+        branch_node: r.branch_node,
+        status: match r.status.as_str() {
+            "arrived" => BranchStatus::Arrived,
+            "cancelled" => BranchStatus::Cancelled,
+            _ => BranchStatus::Active,
+        },
+        claimed_by: r
+            .claimed_by
+            .as_ref()
+            .and_then(|cb| cb.get("user_id"))
+            .and_then(|u| u.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok()),
+        claimed_at: r.claimed_at,
+        entered_at: r.entered_at,
+    }
 }
 
 async fn list_wfe(
@@ -287,6 +316,26 @@ async fn list_wfe(
     let revs = wf_wfe::repo::wfah::max_seq_by_wfe(&s.pool, &wfe_ids)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    // WOR-31 T4: paralel WFE'lerin aktif kolları — TEK toplu sorgu, `wfe_id`'ye
+    // göre grupla. Yalnız `join_target` dolu (paralel) satırları sorgula: tek-kol
+    // WFE'ler için gereksiz yük olmasın.
+    let parallel_ids: Vec<Uuid> = rows
+        .iter()
+        .filter(|r| r.join_target.is_some())
+        .map(|r| r.wfe_id)
+        .collect();
+    let mut branches_by_wfe: std::collections::HashMap<Uuid, Vec<BranchState>> =
+        std::collections::HashMap::new();
+    for br in wf_wfe::repo::branch::load_active_for_wfes(&s.pool, &parallel_ids)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
+    {
+        branches_by_wfe
+            .entry(br.wfe_id)
+            .or_default()
+            .push(branch_list_row_to_state(br));
+    }
 
     let now = chrono::Utc::now();
     // (wfd_id, version) immutable — aynı sürüm birden çok satırda paylaşılıyorsa
@@ -320,7 +369,8 @@ async fn list_wfe(
             None
         };
         let rev = revs.get(&row.wfe_id).copied().unwrap_or(0);
-        out.push(WfeListItem { priority, claim_deadline, rev, row });
+        let branches = branches_by_wfe.remove(&row.wfe_id).unwrap_or_default();
+        out.push(WfeListItem { priority, claim_deadline, rev, branches, row });
     }
     Ok(Json(out))
 }

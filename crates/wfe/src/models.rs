@@ -35,6 +35,19 @@ pub struct BranchRow {
     pub entered_at: DateTime<Utc>,
 }
 
+/// WOR-31 T4: liste görünümü için `wfe_id` taşıyan kol satırı — `GET /wfe` birden
+/// çok WFE'nin kollarını TEK sorguda çekip `wfe_id`'ye göre gruplar (satır-başına
+/// sorgu YOK, bkz. `repo::branch::load_active_for_wfes`).
+#[derive(Debug, FromRow)]
+pub struct BranchListRow {
+    pub wfe_id: Uuid,
+    pub branch_node: String,
+    pub status: String,
+    pub claimed_by: Option<serde_json::Value>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub entered_at: DateTime<Utc>,
+}
+
 #[derive(Debug, FromRow)]
 pub struct WfahRow {
     pub wfah_id: Uuid,

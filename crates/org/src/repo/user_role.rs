@@ -91,8 +91,9 @@ pub async fn list_user_roles(
     .map_err(OrgError::Database)
 }
 
-/// Returns true if user holds the given role in the given orgu,
-/// respecting timeslice validity and excluding 'excluded' assignments.
+/// Kullanıcı verilen orgu'da verilen role sahip mi?
+/// Kaynak: org.ur doğrudan grant VEYA org.orgu_r birim grant'ı (devralma);
+/// org.ur 'excluded' satırı her ikisini de ezer. Timeslice geçerliliği uygulanır.
 pub async fn check_user_role(
     pool: &PgPool,
     user_id: Uuid,
@@ -100,17 +101,23 @@ pub async fn check_user_role(
     role_name: &str,
 ) -> Result<bool, OrgError> {
     let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS (
-             SELECT 1 FROM org.ur u
-             JOIN org.r r ON u.r_id = r.r_id
-             WHERE u.u_id    = $1
-               AND u.orgu_id = $2
-               AND r.name    = $3
-               AND r.is_active = true
-               AND u.ur_type != 'excluded'
-               AND (u.valid_from  IS NULL OR u.valid_from  <= now())
-               AND (u.valid_until IS NULL OR u.valid_until >  now())
-         )",
+        "SELECT
+            ( EXISTS (
+                SELECT 1 FROM org.ur u JOIN org.r r ON u.r_id = r.r_id
+                WHERE u.u_id = $1 AND u.orgu_id = $2 AND r.name = $3
+                  AND r.is_active = true AND u.ur_type != 'excluded'
+                  AND (u.valid_from  IS NULL OR u.valid_from  <= now())
+                  AND (u.valid_until IS NULL OR u.valid_until >  now()) )
+              OR EXISTS (
+                SELECT 1 FROM org.orgu_r orr JOIN org.r r ON orr.r_id = r.r_id
+                WHERE orr.orgu_id = $2 AND r.name = $3
+                  AND r.is_active = true
+                  AND (orr.valid_from  IS NULL OR orr.valid_from  <= now())
+                  AND (orr.valid_until IS NULL OR orr.valid_until >  now()) ) )
+          AND NOT EXISTS (
+                SELECT 1 FROM org.ur u JOIN org.r r ON u.r_id = r.r_id
+                WHERE u.u_id = $1 AND u.orgu_id = $2 AND r.name = $3
+                  AND u.ur_type = 'excluded' )",
     )
     .bind(user_id)
     .bind(orgu_id)
@@ -139,42 +146,17 @@ pub async fn resolve_orgu(
     Ok(orgus.into_iter().map(OrgUnit::from).collect())
 }
 
-/// Handles "*:[type:branch]" — all orgus of a given type within the tenant.
+/// `*:[filter]` — tenant genelinde filtreye uyan orgu üyelikleri.
+/// Executor'ın filtre motoruna delege eder (type/role, &&/||, virgül-OR hepsi desteklenir).
 async fn resolve_global_type(
     pool: &PgPool,
     type_expr: &str,
     orgtnt_id: Uuid,
 ) -> Result<Vec<OrgUnit>, OrgError> {
-    let inner = type_expr.trim_start_matches('[').trim_end_matches(']');
-    let (key, val) = inner
-        .split_once(':')
-        .ok_or_else(|| OrgError::BadRequest(format!("invalid type expr: {type_expr}")))?;
-
-    let rows = sqlx::query_as::<_, (Uuid, serde_json::Value, String)>(
-        "SELECT o.orgu_id, o.orgu_type, oo.path::text
-         FROM org.orgu o
-         JOIN org.orgt_orgu oo ON o.orgu_id = oo.orgu_id
-         WHERE oo.orgtnt_id  = $1
-           AND o.is_active   = true
-           AND oo.is_active  = true
-           AND (o.orgu_type ? '*'
-                OR o.orgu_type->>$2 = $3
-                OR o.orgu_type->$2 @> to_jsonb($3::text))",
-    )
-    .bind(orgtnt_id)
-    .bind(key)
-    .bind(val)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|(orgu_id, orgu_type, path)| OrgUnit {
-            orgu_id,
-            orgu_type,
-            path,
-        })
-        .collect())
+    let inner = type_expr.trim().trim_start_matches('[').trim_end_matches(']');
+    let filter = parser::parse_filter(inner).map_err(|e| OrgError::BadRequest(e.to_string()))?;
+    let orgus = executor::fetch_global_type(pool, orgtnt_id, &filter).await?;
+    Ok(orgus.into_iter().map(OrgUnit::from).collect())
 }
 
 // ── Simülasyon playground: aktör oluşturma (WOR sim) ────────────────────────
@@ -344,6 +326,51 @@ pub async fn revoke_assignment(
     )
     .bind(orgtnt_id)
     .bind(u_id)
+    .bind(orgu_id)
+    .bind(role_name)
+    .execute(pool)
+    .await
+    .map_err(OrgError::Database)?;
+    Ok(r.rows_affected() > 0)
+}
+
+/// Bir orgu'ya rol grant'ı: org.orgu_r satırı. Rol yoksa oluşturulur (ensure_role).
+/// İdempotent — aynı (orgu, rol) tekrar çağrılırsa yeni satır eklenmez.
+pub async fn grant_orgu_role(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    orgu_id: Uuid,
+    role_name: &str,
+) -> Result<(), OrgError> {
+    let role = ensure_role(pool, orgtnt_id, role_name).await?;
+    sqlx::query(
+        "INSERT INTO org.orgu_r (orgtnt_id, orgu_id, r_id, ur_type)
+         VALUES ($1, $2, $3, 'granted')
+         ON CONFLICT (orgu_id, r_id) DO NOTHING",
+    )
+    .bind(orgtnt_id)
+    .bind(orgu_id)
+    .bind(role.r_id)
+    .execute(pool)
+    .await
+    .map_err(OrgError::Database)?;
+    Ok(())
+}
+
+/// `grant_orgu_role`'ün tersi: bir orgu'nun rol grant'ını (org.orgu_r) kaldırır.
+/// Etkilenen satır varsa true.
+pub async fn revoke_orgu_role(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    orgu_id: Uuid,
+    role_name: &str,
+) -> Result<bool, OrgError> {
+    let r = sqlx::query(
+        "DELETE FROM org.orgu_r
+         WHERE orgtnt_id = $1 AND orgu_id = $2
+           AND r_id = (SELECT r_id FROM org.r WHERE orgtnt_id = $1 AND name = $3)",
+    )
+    .bind(orgtnt_id)
     .bind(orgu_id)
     .bind(role_name)
     .execute(pool)

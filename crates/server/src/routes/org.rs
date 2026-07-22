@@ -32,6 +32,10 @@ pub fn router(pool: PgPool) -> Router {
             post(create_assignment).delete(revoke_assignment),
         )
         .route(
+            "/orgtnt/:id/orgu-roles",
+            post(create_orgu_role).delete(delete_orgu_role),
+        )
+        .route(
             "/orgtnt/:id/delegations",
             get(list_delegations).post(create_delegation_admin),
         )
@@ -281,6 +285,56 @@ async fn revoke_assignment(
     } else {
         Err(AppError(
             "atama bulunamadı".into(),
+            axum::http::StatusCode::NOT_FOUND,
+        ))
+    }
+}
+
+/// Orgu'ya rol grant'ı: birimdeki tüm kullanıcılar bu rolü devralır (check_user_role).
+#[derive(Deserialize)]
+struct OrguRoleBody {
+    orgu_id: Uuid,
+    role_name: String,
+}
+
+async fn create_orgu_role(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<OrguRoleBody>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let role_name = body.role_name.trim();
+    if role_name.is_empty() {
+        return Err(AppError(
+            "rol adı boş olamaz".into(),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    repo::user_role::grant_orgu_role(&pool, orgtnt_id, body.orgu_id, role_name)
+        .await
+        .map_err(AppError::from)?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+/// Orgu rol grant'ını kaldırma: (orgu_id, role_name) query paramlarıyla.
+#[derive(Deserialize)]
+struct RevokeOrguRoleQuery {
+    orgu_id: Uuid,
+    role_name: String,
+}
+
+async fn delete_orgu_role(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Query(q): Query<RevokeOrguRoleQuery>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let removed = repo::user_role::revoke_orgu_role(&pool, orgtnt_id, q.orgu_id, &q.role_name)
+        .await
+        .map_err(AppError::from)?;
+    if removed {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError(
+            "birim-rol bulunamadı".into(),
             axum::http::StatusCode::NOT_FOUND,
         ))
     }

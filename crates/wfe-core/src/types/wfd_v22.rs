@@ -45,6 +45,11 @@ pub struct Wfd {
     pub terminals: Vec<Terminal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listable: Vec<ListableRule>,
+    /// Opsiyonel ek-belge katalogu (grup adı → grup). Node'lar `NodeDef.attachments`
+    /// ile bu grupları adıyla referanslar. Engine yalnız metadata taşır; dosya I/O
+    /// portal katmanındadır (bkz. server/routes/portal/attachments.rs).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub attachments: BTreeMap<String, AttachmentGroup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_when: Option<String>,
 }
@@ -90,6 +95,12 @@ pub struct NodeDef {
     /// SLA-1 (2026-07-16): claim eden aktör `after` içinde aksiyon almazsa tetiklenir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_timeout: Option<ClaimTimeout>,
+    /// Root `attachments` katalogundaki grup key'lerine referans. WFE bu node'da
+    /// beklerken listelenen grupların `required` dosyaları yüklenmeden bu node'dan
+    /// hiçbir aksiyon submit edilemez (gate portal katmanındadır; engine core dosya
+    /// I/O yapmaz, yalnız referansı taşır ve validator ile katalogda var olduğunu doğrular).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<String>,
 }
 
 /// SLA-1 — claim timeout (havuz node'u üzerinde). `wft` yoksa aynı havuza döner
@@ -238,6 +249,48 @@ pub struct ActionDef {
 pub struct InputDef {
     pub required: Vec<String>,
     pub optional: Vec<String>,
+}
+
+/// Ek-belge katalog grubu. Bir veya daha fazla dosya slotu (item) içerir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentGroup {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub items: Vec<AttachmentItem>,
+}
+
+/// Katalog grubundaki tek dosya slotu. `id` = "verilen dosya ismi"; grup içinde tekildir.
+/// Storage anahtarı: `attachments/{wfe_id}/{grup}/{id}` (portal katmanı).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentItem {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// true (default): yüklenmeden gruba bağlı node'dan aksiyon submit edilemez.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub required: bool,
+    /// Kabul edilen format kuralları — her biri bir MIME grubu + o gruba özel boyut
+    /// sınırı. Farklı formatlar farklı MB (örn. pdf/jpg→4MB, xml/zip→20MB). Boş = her
+    /// tip, sınırsız. Portal upload katmanı uygular (engine core dosyaya değmez).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formats: Vec<AttachmentFormatRule>,
+}
+
+/// Tek format kuralı: bir MIME grubu + o gruba özel opsiyonel boyut sınırı.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentFormatRule {
+    /// MIME tipleri (örn. `["application/pdf","image/jpeg"]`) veya `image/*` joker.
+    pub accept: Vec<String>,
+    /// Bu format grubu için üst boyut (MB). Yoksa bu grup için sınır yok.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_size_mb: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

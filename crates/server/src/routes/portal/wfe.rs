@@ -22,6 +22,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/:wfe_id", get(get_wfe_detail))
         .route("/:wfe_id/action", post(submit_action))
+        .merge(super::attachments::routes())
         .with_state(state)
 }
 
@@ -49,6 +50,13 @@ struct AvailableAction {
     /// disambiguasyon için zorunlu). Paralel değilse `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     node: Option<String>,
+    /// Bu aksiyonun kaynak node'una bağlı ek-belge grupları ve item bazlı yükleme
+    /// durumu. Boşsa attachment gate yok. Portal, `attachments_satisfied=false`
+    /// iken submit butonunu disable eder ve eksik dosyalar için upload gösterir.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attachments: Vec<super::attachments::AttachmentGroupStatus>,
+    /// Kaynak node'un tüm `required` dosyaları yüklü mü? attachments boşsa `true`.
+    attachments_satisfied: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,20 +136,37 @@ async fn get_wfe_detail(
     // WOR-31 T4: paralel modda aynı aksiyon adı birden fazla kolda tekrar edebilir
     // (ör. üç kolun da `approve`'u) — her tekrar kendi `node`'uyla ayrı satırdır,
     // istemci hangi kolu onayladığını `node`'u geri göndererek belirtir.
-    let available_actions: Vec<AvailableAction> = possible
-        .iter()
-        .filter_map(|pa| {
-            wfd.actions.get(&pa.action).map(|def| AvailableAction {
-                name: pa.action.clone(),
-                label: def.label.clone(),
-                input: ActionInputSchema {
-                    required: def.input.required.clone(),
-                    optional: def.input.optional.clone(),
-                },
-                node: pa.node.clone(),
-            })
-        })
-        .collect();
+    let mut available_actions: Vec<AvailableAction> = Vec::with_capacity(possible.len());
+    for pa in &possible {
+        let Some(def) = wfd.actions.get(&pa.action) else {
+            continue;
+        };
+        // Aksiyonun kaynak node'u: paralelde kol node'u, aksi halde current_node.
+        let src_node = pa.node.clone().or_else(|| view.current_node.clone());
+        let attachments = match &src_node {
+            Some(n) => super::attachments::status_for_node(&s.attachments, &wfd, wfe_id, n)
+                .await
+                .map_err(|e| {
+                    AppError(
+                        format!("attachment durum sorgusu başarısız: {e}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                })?,
+            None => vec![],
+        };
+        let attachments_satisfied = super::attachments::satisfied(&attachments);
+        available_actions.push(AvailableAction {
+            name: pa.action.clone(),
+            label: def.label.clone(),
+            input: ActionInputSchema {
+                required: def.input.required.clone(),
+                optional: def.input.optional.clone(),
+            },
+            node: pa.node.clone(),
+            attachments,
+            attachments_satisfied,
+        });
+    }
 
     Ok(Json(WfeDetailResponse {
         wfe_id,
@@ -186,6 +211,37 @@ async fn submit_action(
     Path(wfe_id): Path<Uuid>,
     Json(body): Json<ActionRequest>,
 ) -> Result<Json<ActionResponse>, AppError> {
+    // Attachment gate (portal katmanı): hedef node'un `required` dosyaları
+    // yüklenmeden engine'e HİÇ gitmeyiz. UI zaten disable eder; bu server-side
+    // zorlamadır (UI-only gating'e güvenilmez). Engine core dosyadan habersiz kalır.
+    let wfd = super::attachments::load_wfd_for_wfe(&s, wfe_id, actor.orgtnt_id).await?;
+    let view = s
+        .executor
+        .query(wfe_id, &to_actor(&actor))
+        .await
+        .map_err(AppError::from)?;
+    // Paralelde current_node None'dur; kol seçimi body.node ile gelir.
+    let target_node = body.node.clone().or(view.current_node.clone());
+    if let Some(node) = &target_node {
+        let groups =
+            super::attachments::status_for_node(&s.attachments, &wfd, wfe_id, node)
+                .await
+                .map_err(|e| {
+                    AppError(
+                        format!("attachment durum sorgusu başarısız: {e}"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    )
+                })?;
+        let missing = super::attachments::missing_required(&groups);
+        if !missing.is_empty() {
+            return Err(AppError {
+                message: format!("Eksik zorunlu belgeler: {}", missing.join(", ")),
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: Some("attachment.missing"),
+            });
+        }
+    }
+
     // Assignment, yetki, input validasyonu ve claimed_by reset'i engine +
     // atomik commit içinde — burada ek SQL yok (WOR-43).
     let result = s

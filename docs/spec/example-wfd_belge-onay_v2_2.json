@@ -1,0 +1,262 @@
+{
+  "wfd_version": "2.2",
+  "expression_language": "zen@1",
+  "id": "belge-onay-v1",
+  "name": "Belgeli Kredi Onayı",
+  "version": "1.0.0",
+  "description": "attachments örnek fixture'ı — ek-belge katalogu + node referansı. Analist havuzunda başvuru belgeleri, müdür havuzunda ek olarak onay belgeleri yüklenmeden ilgili node'dan aksiyon SUBMIT edilemez. Dosyalar engine'de değil work-pool-portal opendal storage'ında tutulur; varlık kontrolü portal katmanındadır (engine core dosya I/O yapmaz).",
+  "timeout": "P30D",
+  "context": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "applicant": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "tckid": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "tckid"
+        ]
+      },
+      "credit_info": {
+        "type": "object",
+        "properties": {
+          "amount_requested": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "amount_requested"
+        ]
+      },
+      "manager_decision": {
+        "type": "string",
+        "enum": [
+          "approve",
+          "reject"
+        ],
+        "description": "Müdürün nihai kararı; manager_decide aksiyonunun input'udur."
+      },
+      "initiated_by": {
+        "type": "object",
+        "x-wf-readonly": true
+      },
+      "analyst_approved_at": {
+        "type": "string",
+        "x-wf-readonly": true
+      },
+      "manager_reviewed_at": {
+        "type": "string",
+        "x-wf-readonly": true
+      }
+    },
+    "required": [
+      "applicant",
+      "credit_info"
+    ]
+  },
+  "attachments": {
+    "basvuru_belgeleri": {
+      "label": "Başvuru Belgeleri",
+      "description": "Analistin değerlendirmeye başlamadan önce yüklenmesi gereken temel evraklar.",
+      "items": [
+        {
+          "id": "kimlik",
+          "label": "Kimlik Fotokopisi",
+          "required": true,
+          "formats": [
+            {
+              "accept": ["application/pdf", "image/*"],
+              "max_size_mb": 5
+            }
+          ]
+        },
+        {
+          "id": "gelir_belgesi",
+          "label": "Gelir Belgesi",
+          "required": true,
+          "formats": [
+            {
+              "accept": ["application/pdf"],
+              "max_size_mb": 5
+            }
+          ]
+        }
+      ]
+    },
+    "onay_belgeleri": {
+      "label": "Onay Belgeleri",
+      "description": "Müdürün nihai kararı için gereken ek belgeler.",
+      "items": [
+        {
+          "id": "kredi_raporu",
+          "label": "Kredi Raporu",
+          "required": true,
+          "formats": [
+            {
+              "accept": ["application/pdf"],
+              "max_size_mb": 10
+            },
+            {
+              "accept": ["application/zip", "application/x-rar-compressed"],
+              "max_size_mb": 20
+            }
+          ]
+        },
+        {
+          "id": "risk_notu",
+          "label": "Risk Değerlendirme Notu",
+          "required": false
+        }
+      ]
+    }
+  },
+  "nodes": {
+    "type_branch__branchClerk": {
+      "label": "Şube Memuru",
+      "description": "Başvuruyu başlatan şube memuru havuzu.",
+      "c_a": {
+        "c_orgu": "*:[type:branch]",
+        "c_r": [
+          "branchClerk"
+        ]
+      }
+    },
+    "self__creditAnalyst": {
+      "label": "Analist Havuzu",
+      "description": "Başvuru, kredi analisti havuzunda claim edilmeyi bekliyor. Başvuru belgeleri yüklenmeden analist aksiyon submit edemez.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "creditAnalyst"
+        ]
+      },
+      "attachments": [
+        "basvuru_belgeleri"
+      ]
+    },
+    "self__branchManager": {
+      "label": "Şube Müdürü Havuzu",
+      "description": "Nihai karar için şube müdürü havuzu. Başvuru + onay belgeleri yüklü olmadan karar submit edilemez.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": [
+          "branchManager"
+        ]
+      },
+      "attachments": [
+        "basvuru_belgeleri",
+        "onay_belgeleri"
+      ]
+    }
+  },
+  "start": [
+    {
+      "id": "start__type_branch__branchClerk",
+      "from": "type_branch__branchClerk",
+      "action": "create_application",
+      "wfes_effects": {
+        "set": {
+          "initiated_by": "$actor"
+        }
+      },
+      "wft": {
+        "node": "self__creditAnalyst"
+      }
+    }
+  ],
+  "actions": {
+    "create_application": {
+      "label": "Başvuru Oluştur",
+      "description": "Şube memurunun kredi başvurusunu oluşturması — akışı başlatan aksiyon.",
+      "input": {
+        "required": [
+          "applicant",
+          "credit_info"
+        ],
+        "optional": []
+      }
+    },
+    "analyst_approve": {
+      "label": "Analist Değerlendirmesi",
+      "description": "Analistin başvuruyu değerlendirip müdüre iletmesi. Başvuru belgeleri yüklü olmadan submit edilemez.",
+      "input": {
+        "required": [
+          "credit_info.amount_requested"
+        ],
+        "optional": []
+      }
+    },
+    "manager_decide": {
+      "label": "Müdür Kararı",
+      "description": "Şube müdürünün nihai kararı. Onay belgeleri yüklü olmadan submit edilemez.",
+      "input": {
+        "required": [
+          "manager_decision"
+        ],
+        "optional": []
+      }
+    }
+  },
+  "transitions": [
+    {
+      "id": "t_analyst_approve",
+      "from": "self__creditAnalyst",
+      "action": "analyst_approve",
+      "wfes_effects": {
+        "set": {
+          "analyst_approved_at": "$timestamp"
+        }
+      },
+      "wft": {
+        "node": "self__branchManager"
+      }
+    },
+    {
+      "id": "t_manager_decide",
+      "from": "self__branchManager",
+      "action": "manager_decide",
+      "wfes_effects": {
+        "set": {
+          "manager_reviewed_at": "$timestamp"
+        }
+      },
+      "wft": {
+        "conditions": [
+          {
+            "when": "$action.input.manager_decision == 'approve'",
+            "terminal": "terminal_approved"
+          }
+        ],
+        "default": {
+          "terminal": "terminal_rejected"
+        }
+      }
+    }
+  ],
+  "terminals": [
+    {
+      "id": "terminal_approved",
+      "wfe_end_response": {
+        "status": "approved",
+        "message": "Başvurunuz onaylandı.",
+        "applicant_name": "$ctx.applicant.name"
+      }
+    },
+    {
+      "id": "terminal_rejected",
+      "wfe_end_response": {
+        "status": "rejected",
+        "message": "Başvurunuz reddedildi.",
+        "applicant_name": "$ctx.applicant.name"
+      }
+    }
+  ]
+}

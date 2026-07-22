@@ -33,6 +33,8 @@ pub struct Wfd {
     #[serde(default)]
     pub listable: Vec<ListableRule>,
     #[serde(default)]
+    pub attachments: BTreeMap<String, AttachmentGroup>, // opsiyonel ek-belge katalogu
+    #[serde(default)]
     pub terminal_when: Option<String>,
 }
 
@@ -48,6 +50,44 @@ pub struct NodeDef {
     pub reassign: Option<CandidateActor>, // Madde 7: opsiyonel claim devri yetkisi (amir)
     #[serde(default)]
     pub escalation: Vec<EscalationStep>,
+    #[serde(default)]
+    pub attachments: Vec<String>,     // root attachments katalogundaki grup key referanslari
+}
+
+/// Ek-belge katalog grubu. Dosyalar engine'de degil portal opendal storage'inda tutulur.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentGroup {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub items: Vec<AttachmentItem>,
+}
+
+/// Katalog grubundaki tek dosya slotu. id = "verilen dosya ismi"; grup icinde tekil.
+/// Storage anahtari: attachments/{wfe_id}/{grup}/{id}.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentItem {
+    pub id: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub required: bool,               // yuklenmeden gruba bagli node'dan aksiyon submit edilemez
+    #[serde(default)]
+    pub formats: Vec<AttachmentFormatRule>, // per-format MIME grubu + o gruba ozel boyut siniri
+}
+
+/// Tek format kurali: MIME grubu + o gruba ozel opsiyonel boyut siniri.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentFormatRule {
+    pub accept: Vec<String>,
+    #[serde(default)]
+    pub max_size_mb: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]

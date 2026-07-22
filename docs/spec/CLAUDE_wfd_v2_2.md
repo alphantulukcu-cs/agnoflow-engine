@@ -27,6 +27,7 @@ Detay gerektiğinde bu dosyaları oku; içeriklerini buraya kopyalama.
 - tek exec namespace `$exec.result.*`; pipeline atomik; hata isimleri `WFD.*`
 - **visibility matcher AYRI fonksiyondur ve kriterler arası OR'dur** — authorization matcher'ı ile birleştirme
 - expression namespace'leri: `$ctx $wfah $node $actor $timestamp $wfe_id $action.input.* $exec.result.*`
+- **attachments (ek-belge)** opsiyonel: root `attachments` katalogu (grup→`items[]`) + `nodes.<key>.attachments` (grup key referansları). Engine core dosya I/O YAPMAZ — katalog+referansı metadata tutar; varlık kontrolü + gate portal edge'inde (`422 attachment.missing`). Detay DECISIONS Madde 8 + runtime-semantics §6c.
 
 ## Çalışma Kuralları
 

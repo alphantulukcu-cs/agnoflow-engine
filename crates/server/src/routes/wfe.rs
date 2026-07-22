@@ -19,10 +19,11 @@ pub fn router(state: AppState) -> Router {
         .route("/:id/claim", post(claim_wfe))
         .route("/:id/reassign", post(reassign_wfe))
         .route("/:id/possible-actions", get(possible_actions))
+        .merge(super::attachments::routes())
         .with_state(state)
 }
 
-fn extract_actor(headers: &HeaderMap) -> Result<Actor, AppError> {
+pub(crate) fn extract_actor(headers: &HeaderMap) -> Result<Actor, AppError> {
     let orgu_id = parse_uuid_header(headers, "x-actor-orgu")?;
     let user_id = parse_uuid_header(headers, "x-actor-user")?;
     let role = headers
@@ -121,6 +122,41 @@ async fn apply_action(
     Json(body): Json<ApplyBody>,
 ) -> Result<Json<wf_wfe::executor::WfeApplyResult>, AppError> {
     let actor = extract_actor(&headers)?;
+
+    // Attachment gate: hedef node'un `required` dosyaları yüklenmeden engine'e HİÇ
+    // gitmeyiz (server-side zorlama; UI-only gating'e güvenilmez). Engine core
+    // dosyadan habersiz kalır — kontrol portal katmanı opendal store'undadır.
+    let wfd = super::attachments::load_wfd(&s, wfe_id).await?;
+    let has_attachments = wfd.nodes.values().any(|n| !n.attachments.is_empty());
+    if has_attachments {
+        let view = s
+            .executor
+            .query(wfe_id, &actor)
+            .await
+            .map_err(AppError::from)?;
+        // Paralelde current_node None'dur; kol seçimi body.node ile gelir.
+        let target_node = body.node.clone().or(view.current_node.clone());
+        if let Some(node) = &target_node {
+            let groups =
+                crate::attachments::status_for_node(&s.attachments, &wfd, wfe_id, node)
+                    .await
+                    .map_err(|e| {
+                        AppError(
+                            format!("attachment durum sorgusu başarısız: {e}"),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        )
+                    })?;
+            let missing = crate::attachments::missing_required(&groups);
+            if !missing.is_empty() {
+                return Err(AppError {
+                    message: format!("Eksik zorunlu belgeler: {}", missing.join(", ")),
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: Some("attachment.missing"),
+                });
+            }
+        }
+    }
+
     s.executor
         .apply(
             wfe_id,

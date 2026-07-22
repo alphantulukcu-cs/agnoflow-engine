@@ -4524,6 +4524,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "jsonwebtoken",
+ "opendal",
  "serde",
  "serde_json",
  "sqlx",

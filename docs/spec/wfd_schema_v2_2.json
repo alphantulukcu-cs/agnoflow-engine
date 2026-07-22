@@ -129,11 +129,105 @@
         "$ref": "#/$defs/listableRule"
       }
     },
+    "attachments": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "#/$defs/idName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/attachmentGroup"
+      },
+      "description": "Opsiyonel ek-belge katalogu. Adlandirilmis gruplar; her grup bir veya daha fazla dosya slotu (item) icerir. Node'lar (nodeDef.attachments) bu gruplari ADIYLA referanslar - ayni belge kumesi tekrar tekrar yazilmaz. Dosyalarin kendisi engine'de DEGIL, dis UI'in (work-pool-portal) opendal storage'inda tutulur; engine yalniz katalogu ve referanslari tasir, varlik kontrolu portal katmanindadir."
+    },
     "terminal_when": {
       "$ref": "#/$defs/expression"
     }
   },
   "$defs": {
+    "attachmentGroup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "items"
+      ],
+      "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "UI'da gorunen grup adi ( or. 'Kredi Degerlendirme Belgeleri')."
+        },
+        "description": {
+          "type": "string"
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/attachmentItem"
+          },
+          "description": "Bu gruptaki dosya slotlari. 'id' grup icinde tekildir (custom validator)."
+        }
+      }
+    },
+    "attachmentItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/idName",
+          "description": "Dosya slotunun mantiksal kimligi = 'verilen dosya ismi'. Storage anahtari: attachments/{wfe_id}/{grup}/{id}. Grup icinde tekildir."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "UI'da gorunen dosya adi (or. 'Kredi Raporu')."
+        },
+        "description": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "true (default): bu dosya yuklenmeden gruba bagli node'dan aksiyon submit edilemez. false: opsiyonel, aksiyonu gate etmez."
+        },
+        "formats": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/attachmentFormatRule"
+          },
+          "description": "Kabul edilen format kurallari listesi. Her kural bir MIME grubu + o gruba OZEL boyut siniri tasir (farkli formatlar farkli MB, or. pdf/jpg->4MB, xml/zip->20MB). Bos/yoksa: her tip, sinirsiz boyut. Portal upload: yuklenen icerik tipi bir kurala uymali; uyan kuralin max_size_mb'si uygulanir."
+        }
+      }
+    },
+    "attachmentFormatRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accept"
+      ],
+      "properties": {
+        "accept": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "MIME tipleri (or. ['application/pdf','image/jpeg']) veya 'image/*' joker."
+        },
+        "max_size_mb": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Bu format grubu icin ust boyut siniri (MB). Yoksa bu grup icin sinir yok."
+        }
+      }
+    },
     "idName": {
       "type": "string",
       "minLength": 1,
@@ -717,6 +811,15 @@
             "$ref": "#/$defs/escalationStep"
           },
           "description": "SLA zinciri: WFE bu node'a girdikten itibaren sure asiminda siradaki adim uygulanir. Assigned WFE'de de calisir; escalation WFT'si WFE'yi yeni node'a tasirsa assignment temizlenir."
+        },
+        "attachments": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/idName"
+          },
+          "description": "Root 'attachments' katalogundaki grup key'lerine referans. WFE bu node'da beklerken, listelenen gruplarin 'required' dosyalari yuklenmeden bu node'dan HICBIR aksiyon submit edilemez (portal katmani opendal exists ile dogrular; engine core dosya I/O yapmaz - yalniz metadata tasir). Ayni grup birden fazla node'dan referanslanabilir; dosyalar wfe_id+grup+item ile saklandigindan tekrar yuklenmesi gerekmez."
         }
       },
       "description": "Node key = c_a'dan turetilen canonical slug (validator yeniden hesaplayip karsilastirir). Ayni canonical c_a ikinci bir node'da BULUNAMAZ."

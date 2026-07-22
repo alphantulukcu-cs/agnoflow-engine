@@ -3,6 +3,11 @@ pub struct Config {
     pub database_url: String,
     pub port: u16,
     pub storage: wf_wfd::StorageConfig,
+    /// Ek-belge (attachment) depolaması — WFD JSON storage'ından AYRI konum.
+    /// Varsayılan yerel yol `../work-pool-portal/storage` (engine cwd'sine göre);
+    /// dış UI'ın yüklediği dosyalar burada tutulur. Engine core buna bağımlı değil,
+    /// yalnız portal katmanı kullanır. `ATTACHMENT_STORAGE_*` env ile yapılandırılır.
+    pub attachment_storage: wf_wfd::StorageConfig,
     pub jwt_secret: String,
     /// İzinli CORS origin'leri (virgülle ayrık). Boşsa localhost dev origin'leri.
     pub cors_origins: Vec<String>,
@@ -21,6 +26,7 @@ impl Config {
                 .parse()
                 .map_err(|_| "PORT must be a number")?,
             storage: wf_wfd::StorageConfig::from_env(),
+            attachment_storage: attachment_storage_from_env(),
             jwt_secret: std::env::var("JWT_SECRET").map_err(|_| "JWT_SECRET env var required")?,
             cors_origins: std::env::var("CORS_ORIGINS")
                 .map(|s| s.split(',').map(|o| o.trim().to_string()).collect())
@@ -33,5 +39,24 @@ impl Config {
                 }),
             admin_api_key: std::env::var("ADMIN_API_KEY").ok(),
         })
+    }
+}
+
+/// Attachment storage config — `ATTACHMENT_STORAGE_*` env'inden okunur. WFD
+/// storage'ından ayrıdır; local backend'de varsayılan kök `../work-pool-portal/storage`.
+fn attachment_storage_from_env() -> wf_wfd::StorageConfig {
+    let backend = match std::env::var("ATTACHMENT_STORAGE_BACKEND")
+        .unwrap_or_else(|_| "local".into())
+        .as_str()
+    {
+        "s3" => wf_wfd::StorageBackend::S3,
+        _ => wf_wfd::StorageBackend::Local,
+    };
+    wf_wfd::StorageConfig {
+        backend,
+        path: std::env::var("ATTACHMENT_STORAGE_PATH")
+            .unwrap_or_else(|_| "../work-pool-portal/storage".into()),
+        s3_bucket: std::env::var("ATTACHMENT_STORAGE_S3_BUCKET").ok(),
+        s3_region: std::env::var("ATTACHMENT_STORAGE_S3_REGION").ok(),
     }
 }

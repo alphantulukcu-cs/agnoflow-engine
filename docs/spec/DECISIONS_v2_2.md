@@ -604,3 +604,39 @@ Her başarılı devir append-only WFAH marker'ı yazar: `action` = `reassign` (h
 kol-bazlıdır (`node` alanı). Alan opsiyonel olduğundan golden fixture değişmeden geçerli.
 (`wfe-core/src/v22/pipeline.rs::reassign`, `wfe/src/wfe_adapter.rs::reassign`,
 `server/src/routes/wfe.rs`, testler `tests/pipeline.rs` reassign_*.)
+
+## Madde 8 — Ek-belge (attachments): katalog + node referansı
+
+**Sorun:** Bir aksiyonun alınabilmesi için dış bir UI'dan (work-pool-portal) yüklenmiş
+belgelerin varlığına bağlı olması gerekiyordu. Aynı belge kümesi bir node'a girdikten
+sonra o node'dan çıkan tüm aksiyonların koşuluydu; belgeleri her aksiyona tekrar yazmak
+istenmedi. Ek olarak: engine dış kaynaklara (S3/dosya sistemi) bağımlı OLMAMALI.
+
+**Karar:** İki parça.
+1. **Katalog + referans (WFD şeması).** Root'ta opsiyonel `attachments` katalogu
+   (adlandırılmış gruplar; her grup `items[]` = `{id, label?, description?, required?
+   (default true), formats?}`; her `formats[]` kaydı `{accept: string[], max_size_mb?}` =
+   bir MIME grubu + o gruba ÖZEL boyut sınırı → farklı formatlar farklı MB). Node'lar `nodes.<key>.attachments`
+   (grup key'leri dizisi) ile katalogu ADIYLA referanslar. `id` = "verilen dosya ismi";
+   grup içinde tekildir. Custom validator: item.id grup-içi tekil (`attachment_item_dup`),
+   node referansı katalogda var olmalı (`attachment_ref`), node içinde grup tekrarı yok
+   (`attachment_ref_dup`). Alan opsiyonel — golden fixture değişmeden geçerli.
+2. **Engine saf kalır; gate portal edge'inde.** wfe-core yalnız katalog + referansı
+   METADATA olarak taşır, dosya I/O YAPMAZ. Varlık kontrolü ve yükleme server'ın portal
+   katmanındadır: `AttachmentStore` (opendal; local fs default kök `../work-pool-portal/
+   storage`, `ATTACHMENT_STORAGE_*` env, S3'e geçince aynı arayüz). Storage anahtarı
+   `attachments/{wfe_id}/{grup}/{item}` — aynı grubu referanslayan farklı node'lar dosyayı
+   tekrar istemez.
+
+**Akış.** "Hangi aksiyonlar alınabilir?" (`GET /wfe/:id/attachments`, direkt X-Actor
+ağacı) → aktörün gördüğü node(lar)ın referanslı gruplarının item bazlı yükleme durumu +
+`satisfied`. UI, `satisfied=false` iken submit'i disable eder. Zorlama server-side:
+`apply_action` (ve JWT `submit_action`) hedef node'un `required` dosyaları eksikse
+engine'e HİÇ gitmeden `422 code: "attachment.missing"` döner (UI-only gating'e güvenilmez).
+Yükleme/indirme/silme: `PUT/GET/DELETE /wfe/:id/attachments/:group/:item` (ham gövde;
+upload'ta içerik tipi bir `formats` kuralına uymalı ve uyan kuralın `max_size_mb`'si
+uygulanır — uymazsa 415, aşarsa 413). Aynı endpoint'ler JWT `/portal/wfe/*`
+ağacında da vardır. Örnek fixture: `example-wfd_belge-onay_v2_2.json`.
+(`wfe-core/src/types/wfd_v22.rs` AttachmentGroup/Item, `validator.rs::check_attachments`,
+`server/src/attachments.rs`, `server/src/routes/attachments.rs`,
+`server/src/routes/portal/attachments.rs`, `server/src/routes/wfe.rs::apply_action`.)

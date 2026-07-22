@@ -299,7 +299,7 @@ pub async fn user_view(pool: &sqlx::PgPool, row: UserRow) -> Result<UserView, Ap
 
 #[derive(Deserialize)]
 struct LoginBody {
-    orgtnt_id: Uuid,
+    orgtnt_id: Option<Uuid>,
     email: String,
     password: String,
 }
@@ -316,16 +316,35 @@ async fn login(
 ) -> Result<Json<LoginResponse>, AppError> {
     let bad = || AppError("E-posta veya şifre hatalı".into(), StatusCode::UNAUTHORIZED);
 
-    let user = sqlx::query_as::<_, UserRow>(&format!(
-        "SELECT {USER_COLS} FROM wf.app_user \
-         WHERE orgtnt_id = $1 AND lower(email) = lower($2) AND is_active = true",
-    ))
-    .bind(body.orgtnt_id)
-    .bind(&body.email)
-    .fetch_optional(&s.pool)
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
-    .ok_or_else(bad)?;
+    let user = if let Some(orgtnt_id) = body.orgtnt_id {
+        sqlx::query_as::<_, UserRow>(&format!(
+            "SELECT {USER_COLS} FROM wf.app_user \
+             WHERE orgtnt_id = $1 AND lower(email) = lower($2) AND is_active = true",
+        ))
+        .bind(orgtnt_id)
+        .bind(&body.email)
+        .fetch_optional(&s.pool)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
+        .ok_or_else(bad)?
+    } else {
+        let matches = sqlx::query_as::<_, UserRow>(&format!(
+            "SELECT {USER_COLS} FROM wf.app_user \
+             WHERE lower(email) = lower($1) AND is_active = true \
+             ORDER BY created_at DESC LIMIT 2",
+        ))
+        .bind(&body.email)
+        .fetch_all(&s.pool)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+        if matches.len() > 1 {
+            return Err(AppError(
+                "Bu e-posta birden fazla tenant'ta kayıtlı".into(),
+                StatusCode::CONFLICT,
+            ));
+        }
+        matches.into_iter().next().ok_or_else(bad)?
+    };
 
     let hash: String =
         sqlx::query_scalar("SELECT password_hash FROM wf.app_user WHERE user_id = $1")

@@ -130,6 +130,28 @@ fn parse_type_filter(inner: &str) -> TypeFilter {
     }
 }
 
+/// Bir atom ident'ini FilterExpr'e çevirir. Değer virgül içeriyorsa
+/// (`role:doviz,kredi`) aynı anahtarla OR'a açılır; tek değer Leaf kalır.
+fn atom_to_expr(s: &str) -> FilterExpr {
+    let tf = parse_type_filter(s);
+    if tf.val.contains(',') {
+        let leaves: Vec<FilterExpr> = tf
+            .val
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(|p| FilterExpr::Leaf(TypeFilter::new(tf.key.clone(), p)))
+            .collect();
+        match leaves.len() {
+            0 => FilterExpr::Leaf(TypeFilter::new(tf.key, "")),
+            1 => leaves.into_iter().next().unwrap(),
+            _ => FilterExpr::Or(leaves),
+        }
+    } else {
+        FilterExpr::Leaf(tf)
+    }
+}
+
 #[derive(Debug)]
 enum FTok {
     Ident(String),
@@ -176,10 +198,10 @@ fn tokenize_filter(s: &str) -> Result<Vec<FTok>, ParseError> {
                     return Err(ParseError::InvalidFilter("expected '||'".to_string()));
                 }
             }
-            c if c.is_alphanumeric() || c == '_' || c == '-' => {
+            c if c.is_alphanumeric() || c == '_' || c == '-' || c == ',' => {
                 let mut ident = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_alphanumeric() || c == '_' || c == '-' || c == ':' {
+                    if c.is_alphanumeric() || c == '_' || c == '-' || c == ':' || c == ',' {
                         ident.push(c);
                         chars.next();
                     } else {
@@ -281,7 +303,7 @@ impl FParser {
                     _ => unreachable!(),
                 };
                 self.advance();
-                Ok(FilterExpr::Leaf(parse_type_filter(&s)))
+                Ok(atom_to_expr(&s))
             }
             None => Err(ParseError::InvalidFilter(
                 "expected filter term".to_string(),
@@ -300,6 +322,12 @@ fn parse_filter_expr(inner: &str) -> Result<FilterExpr, ParseError> {
         return Err(ParseError::InvalidFilter("empty filter".to_string()));
     }
     FParser::new(tokens).parse()
+}
+
+/// `[...]` içindeki filtre ifadesini (köşeli parantezsiz iç metin) FilterExpr'e çevirir.
+/// `*:` global selektör çözümünde executor filtre motoruyla paylaşılır.
+pub fn parse_filter(inner: &str) -> Result<FilterExpr, ParseError> {
+    parse_filter_expr(inner)
 }
 
 fn parse_step(token: &str) -> Result<Step, ParseError> {
@@ -473,8 +501,39 @@ mod tests {
     #[test]
     fn test_key_val_children() {
         assert_eq!(
-            steps("self.children[special:doviz]"),
-            vec![Step::ChildrenT(kleaf("special", "doviz"))]
+            steps("self.children[role:doviz]"),
+            vec![Step::ChildrenT(kleaf("role", "doviz"))]
+        );
+    }
+
+    #[test]
+    fn test_role_comma_expands_to_or() {
+        assert_eq!(
+            steps("self.children[role:doviz,kredi]"),
+            vec![Step::ChildrenT(FilterExpr::Or(vec![
+                kleaf("role", "doviz"),
+                kleaf("role", "kredi"),
+            ]))]
+        );
+    }
+
+    #[test]
+    fn test_role_comma_single_value_stays_leaf() {
+        assert_eq!(
+            steps("self.children[role:doviz]"),
+            vec![Step::ChildrenT(kleaf("role", "doviz"))]
+        );
+    }
+
+    #[test]
+    fn test_role_comma_combines_with_and() {
+        // (doviz OR kredi) AND type=sube
+        assert_eq!(
+            steps("self.children[role:doviz,kredi && type:sube]"),
+            vec![Step::ChildrenT(FilterExpr::And(vec![
+                FilterExpr::Or(vec![kleaf("role", "doviz"), kleaf("role", "kredi")]),
+                leaf("sube"),
+            ]))]
         );
     }
 
@@ -497,9 +556,9 @@ mod tests {
     #[test]
     fn test_and_filter() {
         assert_eq!(
-            steps("self.children[special:kredi && type:sube]"),
+            steps("self.children[role:kredi && type:sube]"),
             vec![Step::ChildrenT(FilterExpr::And(vec![
-                kleaf("special", "kredi"),
+                kleaf("role", "kredi"),
                 leaf("sube")
             ]))]
         );

@@ -701,6 +701,28 @@ impl<'a> Engine<'a> {
         authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now()).await
     }
 
+    /// Query-time: bir node'un c_a'sını çözülmüş aday listesine (orgu × rol / orgu ×
+    /// user) çevirir — GET /wfe/:id kol görünümünün "bu kolu kim claim edebilir"
+    /// bilgisi (tek-kol `current_c_a`'nın kol karşılığı). YALNIZ `node.c_a`; listable
+    /// union DAHİL DEĞİL — bu claim adaylığıdır, view değil. `viewer` yalnızca anchor'sız
+    /// formlarda (Selector `self`) default anchor'dır; anchor-tabanlı c_orgu formlarında
+    /// (wfah/ctx) sonucu ETKİLEMEZ. Persist edilmez — her sorguda taze çözülür.
+    pub async fn resolve_node_c_a(
+        &self,
+        wfd: &Wfd,
+        node_key: &str,
+        ctx: &Value,
+        wfah: &Wfah,
+        viewer: &Actor,
+        orgtnt_id: Uuid,
+    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
+        let node = wfd.nodes.get(node_key).ok_or_else(|| {
+            EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'"))
+        })?;
+        self.resolve_candidates(&node.c_a, ctx, wfah, viewer, orgtnt_id)
+            .await
+    }
+
     // -------------------------------------------------------------- reassign
 
     /// Madde 7: yetkili claim devri — SAF. İki `authorize` koşar ve persist

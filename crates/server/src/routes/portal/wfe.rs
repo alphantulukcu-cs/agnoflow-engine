@@ -15,7 +15,8 @@ use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::WftTarget;
-use wfe_core::v22::ports::{BranchState, WfdStore};
+use wf_wfe::executor::BranchView;
+use wfe_core::v22::ports::WfdStore;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -59,10 +60,10 @@ struct WfeDetailResponse {
     dynctx: Value,
     claimed_by: Option<Uuid>,
     available_actions: Vec<AvailableAction>,
-    /// WOR-31 T4: paralel mod kol durumları — `/wfe/:id` (WfeView) ile aynı
-    /// şekil: `[{node, status, claimed_by, claimed_at, entered_at}]`; paralel
-    /// değilken boş dizi.
-    branches: Vec<BranchState>,
+    /// WOR-31 T4: paralel mod kol durumları — `/wfe/:id` (WfeView) ile aynı şekil:
+    /// `[{node, status, claimed_by, claimed_at, entered_at, c_a}]`; `c_a` sorgu-anında
+    /// çözülmüş kol claim adayları (bkz. `BranchView`); paralel değilken boş dizi.
+    branches: Vec<BranchView>,
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     join_target: Option<WftTarget>,

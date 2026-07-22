@@ -183,8 +183,8 @@ pub struct WfeView {
     /// 1–10, deadline'dan otomatik hesaplanır (bkz. `priority::compute_priority`).
     pub priority: i32,
     /// WOR-31 T4: paralel mod kol durumları — paralel modda değilken boş.
-    /// JSON alan adı `node` (bkz. `BranchState`).
-    pub branches: Vec<BranchState>,
+    /// JSON alan adı `node` (bkz. `BranchState`), artı sorgu-anında çözülmüş `c_a`.
+    pub branches: Vec<BranchView>,
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     pub join_target: Option<WftTarget>,
@@ -193,6 +193,17 @@ pub struct WfeView {
     /// durum değişmişse 409 `conflict.stale_revision` alır. WFE-seviyesidir —
     /// paralel modda TÜM kollar için aynı değerdir.
     pub rev: u32,
+}
+
+/// GET /wfe/:id kol görünümü: kalıcı `BranchState` alanları (`#[serde(flatten)]` ile
+/// `node`/`status`/`claimed_by`/`claimed_at`/`entered_at`) + sorgu-anında çözülmüş
+/// `c_a` (bu kolu kim claim edebilir — tek-kol `current_c_a`'nın kol karşılığı).
+/// `c_a` PERSIST EDİLMEZ; yalnız aktif kollar için doldurulur (arrived/cancelled boş).
+#[derive(Debug, serde::Serialize)]
+pub struct BranchView {
+    #[serde(flatten)]
+    pub state: BranchState,
+    pub c_a: Vec<CandidateActor>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -515,6 +526,24 @@ impl WfeExecutor {
         // `wfes` aşağıda parça parça taşınıyor — revizyon ÖNCE okunmalı (WOR-65).
         let rev = wfes.rev();
 
+        // Kol görünümü: her AKTİF kol için c_a'yı sorgu-anında çöz (tek-kol
+        // `current_c_a`'nın kol karşılığı; parent/*:[type:]/anchor formları burada
+        // motorun org resolver'ıyla doğru çözülür — portal bunu düz okur). Anchor'sız
+        // Selector `self` için default anchor = viewer; anchor-tabanlı formlarda viewer
+        // önemsiz. arrived/cancelled kollarda c_a boş (claim edilemezler).
+        let engine = self.engine();
+        let mut branch_views = Vec::with_capacity(wfes.branches.len());
+        for b in wfes.branches {
+            let c_a = if b.status == BranchStatus::Active {
+                engine
+                    .resolve_node_c_a(&wfd, &b.branch_node, ctx, &wfes.wfah, viewer, wfes.orgtnt_id)
+                    .await?
+            } else {
+                Vec::new()
+            };
+            branch_views.push(BranchView { state: b, c_a });
+        }
+
         Ok(WfeView {
             wfe_id,
             status: wfes.status,
@@ -528,7 +557,7 @@ impl WfeExecutor {
             claim_deadline,
             priority,
             rev,
-            branches: wfes.branches,
+            branches: branch_views,
             join_target: wfes.join_target,
         })
     }

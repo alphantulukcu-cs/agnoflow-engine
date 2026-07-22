@@ -153,7 +153,10 @@ async fn resolve_global_type(
     type_expr: &str,
     orgtnt_id: Uuid,
 ) -> Result<Vec<OrgUnit>, OrgError> {
-    let inner = type_expr.trim().trim_start_matches('[').trim_end_matches(']');
+    let inner = type_expr
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
     let filter = parser::parse_filter(inner).map_err(|e| OrgError::BadRequest(e.to_string()))?;
     let orgus = executor::fetch_global_type(pool, orgtnt_id, &filter).await?;
     Ok(orgus.into_iter().map(OrgUnit::from).collect())

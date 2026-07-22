@@ -77,28 +77,50 @@ BEGIN
 END $$;
 
 -- ================================================================
--- Döviz birimleri (orgu_type.special ∋ "doviz") — her birine kullanıcı
--- + "rol" + "doviz" rolleri. Böylece `*:[special:doviz]` / `[special:doviz]`
--- filtreli akışlar için de aktör bulunur.
+-- Birim-rolleri (org.orgu_r): eski 'special' regex'i artık org.orgu_r grant'ı
+-- üretir. Döviz birimlerine ayrıca kullanıcı + "rol" + "doviz" rolleri seed'lenir;
+-- böylece `*:[role:doviz]` / `[role:doviz]` filtreli akışlar için aktör bulunur.
+-- (Tüm orgu'lar seed edildikten SONRA çalışır → 5/5.)
 -- ================================================================
 DO $$
 DECLARE
     c uuid := '3c1811a6-1e63-4261-a1ce-658da1fbfa6b';
-    r_rol uuid; r_doviz uuid;
+    r_rol uuid; r_doviz uuid; r_kredi uuid;
     rec record;
     uid uuid;
 BEGIN
-    INSERT INTO org.r (orgtnt_id, name, display_name) VALUES (c, 'doviz', 'Döviz')
+    INSERT INTO org.r (orgtnt_id, name, display_name) VALUES
+        (c, 'doviz', 'Döviz'), (c, 'kredi', 'Kredi')
     ON CONFLICT (orgtnt_id, name) DO NOTHING;
     SELECT r_id INTO r_rol   FROM org.r WHERE orgtnt_id = c AND name = 'rol';
     SELECT r_id INTO r_doviz FROM org.r WHERE orgtnt_id = c AND name = 'doviz';
+    SELECT r_id INTO r_kredi FROM org.r WHERE orgtnt_id = c AND name = 'kredi';
+
+    -- Birim-rol grant'ları (eski seed_orgu_type regex'i → org.orgu_r).
+    INSERT INTO org.orgu_r (orgtnt_id, orgu_id, r_id, ur_type)
+    SELECT c, o.orgu_id, r_kredi, 'granted'
+    FROM org.orgu o
+    JOIN org.orgt_orgu oo ON o.orgu_id = oo.orgu_id
+    WHERE oo.orgtnt_id = c AND o.is_active = true AND oo.is_active = true
+      AND ( (o.metadata->>'code') ~* 'kredi'
+            OR o.name ~* 'kredi|finansman|fon yonetimi|fon yönetimi' )
+    ON CONFLICT (orgu_id, r_id) DO NOTHING;
+
+    INSERT INTO org.orgu_r (orgtnt_id, orgu_id, r_id, ur_type)
+    SELECT c, o.orgu_id, r_doviz, 'granted'
+    FROM org.orgu o
+    JOIN org.orgt_orgu oo ON o.orgu_id = oo.orgu_id
+    WHERE oo.orgtnt_id = c AND o.is_active = true AND oo.is_active = true
+      AND ( (o.metadata->>'code') ~* 'havalimani|pasaport|serbest-bolge|international|laleli|karakoy|sultanhamam|nisantasi|bodrum|marmaris|fethiye|kusadasi|cesme|yalikavak|ortakoy'
+            OR o.name ~* 'havaliman|pasaport|serbest bolge|serbest bölge|international|laleli|karakoy|karaköy|sultanhamam|nisantasi|nişantaşı|bodrum|marmaris|fethiye|kuşadası|çeşme|yalıkavak|ortaköy' )
+    ON CONFLICT (orgu_id, r_id) DO NOTHING;
 
     FOR rec IN
         SELECT o.orgu_id, o.name
         FROM org.orgu o
         JOIN org.orgt_orgu oo ON o.orgu_id = oo.orgu_id
+        JOIN org.orgu_r orr   ON orr.orgu_id = o.orgu_id AND orr.r_id = r_doviz
         WHERE oo.orgtnt_id = c AND o.is_active = true AND oo.is_active = true
-          AND o.orgu_type -> 'special' @> '["doviz"]'::jsonb
     LOOP
         INSERT INTO org.u (orgtnt_id, username, full_name)
         VALUES (c, 'sim_' || substr(rec.orgu_id::text, 1, 8), rec.name)

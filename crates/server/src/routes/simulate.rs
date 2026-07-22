@@ -91,9 +91,10 @@ async fn sim_start(
     let sim_state = SimState::from_new_wfe(&new);
 
     let wfes = sim_state.to_wfes(Some(body.actor.user_id));
-    let possible_actions = wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
-        .await
-        .map_err(AppError::from)?;
+    let possible_actions =
+        wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
+            .await
+            .map_err(AppError::from)?;
 
     Ok(Json(SimStartResponse {
         sim_state,

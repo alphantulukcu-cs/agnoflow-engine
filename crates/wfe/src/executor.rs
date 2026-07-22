@@ -7,9 +7,9 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
+use wfe_core::types::wfah::WfahEntry;
 use wfe_core::types::wfd_v22::{Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
-use wfe_core::types::wfah::WfahEntry;
 use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
@@ -55,12 +55,13 @@ fn check_rev(wfes: &Wfes, expected_rev: Option<u32>) -> Result<(), EngineError> 
 /// (`node` verilir) o kolun `claimed_by`'ı, aksi halde wfe-seviyesi `assigned_to`.
 fn branch_owner_is(wfes: &Wfes, node: Option<&str>, user_id: Uuid) -> bool {
     match node {
-        Some(n) => wfes
-            .branches
-            .iter()
-            .find(|b| b.status == BranchStatus::Active && b.branch_node == n)
-            .and_then(|b| b.claimed_by)
-            == Some(user_id),
+        Some(n) => {
+            wfes.branches
+                .iter()
+                .find(|b| b.status == BranchStatus::Active && b.branch_node == n)
+                .and_then(|b| b.claimed_by)
+                == Some(user_id)
+        }
         None => wfes.assigned_to == Some(user_id),
     }
 }
@@ -98,7 +99,9 @@ pub async fn possible_actions_for(
     if wfes.join_target.is_some() {
         let mut out = Vec::new();
         for node in active_branch_nodes(wfes) {
-            let actions = engine.possible_actions(wfd, wfes, actor, Some(&node)).await?;
+            let actions = engine
+                .possible_actions(wfd, wfes, actor, Some(&node))
+                .await?;
             out.extend(actions.into_iter().map(|action| PossibleAction {
                 action,
                 node: Some(node.clone()),
@@ -360,13 +363,15 @@ impl WfeExecutor {
             return Ok((true, None));
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        Ok(match self.engine().can_claim(&wfd, &wfes, actor, node).await? {
-            ClaimCheck::Ok => (true, None),
-            ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
-            ClaimCheck::Terminal => (false, Some("terminal".into())),
-            ClaimCheck::Expired => (false, Some("expired".into())),
-            ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
-        })
+        Ok(
+            match self.engine().can_claim(&wfd, &wfes, actor, node).await? {
+                ClaimCheck::Ok => (true, None),
+                ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
+                ClaimCheck::Terminal => (false, Some("terminal".into())),
+                ClaimCheck::Expired => (false, Some("expired".into())),
+                ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
+            },
+        )
     }
 
     /// Atomik claim: uygunluk matcher ile doğrulanır, yazım CAS ile yapılır.
@@ -393,16 +398,26 @@ impl WfeExecutor {
         }
         let (eligible, reason) = self.can_claim(wfe_id, actor, node).await?;
         if !eligible {
-            return Ok(ClaimOutcome { success: false, reason });
+            return Ok(ClaimOutcome {
+                success: false,
+                reason,
+            });
         }
         let wfes = self.wfe.load(wfe_id).await?;
         if branch_owner_is(&wfes, node, actor.user_id) {
-            return Ok(ClaimOutcome { success: true, reason: None });
+            return Ok(ClaimOutcome {
+                success: true,
+                reason: None,
+            });
         }
         // Madde 6: claim DOĞRUDAN mı VEKALETEN mi uygun? Vekaletense CAS kazanılınca
         // aynı transaction'da `claim:delegated` audit marker'ı yazılır.
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        let marker = match self.engine().claim_decision(&wfd, &wfes, actor, node).await? {
+        let marker = match self
+            .engine()
+            .claim_decision(&wfd, &wfes, actor, node)
+            .await?
+        {
             AuthDecision::Delegated {
                 delegation_id,
                 delegator_user_id,
@@ -433,7 +448,11 @@ impl WfeExecutor {
         }
         Ok(ClaimOutcome {
             success: won,
-            reason: if won { None } else { Some("already_claimed".into()) },
+            reason: if won {
+                None
+            } else {
+                Some("already_claimed".into())
+            },
         })
     }
 
@@ -464,7 +483,10 @@ impl WfeExecutor {
             )
             .await?;
         self.nudge_timers(); // hedefli devirde claim_timeout sayacı (SLA-1) yeniden başladı
-        Ok(ReassignOutcome { success: true, reason: None })
+        Ok(ReassignOutcome {
+            success: true,
+            reason: None,
+        })
     }
 
     /// WFE görünümü — önce WFE-seviyesi VIEW kapısı (owner / node c_a / listable,
@@ -559,7 +581,9 @@ impl WfeExecutor {
                 match engine.fire_claim_timeout(&wfd, &wfes, now, b).await? {
                     ClaimTimeoutOutcome::Move(commit) => self.wfe.commit(&commit).await?,
                     ClaimTimeoutOutcome::Release(entry) => {
-                        self.wfe.release_claim(wfe_id, wfes.orgtnt_id, &entry, b).await?
+                        self.wfe
+                            .release_claim(wfe_id, wfes.orgtnt_id, &entry, b)
+                            .await?
                     }
                 }
                 return Ok(true);
@@ -605,7 +629,11 @@ impl WfeExecutor {
                 if b.status != BranchStatus::Active {
                     continue;
                 }
-                fold(compute_claim_deadline(&wfd, Some(&b.branch_node), b.claimed_at));
+                fold(compute_claim_deadline(
+                    &wfd,
+                    Some(&b.branch_node),
+                    b.claimed_at,
+                ));
                 fold(
                     self.engine()
                         .next_escalation(&wfd, &wfes, now, Some(&b.branch_node))?

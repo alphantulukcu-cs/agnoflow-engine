@@ -33,7 +33,11 @@ fn golden_fixture_is_valid() {
         "golden fixture temiz geçmeli, hatalar: {:#?}",
         report.errors
     );
-    assert!(report.warnings.is_empty(), "uyarılar: {:#?}", report.warnings);
+    assert!(
+        report.warnings.is_empty(),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
 }
 
 // ---- §1 cross-reference ----
@@ -107,7 +111,11 @@ fn terminal_ids_differing_only_by_case_is_error() {
     v["terminals"][1]["id"] = json!("Terminal_Approved");
     v["transitions"][1]["wft"]["default"]["terminal"] = json!("Terminal_Approved");
     let report = validate_value(v);
-    assert!(has_error(&report, "unique"), "hatalar: {:#?}", report.errors);
+    assert!(
+        has_error(&report, "unique"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 // ---- §2b slug / canonical uniqueness ----
@@ -116,7 +124,10 @@ fn terminal_ids_differing_only_by_case_is_error() {
 fn node_key_not_matching_slug_is_error() {
     let mut v = fixture_value();
     let node = v["nodes"]["parent__creditDeptManager"].clone();
-    v["nodes"].as_object_mut().unwrap().remove("parent__creditDeptManager");
+    v["nodes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("parent__creditDeptManager");
     v["nodes"]["parent__wrongKey"] = node;
     // referansları düzelt ki sadece slug hatası kalsın
     v["nodes"]["self__branchManager"]["escalation"][0]["wft"] = json!({"node": "parent__wrongKey"});
@@ -129,13 +140,20 @@ fn node_key_not_matching_slug_is_error() {
 fn collision_hash_suffix_is_accepted() {
     let mut v = fixture_value();
     let node = v["nodes"]["parent__creditDeptManager"].clone();
-    v["nodes"].as_object_mut().unwrap().remove("parent__creditDeptManager");
+    v["nodes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("parent__creditDeptManager");
     v["nodes"]["parent__creditDeptManager_a3f9"] = node;
     v["nodes"]["self__branchManager"]["escalation"][0]["wft"] =
         json!({"node": "parent__creditDeptManager_a3f9"});
     v["transitions"][1]["from"] = json!(["self__branchManager", "parent__creditDeptManager_a3f9"]);
     let report = validate_value(v);
-    assert!(!has_error(&report, "slug"), "hash'li key kabul edilmeli: {:#?}", report.errors);
+    assert!(
+        !has_error(&report, "slug"),
+        "hash'li key kabul edilmeli: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -145,7 +163,10 @@ fn duplicate_canonical_c_a_is_error() {
     // (key'i de yeni slug'ın collision-hash'li haline getir ki yalnızca duplicate hatası kalsın)
     let ca = v["nodes"]["self__branchManager"]["c_a"].clone();
     let node = json!({"label": "Kopya", "c_a": ca});
-    v["nodes"].as_object_mut().unwrap().remove("parent__creditDeptManager");
+    v["nodes"]
+        .as_object_mut()
+        .unwrap()
+        .remove("parent__creditDeptManager");
     v["nodes"]["self__branchManager_0000"] = node;
     v["nodes"]["self__branchManager"]["escalation"][0]["wft"] =
         json!({"node": "self__branchManager_0000"});
@@ -163,7 +184,11 @@ fn unreachable_node_is_error() {
         "c_a": {"c_orgu": "self", "c_r": ["auditor"]}
     });
     let report = validate_value(v);
-    assert!(has_error(&report, "unreachable"), "hatalar: {:#?}", report.errors);
+    assert!(
+        has_error(&report, "unreachable"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -180,7 +205,11 @@ fn node_without_exit_is_error() {
     // parent__creditDeptManager'ı t_manager_decide.from'dan çıkar → çıkışsız kalır
     v["transitions"][1]["from"] = json!("self__branchManager");
     let report = validate_value(v);
-    assert!(has_error(&report, "no_exit"), "hatalar: {:#?}", report.errors);
+    assert!(
+        has_error(&report, "no_exit"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -201,9 +230,16 @@ fn duplicate_from_action_with_when_is_warning() {
     t2["when"] = json!("$ctx.credit_info.amount_requested > 1000");
     v["transitions"].as_array_mut().unwrap().push(t2);
     let report = validate_value(v);
-    assert!(!has_error(&report, "ambiguous_transition"), "hatalar: {:#?}", report.errors);
     assert!(
-        report.warnings.iter().any(|w| w.code == "ambiguous_transition"),
+        !has_error(&report, "ambiguous_transition"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == "ambiguous_transition"),
         "when'li çakışma uyarı olmalı"
     );
 }
@@ -354,7 +390,10 @@ fn golden_start_is_symmetric_from_action() {
         v["actions"].get("create_application").is_some(),
         "start aksiyonu actions{{}} içinde tanımlı olmalı"
     );
-    assert!(v["start"][0].get("c_a").is_none(), "start artık c_a taşımamalı");
+    assert!(
+        v["start"][0].get("c_a").is_none(),
+        "start artık c_a taşımamalı"
+    );
     assert!(validate_value(v).errors.is_empty());
 }
 
@@ -396,7 +435,11 @@ fn escalation_terminate_true_without_wft_is_valid() {
         .remove("wft");
     v["nodes"]["self__creditAnalyst"]["escalation"][0]["terminate"] = json!(true);
     let report = validate_value(v);
-    assert!(!has_error(&report, "escalation_xor"), "hatalar: {:#?}", report.errors);
+    assert!(
+        !has_error(&report, "escalation_xor"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -441,7 +484,11 @@ fn parallel_fixture_is_valid() {
         "paralel-onay fixture temiz geçmeli, hatalar: {:#?}",
         report.errors
     );
-    assert!(report.warnings.is_empty(), "uyarılar: {:#?}", report.warnings);
+    assert!(
+        report.warnings.is_empty(),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
 }
 
 #[test]
@@ -485,11 +532,8 @@ fn parallel_join_equal_to_branch_is_error() {
 fn parallel_unknown_branch_node_is_error() {
     // branch/join hedeflerinin var olması generic cross_ref (wft_targets) ile denetlenir.
     let mut v = parallel_fixture_value();
-    v["transitions"][0]["wft"]["parallel"]["branches"] = json!([
-        "self__ghost",
-        "self__legalApprover",
-        "self__hrApprover"
-    ]);
+    v["transitions"][0]["wft"]["parallel"]["branches"] =
+        json!(["self__ghost", "self__legalApprover", "self__hrApprover"]);
     assert!(has_error(&validate_value(v), "cross_ref"));
 }
 
@@ -530,9 +574,13 @@ fn parallel_branch_dead_end_is_error() {
     // ulaşamıyor (yalnız reject kalıyor, o da başka bir hatayla karışmasın diye node'u
     // kendine döndürüyoruz: gerçek dead-end üretmek için approve transition'ı kaldırıyoruz).
     v["transitions"].as_array_mut().unwrap().remove(1); // t_finance_approve
-    // reject de kaldırılırsa no_exit hatasına düşer; onu sadece terminal'e değil
-    // kendi node'una yönlendirerek dead-end'i saf tutuyoruz.
+                                                        // reject de kaldırılırsa no_exit hatasına düşer; onu sadece terminal'e değil
+                                                        // kendi node'una yönlendirerek dead-end'i saf tutuyoruz.
     v["transitions"][1]["wft"] = json!({"node": "self__financeApprover"});
     let report = validate_value(v);
-    assert!(has_error(&report, "parallel_dead_end"), "hatalar: {:#?}", report.errors);
+    assert!(
+        has_error(&report, "parallel_dead_end"),
+        "hatalar: {:#?}",
+        report.errors
+    );
 }

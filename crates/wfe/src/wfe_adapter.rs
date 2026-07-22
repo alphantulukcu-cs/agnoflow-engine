@@ -5,13 +5,13 @@ use async_trait::async_trait;
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
+use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::types::{
     actor::Actor,
     dynctx::DynCtx,
     wfah::{Wfah, WfahEntry},
     wfe::WfeStatus,
 };
-use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::v22::ports::{
     BranchState, BranchStatus, CommitOutcome, NewWfe, TransitionCommit, WfeStore, Wfes,
 };
@@ -213,10 +213,7 @@ impl WfeStore for WfeAdapter {
             .map(|r| {
                 let actor: Actor = serde_json::from_value(r.actor).unwrap_or_else(|e| {
                     // WOR-19: bozuk kayıt sessiz kalmasın — audit izi log'a düşer
-                    tracing::warn!(
-                        "wfe {wfe_id} wfah seq {} actor parse edilemedi: {e}",
-                        r.seq
-                    );
+                    tracing::warn!("wfe {wfe_id} wfah seq {} actor parse edilemedi: {e}", r.seq);
                     Actor {
                         orgu_id: Uuid::nil(),
                         user_id: Uuid::nil(),
@@ -291,9 +288,7 @@ impl WfeStore for WfeAdapter {
             CommitOutcome::MoveTo { node } => ("active", Some(node.as_str()), None),
             CommitOutcome::Terminal { end_response } => ("terminal", None, Some(end_response)),
             CommitOutcome::Failed { end_response } => ("error", None, Some(end_response)),
-            CommitOutcome::Terminated { end_response } => {
-                ("terminated", None, Some(end_response))
-            }
+            CommitOutcome::Terminated { end_response } => ("terminated", None, Some(end_response)),
             // WOR-31: start wft'i Parallel olamaz (engine + validator reddeder) —
             // buraya ulaşması programlama hatasıdır.
             CommitOutcome::ForkTo { .. }
@@ -515,11 +510,7 @@ impl WfeStore for WfeAdapter {
                 }
                 // `_join` sistem marker'ı (dokümante istisna: adapter ekler) —
                 // seq = son staged wfah seq + 1.
-                let join_seq = commit
-                    .wfah_entries
-                    .last()
-                    .map(|e| e.seq + 1)
-                    .unwrap_or(1);
+                let join_seq = commit.wfah_entries.last().map(|e| e.seq + 1).unwrap_or(1);
                 let join_entry = WfahEntry {
                     seq: join_seq,
                     action: "_join".into(),
@@ -743,8 +734,7 @@ impl WfeStore for WfeAdapter {
         wfah_entry: &WfahEntry,
         branch: Option<&str>,
     ) -> Result<(), EngineError> {
-        let claimed_by =
-            target.map(|user_id| json!({ "user_id": user_id.to_string() }));
+        let claimed_by = target.map(|user_id| json!({ "user_id": user_id.to_string() }));
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         match branch {
             // WOR-31: paralel modda yalnız o kolun sahipliği değişir (node DEĞİŞMEZ).

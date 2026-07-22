@@ -37,7 +37,9 @@ async fn list_members(
     auth: AppAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<MemberRow>>, AppError> {
-    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    let project = wf_wfd::project::get(&s.pool, id)
+        .await
+        .map_err(map_wfd_err)?;
     if project.orgtnt_id != auth.orgtnt_id {
         return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
     }
@@ -53,7 +55,12 @@ async fn list_members(
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
         rows.into_iter()
-            .map(|(user_id, display_name, email, role)| MemberRow { user_id, display_name, email, role })
+            .map(|(user_id, display_name, email, role)| MemberRow {
+                user_id,
+                display_name,
+                email,
+                role,
+            })
             .collect(),
     ))
 }
@@ -68,14 +75,17 @@ async fn list_projects(
     if auth.role == "admin" {
         return Ok(Json(all));
     }
-    let member_of: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT project_id FROM wf.project_member WHERE user_id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_all(&s.pool)
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
-    Ok(Json(all.into_iter().filter(|p| member_of.contains(&p.project_id)).collect()))
+    let member_of: Vec<Uuid> =
+        sqlx::query_scalar("SELECT project_id FROM wf.project_member WHERE user_id = $1")
+            .bind(auth.user_id)
+            .fetch_all(&s.pool)
+            .await
+            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    Ok(Json(
+        all.into_iter()
+            .filter(|p| member_of.contains(&p.project_id))
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -101,7 +111,10 @@ async fn create_project(
     }
     let name = b.name.trim();
     if name.is_empty() {
-        return Err(AppError("Proje adı boş olamaz".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "Proje adı boş olamaz".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     wf_wfd::project::create(&s.pool, auth.orgtnt_id, name, b.description.as_deref())
         .await
@@ -114,7 +127,9 @@ async fn get_project(
     auth: AppAuth,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Project>, AppError> {
-    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    let project = wf_wfd::project::get(&s.pool, id)
+        .await
+        .map_err(map_wfd_err)?;
     if project.orgtnt_id != auth.orgtnt_id {
         return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
     }
@@ -136,14 +151,19 @@ async fn update_project(
     Path(id): Path<Uuid>,
     Json(b): Json<UpdateBody>,
 ) -> Result<Json<Project>, AppError> {
-    let project = wf_wfd::project::get(&s.pool, id).await.map_err(map_wfd_err)?;
+    let project = wf_wfd::project::get(&s.pool, id)
+        .await
+        .map_err(map_wfd_err)?;
     if project.orgtnt_id != auth.orgtnt_id {
         return Err(AppError("Proje bulunamadı".into(), StatusCode::NOT_FOUND));
     }
     require_can_manage_project(&s.pool, &auth, id).await?;
     let name = b.name.as_deref().map(str::trim).filter(|v| !v.is_empty());
     if b.name.is_some() && name.is_none() {
-        return Err(AppError("Proje adı boş olamaz".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "Proje adı boş olamaz".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     wf_wfd::project::update(&s.pool, id, name, b.description.as_deref())
         .await

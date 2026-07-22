@@ -1,17 +1,22 @@
-use sqlx::PgPool;
-use uuid::Uuid;
 use crate::{
     error::OrgError,
     models::{OrgUnit, Role, User, UserOrgu, UserRole},
     traversal::{executor, parser},
 };
+use sqlx::PgPool;
+use uuid::Uuid;
 
-pub async fn list_users(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64) -> Result<Vec<User>, OrgError> {
+pub async fn list_users(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<User>, OrgError> {
     sqlx::query_as::<_, User>(
         "SELECT u_id, orgtnt_id, username, full_name, email, is_active, created_at
          FROM org.u
          WHERE orgtnt_id = $1 AND is_active = true
-         ORDER BY full_name, username LIMIT $2 OFFSET $3"
+         ORDER BY full_name, username LIMIT $2 OFFSET $3",
     )
     .bind(orgtnt_id)
     .bind(limit)
@@ -21,12 +26,17 @@ pub async fn list_users(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64)
     .map_err(OrgError::Database)
 }
 
-pub async fn list_roles(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64) -> Result<Vec<Role>, OrgError> {
+pub async fn list_roles(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<Role>, OrgError> {
     sqlx::query_as::<_, Role>(
         "SELECT r_id, orgtnt_id, name, display_name, is_active, created_at
          FROM org.r
          WHERE orgtnt_id = $1 AND is_active = true
-         ORDER BY display_name, name LIMIT $2 OFFSET $3"
+         ORDER BY display_name, name LIMIT $2 OFFSET $3",
     )
     .bind(orgtnt_id)
     .bind(limit)
@@ -36,12 +46,17 @@ pub async fn list_roles(pool: &PgPool, orgtnt_id: Uuid, limit: i64, offset: i64)
     .map_err(OrgError::Database)
 }
 
-pub async fn list_user_orgus(pool: &PgPool, user_id: Uuid, limit: i64, offset: i64) -> Result<Vec<UserOrgu>, OrgError> {
+pub async fn list_user_orgus(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<UserOrgu>, OrgError> {
     sqlx::query_as::<_, UserOrgu>(
         "SELECT u_orgu_id, orgtnt_id, u_id, orgu_id, is_primary, created_at
          FROM org.u_orgu
          WHERE u_id = $1
-         ORDER BY is_primary DESC, created_at LIMIT $2 OFFSET $3"
+         ORDER BY is_primary DESC, created_at LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
     .bind(limit)
@@ -51,7 +66,12 @@ pub async fn list_user_orgus(pool: &PgPool, user_id: Uuid, limit: i64, offset: i
     .map_err(OrgError::Database)
 }
 
-pub async fn list_user_roles(pool: &PgPool, user_id: Uuid, limit: i64, offset: i64) -> Result<Vec<UserRole>, OrgError> {
+pub async fn list_user_roles(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<UserRole>, OrgError> {
     sqlx::query_as::<_, UserRole>(
         "SELECT ur.ur_id, ur.orgtnt_id, ur.u_id, ur.r_id, r.name AS role_name,
                 ur.orgu_id, ur.orgu_scope, ur.ur_type, ur.valid_from, ur.valid_until, ur.created_at
@@ -61,7 +81,7 @@ pub async fn list_user_roles(pool: &PgPool, user_id: Uuid, limit: i64, offset: i
            AND ur.ur_type != 'excluded'
            AND (ur.valid_from IS NULL OR ur.valid_from <= now())
            AND (ur.valid_until IS NULL OR ur.valid_until > now())
-         ORDER BY r.name, ur.created_at LIMIT $2 OFFSET $3"
+         ORDER BY r.name, ur.created_at LIMIT $2 OFFSET $3",
     )
     .bind(user_id)
     .bind(limit)
@@ -74,9 +94,9 @@ pub async fn list_user_roles(pool: &PgPool, user_id: Uuid, limit: i64, offset: i
 /// Returns true if user holds the given role in the given orgu,
 /// respecting timeslice validity and excluding 'excluded' assignments.
 pub async fn check_user_role(
-    pool:      &PgPool,
-    user_id:   Uuid,
-    orgu_id:   Uuid,
+    pool: &PgPool,
+    user_id: Uuid,
+    orgu_id: Uuid,
     role_name: &str,
 ) -> Result<bool, OrgError> {
     let exists = sqlx::query_scalar::<_, bool>(
@@ -90,7 +110,7 @@ pub async fn check_user_role(
                AND u.ur_type != 'excluded'
                AND (u.valid_from  IS NULL OR u.valid_from  <= now())
                AND (u.valid_until IS NULL OR u.valid_until >  now())
-         )"
+         )",
     )
     .bind(user_id)
     .bind(orgu_id)
@@ -104,31 +124,28 @@ pub async fn check_user_role(
 /// For absolute expressions starting with "*:" (e.g. "*:[type:branch]"), anchor_orgu_id
 /// is used only to determine the orgtnt scope.
 pub async fn resolve_orgu(
-    pool:           &PgPool,
+    pool: &PgPool,
     anchor_orgu_id: Uuid,
-    expr:           &str,
-    orgtnt_id:      Uuid,
+    expr: &str,
+    orgtnt_id: Uuid,
 ) -> Result<Vec<OrgUnit>, OrgError> {
     if let Some(type_expr) = expr.strip_prefix("*:") {
         return resolve_global_type(pool, type_expr, orgtnt_id).await;
     }
 
     let orgt_id = super::orgu::get_orgt_id(pool, anchor_orgu_id).await?;
-    let pipeline = parser::parse(expr)
-        .map_err(|e| OrgError::BadRequest(e.to_string()))?;
+    let pipeline = parser::parse(expr).map_err(|e| OrgError::BadRequest(e.to_string()))?;
     let orgus = executor::execute(pool, anchor_orgu_id, orgt_id, orgtnt_id, &pipeline).await?;
     Ok(orgus.into_iter().map(OrgUnit::from).collect())
 }
 
 /// Handles "*:[type:branch]" — all orgus of a given type within the tenant.
 async fn resolve_global_type(
-    pool:      &PgPool,
+    pool: &PgPool,
     type_expr: &str,
     orgtnt_id: Uuid,
 ) -> Result<Vec<OrgUnit>, OrgError> {
-    let inner = type_expr
-        .trim_start_matches('[')
-        .trim_end_matches(']');
+    let inner = type_expr.trim_start_matches('[').trim_end_matches(']');
     let (key, val) = inner
         .split_once(':')
         .ok_or_else(|| OrgError::BadRequest(format!("invalid type expr: {type_expr}")))?;
@@ -142,7 +159,7 @@ async fn resolve_global_type(
            AND oo.is_active  = true
            AND (o.orgu_type ? '*'
                 OR o.orgu_type->>$2 = $3
-                OR o.orgu_type->$2 @> to_jsonb($3::text))"
+                OR o.orgu_type->$2 @> to_jsonb($3::text))",
     )
     .bind(orgtnt_id)
     .bind(key)
@@ -152,7 +169,11 @@ async fn resolve_global_type(
 
     Ok(rows
         .into_iter()
-        .map(|(orgu_id, orgu_type, path)| OrgUnit { orgu_id, orgu_type, path })
+        .map(|(orgu_id, orgu_type, path)| OrgUnit {
+            orgu_id,
+            orgu_type,
+            path,
+        })
         .collect())
 }
 
@@ -203,6 +224,61 @@ pub async fn ensure_role(pool: &PgPool, orgtnt_id: Uuid, name: &str) -> Result<R
     )
     .bind(orgtnt_id)
     .bind(name)
+    .fetch_one(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
+/// Yeni rol ekler. Aynı `name` varsa mevcut aktif rol döner; display name boşsa name kullanılır.
+pub async fn create_role(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    name: &str,
+    display_name: Option<&str>,
+) -> Result<Role, OrgError> {
+    let display_name = display_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(name);
+
+    sqlx::query_as::<_, Role>(
+        "INSERT INTO org.r (orgtnt_id, name, display_name)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (orgtnt_id, name) DO UPDATE
+         SET display_name = EXCLUDED.display_name,
+             is_active = true
+         RETURNING r_id, orgtnt_id, name, display_name, is_active, created_at",
+    )
+    .bind(orgtnt_id)
+    .bind(name)
+    .bind(display_name)
+    .fetch_one(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
+/// Rolün teknik adını ve görünen adını günceller. Atamalar r_id ile bağlı olduğu
+/// için bu değişiklik rolün kullanıldığı tüm kullanıcı/birim kayıtlarına yansır.
+pub async fn update_role(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    r_id: Uuid,
+    name: &str,
+    display_name: &str,
+) -> Result<Role, OrgError> {
+    sqlx::query_as::<_, Role>(
+        "UPDATE org.r
+         SET name = $4,
+             display_name = $5,
+             is_active = true
+         WHERE orgtnt_id = $1 AND r_id = $2 AND is_active = $3
+         RETURNING r_id, orgtnt_id, name, display_name, is_active, created_at",
+    )
+    .bind(orgtnt_id)
+    .bind(r_id)
+    .bind(true)
+    .bind(name)
+    .bind(display_name)
     .fetch_one(pool)
     .await
     .map_err(OrgError::Database)

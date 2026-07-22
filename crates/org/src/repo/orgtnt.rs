@@ -1,12 +1,12 @@
-use sqlx::PgPool;
-use uuid::Uuid;
 use crate::{error::OrgError, models::Orgtnt};
 use chrono::Utc;
+use sqlx::PgPool;
+use uuid::Uuid;
 
 pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Orgtnt>, OrgError> {
     sqlx::query_as::<_, Orgtnt>(
         "SELECT orgtnt_id, name, code, is_active, created_at, updated_at
-         FROM org.orgtnt ORDER BY name LIMIT $1 OFFSET $2"
+         FROM org.orgtnt ORDER BY name LIMIT $1 OFFSET $2",
     )
     .bind(limit)
     .bind(offset)
@@ -18,7 +18,7 @@ pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> Result<Vec<Orgtnt>,
 pub async fn get(pool: &PgPool, id: Uuid) -> Result<Orgtnt, OrgError> {
     sqlx::query_as::<_, Orgtnt>(
         "SELECT orgtnt_id, name, code, is_active, created_at, updated_at
-         FROM org.orgtnt WHERE orgtnt_id = $1"
+         FROM org.orgtnt WHERE orgtnt_id = $1",
     )
     .bind(id)
     .fetch_optional(pool)
@@ -33,7 +33,7 @@ pub async fn create(pool: &PgPool, name: String, code: String) -> Result<Orgtnt,
     sqlx::query_as::<_, Orgtnt>(
         "INSERT INTO org.orgtnt (orgtnt_id, name, code, is_active, created_at, updated_at)
          VALUES ($1, $2, $3, true, $4, $5)
-         RETURNING orgtnt_id, name, code, is_active, created_at, updated_at"
+         RETURNING orgtnt_id, name, code, is_active, created_at, updated_at",
     )
     .bind(id)
     .bind(&name)
@@ -45,13 +45,18 @@ pub async fn create(pool: &PgPool, name: String, code: String) -> Result<Orgtnt,
     .map_err(OrgError::Database)
 }
 
-pub async fn update(pool: &PgPool, id: Uuid, name: String, code: String) -> Result<Orgtnt, OrgError> {
+pub async fn update(
+    pool: &PgPool,
+    id: Uuid,
+    name: String,
+    code: String,
+) -> Result<Orgtnt, OrgError> {
     let now = Utc::now();
 
     sqlx::query_as::<_, Orgtnt>(
         "UPDATE org.orgtnt SET name = $1, code = $2, updated_at = $3
          WHERE orgtnt_id = $4
-         RETURNING orgtnt_id, name, code, is_active, created_at, updated_at"
+         RETURNING orgtnt_id, name, code, is_active, created_at, updated_at",
     )
     .bind(&name)
     .bind(&code)

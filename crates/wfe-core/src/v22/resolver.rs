@@ -200,11 +200,21 @@ mod tests {
             from: AnchorFrom::Ctx("$ctx.initiated_by".into()),
             traverse: "parent".into(),
         };
-        resolve_c_orgu(&c_orgu, Uuid::new_v4(), &ctx, &Wfah::empty(), Uuid::nil(), &org)
-            .await
-            .unwrap();
+        resolve_c_orgu(
+            &c_orgu,
+            Uuid::new_v4(),
+            &ctx,
+            &Wfah::empty(),
+            Uuid::nil(),
+            &org,
+        )
+        .await
+        .unwrap();
         let (called_anchor, expr) = org.last_call.lock().unwrap().clone().unwrap();
-        assert_eq!(called_anchor, stored_orgu, "anchor ctx'teki actor'ün orgu'su olmalı");
+        assert_eq!(
+            called_anchor, stored_orgu,
+            "anchor ctx'teki actor'ün orgu'su olmalı"
+        );
         assert_eq!(expr, "self.parent", "traverse self köküne bağlanmalı");
     }
 
@@ -224,11 +234,21 @@ mod tests {
             },
             traverse: "self".into(),
         };
-        resolve_c_orgu(&c_orgu, Uuid::new_v4(), &json!({}), &wfah, Uuid::nil(), &org)
-            .await
-            .unwrap();
+        resolve_c_orgu(
+            &c_orgu,
+            Uuid::new_v4(),
+            &json!({}),
+            &wfah,
+            Uuid::nil(),
+            &org,
+        )
+        .await
+        .unwrap();
         let (called_anchor, _) = org.last_call.lock().unwrap().clone().unwrap();
-        assert_eq!(called_anchor, last_orgu, "default occurrence 'last' olmalı (M9)");
+        assert_eq!(
+            called_anchor, last_orgu,
+            "default occurrence 'last' olmalı (M9)"
+        );
     }
 
     #[tokio::test]
@@ -247,9 +267,16 @@ mod tests {
             },
             traverse: "self".into(),
         };
-        resolve_c_orgu(&c_orgu, Uuid::new_v4(), &json!({}), &wfah, Uuid::nil(), &org)
-            .await
-            .unwrap();
+        resolve_c_orgu(
+            &c_orgu,
+            Uuid::new_v4(),
+            &json!({}),
+            &wfah,
+            Uuid::nil(),
+            &org,
+        )
+        .await
+        .unwrap();
         let (called_anchor, _) = org.last_call.lock().unwrap().clone().unwrap();
         assert_eq!(called_anchor, first_orgu);
     }
@@ -262,9 +289,16 @@ mod tests {
             from: AnchorFrom::Ctx("$ctx.ghost".into()),
             traverse: "self".into(),
         };
-        resolve_c_orgu(&c_orgu, default_anchor, &json!({}), &Wfah::empty(), Uuid::nil(), &org)
-            .await
-            .unwrap();
+        resolve_c_orgu(
+            &c_orgu,
+            default_anchor,
+            &json!({}),
+            &Wfah::empty(),
+            Uuid::nil(),
+            &org,
+        )
+        .await
+        .unwrap();
         let (called_anchor, _) = org.last_call.lock().unwrap().clone().unwrap();
         assert_eq!(called_anchor, default_anchor);
     }

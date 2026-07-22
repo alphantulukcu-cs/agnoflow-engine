@@ -69,7 +69,10 @@ mod tests {
             parse_iso8601_duration("PT2H30M").unwrap(),
             Duration::hours(2) + Duration::minutes(30)
         );
-        assert_eq!(parse_iso8601_duration("PT45S").unwrap(), Duration::seconds(45));
+        assert_eq!(
+            parse_iso8601_duration("PT45S").unwrap(),
+            Duration::seconds(45)
+        );
     }
 
     #[test]

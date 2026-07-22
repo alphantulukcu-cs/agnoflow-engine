@@ -1,6 +1,6 @@
+use crate::{error::WfdError, models::WfdMeta};
 use sqlx::PgPool;
 use uuid::Uuid;
-use crate::{error::WfdError, models::WfdMeta};
 
 const COLS: &str = "wfd_id, orgtnt_id, project_id, name, version, s3_key, is_active, created_at, \
                     status, description, tags, owner, updated_at, source_template_id, review_note, submitted_by";
@@ -10,17 +10,17 @@ const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.project_id, m.name, m.version, m.
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert(
-    pool:        &PgPool,
-    wfd_id:      Uuid,
-    orgtnt_id:   Uuid,
-    project_id:  Uuid,
-    name:        &str,
-    version:     i32,
-    s3_key:      &str,
-    status:      &str,
+    pool: &PgPool,
+    wfd_id: Uuid,
+    orgtnt_id: Uuid,
+    project_id: Uuid,
+    name: &str,
+    version: i32,
+    s3_key: &str,
+    status: &str,
     description: Option<&str>,
-    tags:        &[String],
-    owner:       &str,
+    tags: &[String],
+    owner: &str,
     source_template_id: Option<Uuid>,
 ) -> Result<Uuid, WfdError> {
     let id = sqlx::query_scalar::<_, Uuid>(
@@ -44,55 +44,71 @@ pub async fn insert(
 /// Yalnızca published (is_active) satırı döner — mevcut çalıştırma yolu.
 /// status='published' filtresi draft'ların engine'de koşmasını engeller.
 pub async fn get_meta(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<WfdMeta, WfdError> {
-    sqlx::query_as::<_, WfdMeta>(
-        &format!("SELECT {COLS} FROM wf.wfd_meta \
-                  WHERE wfd_id=$1 AND version=$2 AND is_active=true AND status='published'")
-    )
-    .bind(wfd_id).bind(version)
-    .fetch_optional(pool).await?
+    sqlx::query_as::<_, WfdMeta>(&format!(
+        "SELECT {COLS} FROM wf.wfd_meta \
+                  WHERE wfd_id=$1 AND version=$2 AND is_active=true AND status='published'"
+    ))
+    .bind(wfd_id)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?
     .ok_or_else(|| WfdError::NotFound(format!("{wfd_id} v{version}")))
 }
 
 /// Draft dahil herhangi bir satırı döner (is_active filtresi yok).
 pub async fn get_meta_any(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<WfdMeta, WfdError> {
-    sqlx::query_as::<_, WfdMeta>(
-        &format!("SELECT {COLS} FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2")
-    )
-    .bind(wfd_id).bind(version)
-    .fetch_optional(pool).await?
+    sqlx::query_as::<_, WfdMeta>(&format!(
+        "SELECT {COLS} FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2"
+    ))
+    .bind(wfd_id)
+    .bind(version)
+    .fetch_optional(pool)
+    .await?
     .ok_or_else(|| WfdError::NotFound(format!("{wfd_id} v{version}")))
 }
 
 /// Liste — draft ve published birlikte döner (UI ayırır).
 /// `project_id` verilirse o projeyle sınırlanır.
-pub async fn list(pool: &PgPool, orgtnt_id: Uuid, project_id: Option<Uuid>, limit: i64, offset: i64)
-    -> Result<Vec<WfdMeta>, WfdError>
-{
-    sqlx::query_as::<_, WfdMeta>(
-        &format!("SELECT {COLS} FROM wf.wfd_meta \
+pub async fn list(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    project_id: Option<Uuid>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<WfdMeta>, WfdError> {
+    sqlx::query_as::<_, WfdMeta>(&format!(
+        "SELECT {COLS} FROM wf.wfd_meta \
                   WHERE orgtnt_id=$1 AND is_active=true \
                     AND ($4::uuid IS NULL OR project_id=$4) \
-                  ORDER BY name, version DESC LIMIT $2 OFFSET $3")
-    )
-    .bind(orgtnt_id).bind(limit).bind(offset).bind(project_id)
-    .fetch_all(pool).await
+                  ORDER BY name, version DESC LIMIT $2 OFFSET $3"
+    ))
+    .bind(orgtnt_id)
+    .bind(limit)
+    .bind(offset)
+    .bind(project_id)
+    .fetch_all(pool)
+    .await
     .map_err(WfdError::Database)
 }
 
 /// Versiyon sayacı proje kapsamındadır (name benzersizliği gibi).
 pub async fn next_version(pool: &PgPool, project_id: Uuid, name: &str) -> Result<i32, WfdError> {
-    let max: Option<i32> = sqlx::query_scalar(
-        "SELECT MAX(version) FROM wf.wfd_meta WHERE project_id=$1 AND name=$2"
-    )
-    .bind(project_id).bind(name)
-    .fetch_one(pool).await?;
+    let max: Option<i32> =
+        sqlx::query_scalar("SELECT MAX(version) FROM wf.wfd_meta WHERE project_id=$1 AND name=$2")
+            .bind(project_id)
+            .bind(name)
+            .fetch_one(pool)
+            .await?;
     Ok(max.unwrap_or(0) + 1)
 }
 
 /// Draft metadata günceller (JSON storage'da; burada sadece meta + updated_at).
 pub async fn update_draft(
-    pool: &PgPool, wfd_id: Uuid, version: i32,
-    description: Option<&str>, tags: Option<&[String]>,
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    description: Option<&str>,
+    tags: Option<&[String]>,
 ) -> Result<(), WfdError> {
     // COALESCE: verilmeyen alan (NULL) mevcut değeri korur — editör kaydı
     // yalnızca JSON gönderdiğinden create'te girilen description/tags silinmez.
@@ -101,11 +117,18 @@ pub async fn update_draft(
          SET description = COALESCE($3, description), \
              tags = COALESCE($4, tags), \
              updated_at = now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='draft'"
+         WHERE wfd_id=$1 AND version=$2 AND status='draft'",
     )
-    .bind(wfd_id).bind(version).bind(description).bind(tags)
-    .execute(pool).await?.rows_affected();
-    if n == 0 { return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}"))); }
+    .bind(wfd_id)
+    .bind(version)
+    .bind(description)
+    .bind(tags)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+    }
     Ok(())
 }
 
@@ -143,51 +166,83 @@ pub async fn update_group_metadata(
     .bind(description)
     .fetch_all(pool)
     .await
-    .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {
-        Some("wfd_meta_project_name_version_key") | Some("wfd_single_draft") =>
-            WfdError::Conflict("Bu isimde başka bir workflow zaten var".into()),
-        _ => WfdError::Database(e),
-    })?;
+    .map_err(
+        |e| match e.as_database_error().and_then(|d| d.constraint()) {
+            Some("wfd_meta_project_name_version_key") | Some("wfd_single_draft") => {
+                WfdError::Conflict("Bu isimde başka bir workflow zaten var".into())
+            }
+            _ => WfdError::Database(e),
+        },
+    )?;
 
     if rows.is_empty() {
-        return Err(WfdError::NotFound(format!("{anchor_wfd_id} v{anchor_version}")));
+        return Err(WfdError::NotFound(format!(
+            "{anchor_wfd_id} v{anchor_version}"
+        )));
     }
     Ok(rows)
 }
 
 /// Draft'ı onaya gönderir: draft → pending_approval (+ gönderen, eski ret notu silinir).
-pub async fn set_pending(pool: &PgPool, wfd_id: Uuid, version: i32, submitted_by: &str) -> Result<(), WfdError> {
+pub async fn set_pending(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    submitted_by: &str,
+) -> Result<(), WfdError> {
     let n = sqlx::query(
         "UPDATE wf.wfd_meta SET status='pending_approval', submitted_by=$3, review_note=NULL, updated_at=now() \
          WHERE wfd_id=$1 AND version=$2 AND status='draft'"
     )
     .bind(wfd_id).bind(version).bind(submitted_by)
     .execute(pool).await?.rows_affected();
-    if n == 0 { return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}"))); }
+    if n == 0 {
+        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+    }
     Ok(())
 }
 
 /// Onay bekleyeni yayınlar: pending_approval → published.
-pub async fn set_published_from_pending(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
+pub async fn set_published_from_pending(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<(), WfdError> {
     let n = sqlx::query(
         "UPDATE wf.wfd_meta SET status='published', review_note=NULL, updated_at=now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='pending_approval'"
+         WHERE wfd_id=$1 AND version=$2 AND status='pending_approval'",
     )
-    .bind(wfd_id).bind(version)
-    .execute(pool).await?.rows_affected();
-    if n == 0 { return Err(WfdError::NotFound(format!("pending {wfd_id} v{version}"))); }
+    .bind(wfd_id)
+    .bind(version)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(WfdError::NotFound(format!("pending {wfd_id} v{version}")));
+    }
     Ok(())
 }
 
 /// Onay bekleyeni reddeder: pending_approval → draft (+ gerekçe).
-pub async fn set_rejected(pool: &PgPool, wfd_id: Uuid, version: i32, note: Option<&str>) -> Result<(), WfdError> {
+pub async fn set_rejected(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    note: Option<&str>,
+) -> Result<(), WfdError> {
     let n = sqlx::query(
         "UPDATE wf.wfd_meta SET status='draft', review_note=$3, updated_at=now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='pending_approval'"
+         WHERE wfd_id=$1 AND version=$2 AND status='pending_approval'",
     )
-    .bind(wfd_id).bind(version).bind(note)
-    .execute(pool).await?.rows_affected();
-    if n == 0 { return Err(WfdError::NotFound(format!("pending {wfd_id} v{version}"))); }
+    .bind(wfd_id)
+    .bind(version)
+    .bind(note)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(WfdError::NotFound(format!("pending {wfd_id} v{version}")));
+    }
     Ok(())
 }
 
@@ -195,21 +250,30 @@ pub async fn set_rejected(pool: &PgPool, wfd_id: Uuid, version: i32, note: Optio
 pub async fn set_published(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
     let n = sqlx::query(
         "UPDATE wf.wfd_meta SET status='published', updated_at=now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='draft'"
+         WHERE wfd_id=$1 AND version=$2 AND status='draft'",
     )
-    .bind(wfd_id).bind(version)
-    .execute(pool).await?.rows_affected();
-    if n == 0 { return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}"))); }
+    .bind(wfd_id)
+    .bind(version)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+    }
     Ok(())
 }
 
 /// Draft satırını siler (published silinemez).
 pub async fn delete_draft(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
-    let n = sqlx::query(
-        "DELETE FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2 AND status='draft'"
-    )
-    .bind(wfd_id).bind(version)
-    .execute(pool).await?.rows_affected();
-    if n == 0 { return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}"))); }
+    let n =
+        sqlx::query("DELETE FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2 AND status='draft'")
+            .bind(wfd_id)
+            .bind(version)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    if n == 0 {
+        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+    }
     Ok(())
 }

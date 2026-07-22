@@ -108,9 +108,9 @@ impl EvalEnv {
 pub fn evaluate_bool(expr: &str, env: &EvalEnv) -> Result<bool, EngineError> {
     let result = zen_expression::evaluate_expression(expr, env.zen_context().into())
         .map_err(|e| EngineError::ZenEvaluation(format!("'{expr}': {e}")))?;
-    result.as_bool().ok_or_else(|| {
-        EngineError::ZenEvaluation(format!("'{expr}' boolean sonuç üretmedi"))
-    })
+    result
+        .as_bool()
+        .ok_or_else(|| EngineError::ZenEvaluation(format!("'{expr}' boolean sonuç üretmedi")))
 }
 
 /// Herhangi bir değer üreten değerlendirme (calc autoexec).
@@ -156,8 +156,8 @@ mod tests {
 
     #[test]
     fn action_input_namespace() {
-        let env = EvalEnv::new(&json!({}))
-            .with_action_input(&json!({"manager_decision": "approve"}));
+        let env =
+            EvalEnv::new(&json!({})).with_action_input(&json!({"manager_decision": "approve"}));
         assert!(evaluate_bool("$action.input.manager_decision == 'approve'", &env).unwrap());
     }
 
@@ -169,14 +169,17 @@ mod tests {
 
     #[test]
     fn wfah_namespace_supports_zen_functions() {
-        let wfah = Wfah::empty()
-            .push("start".into(), actor(), None)
-            .push("analyst_approve".into(), actor(), None);
-        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
-        assert!(
-            evaluate_bool("len(filter($wfah, #.action == 'analyst_approve')) >= 1", &env)
-                .unwrap()
+        let wfah = Wfah::empty().push("start".into(), actor(), None).push(
+            "analyst_approve".into(),
+            actor(),
+            None,
         );
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool(
+            "len(filter($wfah, #.action == 'analyst_approve')) >= 1",
+            &env
+        )
+        .unwrap());
         assert!(evaluate_bool("some($wfah, #.action == 'start')", &env).unwrap());
     }
 

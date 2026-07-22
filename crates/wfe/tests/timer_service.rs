@@ -274,7 +274,14 @@ async fn short_deadline_fires_without_waiting_fallback_sweep() {
 
     let t0 = std::time::Instant::now();
     let started = executor
-        .start(Uuid::new_v4(), 1, &clerk(), None, &start_input(), Some("PT2S"))
+        .start(
+            Uuid::new_v4(),
+            1,
+            &clerk(),
+            None,
+            &start_input(),
+            Some("PT2S"),
+        )
         .await
         .unwrap();
     assert!(!started.terminal, "start terminal olmamalı");

@@ -118,7 +118,11 @@ impl<'a> Engine<'a> {
             let node = wfd.nodes.get(&r.from).ok_or_else(|| {
                 EngineError::InvalidWfd(format!("start.from bilinmeyen node: '{}'", r.from))
             })?;
-            let env = MatchEnv { ctx: &empty_ctx, wfah: &empty_wfah, orgtnt_id };
+            let env = MatchEnv {
+                ctx: &empty_ctx,
+                wfah: &empty_wfah,
+                orgtnt_id,
+            };
             if authorize(&node.c_a, actor, env, self.org).await? {
                 rule = Some(r);
                 break;
@@ -317,7 +321,11 @@ impl<'a> Engine<'a> {
 
         // §7.2 — ek yetki kısıtı
         if let Some(extra_rule) = &transition.c_a {
-            let env = MatchEnv { ctx: &ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+            let env = MatchEnv {
+                ctx: &ctx,
+                wfah: &wfes.wfah,
+                orgtnt_id: wfes.orgtnt_id,
+            };
             if !authorize(extra_rule, actor, env, self.org).await? {
                 return Err(EngineError::PermissionDenied(action.to_string()));
             }
@@ -390,8 +398,16 @@ impl<'a> Engine<'a> {
         // WOR-31: wft Parallel'e çözüldüyse `_fork` marker'ı engine tarafından staged.
         stage_parallel_markers(
             wfes,
-            &Trigger { branch: None, action: Some(action), actor },
-            &outcome, &mut wfah_entries, &mut seq, now);
+            &Trigger {
+                branch: None,
+                action: Some(action),
+                actor,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -487,7 +503,11 @@ impl<'a> Engine<'a> {
 
         // §7.2 — ek yetki kısıtı
         if let Some(extra_rule) = &transition.c_a {
-            let env = MatchEnv { ctx: &ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+            let env = MatchEnv {
+                ctx: &ctx,
+                wfah: &wfes.wfah,
+                orgtnt_id: wfes.orgtnt_id,
+            };
             if !authorize(extra_rule, actor, env, self.org).await? {
                 return Err(EngineError::PermissionDenied(action.to_string()));
             }
@@ -564,8 +584,16 @@ impl<'a> Engine<'a> {
         // WOR-31 marker'ları: `_branch_arrived` / sibling `_branch_cancelled`
         stage_parallel_markers(
             wfes,
-            &Trigger { branch: Some(branch_node), action: Some(action), actor },
-            &outcome, &mut wfah_entries, &mut seq, now);
+            &Trigger {
+                branch: Some(branch_node),
+                action: Some(action),
+                actor,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -627,7 +655,11 @@ impl<'a> Engine<'a> {
             return Ok(ClaimCheck::NotEligible);
         };
         let ctx = wfes.dynctx.as_value();
-        let env = MatchEnv { ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+        let env = MatchEnv {
+            ctx,
+            wfah: &wfes.wfah,
+            orgtnt_id: wfes.orgtnt_id,
+        };
         // Madde 6: doğrudan VEYA vekaleten uygun (vekil işi görür + claim'ler).
         if authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now())
             .await?
@@ -661,7 +693,11 @@ impl<'a> Engine<'a> {
             return Ok(AuthDecision::Denied);
         };
         let ctx = wfes.dynctx.as_value();
-        let env = MatchEnv { ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+        let env = MatchEnv {
+            ctx,
+            wfah: &wfes.wfah,
+            orgtnt_id: wfes.orgtnt_id,
+        };
         authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now()).await
     }
 
@@ -720,7 +756,11 @@ impl<'a> Engine<'a> {
             return Err(EngineError::Unauthorized);
         };
         let ctx = wfes.dynctx.as_value();
-        let env = MatchEnv { ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+        let env = MatchEnv {
+            ctx,
+            wfah: &wfes.wfah,
+            orgtnt_id: wfes.orgtnt_id,
+        };
         if !authorize(reassign_rule, reassigner, env, self.org).await? {
             return Err(EngineError::Unauthorized);
         }
@@ -733,7 +773,11 @@ impl<'a> Engine<'a> {
         }
 
         let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
-        let action = if target.is_some() { "reassign" } else { "unclaim" };
+        let action = if target.is_some() {
+            "reassign"
+        } else {
+            "unclaim"
+        };
         Ok(WfahEntry {
             seq,
             action: action.to_string(),
@@ -805,7 +849,11 @@ impl<'a> Engine<'a> {
                 continue;
             }
             if let Some(extra_rule) = &t.c_a {
-                let env = MatchEnv { ctx: &ctx, wfah: &wfes.wfah, orgtnt_id: wfes.orgtnt_id };
+                let env = MatchEnv {
+                    ctx: &ctx,
+                    wfah: &wfes.wfah,
+                    orgtnt_id: wfes.orgtnt_id,
+                };
                 if !authorize(extra_rule, actor, env, self.org).await? {
                     continue;
                 }
@@ -972,7 +1020,11 @@ impl<'a> Engine<'a> {
             // WOR-31: paralel modda terminate diğer aktif kolları da iptal eder.
             stage_parallel_markers(
                 wfes,
-                &Trigger { branch, action: Some(&trigger_action), actor: &system },
+                &Trigger {
+                    branch,
+                    action: Some(&trigger_action),
+                    actor: &system,
+                },
                 &outcome,
                 &mut wfah_entries,
                 &mut seq,
@@ -1022,13 +1074,17 @@ impl<'a> Engine<'a> {
             .await?;
 
         stage_parallel_markers(
-                wfes,
-                &Trigger { branch, action: Some(&trigger_action), actor: &system },
-                &outcome,
-                &mut wfah_entries,
-                &mut seq,
-                now,
-            );
+            wfes,
+            &Trigger {
+                branch,
+                action: Some(&trigger_action),
+                actor: &system,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -1071,8 +1127,16 @@ impl<'a> Engine<'a> {
         // WOR-31: paralel modda deadline TÜM aktif kolları iptal eder.
         stage_parallel_markers(
             wfes,
-            &Trigger { branch: None, action: Some("timeout:deadline"), actor: &system },
-            &outcome, &mut wfah_entries, &mut seq, now);
+            &Trigger {
+                branch: None,
+                action: Some("timeout:deadline"),
+                actor: &system,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
         TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
@@ -1177,9 +1241,13 @@ impl<'a> Engine<'a> {
                 // Bare string hedef — node/terminal ayrımı validator'ın garanti
                 // ettiği referansa göre çözülür (wft-target-exists).
                 let wft = if wfd.nodes.contains_key(target) {
-                    Wft::Node { node: target.clone() }
+                    Wft::Node {
+                        node: target.clone(),
+                    }
                 } else {
-                    Wft::Terminal { terminal: target.clone() }
+                    Wft::Terminal {
+                        terminal: target.clone(),
+                    }
                 };
                 let mut wfah_entries = vec![WfahEntry {
                     seq,
@@ -1218,7 +1286,11 @@ impl<'a> Engine<'a> {
                     .await?;
                 stage_parallel_markers(
                     wfes,
-                    &Trigger { branch, action: Some(&marker), actor: &system },
+                    &Trigger {
+                        branch,
+                        action: Some(&marker),
+                        actor: &system,
+                    },
                     &outcome,
                     &mut wfah_entries,
                     &mut seq,
@@ -1276,8 +1348,14 @@ impl<'a> Engine<'a> {
                 EngineError::InvalidWfd(format!("autoexec '{}' tanımsız", trig.use_))
             })?;
 
-            let system = Actor { role: "system".into(), ..actor.clone() };
-            match self.execute_with_retry(def, trig, staged, wfe_id, node, &system).await {
+            let system = Actor {
+                role: "system".into(),
+                ..actor.clone()
+            };
+            match self
+                .execute_with_retry(def, trig, staged, wfe_id, node, &system)
+                .await
+            {
                 Ok(result) => {
                     if let Some(effects) = &def.wfes_effects {
                         let env = EffectEnv {
@@ -1377,9 +1455,11 @@ impl<'a> Engine<'a> {
 
         loop {
             let run = self.exec.run(def, &env);
-            let outcome =
-                tokio::time::timeout(std::time::Duration::from_secs(def.timeout_seconds as u64), run)
-                    .await;
+            let outcome = tokio::time::timeout(
+                std::time::Duration::from_secs(def.timeout_seconds as u64),
+                run,
+            )
+            .await;
             let failure = match outcome {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(f)) => f,
@@ -1402,8 +1482,7 @@ impl<'a> Engine<'a> {
             }
             attempts_per_retrier[idx] = attempt + 1;
 
-            let delay =
-                retrier.interval_seconds as f64 * retrier.backoff_rate.powi(attempt as i32);
+            let delay = retrier.interval_seconds as f64 * retrier.backoff_rate.powi(attempt as i32);
             let delay = match retrier.max_delay_seconds {
                 Some(max) => delay.min(max as f64),
                 None => delay,
@@ -1444,9 +1523,8 @@ impl<'a> Engine<'a> {
             };
             return match collapse {
                 WftTarget::Terminal { terminal } => {
-                    let (end_response, final_ctx) = self.terminal_outcome(
-                        terminal, wfd, staged, actor, wfe_id, action_input,
-                    )?;
+                    let (end_response, final_ctx) =
+                        self.terminal_outcome(terminal, wfd, staged, actor, wfe_id, action_input)?;
                     Ok((CommitOutcome::Terminal { end_response }, vec![], final_ctx))
                 }
                 WftTarget::Node { node } => {
@@ -1553,7 +1631,12 @@ impl<'a> Engine<'a> {
         // işgal edilmez); normal node ise kol hareketi; join'den FARKLI bir
         // terminal ise aşağıdaki normal terminal yoluna düşer — TÜM WFE orada
         // biter (sibling `_branch_cancelled` marker'ları çağıranda staged edilir).
-        if let WftMode::Branch { join, from_node, others_active } = mode {
+        if let WftMode::Branch {
+            join,
+            from_node,
+            others_active,
+        } = mode
+        {
             let arrived = match (&target, join) {
                 (Target::Node(n), WftTarget::Node { node }) => n == node,
                 (Target::Terminal(t), WftTarget::Terminal { terminal }) => t == terminal,
@@ -1564,7 +1647,9 @@ impl<'a> Engine<'a> {
                     // Engine'in görüşü: başka aktif kol var — yarış varsa adapter
                     // doğrulaması + executor retry düzeltir (T3).
                     return Ok((
-                        CommitOutcome::BranchArrived { from_node: from_node.to_string() },
+                        CommitOutcome::BranchArrived {
+                            from_node: from_node.to_string(),
+                        },
                         vec![],
                         staged,
                     ));
@@ -1920,8 +2005,8 @@ fn stage_parallel_markers(
     // manşet zaten `trigger_*` taşıyor, claim de doğal olarak buraya ait. Kardeş
     // kollarla simetri için `claimed_by` de yazılır (çoğu yolda == trigger_actor).
     // Snapshot commit ÖNCESİ olduğu için acting kolun claim'i hâlâ duruyor.
-    let acting = acting_branch
-        .and_then(|n| wfes.branches.iter().find(|b| b.branch_node.as_str() == n));
+    let acting =
+        acting_branch.and_then(|n| wfes.branches.iter().find(|b| b.branch_node.as_str() == n));
     // WOR-61 manşet: collapse'ın tamamı tek kayıtta. Detaylar (aşağıdaki kol-başına
     // marker'lar) KALIR — bu özet onların yerine değil, üstüne geçer.
     push(
@@ -2049,9 +2134,9 @@ fn merge_action_input(
     let mut leaves = Vec::new();
     collect_leaf_paths(input, String::new(), &mut leaves);
     for leaf in &leaves {
-        let covered = declared
-            .iter()
-            .any(|d| leaf == *d || leaf.starts_with(&format!("{d}.")) || d.starts_with(&format!("{leaf}.")));
+        let covered = declared.iter().any(|d| {
+            leaf == *d || leaf.starts_with(&format!("{d}.")) || d.starts_with(&format!("{leaf}."))
+        });
         if !covered {
             return Err(EngineError::InvalidInput(format!(
                 "input yolu '{leaf}' bu action'da tanımlı değil"
@@ -2100,7 +2185,11 @@ fn validate_readonly_paths(
     input: &Value,
     context_schema: &Value,
 ) -> Result<(), EngineError> {
-    let declared = action.input.required.iter().chain(action.input.optional.iter());
+    let declared = action
+        .input
+        .required
+        .iter()
+        .chain(action.input.optional.iter());
     for path in declared {
         if get_path(input, path).is_none() {
             continue;
@@ -2194,12 +2283,25 @@ mod tests {
     async fn resolve_candidates_still_emits_role_candidates() {
         let org = MockOrg;
         let runner = DummyRunner;
-        let engine = Engine { org: &org, exec: &runner };
-        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let engine = Engine {
+            org: &org,
+            exec: &runner,
+        };
+        let actor = Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        };
         let wfah = Wfah::empty();
 
         let out = engine
-            .resolve_candidates(&rule(Some(vec!["branchClerk"]), None), &json!({}), &wfah, &actor, Uuid::nil())
+            .resolve_candidates(
+                &rule(Some(vec!["branchClerk"]), None),
+                &json!({}),
+                &wfah,
+                &actor,
+                Uuid::nil(),
+            )
             .await
             .unwrap();
 
@@ -2214,8 +2316,15 @@ mod tests {
     async fn resolve_candidates_emits_user_candidate_for_uuid_c_u() {
         let org = MockOrg;
         let runner = DummyRunner;
-        let engine = Engine { org: &org, exec: &runner };
-        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let engine = Engine {
+            org: &org,
+            exec: &runner,
+        };
+        let actor = Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        };
         let wfah = Wfah::empty();
         let target_user = Uuid::new_v4();
         let target_user_str = target_user.to_string();
@@ -2242,12 +2351,25 @@ mod tests {
     async fn resolve_candidates_emits_ident_candidate_for_non_uuid_c_u() {
         let org = MockOrg;
         let runner = DummyRunner;
-        let engine = Engine { org: &org, exec: &runner };
-        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let engine = Engine {
+            org: &org,
+            exec: &runner,
+        };
+        let actor = Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        };
         let wfah = Wfah::empty();
 
         let out = engine
-            .resolve_candidates(&rule(None, Some(vec!["jdoe"])), &json!({}), &wfah, &actor, Uuid::nil())
+            .resolve_candidates(
+                &rule(None, Some(vec!["jdoe"])),
+                &json!({}),
+                &wfah,
+                &actor,
+                Uuid::nil(),
+            )
             .await
             .unwrap();
 
@@ -2261,8 +2383,15 @@ mod tests {
     async fn resolve_candidates_unions_role_and_user_entries() {
         let org = MockOrg;
         let runner = DummyRunner;
-        let engine = Engine { org: &org, exec: &runner };
-        let actor = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() };
+        let engine = Engine {
+            org: &org,
+            exec: &runner,
+        };
+        let actor = Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        };
         let wfah = Wfah::empty();
 
         let out = engine
@@ -2277,7 +2406,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.len(), 2);
-        assert!(out.iter().any(|c| c.role == "creditAnalyst" && c.user_id.is_none() && c.user_ident.is_none()));
-        assert!(out.iter().any(|c| c.role.is_empty() && c.user_ident.as_deref() == Some("jdoe")));
+        assert!(out
+            .iter()
+            .any(|c| c.role == "creditAnalyst" && c.user_id.is_none() && c.user_ident.is_none()));
+        assert!(out
+            .iter()
+            .any(|c| c.role.is_empty() && c.user_ident.as_deref() == Some("jdoe")));
     }
 }

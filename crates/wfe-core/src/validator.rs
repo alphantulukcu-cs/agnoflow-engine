@@ -284,9 +284,7 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
         // (aşağıda check_parallel'de atlanır — kapsam dışına çıkar).
         Wft::Collapse { collapse } => match collapse {
             WftTarget::Node { node } => out.push((TargetKind::Node, node.as_str())),
-            WftTarget::Terminal { terminal } => {
-                out.push((TargetKind::Terminal, terminal.as_str()))
-            }
+            WftTarget::Terminal { terminal } => out.push((TargetKind::Terminal, terminal.as_str())),
         },
     }
     out
@@ -346,11 +344,7 @@ fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
             if let Some(wft) = &esc.wft {
-                visit(
-                    wft,
-                    format!("nodes[{key}].escalation[{j}].wft"),
-                    report,
-                );
+                visit(wft, format!("nodes[{key}].escalation[{j}].wft"), report);
             }
         }
     }
@@ -468,7 +462,10 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
             report.error(
                 "unreachable",
                 format!("terminals[{}]", t.id),
-                format!("WFD.Unreachable: terminal '{}' hiçbir wft'den referans almıyor", t.id),
+                format!(
+                    "WFD.Unreachable: terminal '{}' hiçbir wft'den referans almıyor",
+                    t.id
+                ),
             );
         }
     }
@@ -491,8 +488,7 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
     }
 
     // aynı (node, action) için çoklu transition
-    let mut groups: HashMap<(&str, &str), Vec<&crate::types::wfd_v22::Transition>> =
-        HashMap::new();
+    let mut groups: HashMap<(&str, &str), Vec<&crate::types::wfd_v22::Transition>> = HashMap::new();
     for t in &wfd.transitions {
         for node in t.from.iter() {
             groups.entry((node, t.action.as_str())).or_default().push(t);
@@ -684,9 +680,7 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                 report.error(
                     "parallel_dead_end",
                     format!("{}.parallel.branches[{}]", fork.path, bi),
-                    format!(
-                        "branch '{start}' join node'a veya bir terminal'e ulaşamıyor"
-                    ),
+                    format!("branch '{start}' join node'a veya bir terminal'e ulaşamıyor"),
                 );
             }
         }
@@ -738,11 +732,7 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
             if let Some(wft) = &esc.wft {
-                visit_wft(
-                    wft,
-                    &format!("nodes[{key}].escalation[{j}].wft"),
-                    report,
-                );
+                visit_wft(wft, &format!("nodes[{key}].escalation[{j}].wft"), report);
             }
         }
     }
@@ -781,19 +771,20 @@ fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
 // ---- §6: wfes_effects.set yolları (catch ve escalation dahil) ----
 
 fn check_effect_paths(wfd: &Wfd, report: &mut ValidationReport) {
-    let check_effects =
-        |effects: &Option<crate::types::wfd_v22::WfesEffects>, path: &str, report: &mut ValidationReport| {
-            let Some(effects) = effects else { return };
-            for key in effects.set.keys() {
-                if let PathResolution::Missing = resolve_schema_path(&wfd.context, key) {
-                    report.error(
-                        "effect_path",
-                        path.to_string(),
-                        format!("effect yolu '{key}' context şemasında yok"),
-                    );
-                }
+    let check_effects = |effects: &Option<crate::types::wfd_v22::WfesEffects>,
+                         path: &str,
+                         report: &mut ValidationReport| {
+        let Some(effects) = effects else { return };
+        for key in effects.set.keys() {
+            if let PathResolution::Missing = resolve_schema_path(&wfd.context, key) {
+                report.error(
+                    "effect_path",
+                    path.to_string(),
+                    format!("effect yolu '{key}' context şemasında yok"),
+                );
             }
-        };
+        }
+    };
 
     for s in &wfd.start {
         check_effects(&s.wfes_effects, &format!("start[{}]", s.id), report);
@@ -839,30 +830,31 @@ fn check_effect_paths(wfd: &Wfd, report: &mut ValidationReport) {
 // ---- §6: retry — WFD.ALL tek başına ve yalnızca son retrier'da ----
 
 fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
-    let check_triggers =
-        |triggers: &[crate::types::wfd_v22::TriggerInvocation], path: &str, report: &mut ValidationReport| {
-            for (j, trig) in triggers.iter().enumerate() {
-                let last = trig.retry.len().saturating_sub(1);
-                for (k, r) in trig.retry.iter().enumerate() {
-                    if r.error_equals.iter().any(|e| e == "WFD.ALL") {
-                        if r.error_equals.len() > 1 {
-                            report.error(
-                                "retry_wfd_all",
-                                format!("{path}.trigger[{j}].retry[{k}]"),
-                                "WFD.ALL yalnızca tek başına kullanılabilir".into(),
-                            );
-                        }
-                        if k != last {
-                            report.error(
-                                "retry_wfd_all",
-                                format!("{path}.trigger[{j}].retry[{k}]"),
-                                "WFD.ALL yalnızca son retrier'da kullanılabilir".into(),
-                            );
-                        }
+    let check_triggers = |triggers: &[crate::types::wfd_v22::TriggerInvocation],
+                          path: &str,
+                          report: &mut ValidationReport| {
+        for (j, trig) in triggers.iter().enumerate() {
+            let last = trig.retry.len().saturating_sub(1);
+            for (k, r) in trig.retry.iter().enumerate() {
+                if r.error_equals.iter().any(|e| e == "WFD.ALL") {
+                    if r.error_equals.len() > 1 {
+                        report.error(
+                            "retry_wfd_all",
+                            format!("{path}.trigger[{j}].retry[{k}]"),
+                            "WFD.ALL yalnızca tek başına kullanılabilir".into(),
+                        );
+                    }
+                    if k != last {
+                        report.error(
+                            "retry_wfd_all",
+                            format!("{path}.trigger[{j}].retry[{k}]"),
+                            "WFD.ALL yalnızca son retrier'da kullanılabilir".into(),
+                        );
                     }
                 }
             }
-        };
+        }
+    };
 
     for s in &wfd.start {
         check_triggers(&s.trigger, &format!("start[{}]", s.id), report);
@@ -894,8 +886,8 @@ fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
                 report.error("duration_format", format!("{path}.after"), e.to_string());
             }
             if let Some(target) = &ct.wft {
-                let known = wfd.nodes.contains_key(target)
-                    || wfd.terminals.iter().any(|t| t.id == *target);
+                let known =
+                    wfd.nodes.contains_key(target) || wfd.terminals.iter().any(|t| t.id == *target);
                 if !known {
                     report.error(
                         "cross_ref",

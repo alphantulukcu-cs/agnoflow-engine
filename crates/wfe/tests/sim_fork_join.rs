@@ -53,7 +53,11 @@ struct MockRunner;
 
 #[async_trait]
 impl AutoexecRunner for MockRunner {
-    async fn run(&self, _def: &AutoexecDef, _env: &ExecEnv) -> Result<serde_json::Value, ExecFailure> {
+    async fn run(
+        &self,
+        _def: &AutoexecDef,
+        _env: &ExecEnv,
+    ) -> Result<serde_json::Value, ExecFailure> {
         Ok(json!({}))
     }
 }
@@ -111,7 +115,10 @@ async fn fork_setup(eng: &Engine<'_>, wfd: &Wfd) -> SimState {
         .unwrap();
     sim_state.apply_commit(&commit);
 
-    assert_eq!(sim_state.current_node, None, "fork sonrası wfe-seviyesi node yok");
+    assert_eq!(
+        sim_state.current_node, None,
+        "fork sonrası wfe-seviyesi node yok"
+    );
     assert!(sim_state.join_target.is_some(), "paralel moda girildi");
     assert_eq!(sim_state.branches.len(), 3);
     sim_state
@@ -164,7 +171,10 @@ async fn sim_happy_path_fork_join_finalize() {
         .unwrap();
     sim_state.apply_commit(&commit);
 
-    assert_eq!(sim_state.current_node.as_deref(), Some("self__resultCoordinator"));
+    assert_eq!(
+        sim_state.current_node.as_deref(),
+        Some("self__resultCoordinator")
+    );
     assert!(sim_state.join_target.is_none(), "paralel mod bitti");
     assert!(sim_state.branches.is_empty(), "kollar temizlendi");
     assert!(
@@ -173,7 +183,11 @@ async fn sim_happy_path_fork_join_finalize() {
     );
     assert!(sim_state.wfah.iter().any(|e| e.action == "_fork"));
     assert_eq!(
-        sim_state.wfah.iter().filter(|e| e.action == "_branch_arrived").count(),
+        sim_state
+            .wfah
+            .iter()
+            .filter(|e| e.action == "_branch_arrived")
+            .count(),
         3,
         "her varış (ara + son) _branch_arrived üretmeli"
     );
@@ -230,7 +244,11 @@ async fn sim_branch_reject_terminates_and_cancels_siblings() {
         .iter()
         .filter(|e| e.action == "_branch_cancelled")
         .collect();
-    assert_eq!(cancelled.len(), 2, "reddeden kol hariç 2 kardeş iptal edilmeli");
+    assert_eq!(
+        cancelled.len(),
+        2,
+        "reddeden kol hariç 2 kardeş iptal edilmeli"
+    );
 }
 
 /// Aksiyon ≥2 aktif kolun transition'ıyla eşleşir ve `node` hint verilmezse

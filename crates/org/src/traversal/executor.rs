@@ -4,11 +4,10 @@ use sqlx::postgres::PgArguments;
 use sqlx::{Arguments, PgPool};
 use uuid::Uuid;
 
-use crate::{error::OrgError, models::Orgu};
 use super::parser::{FilterExpr, Pipeline, Step};
+use crate::{error::OrgError, models::Orgu};
 
-const MEMBERS: &str =
-    "WITH members AS ( \
+const MEMBERS: &str = "WITH members AS ( \
          SELECT o.orgu_id, oo.orgtnt_id, oo.orgt_id, oo.parent_orgu_id, \
                 oo.path, o.orgu_type, o.name, o.metadata, \
                 (o.is_active AND oo.is_active) AS is_active, \
@@ -18,17 +17,16 @@ const MEMBERS: &str =
          WHERE oo.orgt_id = $2 AND o.is_active = true AND oo.is_active = true \
      )";
 
-const SEL: &str =
-    "m.orgu_id, m.orgtnt_id, m.orgt_id, m.parent_orgu_id, \
+const SEL: &str = "m.orgu_id, m.orgtnt_id, m.orgt_id, m.parent_orgu_id, \
      m.path::text AS path, m.orgu_type, m.name, m.metadata, \
      m.is_active, m.created_at, m.updated_at";
 
 pub async fn execute(
-    pool:      &PgPool,
-    anchor:    Uuid,
-    orgt_id:   Uuid,
+    pool: &PgPool,
+    anchor: Uuid,
+    orgt_id: Uuid,
     orgtnt_id: Uuid,
-    pipeline:  &Pipeline,
+    pipeline: &Pipeline,
 ) -> Result<Vec<Orgu>, OrgError> {
     // "*:[filter]" ilk adımsa: tenant genelinde KAYNAK kümeyi çöz (anchor kullanılmaz),
     // sonra kalan adımları her ağaç (orgt_id) için ayrı uygula ve birleştir.
@@ -55,10 +53,10 @@ pub async fn execute(
 
 /// Verilen başlangıç id kümesine adımları sırayla uygular (tek ağaç = orgt_id bağlamında).
 async fn run_steps(
-    pool:    &PgPool,
+    pool: &PgPool,
     initial: Vec<Uuid>,
     orgt_id: Uuid,
-    steps:   &[Step],
+    steps: &[Step],
 ) -> Result<Vec<Orgu>, OrgError> {
     if steps.is_empty() {
         return fetch_by_ids(pool, &initial, orgt_id).await;
@@ -77,7 +75,9 @@ async fn run_steps(
 
 fn dedup_orgus(rows: Vec<Orgu>) -> Vec<Orgu> {
     let mut seen = HashSet::new();
-    rows.into_iter().filter(|r| seen.insert(r.orgu_id)).collect()
+    rows.into_iter()
+        .filter(|r| seen.insert(r.orgu_id))
+        .collect()
 }
 
 fn dedup_ids(rows: &[Orgu]) -> Vec<Uuid> {
@@ -88,11 +88,7 @@ fn dedup_ids(rows: &[Orgu]) -> Vec<Uuid> {
         .collect()
 }
 
-async fn fetch_by_ids(
-    pool:    &PgPool,
-    ids:     &[Uuid],
-    orgt_id: Uuid,
-) -> Result<Vec<Orgu>, OrgError> {
+async fn fetch_by_ids(pool: &PgPool, ids: &[Uuid], orgt_id: Uuid) -> Result<Vec<Orgu>, OrgError> {
     sqlx::query_as::<_, Orgu>(&format!(
         "{MEMBERS} \
          SELECT DISTINCT {SEL} FROM members m \
@@ -110,9 +106,9 @@ async fn fetch_by_ids(
 // DISTINCT YOK — dedup çağırana aittir (standalone kullanımda `dedup_orgus`, orgu_id'ye göre).
 // resolve_orgu'nun `*:` özel-case'iyle (resolve_global_type) aynı eşleşme semantiği.
 async fn fetch_global_type(
-    pool:      &PgPool,
+    pool: &PgPool,
     orgtnt_id: Uuid,
-    filter:    &FilterExpr,
+    filter: &FilterExpr,
 ) -> Result<Vec<Orgu>, OrgError> {
     let mut idx = 2usize; // $1 = orgtnt_id
     let (fsql, bindings) = filter_sql(filter, &mut idx);
@@ -140,8 +136,10 @@ async fn fetch_global_type(
 fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<(String, String)>) {
     match expr {
         FilterExpr::Leaf(tf) => {
-            let k = *idx; *idx += 1;
-            let v = *idx; *idx += 1;
+            let k = *idx;
+            *idx += 1;
+            let v = *idx;
+            *idx += 1;
             let sql = format!(
                 "(m.orgu_type->>${} = ${} OR m.orgu_type->${} @> to_jsonb(${}::text))",
                 k, v, k, v
@@ -165,7 +163,7 @@ fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<(String, Strin
 
 fn collect_filter_parts(
     exprs: &[FilterExpr],
-    idx:   &mut usize,
+    idx: &mut usize,
 ) -> (Vec<String>, Vec<(String, String)>) {
     let mut parts = Vec::new();
     let mut binds = Vec::new();
@@ -178,10 +176,10 @@ fn collect_filter_parts(
 }
 
 async fn run_filtered(
-    pool:     &PgPool,
-    sql:      String,
-    ids:      &[Uuid],
-    orgt_id:  Uuid,
+    pool: &PgPool,
+    sql: String,
+    ids: &[Uuid],
+    orgt_id: Uuid,
     bindings: Vec<(String, String)>,
 ) -> Result<Vec<Orgu>, OrgError> {
     let mut args = PgArguments::default();
@@ -198,10 +196,10 @@ async fn run_filtered(
 }
 
 async fn execute_step(
-    pool:    &PgPool,
-    ids:     &[Uuid],
+    pool: &PgPool,
+    ids: &[Uuid],
     orgt_id: Uuid,
-    step:    &Step,
+    step: &Step,
 ) -> Result<Vec<Orgu>, OrgError> {
     match step {
         Step::Children => {

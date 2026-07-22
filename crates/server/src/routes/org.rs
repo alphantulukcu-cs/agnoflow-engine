@@ -1,7 +1,7 @@
 use crate::error::AppError;
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,11 @@ pub fn router(pool: PgPool) -> Router {
             "/orgtnt/:id/users",
             get(list_users_by_tenant).post(create_user),
         )
-        .route("/orgtnt/:id/roles", get(list_roles_by_tenant))
+        .route(
+            "/orgtnt/:id/roles",
+            get(list_roles_by_tenant).post(create_role),
+        )
+        .route("/orgtnt/:id/roles/:rid", patch(update_role))
         .route("/orgtnt/:id/actors", get(list_actors))
         .route(
             "/orgtnt/:id/assignments",
@@ -31,7 +35,10 @@ pub fn router(pool: PgPool) -> Router {
             "/orgtnt/:id/delegations",
             get(list_delegations).post(create_delegation_admin),
         )
-        .route("/orgtnt/:id/delegations/:did", axum::routing::delete(revoke_delegation_admin))
+        .route(
+            "/orgtnt/:id/delegations/:did",
+            axum::routing::delete(revoke_delegation_admin),
+        )
         .route("/orgt/:id/orgu", get(list_orgu_by_tree))
         .route("/users/:id/orgu", get(list_user_orgu))
         .route("/users/:id/roles", get(list_user_roles))
@@ -169,6 +176,58 @@ async fn create_user(
     .map_err(Into::into)
 }
 
+/// Yeni rol ekle veya aynı isimli pasif rolü yeniden aktifleştir.
+#[derive(Deserialize)]
+struct CreateRoleBody {
+    name: String,
+    display_name: Option<String>,
+}
+
+async fn create_role(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<CreateRoleBody>,
+) -> Result<Json<wf_org::models::Role>, AppError> {
+    let name = body.name.trim();
+    if name.is_empty() {
+        return Err(AppError(
+            "rol adı boş olamaz".into(),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    repo::user_role::create_role(&pool, orgtnt_id, name, body.display_name.as_deref())
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+/// Rol adını/görünen adını günceller. Kullanıcı atamaları r_id üzerinden kaldığı
+/// için değişiklik rolün geçtiği tüm aktör listelerine yansır.
+#[derive(Deserialize)]
+struct UpdateRoleBody {
+    name: String,
+    display_name: String,
+}
+
+async fn update_role(
+    State(pool): State<PgPool>,
+    Path((orgtnt_id, r_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<UpdateRoleBody>,
+) -> Result<Json<wf_org::models::Role>, AppError> {
+    let name = body.name.trim();
+    let display_name = body.display_name.trim();
+    if name.is_empty() || display_name.is_empty() {
+        return Err(AppError(
+            "rol adı ve görünen ad boş olamaz".into(),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    repo::user_role::update_role(&pool, orgtnt_id, r_id, name, display_name)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
 /// Sim playground: (kullanıcı, birim, rol) atamasını garantiler → dönüşte hazır aktör satırı.
 /// Kritere uygun aktör yoksa UI bununla bir aktör üretir.
 #[derive(Deserialize)]
@@ -213,13 +272,17 @@ async fn revoke_assignment(
     Path(orgtnt_id): Path<Uuid>,
     Query(q): Query<RevokeAssignQuery>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    let removed = repo::user_role::revoke_assignment(&pool, orgtnt_id, q.u_id, q.orgu_id, &q.role_name)
-        .await
-        .map_err(AppError::from)?;
+    let removed =
+        repo::user_role::revoke_assignment(&pool, orgtnt_id, q.u_id, q.orgu_id, &q.role_name)
+            .await
+            .map_err(AppError::from)?;
     if removed {
         Ok(axum::http::StatusCode::NO_CONTENT)
     } else {
-        Err(AppError("atama bulunamadı".into(), axum::http::StatusCode::NOT_FOUND))
+        Err(AppError(
+            "atama bulunamadı".into(),
+            axum::http::StatusCode::NOT_FOUND,
+        ))
     }
 }
 

@@ -1,9 +1,9 @@
-use opendal::{Operator, services};
+use opendal::{services, Operator};
 
 #[derive(Debug, Clone)]
 pub struct StorageConfig {
-    pub backend:   StorageBackend,
-    pub path:      String,
+    pub backend: StorageBackend,
+    pub path: String,
     pub s3_bucket: Option<String>,
     pub s3_region: Option<String>,
 }
@@ -21,11 +21,11 @@ impl StorageConfig {
             .as_str()
         {
             "s3" => StorageBackend::S3,
-            _    => StorageBackend::Local,
+            _ => StorageBackend::Local,
         };
         Self {
             backend,
-            path:      std::env::var("STORAGE_PATH").unwrap_or_else(|_| "./storage".into()),
+            path: std::env::var("STORAGE_PATH").unwrap_or_else(|_| "./storage".into()),
             s3_bucket: std::env::var("STORAGE_S3_BUCKET").ok(),
             s3_region: std::env::var("STORAGE_S3_REGION").ok(),
         }

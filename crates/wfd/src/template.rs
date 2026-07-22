@@ -11,18 +11,18 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, FromRow)]
 pub struct WfdTemplate {
     pub template_id: Uuid,
-    pub orgtnt_id:   Uuid,
+    pub orgtnt_id: Uuid,
     /// 'workflow' → WFD dokümanı; 'context' → {properties, required} şeması.
-    pub kind:        String,
-    pub scope:       String,
-    pub project_id:  Option<Uuid>,
-    pub name:        String,
+    pub kind: String,
+    pub scope: String,
+    pub project_id: Option<Uuid>,
+    pub name: String,
     pub description: Option<String>,
-    pub version:     i32,
-    pub created_by:  Uuid,
-    pub is_active:   bool,
-    pub created_at:  DateTime<Utc>,
-    pub updated_at:  DateTime<Utc>,
+    pub version: i32,
+    pub created_by: Uuid,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 const COLS: &str = "template_id, orgtnt_id, kind, scope, project_id, name, description, \
@@ -305,17 +305,15 @@ pub async fn visibility(
     pool: &PgPool,
     template_id: Uuid,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), WfdError> {
-    let projects: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT project_id FROM wf.wfd_template_project WHERE template_id = $1",
-    )
-    .bind(template_id)
-    .fetch_all(pool)
-    .await?;
-    let users: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT user_id FROM wf.wfd_template_user WHERE template_id = $1",
-    )
-    .bind(template_id)
-    .fetch_all(pool)
-    .await?;
+    let projects: Vec<Uuid> =
+        sqlx::query_scalar("SELECT project_id FROM wf.wfd_template_project WHERE template_id = $1")
+            .bind(template_id)
+            .fetch_all(pool)
+            .await?;
+    let users: Vec<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM wf.wfd_template_user WHERE template_id = $1")
+            .bind(template_id)
+            .fetch_all(pool)
+            .await?;
     Ok((projects, users))
 }

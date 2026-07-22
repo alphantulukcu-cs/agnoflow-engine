@@ -14,7 +14,7 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::delegation::DelegationGrant;
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::{AutoexecDef, CandidateActor, COrgu, Wfd};
+use wfe_core::types::wfd_v22::{AutoexecDef, COrgu, CandidateActor, Wfd};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::AuthDecision;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
@@ -92,11 +92,19 @@ impl AutoexecRunner for NoRunner {
 }
 
 fn actor(orgu: Uuid, user: Uuid, role: &str) -> Actor {
-    Actor { orgu_id: orgu, user_id: user, role: role.into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: user,
+        role: role.into(),
+    }
 }
 
 fn wfes_at(node: &str) -> Wfes {
-    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
     let wfah = Wfah::empty().push("start".into(), system, None);
     let created_at = wfah.entries()[0].applied_at;
     Wfes {
@@ -158,20 +166,34 @@ async fn delegated_person_can_claim() {
         delegations: vec![grant(ahmet, orgu, person_grantee("ayse"))],
     };
     let runner = NoRunner;
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
 
     // Ayşe clerk — DOĞRUDAN uygun değil, ama vekaleten uygun olmalı.
     let ayse_actor = actor(orgu, ayse, "clerk");
     assert_eq!(
-        engine.can_claim(&wfd, &wfes, &ayse_actor, None).await.unwrap(),
+        engine
+            .can_claim(&wfd, &wfes, &ayse_actor, None)
+            .await
+            .unwrap(),
         ClaimCheck::Ok
     );
 
     // provenance: Delegated(Ahmet).
-    match engine.claim_decision(&wfd, &wfes, &ayse_actor, None).await.unwrap() {
-        AuthDecision::Delegated { delegator_user_id, seat_role, .. } => {
+    match engine
+        .claim_decision(&wfd, &wfes, &ayse_actor, None)
+        .await
+        .unwrap()
+    {
+        AuthDecision::Delegated {
+            delegator_user_id,
+            seat_role,
+            ..
+        } => {
             assert_eq!(delegator_user_id, ahmet);
             assert_eq!(seat_role, "creditAnalyst");
         }
@@ -193,14 +215,20 @@ async fn delegated_pool_can_claim() {
         delegations: vec![grant(ahmet, orgu, pool_grantee("backup"))],
     };
     let runner = NoRunner;
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
 
     // Bob backup — havuz grantee'ye uyar → vekaleten claim'leyebilir.
     let bob_actor = actor(orgu, bob, "backup");
     assert_eq!(
-        engine.can_claim(&wfd, &wfes, &bob_actor, None).await.unwrap(),
+        engine
+            .can_claim(&wfd, &wfes, &bob_actor, None)
+            .await
+            .unwrap(),
         ClaimCheck::Ok
     );
 }
@@ -217,13 +245,19 @@ async fn non_grantee_cannot_claim() {
         delegations: vec![grant(ahmet, orgu, person_grantee("ayse"))],
     };
     let runner = NoRunner;
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
 
     let cem_actor = actor(orgu, cem, "clerk");
     assert_eq!(
-        engine.can_claim(&wfd, &wfes, &cem_actor, None).await.unwrap(),
+        engine
+            .can_claim(&wfd, &wfes, &cem_actor, None)
+            .await
+            .unwrap(),
         ClaimCheck::NotEligible
     );
 }
@@ -238,13 +272,19 @@ async fn no_active_delegation_denies() {
         delegations: vec![], // süresi dolmuş/iptal → aday yok
     };
     let runner = NoRunner;
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
 
     let ayse_actor = actor(orgu, ayse, "clerk");
     assert_eq!(
-        engine.can_claim(&wfd, &wfes, &ayse_actor, None).await.unwrap(),
+        engine
+            .can_claim(&wfd, &wfes, &ayse_actor, None)
+            .await
+            .unwrap(),
         ClaimCheck::NotEligible
     );
 }
@@ -259,12 +299,18 @@ async fn direct_eligibility_still_works() {
         delegations: vec![],
     };
     let runner = NoRunner;
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
 
     let a = actor(orgu, analyst, "creditAnalyst");
-    assert_eq!(engine.can_claim(&wfd, &wfes, &a, None).await.unwrap(), ClaimCheck::Ok);
+    assert_eq!(
+        engine.can_claim(&wfd, &wfes, &a, None).await.unwrap(),
+        ClaimCheck::Ok
+    );
     // Doğrudan uygun → provenance Direct (vekalet marker'ı YAZILMAZ).
     assert_eq!(
         engine.claim_decision(&wfd, &wfes, &a, None).await.unwrap(),
@@ -284,13 +330,19 @@ async fn delegator_not_holding_seat_denies() {
         delegations: vec![grant(ahmet, orgu, person_grantee("ayse"))],
     };
     let runner = NoRunner;
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
 
     let ayse_actor = actor(orgu, ayse, "clerk");
     assert_eq!(
-        engine.can_claim(&wfd, &wfes, &ayse_actor, None).await.unwrap(),
+        engine
+            .can_claim(&wfd, &wfes, &ayse_actor, None)
+            .await
+            .unwrap(),
         ClaimCheck::NotEligible
     );
 }

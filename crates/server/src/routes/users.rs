@@ -15,7 +15,10 @@ use uuid::Uuid;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(list_users).post(create_user))
-        .route("/:id", axum::routing::patch(update_user).delete(delete_user))
+        .route(
+            "/:id",
+            axum::routing::patch(update_user).delete(delete_user),
+        )
         .route("/:id/projects", put(set_projects))
         .with_state(state)
 }
@@ -27,7 +30,11 @@ fn internal(e: impl std::fmt::Display) -> AppError {
 }
 
 /// Hedef kullanıcıyı admin'in tenant'ında bulur — cross-tenant erişimi 404'a düşürür.
-async fn fetch_target(pool: &sqlx::PgPool, auth: &AppAuth, user_id: Uuid) -> Result<UserRow, AppError> {
+async fn fetch_target(
+    pool: &sqlx::PgPool,
+    auth: &AppAuth,
+    user_id: Uuid,
+) -> Result<UserRow, AppError> {
     sqlx::query_as::<_, UserRow>(&format!(
         "SELECT {USER_COLS} FROM wf.app_user WHERE user_id = $1 AND orgtnt_id = $2",
     ))
@@ -52,7 +59,10 @@ async fn active_admin_count(pool: &sqlx::PgPool, orgtnt_id: Uuid) -> Result<i64,
 
 /// Hedef aktif bir admin ise ve tenant'ta başka aktif admin yoksa işlemi reddeder.
 async fn guard_last_admin(pool: &sqlx::PgPool, target: &UserRow) -> Result<(), AppError> {
-    if target.role == "admin" && target.is_active && active_admin_count(pool, target.orgtnt_id).await? <= 1 {
+    if target.role == "admin"
+        && target.is_active
+        && active_admin_count(pool, target.orgtnt_id).await? <= 1
+    {
         return Err(AppError(
             "Tenant'ın son aktif admin'i silinemez/düşürülemez".into(),
             StatusCode::CONFLICT,
@@ -61,7 +71,10 @@ async fn guard_last_admin(pool: &sqlx::PgPool, target: &UserRow) -> Result<(), A
     Ok(())
 }
 
-async fn list_users(State(s): State<AppState>, auth: AppAuth) -> Result<Json<Vec<UserView>>, AppError> {
+async fn list_users(
+    State(s): State<AppState>,
+    auth: AppAuth,
+) -> Result<Json<Vec<UserView>>, AppError> {
     auth.require_admin()?;
     let rows = sqlx::query_as::<_, UserRow>(&format!(
         "SELECT {USER_COLS} FROM wf.app_user WHERE orgtnt_id = $1 ORDER BY created_at",
@@ -99,14 +112,23 @@ async fn create_user(
     let email = b.email.trim().to_lowercase();
     let name = b.display_name.trim();
     if email.is_empty() || name.is_empty() {
-        return Err(AppError("E-posta ve ad zorunludur".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "E-posta ve ad zorunludur".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     if b.password.len() < 6 {
-        return Err(AppError("Şifre en az 6 karakter olmalı".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "Şifre en az 6 karakter olmalı".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let role = b.role.as_deref().unwrap_or("member");
     if !matches!(role, "admin" | "member") {
-        return Err(AppError("Rol 'admin' ya da 'member' olmalı".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "Rol 'admin' ya da 'member' olmalı".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let hash = bcrypt::hash(&b.password, BCRYPT_COST).map_err(internal)?;
 
@@ -157,7 +179,10 @@ async fn update_user(
 
     if let Some(role) = b.role.as_deref() {
         if !matches!(role, "admin" | "member") {
-            return Err(AppError("Rol 'admin' ya da 'member' olmalı".into(), StatusCode::BAD_REQUEST));
+            return Err(AppError(
+                "Rol 'admin' ya da 'member' olmalı".into(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
     }
     // Admin'i düşüren veya pasifleştiren değişiklikler son-admin kuralına takılır.
@@ -169,12 +194,19 @@ async fn update_user(
 
     let password_hash = match b.password.as_deref() {
         Some(pw) if pw.len() < 6 => {
-            return Err(AppError("Şifre en az 6 karakter olmalı".into(), StatusCode::BAD_REQUEST))
+            return Err(AppError(
+                "Şifre en az 6 karakter olmalı".into(),
+                StatusCode::BAD_REQUEST,
+            ))
         }
         Some(pw) => Some(bcrypt::hash(pw, BCRYPT_COST).map_err(internal)?),
         None => None,
     };
-    let display_name = b.display_name.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let display_name = b
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
 
     let row = sqlx::query_as::<_, UserRow>(&format!(
         "UPDATE wf.app_user SET \
@@ -234,14 +266,19 @@ async fn set_projects(
 
     for a in &assignments {
         if !matches!(a.role.as_str(), "admin" | "user") {
-            return Err(AppError("Proje rolü 'admin' ya da 'user' olmalı".into(), StatusCode::BAD_REQUEST));
+            return Err(AppError(
+                "Proje rolü 'admin' ya da 'user' olmalı".into(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
         wf_wfd::project::assert_in_tenant(&s.pool, a.project_id, auth.orgtnt_id)
             .await
-            .map_err(|_| AppError(
-                format!("Proje bulunamadı: {}", a.project_id),
-                StatusCode::NOT_FOUND,
-            ))?;
+            .map_err(|_| {
+                AppError(
+                    format!("Proje bulunamadı: {}", a.project_id),
+                    StatusCode::NOT_FOUND,
+                )
+            })?;
     }
 
     let mut tx = s.pool.begin().await.map_err(internal)?;

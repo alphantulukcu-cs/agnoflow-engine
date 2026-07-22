@@ -225,32 +225,59 @@ mod tests {
     #[tokio::test]
     async fn role_match_with_assignment_succeeds() {
         let orgu = Uuid::new_v4();
-        let org = MockOrg { units: vec![unit(orgu)], role_assigned: true, ident: None };
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: true,
+            ident: None,
+        };
         let a = actor(orgu, "creditAnalyst");
-        assert!(authorize(&rule(Some(vec!["creditAnalyst"]), None), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
-            .await
-            .unwrap());
+        assert!(authorize(
+            &rule(Some(vec!["creditAnalyst"]), None),
+            &a,
+            env(&EMPTY_CTX, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
     async fn role_match_without_assignment_fails() {
         let orgu = Uuid::new_v4();
-        let org = MockOrg { units: vec![unit(orgu)], role_assigned: false, ident: None };
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: false,
+            ident: None,
+        };
         let a = actor(orgu, "creditAnalyst");
-        assert!(!authorize(&rule(Some(vec!["creditAnalyst"]), None), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
-            .await
-            .unwrap());
+        assert!(!authorize(
+            &rule(Some(vec!["creditAnalyst"]), None),
+            &a,
+            env(&EMPTY_CTX, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
     async fn actor_outside_resolved_orgu_fails_even_with_role() {
         let orgu = Uuid::new_v4();
         let other = Uuid::new_v4();
-        let org = MockOrg { units: vec![unit(other)], role_assigned: true, ident: None };
+        let org = MockOrg {
+            units: vec![unit(other)],
+            role_assigned: true,
+            ident: None,
+        };
         let a = actor(orgu, "creditAnalyst");
-        assert!(!authorize(&rule(Some(vec!["creditAnalyst"]), None), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
-            .await
-            .unwrap());
+        assert!(!authorize(
+            &rule(Some(vec!["creditAnalyst"]), None),
+            &a,
+            env(&EMPTY_CTX, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
@@ -262,15 +289,24 @@ mod tests {
             ident: Some("user_ayse".into()),
         };
         let a = actor(orgu, "branchClerk");
-        assert!(authorize(&rule(None, Some(vec!["user_ayse"])), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
-            .await
-            .unwrap());
+        assert!(authorize(
+            &rule(None, Some(vec!["user_ayse"])),
+            &a,
+            env(&EMPTY_CTX, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
     }
 
     #[tokio::test]
     async fn c_u_match_by_uuid_string() {
         let orgu = Uuid::new_v4();
-        let org = MockOrg { units: vec![unit(orgu)], role_assigned: false, ident: None };
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: false,
+            ident: None,
+        };
         let a = actor(orgu, "x");
         let uuid_str = a.user_id.to_string();
         let r = CandidateActor {
@@ -278,26 +314,43 @@ mod tests {
             c_r: None,
             c_u: Some(vec![uuid_str]),
         };
-        assert!(authorize(&r, &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org).await.unwrap());
+        assert!(authorize(&r, &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
     async fn missing_both_channels_is_false_not_wildcard() {
         let orgu = Uuid::new_v4();
-        let org = MockOrg { units: vec![unit(orgu)], role_assigned: true, ident: Some("u".into()) };
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: true,
+            ident: Some("u".into()),
+        };
         let a = actor(orgu, "any");
-        assert!(!authorize(&rule(None, None), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
-            .await
-            .unwrap());
+        assert!(
+            !authorize(&rule(None, None), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
     async fn role_in_list_but_different_actor_role_fails() {
         let orgu = Uuid::new_v4();
-        let org = MockOrg { units: vec![unit(orgu)], role_assigned: true, ident: None };
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: true,
+            ident: None,
+        };
         let a = actor(orgu, "branchClerk");
-        assert!(!authorize(&rule(Some(vec!["creditAnalyst"]), None), &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
-            .await
-            .unwrap());
+        assert!(!authorize(
+            &rule(Some(vec!["creditAnalyst"]), None),
+            &a,
+            env(&EMPTY_CTX, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
     }
 }

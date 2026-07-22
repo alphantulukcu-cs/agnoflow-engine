@@ -5,8 +5,8 @@ pub mod models;
 pub mod org_adapter;
 pub mod priority;
 pub mod repo;
-pub mod sim;
 pub mod runner;
+pub mod sim;
 pub mod timer;
 pub mod wfe_adapter;
 

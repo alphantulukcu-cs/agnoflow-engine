@@ -13,7 +13,10 @@ pub struct TypeFilter {
 
 impl TypeFilter {
     fn new(key: impl Into<String>, val: impl Into<String>) -> Self {
-        Self { key: key.into(), val: val.into() }
+        Self {
+            key: key.into(),
+            val: val.into(),
+        }
     }
 }
 
@@ -61,9 +64,9 @@ pub fn parse(expr: &str) -> Result<Pipeline, ParseError> {
     // (ör. "*:[type:sube].parent" = tüm şube'lerin parentları).
     if let Some(after) = expr.strip_prefix("*:") {
         if !after.starts_with('[') {
-            return Err(ParseError::InvalidFilter(
-                format!("global tip selektörü '[filter]' bekliyor: {expr}"),
-            ));
+            return Err(ParseError::InvalidFilter(format!(
+                "global tip selektörü '[filter]' bekliyor: {expr}"
+            )));
         }
         let close = after
             .find(']')
@@ -82,9 +85,7 @@ pub fn parse(expr: &str) -> Result<Pipeline, ParseError> {
         return Ok(Pipeline { steps });
     }
 
-    let rest = expr
-        .strip_prefix("self")
-        .ok_or(ParseError::MissingSelf)?;
+    let rest = expr.strip_prefix("self").ok_or(ParseError::MissingSelf)?;
 
     if rest.is_empty() {
         return Ok(Pipeline { steps: vec![] });
@@ -125,7 +126,7 @@ fn split_tokens(s: &str) -> Vec<&str> {
 fn parse_type_filter(inner: &str) -> TypeFilter {
     match inner.split_once(':') {
         Some((key, val)) => TypeFilter::new(key, val),
-        None             => TypeFilter::new("type", inner),
+        None => TypeFilter::new("type", inner),
     }
 }
 
@@ -144,10 +145,21 @@ fn tokenize_filter(s: &str) -> Result<Vec<FTok>, ParseError> {
     let mut chars = s.chars().peekable();
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' => { chars.next(); }
-            '!' => { chars.next(); out.push(FTok::Not); }
-            '(' => { chars.next(); out.push(FTok::LParen); }
-            ')' => { chars.next(); out.push(FTok::RParen); }
+            ' ' | '\t' => {
+                chars.next();
+            }
+            '!' => {
+                chars.next();
+                out.push(FTok::Not);
+            }
+            '(' => {
+                chars.next();
+                out.push(FTok::LParen);
+            }
+            ')' => {
+                chars.next();
+                out.push(FTok::RParen);
+            }
             '&' => {
                 chars.next();
                 if chars.next() == Some('&') {
@@ -184,20 +196,28 @@ fn tokenize_filter(s: &str) -> Result<Vec<FTok>, ParseError> {
 
 struct FParser {
     tokens: Vec<FTok>,
-    pos:    usize,
+    pos: usize,
 }
 
 impl FParser {
-    fn new(tokens: Vec<FTok>) -> Self { Self { tokens, pos: 0 } }
+    fn new(tokens: Vec<FTok>) -> Self {
+        Self { tokens, pos: 0 }
+    }
 
-    fn peek(&self) -> Option<&FTok> { self.tokens.get(self.pos) }
+    fn peek(&self) -> Option<&FTok> {
+        self.tokens.get(self.pos)
+    }
 
-    fn advance(&mut self) { self.pos += 1; }
+    fn advance(&mut self) {
+        self.pos += 1;
+    }
 
     fn parse(&mut self) -> Result<FilterExpr, ParseError> {
         let expr = self.parse_or()?;
         if self.peek().is_some() {
-            return Err(ParseError::InvalidFilter("unexpected tokens after expression".to_string()));
+            return Err(ParseError::InvalidFilter(
+                "unexpected tokens after expression".to_string(),
+            ));
         }
         Ok(expr)
     }
@@ -208,8 +228,11 @@ impl FParser {
             self.advance();
             let right = self.parse_and()?;
             left = match left {
-                FilterExpr::Or(mut v) => { v.push(right); FilterExpr::Or(v) }
-                other                 => FilterExpr::Or(vec![other, right]),
+                FilterExpr::Or(mut v) => {
+                    v.push(right);
+                    FilterExpr::Or(v)
+                }
+                other => FilterExpr::Or(vec![other, right]),
             };
         }
         Ok(left)
@@ -221,8 +244,11 @@ impl FParser {
             self.advance();
             let right = self.parse_not()?;
             left = match left {
-                FilterExpr::And(mut v) => { v.push(right); FilterExpr::And(v) }
-                other                  => FilterExpr::And(vec![other, right]),
+                FilterExpr::And(mut v) => {
+                    v.push(right);
+                    FilterExpr::And(v)
+                }
+                other => FilterExpr::And(vec![other, right]),
             };
         }
         Ok(left)
@@ -257,8 +283,13 @@ impl FParser {
                 self.advance();
                 Ok(FilterExpr::Leaf(parse_type_filter(&s)))
             }
-            None  => Err(ParseError::InvalidFilter("expected filter term".to_string())),
-            other => Err(ParseError::InvalidFilter(format!("unexpected token {:?}", other))),
+            None => Err(ParseError::InvalidFilter(
+                "expected filter term".to_string(),
+            )),
+            other => Err(ParseError::InvalidFilter(format!(
+                "unexpected token {:?}",
+                other
+            ))),
         }
     }
 }
@@ -273,40 +304,60 @@ fn parse_filter_expr(inner: &str) -> Result<FilterExpr, ParseError> {
 
 fn parse_step(token: &str) -> Result<Step, ParseError> {
     match token {
-        "parent"    => return Ok(Step::Parent),
-        "siblings"  => return Ok(Step::Siblings),
-        "children"  => return Ok(Step::Children),
+        "parent" => return Ok(Step::Parent),
+        "siblings" => return Ok(Step::Siblings),
+        "children" => return Ok(Step::Children),
         "ancestors" => return Ok(Step::Ancestors),
-        _           => {}
+        _ => {}
     }
 
     if let Some(rest) = token.strip_prefix("siblings[") {
-        let inner = rest.strip_suffix(']').ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
-        if inner.is_empty() { return Err(ParseError::UnknownStep(token.to_string())); }
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
+        if inner.is_empty() {
+            return Err(ParseError::UnknownStep(token.to_string()));
+        }
         return Ok(Step::SiblingsT(parse_filter_expr(inner)?));
     }
 
     if let Some(rest) = token.strip_prefix("children[") {
-        let inner = rest.strip_suffix(']').ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
-        if inner.is_empty() { return Err(ParseError::UnknownStep(token.to_string())); }
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
+        if inner.is_empty() {
+            return Err(ParseError::UnknownStep(token.to_string()));
+        }
         return Ok(Step::ChildrenT(parse_filter_expr(inner)?));
     }
 
     if let Some(rest) = token.strip_prefix("up[") {
-        let inner = rest.strip_suffix(']').ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
-        if inner.is_empty() { return Err(ParseError::UnknownStep(token.to_string())); }
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
+        if inner.is_empty() {
+            return Err(ParseError::UnknownStep(token.to_string()));
+        }
         return Ok(Step::UpT(parse_filter_expr(inner)?));
     }
 
     if let Some(rest) = token.strip_prefix("down[") {
-        let inner = rest.strip_suffix(']').ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
-        if inner.is_empty() { return Err(ParseError::UnknownStep(token.to_string())); }
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
+        if inner.is_empty() {
+            return Err(ParseError::UnknownStep(token.to_string()));
+        }
         return Ok(Step::DownT(parse_filter_expr(inner)?));
     }
 
     if let Some(rest) = token.strip_prefix("ancestors[") {
-        let inner = rest.strip_suffix(']').ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
-        if inner.is_empty() { return Err(ParseError::UnknownStep(token.to_string())); }
+        let inner = rest
+            .strip_suffix(']')
+            .ok_or_else(|| ParseError::UnknownStep(token.to_string()))?;
+        if inner.is_empty() {
+            return Err(ParseError::UnknownStep(token.to_string()));
+        }
         return Ok(Step::AncestorsT(parse_filter_expr(inner)?));
     }
 
@@ -321,35 +372,57 @@ mod tests {
         parse(expr).unwrap().steps
     }
 
-    fn tf(key: &str, val: &str) -> TypeFilter { TypeFilter::new(key, val) }
+    fn tf(key: &str, val: &str) -> TypeFilter {
+        TypeFilter::new(key, val)
+    }
 
-    fn leaf(val: &str) -> FilterExpr { FilterExpr::Leaf(TypeFilter::new("type", val)) }
-    fn kleaf(key: &str, val: &str) -> FilterExpr { FilterExpr::Leaf(tf(key, val)) }
+    fn leaf(val: &str) -> FilterExpr {
+        FilterExpr::Leaf(TypeFilter::new("type", val))
+    }
+    fn kleaf(key: &str, val: &str) -> FilterExpr {
+        FilterExpr::Leaf(tf(key, val))
+    }
 
     #[test]
-    fn test_bare_self() { assert_eq!(steps("self"), vec![]); }
+    fn test_bare_self() {
+        assert_eq!(steps("self"), vec![]);
+    }
 
     #[test]
-    fn test_parent() { assert_eq!(steps("self.parent"), vec![Step::Parent]); }
+    fn test_parent() {
+        assert_eq!(steps("self.parent"), vec![Step::Parent]);
+    }
 
     #[test]
-    fn test_siblings() { assert_eq!(steps("self.siblings"), vec![Step::Siblings]); }
+    fn test_siblings() {
+        assert_eq!(steps("self.siblings"), vec![Step::Siblings]);
+    }
 
     #[test]
     fn test_siblings_t() {
-        assert_eq!(steps("self.siblings[sube]"), vec![Step::SiblingsT(leaf("sube"))]);
+        assert_eq!(
+            steps("self.siblings[sube]"),
+            vec![Step::SiblingsT(leaf("sube"))]
+        );
     }
 
     #[test]
-    fn test_children() { assert_eq!(steps("self.children"), vec![Step::Children]); }
+    fn test_children() {
+        assert_eq!(steps("self.children"), vec![Step::Children]);
+    }
 
     #[test]
     fn test_children_t() {
-        assert_eq!(steps("self.children[il]"), vec![Step::ChildrenT(leaf("il"))]);
+        assert_eq!(
+            steps("self.children[il]"),
+            vec![Step::ChildrenT(leaf("il"))]
+        );
     }
 
     #[test]
-    fn test_up_t() { assert_eq!(steps("self.up[bolge]"), vec![Step::UpT(leaf("bolge"))]); }
+    fn test_up_t() {
+        assert_eq!(steps("self.up[bolge]"), vec![Step::UpT(leaf("bolge"))]);
+    }
 
     #[test]
     fn test_two_step_chain() {
@@ -363,7 +436,11 @@ mod tests {
     fn test_three_step_chain() {
         assert_eq!(
             steps("self.up[bolge].children[il].children[sube]"),
-            vec![Step::UpT(leaf("bolge")), Step::ChildrenT(leaf("il")), Step::ChildrenT(leaf("sube"))]
+            vec![
+                Step::UpT(leaf("bolge")),
+                Step::ChildrenT(leaf("il")),
+                Step::ChildrenT(leaf("sube"))
+            ]
         );
     }
 
@@ -382,29 +459,49 @@ mod tests {
 
     #[test]
     fn test_unknown_step() {
-        assert!(matches!(parse("self.garbage"), Err(ParseError::UnknownStep(_))));
+        assert!(matches!(
+            parse("self.garbage"),
+            Err(ParseError::UnknownStep(_))
+        ));
     }
 
     #[test]
-    fn test_whitespace_trimmed() { assert_eq!(steps("  self  "), vec![]); }
+    fn test_whitespace_trimmed() {
+        assert_eq!(steps("  self  "), vec![]);
+    }
 
     #[test]
     fn test_key_val_children() {
-        assert_eq!(steps("self.children[special:doviz]"), vec![Step::ChildrenT(kleaf("special", "doviz"))]);
+        assert_eq!(
+            steps("self.children[special:doviz]"),
+            vec![Step::ChildrenT(kleaf("special", "doviz"))]
+        );
     }
 
     #[test]
     fn test_empty_type_rejected() {
-        assert!(matches!(parse("self.siblings[]"), Err(ParseError::UnknownStep(_))));
-        assert!(matches!(parse("self.children[]"), Err(ParseError::UnknownStep(_))));
-        assert!(matches!(parse("self.up[]"),       Err(ParseError::UnknownStep(_))));
+        assert!(matches!(
+            parse("self.siblings[]"),
+            Err(ParseError::UnknownStep(_))
+        ));
+        assert!(matches!(
+            parse("self.children[]"),
+            Err(ParseError::UnknownStep(_))
+        ));
+        assert!(matches!(
+            parse("self.up[]"),
+            Err(ParseError::UnknownStep(_))
+        ));
     }
 
     #[test]
     fn test_and_filter() {
         assert_eq!(
             steps("self.children[special:kredi && type:sube]"),
-            vec![Step::ChildrenT(FilterExpr::And(vec![kleaf("special", "kredi"), leaf("sube")]))]
+            vec![Step::ChildrenT(FilterExpr::And(vec![
+                kleaf("special", "kredi"),
+                leaf("sube")
+            ]))]
         );
     }
 
@@ -412,7 +509,10 @@ mod tests {
     fn test_or_filter() {
         assert_eq!(
             steps("self.siblings[type:sube || type:ilce]"),
-            vec![Step::SiblingsT(FilterExpr::Or(vec![leaf("sube"), leaf("ilce")]))]
+            vec![Step::SiblingsT(FilterExpr::Or(vec![
+                leaf("sube"),
+                leaf("ilce")
+            ]))]
         );
     }
 
@@ -436,7 +536,10 @@ mod tests {
 
     #[test]
     fn test_ancestors_t() {
-        assert_eq!(steps("self.ancestors[bolge]"), vec![Step::AncestorsT(leaf("bolge"))]);
+        assert_eq!(
+            steps("self.ancestors[bolge]"),
+            vec![Step::AncestorsT(leaf("bolge"))]
+        );
     }
 
     #[test]
@@ -446,7 +549,10 @@ mod tests {
             vec![
                 Step::Parent,
                 Step::Siblings,
-                Step::ChildrenT(FilterExpr::And(vec![kleaf("special", "kredi"), leaf("sube")])),
+                Step::ChildrenT(FilterExpr::And(vec![
+                    kleaf("special", "kredi"),
+                    leaf("sube")
+                ])),
             ]
         );
     }
@@ -458,13 +564,19 @@ mod tests {
         assert_eq!(steps("*:[sube]"), vec![Step::GlobalType(leaf("sube"))]);
         assert_eq!(
             steps("*:[type:sube || type:ilce]"),
-            vec![Step::GlobalType(FilterExpr::Or(vec![leaf("sube"), leaf("ilce")]))]
+            vec![Step::GlobalType(FilterExpr::Or(vec![
+                leaf("sube"),
+                leaf("ilce")
+            ]))]
         );
     }
 
     #[test]
     fn test_global_type_missing_bracket_rejected() {
-        assert!(matches!(parse("*:type:sube"), Err(ParseError::InvalidFilter(_))));
+        assert!(matches!(
+            parse("*:type:sube"),
+            Err(ParseError::InvalidFilter(_))
+        ));
     }
 
     #[test]

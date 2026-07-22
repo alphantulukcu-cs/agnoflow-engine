@@ -1,14 +1,14 @@
+use super::actor::Actor;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use super::actor::Actor;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WfahEntry {
-    pub seq:        u32,
-    pub action:     String,
-    pub actor:      Actor,
-    pub input:      Option<Value>,
+    pub seq: u32,
+    pub action: String,
+    pub actor: Actor,
+    pub input: Option<Value>,
     pub applied_at: DateTime<Utc>,
 }
 
@@ -25,7 +25,13 @@ impl Wfah {
     pub fn push(&self, action: String, actor: Actor, input: Option<Value>) -> Self {
         let seq = self.0.last().map(|e| e.seq + 1).unwrap_or(1);
         let mut entries = self.0.clone();
-        entries.push(WfahEntry { seq, action, actor, input, applied_at: Utc::now() });
+        entries.push(WfahEntry {
+            seq,
+            action,
+            actor,
+            input,
+            applied_at: Utc::now(),
+        });
         Self(entries)
     }
 
@@ -40,7 +46,11 @@ mod tests {
     use uuid::Uuid;
 
     fn actor() -> Actor {
-        Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: "clerk".into() }
+        Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        }
     }
 
     #[test]

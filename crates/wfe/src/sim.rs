@@ -12,7 +12,9 @@ use wfe_core::types::{
     wfd_v22::WftTarget,
     wfe::WfeStatus,
 };
-use wfe_core::v22::ports::{BranchState, BranchStatus, CommitOutcome, NewWfe, TransitionCommit, Wfes};
+use wfe_core::v22::ports::{
+    BranchState, BranchStatus, CommitOutcome, NewWfe, TransitionCommit, Wfes,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SimState {

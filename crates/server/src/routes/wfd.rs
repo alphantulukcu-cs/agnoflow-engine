@@ -67,13 +67,12 @@ async fn list_wfd(
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     if let Some(auth) = &auth {
         if auth.role != "admin" {
-            let member_of: Vec<Uuid> = sqlx::query_scalar(
-                "SELECT project_id FROM wf.project_member WHERE user_id = $1",
-            )
-            .bind(auth.user_id)
-            .fetch_all(&s.pool)
-            .await
-            .map_err(internal_error)?;
+            let member_of: Vec<Uuid> =
+                sqlx::query_scalar("SELECT project_id FROM wf.project_member WHERE user_id = $1")
+                    .bind(auth.user_id)
+                    .fetch_all(&s.pool)
+                    .await
+                    .map_err(internal_error)?;
             rows.retain(|w| member_of.contains(&w.project_id));
         }
     }
@@ -224,7 +223,9 @@ async fn create_draft(
     let project_id = resolve_project_for_write(&s, &auth, b.orgtnt_id, b.project_id).await?;
     if let Some(tid) = b.source_template_id {
         // İz güvenilir olsun: şablon var ve aynı tenant'ta olmalı.
-        let tpl = wf_wfd::template::get(&s.pool, tid).await.map_err(map_wfd_err)?;
+        let tpl = wf_wfd::template::get(&s.pool, tid)
+            .await
+            .map_err(map_wfd_err)?;
         if tpl.orgtnt_id != auth.orgtnt_id {
             return Err(AppError("Şablon bulunamadı".into(), StatusCode::NOT_FOUND));
         }
@@ -293,18 +294,20 @@ async fn require_can_publish_wfd(
     wfd_id: Uuid,
     version: i32,
 ) -> Result<(), AppError> {
-    if require_approver_on_wfd(s, auth, wfd_id, version).await.is_ok() {
+    if require_approver_on_wfd(s, auth, wfd_id, version)
+        .await
+        .is_ok()
+    {
         return Ok(());
     }
     // Onaycı değil: tasarım yetkisi + kullanıcı bayrağı gerekir.
     require_design_on_wfd(s, auth, wfd_id, version).await?;
-    let flag: Option<bool> = sqlx::query_scalar(
-        "SELECT can_publish FROM wf.app_user WHERE user_id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_optional(&s.pool)
-    .await
-    .map_err(internal_error)?;
+    let flag: Option<bool> =
+        sqlx::query_scalar("SELECT can_publish FROM wf.app_user WHERE user_id = $1")
+            .bind(auth.user_id)
+            .fetch_optional(&s.pool)
+            .await
+            .map_err(internal_error)?;
     if flag == Some(true) {
         return Ok(());
     }
@@ -336,18 +339,19 @@ async fn submit_draft(
 ) -> Result<Json<Value>, AppError> {
     require_design_on_wfd(&s, &auth, id, ver).await?;
     // Token minimal kimlik taşır — gönderenin görünen adı DB'den çözülür.
-    let submitted_by: String = sqlx::query_scalar(
-        "SELECT display_name FROM wf.app_user WHERE user_id = $1",
-    )
-    .bind(auth.user_id)
-    .fetch_optional(&s.pool)
-    .await
-    .map_err(internal_error)?
-    .unwrap_or_else(|| auth.user_id.to_string());
+    let submitted_by: String =
+        sqlx::query_scalar("SELECT display_name FROM wf.app_user WHERE user_id = $1")
+            .bind(auth.user_id)
+            .fetch_optional(&s.pool)
+            .await
+            .map_err(internal_error)?
+            .unwrap_or_else(|| auth.user_id.to_string());
     s.wfd
         .submit_draft(id, ver, &submitted_by)
         .await
-        .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "pending_approval" })))
+        .map(|_| {
+            Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "pending_approval" }))
+        })
         .map_err(map_wfd_err)
 }
 

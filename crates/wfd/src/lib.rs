@@ -7,4 +7,4 @@ pub mod storage;
 pub mod template;
 
 pub use adapter::WfdAdapter;
-pub use storage::{StorageConfig, build_operator};
+pub use storage::{build_operator, StorageConfig};

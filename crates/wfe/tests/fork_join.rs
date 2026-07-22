@@ -525,8 +525,14 @@ async fn happy_path_fork_join_finalize() {
     // ilk iki approve → BranchArrived (wfe hâlâ paralel, aktif)
     for (role, node) in &branches[..2] {
         let a = claim_owner(&store, wfe_id, node);
-        let a = Actor { role: (*role).into(), ..a };
-        let r = exec.apply(wfe_id, &a, "approve", &json!({}), Some(node), None).await.unwrap();
+        let a = Actor {
+            role: (*role).into(),
+            ..a
+        };
+        let r = exec
+            .apply(wfe_id, &a, "approve", &json!({}), Some(node), None)
+            .await
+            .unwrap();
         assert!(!r.terminal);
         assert_eq!(r.current_node, None);
     }
@@ -535,20 +541,32 @@ async fn happy_path_fork_join_finalize() {
     // son approve → JoinComplete → MoveTo join node
     let (role, node) = branches[2];
     let a = claim_owner(&store, wfe_id, node);
-    let a = Actor { role: role.into(), ..a };
-    let r = exec.apply(wfe_id, &a, "approve", &json!({}), Some(node), None).await.unwrap();
+    let a = Actor {
+        role: role.into(),
+        ..a
+    };
+    let r = exec
+        .apply(wfe_id, &a, "approve", &json!({}), Some(node), None)
+        .await
+        .unwrap();
     assert!(!r.terminal, "join node terminal değil");
     let w = store.snapshot(wfe_id);
     assert_eq!(w.current_node.as_deref(), Some("self__resultCoordinator"));
     assert!(w.join_target.is_none(), "paralel mod bitti");
     assert!(w.branches.is_empty(), "kollar temizlendi");
-    assert!(w.wfah.entries().iter().any(|e| e.action == "_join"), "_join marker");
+    assert!(
+        w.wfah.entries().iter().any(|e| e.action == "_join"),
+        "_join marker"
+    );
 
     // finalize → terminal_approved
     let rc = actor("resultCoordinator");
     let c = exec.claim(wfe_id, &rc, None, None).await.unwrap();
     assert!(c.success, "resultCoordinator claim");
-    let r = exec.apply(wfe_id, &rc, "finalize", &json!({}), None, None).await.unwrap();
+    let r = exec
+        .apply(wfe_id, &rc, "finalize", &json!({}), None, None)
+        .await
+        .unwrap();
     assert!(r.terminal, "finalize terminal olmalı");
     assert_eq!(store.snapshot(wfe_id).status, WfeStatus::Terminal);
 }
@@ -562,9 +580,18 @@ async fn branch_reject_terminates_and_cancels_siblings() {
     let wfe_id = fork_setup(&exec).await;
 
     let fin = actor("financeApprover");
-    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None).await.unwrap();
+    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None)
+        .await
+        .unwrap();
     let r = exec
-        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"), None)
+        .apply(
+            wfe_id,
+            &fin,
+            "reject",
+            &json!({}),
+            Some("self__financeApprover"),
+            None,
+        )
         .await
         .unwrap();
     assert!(r.terminal, "red WFE-terminal");
@@ -598,15 +625,31 @@ async fn collapse_drops_sibling_claims_and_records_them() {
         ("hrApprover", "self__hrApprover"),
     ] {
         let a = actor(role);
-        assert!(exec.claim(wfe_id, &a, Some(node), None).await.unwrap().success, "{node} claim");
+        assert!(
+            exec.claim(wfe_id, &a, Some(node), None)
+                .await
+                .unwrap()
+                .success,
+            "{node} claim"
+        );
     }
     let legal_owner = claim_owner(&store, wfe_id, "self__legalApprover").user_id;
     let hr_owner = claim_owner(&store, wfe_id, "self__hrApprover").user_id;
 
     let fin = claim_owner(&store, wfe_id, "self__financeApprover");
-    let fin = Actor { role: "financeApprover".into(), ..fin };
+    let fin = Actor {
+        role: "financeApprover".into(),
+        ..fin
+    };
     let r = exec
-        .apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"), None)
+        .apply(
+            wfe_id,
+            &fin,
+            "reject",
+            &json!({}),
+            Some("self__financeApprover"),
+            None,
+        )
         .await
         .unwrap();
     assert!(r.terminal);
@@ -652,7 +695,11 @@ async fn collapse_drops_sibling_claims_and_records_them() {
         .and_then(|e| e.input.as_ref())
         .expect("_collapse özeti");
     assert_eq!(summary["trigger_branch"], json!("self__financeApprover"));
-    assert_eq!(summary["trigger_claimed_by"], json!(fin.user_id), "acting claim sahibi");
+    assert_eq!(
+        summary["trigger_claimed_by"],
+        json!(fin.user_id),
+        "acting claim sahibi"
+    );
     assert!(
         !summary["trigger_claimed_at"].is_null(),
         "acting kolun claimed_at'i manşette olmalı (hold süresi hesabı için)"
@@ -673,14 +720,30 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         ("hrApprover", "self__hrApprover"),
     ] {
         let a = actor(role);
-        assert!(exec.claim(wfe_id, &a, Some(node), None).await.unwrap().success, "{node} claim");
+        assert!(
+            exec.claim(wfe_id, &a, Some(node), None)
+                .await
+                .unwrap()
+                .success,
+            "{node} claim"
+        );
     }
 
     // legal onaylar → kol `arrived` (hâlâ 2 aktif kol var, join tamamlanmaz)
     let legal = claim_owner(&store, wfe_id, "self__legalApprover");
-    let legal = Actor { role: "legalApprover".into(), ..legal };
+    let legal = Actor {
+        role: "legalApprover".into(),
+        ..legal
+    };
     let r = exec
-        .apply(wfe_id, &legal, "approve", &json!({}), Some("self__legalApprover"), None)
+        .apply(
+            wfe_id,
+            &legal,
+            "approve",
+            &json!({}),
+            Some("self__legalApprover"),
+            None,
+        )
         .await
         .unwrap();
     assert!(!r.terminal);
@@ -695,10 +758,20 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
 
     // finance reddeder → WFE-terminal; legal'in ONAYI boşa gitti
     let fin = claim_owner(&store, wfe_id, "self__financeApprover");
-    let fin = Actor { role: "financeApprover".into(), ..fin };
-    exec.apply(wfe_id, &fin, "reject", &json!({}), Some("self__financeApprover"), None)
-        .await
-        .unwrap();
+    let fin = Actor {
+        role: "financeApprover".into(),
+        ..fin
+    };
+    exec.apply(
+        wfe_id,
+        &fin,
+        "reject",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+    )
+    .await
+    .unwrap();
 
     let w = store.snapshot(wfe_id);
     // kol satırı `arrived` KALIR (yeni statü yok — bkz. DECISIONS_v2_2.md)
@@ -715,7 +788,11 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         .iter()
         .filter(|e| e.action == "_branch_superseded")
         .collect();
-    assert_eq!(superseded.len(), 1, "yalnız arrived kol superseded marker'ı alır");
+    assert_eq!(
+        superseded.len(),
+        1,
+        "yalnız arrived kol superseded marker'ı alır"
+    );
     let input = superseded[0].input.as_ref().unwrap();
     assert_eq!(input["node"], json!("self__legalApprover"));
     assert_eq!(input["reason"], json!("sibling_terminal"));
@@ -734,12 +811,19 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         .filter(|e| e.action == "_branch_cancelled")
         .collect();
     assert_eq!(cancels.len(), 1);
-    assert_eq!(cancels[0].input.as_ref().unwrap()["node"], json!("self__hrApprover"));
+    assert_eq!(
+        cancels[0].input.as_ref().unwrap()["node"],
+        json!("self__hrApprover")
+    );
 
     // WOR-61: collapse başına TEK özet kaydı; detay marker'ları onun üstünde değil
     // altında kalır (ikisi de WFAH'ta).
-    let summaries: Vec<&WfahEntry> =
-        w.wfah.entries().iter().filter(|e| e.action == "_collapse").collect();
+    let summaries: Vec<&WfahEntry> = w
+        .wfah
+        .entries()
+        .iter()
+        .filter(|e| e.action == "_collapse")
+        .collect();
     assert_eq!(summaries.len(), 1, "collapse başına tek özet");
     let s = summaries[0].input.as_ref().unwrap();
     assert_eq!(s["trigger_branch"], json!("self__financeApprover"));
@@ -749,8 +833,15 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     assert_eq!(s["cancelled"], json!(["self__hrApprover"]));
     assert_eq!(s["superseded"], json!(["self__legalApprover"]));
     // WOR-67: acting (finance) kolun düşen claim'i manşette
-    assert_eq!(s["trigger_claimed_by"], json!(fin.user_id), "acting claim sahibi");
-    assert!(!s["trigger_claimed_at"].is_null(), "acting kolun claimed_at'i manşette");
+    assert_eq!(
+        s["trigger_claimed_by"],
+        json!(fin.user_id),
+        "acting claim sahibi"
+    );
+    assert!(
+        !s["trigger_claimed_at"].is_null(),
+        "acting kolun claimed_at'i manşette"
+    );
 
     // WOR-68: arrived (legal) kolun `_branch_arrived` marker'ı claim BAŞLANGICINI
     // taşımalı — kol varışta claim'ini kaybettiği için hold süresi (approved_at −
@@ -761,7 +852,9 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         .iter()
         .find(|e| {
             e.action == "_branch_arrived"
-                && e.input.as_ref().map(|i| i["node"] == json!("self__legalApprover"))
+                && e.input
+                    .as_ref()
+                    .map(|i| i["node"] == json!("self__legalApprover"))
                     == Some(true)
         })
         .and_then(|e| e.input.as_ref())
@@ -774,7 +867,10 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     // hold süresi hesaplanabilir: approved_at ≥ claimed_at
     let claimed = arrived_marker["claimed_at"].as_str().unwrap();
     let approved = arrived_marker["approved_at"].as_str().unwrap();
-    assert!(approved >= claimed, "approved_at ({approved}) ≥ claimed_at ({claimed})");
+    assert!(
+        approved >= claimed,
+        "approved_at ({approved}) ≥ claimed_at ({claimed})"
+    );
 }
 
 /// Executor retry döngüsü: adapter Conflict döndürdüğünde reload + engine
@@ -785,16 +881,29 @@ async fn apply_retries_on_conflict_then_succeeds() {
     let exec = executor(store.clone());
     let wfe_id = fork_setup(&exec).await;
     let fin = actor("financeApprover");
-    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None).await.unwrap();
+    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None)
+        .await
+        .unwrap();
 
     // ilk commit çağrısı Conflict → executor reload edip yeniden dener
     store.fail_commits.store(1, Ordering::SeqCst);
     let r = exec
-        .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"), None)
+        .apply(
+            wfe_id,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+            None,
+        )
         .await
         .unwrap();
     assert!(!r.terminal);
-    assert_eq!(store.fail_commits.load(Ordering::SeqCst), 0, "bir kez conflict tüketildi");
+    assert_eq!(
+        store.fail_commits.load(Ordering::SeqCst),
+        0,
+        "bir kez conflict tüketildi"
+    );
     // varış işlendi: bu kol artık aktif değil
     assert_eq!(active_count(&store.snapshot(wfe_id)), 2);
 }
@@ -806,14 +915,26 @@ async fn apply_gives_up_after_three_conflicts() {
     let exec = executor(store.clone());
     let wfe_id = fork_setup(&exec).await;
     let fin = actor("financeApprover");
-    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None).await.unwrap();
+    exec.claim(wfe_id, &fin, Some("self__financeApprover"), None)
+        .await
+        .unwrap();
 
     store.fail_commits.store(5, Ordering::SeqCst);
     let err = exec
-        .apply(wfe_id, &fin, "approve", &json!({}), Some("self__financeApprover"), None)
+        .apply(
+            wfe_id,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+            None,
+        )
         .await
         .unwrap_err();
-    assert!(matches!(err, EngineError::Conflict(ConflictKind::BranchArrival)));
+    assert!(matches!(
+        err,
+        EngineError::Conflict(ConflictKind::BranchArrival)
+    ));
     // tam 3 deneme tüketildi (5 - 3 = 2 kaldı)
     assert_eq!(store.fail_commits.load(Ordering::SeqCst), 2);
 }
@@ -827,13 +948,31 @@ async fn branch_claim_is_exclusive_per_branch() {
 
     let a1 = actor("financeApprover");
     let a2 = actor("financeApprover");
-    assert!(exec.claim(wfe_id, &a1, Some("self__financeApprover"), None).await.unwrap().success);
-    let second = exec.claim(wfe_id, &a2, Some("self__financeApprover"), None).await.unwrap();
+    assert!(
+        exec.claim(wfe_id, &a1, Some("self__financeApprover"), None)
+            .await
+            .unwrap()
+            .success
+    );
+    let second = exec
+        .claim(wfe_id, &a2, Some("self__financeApprover"), None)
+        .await
+        .unwrap();
     assert!(!second.success);
     assert_eq!(second.reason.as_deref(), Some("already_claimed"));
 
     // farklı kol hâlâ claim edilebilir
-    assert!(exec.claim(wfe_id, &actor("legalApprover"), Some("self__legalApprover"), None).await.unwrap().success);
+    assert!(
+        exec.claim(
+            wfe_id,
+            &actor("legalApprover"),
+            Some("self__legalApprover"),
+            None
+        )
+        .await
+        .unwrap()
+        .success
+    );
 }
 
 // ---- WOR-62: CollapseTo yarış serileştirmesi -----------------------------------
@@ -871,9 +1010,18 @@ async fn claim_all_branches(exec: &WfeExecutor, store: &ParStore, wfe_id: Uuid) 
         ("hrApprover", "self__hrApprover"),
     ] {
         let a = actor(role);
-        assert!(exec.claim(wfe_id, &a, Some(node), None).await.unwrap().success, "{node} claim");
+        assert!(
+            exec.claim(wfe_id, &a, Some(node), None)
+                .await
+                .unwrap()
+                .success,
+            "{node} claim"
+        );
         let owner = claim_owner(store, wfe_id, node);
-        out.push(Actor { role: role.into(), ..owner });
+        out.push(Actor {
+            role: role.into(),
+            ..owner
+        });
     }
     out
 }
@@ -900,8 +1048,22 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
 
     // `join!` future'ları SIRAYLA poll eder: collapse önce commit'e girer.
     let input = json!({});
-    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
-    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"), None);
+    let collapse = exec.apply(
+        wfe_id,
+        &fin,
+        "reject",
+        &input,
+        Some("self__financeApprover"),
+        None,
+    );
+    let sibling = exec.apply(
+        wfe_id,
+        &legal,
+        "approve",
+        &input,
+        Some("self__legalApprover"),
+        None,
+    );
     let (collapse_res, sibling_res) = tokio::join!(collapse, sibling);
 
     // KAZANAN: collapse — WFE hedef node'a taşındı, paralel mod bitti.
@@ -917,8 +1079,10 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
     );
     assert_eq!(
         EngineError::Conflict(ConflictKind::Collapsed).to_string(),
-        format!("optimistic concurrency conflict [{}]: state changed under commit",
-                ConflictKind::Collapsed.code()),
+        format!(
+            "optimistic concurrency conflict [{}]: state changed under commit",
+            ConflictKind::Collapsed.code()
+        ),
     );
 
     // Kaybeden aksiyon HİÇBİR iz bırakmadı: legal kolu `arrived` OLMADI, WFE
@@ -926,14 +1090,21 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
     let w = store.snapshot(wfe_id);
     assert!(w.join_target.is_none(), "paralel mod bitti");
     assert_eq!(active_count(&w), 0, "collapse tüm aktif kolları düşürdü");
-    let legal_row = w.branches.iter().find(|b| b.branch_node == "self__legalApprover").unwrap();
+    let legal_row = w
+        .branches
+        .iter()
+        .find(|b| b.branch_node == "self__legalApprover")
+        .unwrap();
     assert_eq!(
         legal_row.status,
         BranchStatus::Cancelled,
         "kaybeden kol `arrived` değil, collapse ile `cancelled` olmalı"
     );
     assert!(
-        !w.wfah.entries().iter().any(|e| e.action == "_branch_superseded"),
+        !w.wfah
+            .entries()
+            .iter()
+            .any(|e| e.action == "_branch_superseded"),
         "kaybeden varış commit edilmediği için superseded marker'ı da olmamalı"
     );
 }
@@ -952,8 +1123,22 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
     // Bu kez ÖNCE kardeş varışı commit eder (100ms), collapse sonra (200ms).
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"), None);
-    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
+    let sibling = exec.apply(
+        wfe_id,
+        &legal,
+        "approve",
+        &input,
+        Some("self__legalApprover"),
+        None,
+    );
+    let collapse = exec.apply(
+        wfe_id,
+        &fin,
+        "reject",
+        &input,
+        Some("self__financeApprover"),
+        None,
+    );
     let (sibling_res, collapse_res) = tokio::join!(sibling, collapse);
 
     sibling_res.expect("kardeş varışı önce commit etti, başarılı olmalı");
@@ -964,7 +1149,11 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
     assert!(w.join_target.is_none());
     assert_eq!(active_count(&w), 0);
     // Önce varan kol `arrived` KALIR (WOR-60: statü değişmez, marker eklenir).
-    let legal_row = w.branches.iter().find(|b| b.branch_node == "self__legalApprover").unwrap();
+    let legal_row = w
+        .branches
+        .iter()
+        .find(|b| b.branch_node == "self__legalApprover")
+        .unwrap();
     assert_eq!(legal_row.status, BranchStatus::Arrived);
 }
 
@@ -981,8 +1170,22 @@ async fn two_concurrent_collapses_exactly_one_wins() {
 
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let a = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
-    let b = exec.apply(wfe_id, &legal, "reject", &input, Some("self__legalApprover"), None);
+    let a = exec.apply(
+        wfe_id,
+        &fin,
+        "reject",
+        &input,
+        Some("self__financeApprover"),
+        None,
+    );
+    let b = exec.apply(
+        wfe_id,
+        &legal,
+        "reject",
+        &input,
+        Some("self__legalApprover"),
+        None,
+    );
     let (a_res, b_res) = tokio::join!(a, b);
 
     a_res.expect("ilk collapse kazanmalı");
@@ -991,7 +1194,10 @@ async fn two_concurrent_collapses_exactly_one_wins() {
         matches!(err, EngineError::Conflict(ConflictKind::Collapsed)),
         "beklenen Collapsed, alınan: {err:?}"
     );
-    assert_eq!(store.snapshot(wfe_id).current_node.as_deref(), Some("self__coordinator"));
+    assert_eq!(
+        store.snapshot(wfe_id).current_node.as_deref(),
+        Some("self__coordinator")
+    );
 }
 
 /// `Collapsed` retry EDİLMEZ: reload aynı verdikti üretir. Retry sayacı
@@ -1007,8 +1213,22 @@ async fn collapsed_conflict_is_not_retried() {
 
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let collapse = exec.apply(wfe_id, &fin, "reject", &input, Some("self__financeApprover"), None);
-    let sibling = exec.apply(wfe_id, &legal, "approve", &input, Some("self__legalApprover"), None);
+    let collapse = exec.apply(
+        wfe_id,
+        &fin,
+        "reject",
+        &input,
+        Some("self__financeApprover"),
+        None,
+    );
+    let sibling = exec.apply(
+        wfe_id,
+        &legal,
+        "approve",
+        &input,
+        Some("self__legalApprover"),
+        None,
+    );
     let (_, sibling_res) = tokio::join!(collapse, sibling);
 
     assert!(matches!(
@@ -1018,9 +1238,18 @@ async fn collapsed_conflict_is_not_retried() {
     // Kuyrukta bekleyen gecikme kalmadıysa retry olmamıştır: retry her turda
     // yeni bir commit çağrısı yapardı ve kuyruk zaten boş olduğundan bunu
     // doğrudan `is_retryable` sözleşmesinden okuyoruz.
-    assert!(!ConflictKind::Collapsed.is_retryable(), "Collapsed retry-edilemez olmalı");
-    assert!(ConflictKind::BranchArrival.is_retryable(), "kol-varış yarışı retry-edilebilir");
-    assert!(ConflictKind::BranchMoved.is_retryable(), "kol taşınması retry-edilebilir");
+    assert!(
+        !ConflictKind::Collapsed.is_retryable(),
+        "Collapsed retry-edilemez olmalı"
+    );
+    assert!(
+        ConflictKind::BranchArrival.is_retryable(),
+        "kol-varış yarışı retry-edilebilir"
+    );
+    assert!(
+        ConflictKind::BranchMoved.is_retryable(),
+        "kol taşınması retry-edilebilir"
+    );
 }
 
 // ---- timer kol iterasyonu -----------------------------------------------------
@@ -1028,8 +1257,7 @@ async fn collapsed_conflict_is_not_retried() {
 /// Bir kol node'una claim_timeout ekli varyant WFD.
 fn paralel_with_branch_claim_timeout() -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    v["nodes"]["self__financeApprover"]["claim_timeout"] =
-        json!({ "after": "PT10M" });
+    v["nodes"]["self__financeApprover"]["claim_timeout"] = json!({ "after": "PT10M" });
     Wfd::from_value(v).unwrap()
 }
 
@@ -1045,7 +1273,14 @@ fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claima
         entered_at: now,
     };
     let branches = vec![
-        mk("self__financeApprover", if claimed_branch == "self__financeApprover" { Some(claimant) } else { None }),
+        mk(
+            "self__financeApprover",
+            if claimed_branch == "self__financeApprover" {
+                Some(claimant)
+            } else {
+                None
+            },
+        ),
         mk("self__legalApprover", None),
         mk("self__hrApprover", None),
     ];
@@ -1064,7 +1299,9 @@ fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claima
         claimed_at: None,
         created_at: now,
         branches,
-        join_target: Some(WftTarget::Node { node: "self__resultCoordinator".into() }),
+        join_target: Some(WftTarget::Node {
+            node: "self__resultCoordinator".into(),
+        }),
     });
     wfe_id
 }
@@ -1089,7 +1326,10 @@ async fn next_timer_due_iterates_active_branches() {
     let due = due.expect("kol claim_timeout vadesi bekleniyordu");
     // ~ claimed_at + 10dk (±30 sn tolerans)
     let expected = now + chrono::Duration::minutes(10);
-    assert!((due - expected).num_seconds().abs() < 30, "due={due} expected≈{expected}");
+    assert!(
+        (due - expected).num_seconds().abs() < 30,
+        "due={due} expected≈{expected}"
+    );
 }
 
 /// tick_timers paralel modda kolun claim_timeout'unu (wft'siz → Release) o kol
@@ -1107,17 +1347,29 @@ async fn tick_timers_fires_branch_claim_timeout_release() {
     let claimant = Uuid::new_v4();
     let wfe_id = seed_parallel_state(&store, &wfd, "self__financeApprover", claimant);
     // claim'i 11dk geçmişe al → PT10M claim_timeout vadesi doldu
-    store.rewind_branch_claim(wfe_id, "self__financeApprover", chrono::Utc::now() - chrono::Duration::minutes(11));
+    store.rewind_branch_claim(
+        wfe_id,
+        "self__financeApprover",
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+    );
 
     let fired = exec.tick_timers(wfe_id).await.unwrap();
     assert!(fired, "kol claim_timeout ateşlenmeli");
 
     let w = store.snapshot(wfe_id);
     // o kolun claim'i sıfırlandı, node aktif kaldı
-    let fin = w.branches.iter().find(|b| b.branch_node == "self__financeApprover").unwrap();
+    let fin = w
+        .branches
+        .iter()
+        .find(|b| b.branch_node == "self__financeApprover")
+        .unwrap();
     assert_eq!(fin.status, BranchStatus::Active);
     assert!(fin.claimed_by.is_none(), "claim sıfırlanmalı");
-    assert!(w.wfah.entries().iter().any(|e| e.action == "claim_timeout:self__financeApprover"));
+    assert!(w
+        .wfah
+        .entries()
+        .iter()
+        .any(|e| e.action == "claim_timeout:self__financeApprover"));
 }
 
 /// Belirli bir kolun mevcut claimant'ını Actor olarak döndürür (approve için).
@@ -1258,7 +1510,11 @@ async fn stale_rev_apply_is_rejected_without_side_effects() {
     );
 
     let after = store.snapshot(wfe_id);
-    assert_eq!(after.rev(), before.rev(), "reddedilen apply WFAH'a yazmamalı");
+    assert_eq!(
+        after.rev(),
+        before.rev(),
+        "reddedilen apply WFAH'a yazmamalı"
+    );
     assert_eq!(
         active_count(&after),
         active_count(&before),
@@ -1291,7 +1547,10 @@ async fn stale_rev_after_collapse_is_distinguishable() {
     )
     .await
     .unwrap();
-    assert!(store.snapshot(wfe_id).join_target.is_none(), "collapse oldu");
+    assert!(
+        store.snapshot(wfe_id).join_target.is_none(),
+        "collapse oldu"
+    );
 
     let err = exec
         .apply(
@@ -1335,7 +1594,12 @@ async fn stale_rev_claim_is_rejected_but_untokened_claim_is_untouched() {
     // token'lı: NET conflict
     let latecomer = actor("legalApprover");
     let err = exec
-        .claim(wfe_id, &latecomer, Some("self__legalApprover"), Some(stale_rev))
+        .claim(
+            wfe_id,
+            &latecomer,
+            Some("self__legalApprover"),
+            Some(stale_rev),
+        )
         .await
         .expect_err("eskimiş revizyonlu claim reddedilmeli");
     assert!(
@@ -1398,5 +1662,9 @@ async fn concurrent_single_mode_applies_exactly_one_wins() {
         matches!(loser, EngineError::Conflict(ConflictKind::StaleRevision)),
         "kaybeden StaleRevision almalı (kazanan #{winner}), alınan: {loser:?}"
     );
-    assert_eq!(active_count(&store.snapshot(wfe_id)), 3, "fork TEK kez uygulandı");
+    assert_eq!(
+        active_count(&store.snapshot(wfe_id)),
+        3,
+        "fork TEK kez uygulandı"
+    );
 }

@@ -51,7 +51,11 @@ impl AutoexecRunner for LiveAutoexecRunner {
 
 impl LiveAutoexecRunner {
     async fn run_rest(&self, def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure> {
-        let method = def.config.get("method").and_then(Value::as_str).unwrap_or("GET");
+        let method = def
+            .config
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("GET");
         let method = Method::from_str(method)
             .map_err(|_| ExecFailure::failed(format!("geçersiz HTTP metodu: {method}")))?;
         let url = def
@@ -65,14 +69,8 @@ impl LiveAutoexecRunner {
             .get("params")
             .map(|p| resolve_config_value(p, env))
             .unwrap_or(Value::Null);
-        let body = def
-            .config
-            .get("body")
-            .map(|b| resolve_config_value(b, env));
-        let form = def
-            .config
-            .get("form")
-            .map(|f| resolve_config_value(f, env));
+        let body = def.config.get("body").map(|b| resolve_config_value(b, env));
+        let form = def.config.get("form").map(|f| resolve_config_value(f, env));
         let headers = def
             .config
             .get("headers")
@@ -120,7 +118,11 @@ impl LiveAutoexecRunner {
         }
         // JSON yanıt → doğrudan result; değilse ham gövde $exec.result.body altında
         Ok(serde_json::from_str::<Value>(&text).unwrap_or_else(|_| {
-            if text.is_empty() { json!({}) } else { json!({ "body": text }) }
+            if text.is_empty() {
+                json!({})
+            } else {
+                json!({ "body": text })
+            }
         }))
     }
 
@@ -199,13 +201,13 @@ impl LiveAutoexecRunner {
                 _ => {
                     let driver = DbDriver::parse(&row.0)
                         .ok_or_else(|| ExecFailure::failed("geçersiz driver"))?;
-                    let secret = match &row.7 {
-                        Some(b) => Some(
-                            db::crypto::decrypt(b)
-                                .map_err(|e| ExecFailure::failed(format!("secret çözülemedi: {e}")))?,
-                        ),
-                        None => None,
-                    };
+                    let secret =
+                        match &row.7 {
+                            Some(b) => Some(db::crypto::decrypt(b).map_err(|e| {
+                                ExecFailure::failed(format!("secret çözülemedi: {e}"))
+                            })?),
+                            None => None,
+                        };
                     let cfg = DbConfig {
                         driver,
                         mode: row.1.clone(),
@@ -276,10 +278,17 @@ fn apply_auth(
     config: &Value,
     env: &ExecEnv,
 ) -> Result<reqwest::RequestBuilder, ExecFailure> {
-    let Some(auth) = config.get("auth") else { return Ok(request) };
+    let Some(auth) = config.get("auth") else {
+        return Ok(request);
+    };
     let auth = resolve_config_value(auth, env);
     let kind = auth.get("type").and_then(Value::as_str).unwrap_or("");
-    let get = |k: &str| auth.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let get = |k: &str| {
+        auth.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     match kind {
         "" | "none" => Ok(request),
         "bearer" => Ok(request.bearer_auth(get("token"))),
@@ -288,7 +297,10 @@ fn apply_auth(
             Ok(request.basic_auth(get("username"), password))
         }
         "api_key" => {
-            let header = auth.get("header").and_then(Value::as_str).unwrap_or("X-API-Key");
+            let header = auth
+                .get("header")
+                .and_then(Value::as_str)
+                .unwrap_or("X-API-Key");
             Ok(request.header(header, get("value")))
         }
         other => Err(ExecFailure::failed(format!("geçersiz auth tipi: {other}"))),
@@ -398,23 +410,52 @@ mod tests {
         let client = Client::new();
         let e = env(json!({"tok": "abc"}));
 
-        let req = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "bearer", "token": "$ctx.tok"}}), &e)
-            .unwrap().build().unwrap();
+        let req = apply_auth(
+            client.get("http://x/"),
+            &json!({"auth": {"type": "bearer", "token": "$ctx.tok"}}),
+            &e,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         assert_eq!(req.headers()["authorization"], "Bearer abc");
 
-        let req = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "api_key", "value": "k1"}}), &e)
-            .unwrap().build().unwrap();
+        let req = apply_auth(
+            client.get("http://x/"),
+            &json!({"auth": {"type": "api_key", "value": "k1"}}),
+            &e,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         assert_eq!(req.headers()["x-api-key"], "k1");
 
-        let req = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "basic", "username": "u", "password": "p"}}), &e)
-            .unwrap().build().unwrap();
-        assert!(req.headers()["authorization"].to_str().unwrap().starts_with("Basic "));
+        let req = apply_auth(
+            client.get("http://x/"),
+            &json!({"auth": {"type": "basic", "username": "u", "password": "p"}}),
+            &e,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(req.headers()["authorization"]
+            .to_str()
+            .unwrap()
+            .starts_with("Basic "));
 
-        let err = apply_auth(client.get("http://x/"), &json!({"auth": {"type": "oauth9"}}), &e).unwrap_err();
+        let err = apply_auth(
+            client.get("http://x/"),
+            &json!({"auth": {"type": "oauth9"}}),
+            &e,
+        )
+        .unwrap_err();
         assert!(err.message.contains("geçersiz auth tipi"));
 
         // auth yoksa dokunulmaz
-        let req = apply_auth(client.get("http://x/"), &json!({}), &e).unwrap().build().unwrap();
+        let req = apply_auth(client.get("http://x/"), &json!({}), &e)
+            .unwrap()
+            .build()
+            .unwrap();
         assert!(req.headers().get("authorization").is_none());
     }
 

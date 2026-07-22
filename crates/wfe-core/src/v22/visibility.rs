@@ -13,7 +13,7 @@
 use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::Actor;
-use crate::types::wfd_v22::{CandidateActor, COrgu, Wfd};
+use crate::types::wfd_v22::{COrgu, CandidateActor, Wfd};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize_or_delegated, MatchEnv};
 use crate::v22::ports::{BranchStatus, Wfes};
@@ -41,8 +41,8 @@ pub async fn visible(
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
     if let Some(c_orgu) = &vis.c_orgu {
-        let resolved = resolve_c_orgu(c_orgu, actor.orgu_id, env.ctx, env.wfah, env.orgtnt_id, org)
-            .await?;
+        let resolved =
+            resolve_c_orgu(c_orgu, actor.orgu_id, env.ctx, env.wfah, env.orgtnt_id, org).await?;
         if resolved.iter().any(|u| u.orgu_id == actor.orgu_id) {
             return Ok(true);
         }
@@ -263,7 +263,10 @@ mod tests {
     #[tokio::test]
     async fn c_r_criterion_is_scopeless_or() {
         // rol listede ama ORGU resolve edilen kümede DEĞİL — yine de görünür (scope'suz)
-        let org = MockOrg { units: vec![], role_assigned: false };
+        let org = MockOrg {
+            units: vec![],
+            role_assigned: false,
+        };
         let vis = XVisibility {
             c_r: Some(vec!["creditDeptManager".into(), "branchManager".into()]),
             ..Default::default()
@@ -279,7 +282,11 @@ mod tests {
     async fn c_a_criterion_uses_full_authorization_rule() {
         let orgu = Uuid::new_v4();
         let org = MockOrg {
-            units: vec![OrgUnit { orgu_id: orgu, orgu_type: json!({}), path: "1".into() }],
+            units: vec![OrgUnit {
+                orgu_id: orgu,
+                orgu_type: json!({}),
+                path: "1".into(),
+            }],
             role_assigned: true,
         };
         let vis = XVisibility {
@@ -298,7 +305,10 @@ mod tests {
 
     #[tokio::test]
     async fn filter_hides_restricted_field_from_non_matching_actor() {
-        let org = MockOrg { units: vec![], role_assigned: false };
+        let org = MockOrg {
+            units: vec![],
+            role_assigned: false,
+        };
         let schema = json!({
             "type": "object",
             "properties": {
@@ -312,18 +322,28 @@ mod tests {
         let ctx = json!({"amount": 5000, "internal_notes": "gizli"});
 
         let manager = actor(Uuid::new_v4(), "branchManager");
-        let filtered = filter_dynctx(&schema, &ctx, &manager, env(), &org).await.unwrap();
+        let filtered = filter_dynctx(&schema, &ctx, &manager, env(), &org)
+            .await
+            .unwrap();
         assert_eq!(filtered["internal_notes"], json!("gizli"));
 
         let clerk = actor(Uuid::new_v4(), "branchClerk");
-        let filtered = filter_dynctx(&schema, &ctx, &clerk, env(), &org).await.unwrap();
-        assert!(filtered.get("internal_notes").is_none(), "match etmeyen actor'a gizlenmeli");
+        let filtered = filter_dynctx(&schema, &ctx, &clerk, env(), &org)
+            .await
+            .unwrap();
+        assert!(
+            filtered.get("internal_notes").is_none(),
+            "match etmeyen actor'a gizlenmeli"
+        );
         assert_eq!(filtered["amount"], json!(5000), "kısıtsız field görünmeli");
     }
 
     #[tokio::test]
     async fn fields_without_visibility_are_visible_to_all() {
-        let org = MockOrg { units: vec![], role_assigned: false };
+        let org = MockOrg {
+            units: vec![],
+            role_assigned: false,
+        };
         let schema = json!({"type": "object", "properties": {"x": {"type": "string"}}});
         let ctx = json!({"x": "açık", "undeclared": 1});
         let a = actor(Uuid::new_v4(), "anyone");

@@ -89,32 +89,50 @@ impl WfdAdapter {
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
         repo::insert(
-            &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
+            &self.pool,
+            wfd_id,
+            orgtnt_id,
+            project_id,
+            name,
+            version,
+            &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
-            "published", None, &[], "admin", None,
-        ).await?;
+            "published",
+            None,
+            &[],
+            "admin",
+            None,
+        )
+        .await?;
         Ok((wfd_id, version))
     }
 
     /// slug: isimden basit, güvenli bir id üretir (draft iskeleti için).
     fn slug(name: &str) -> String {
-        let s: String = name.trim().to_lowercase().chars()
+        let s: String = name
+            .trim()
+            .to_lowercase()
+            .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
             .collect();
         let s = s.trim_matches('_').to_string();
-        if s.is_empty() { "wfd".into() } else { s }
+        if s.is_empty() {
+            "wfd".into()
+        } else {
+            s
+        }
     }
 
     /// Yeni draft oluşturur. İskelet JSON verilmezse minimal v2.2 taslağı yazılır.
     /// Validasyon YOK. Tek-draft ihlalinde WfdError::Conflict.
     pub async fn create_draft(
         &self,
-        orgtnt_id:   Uuid,
-        project_id:  Option<Uuid>,
-        name:        &str,
+        orgtnt_id: Uuid,
+        project_id: Option<Uuid>,
+        name: &str,
         description: Option<&str>,
-        tags:        &[String],
-        wfd_json:    Option<&Value>,
+        tags: &[String],
+        wfd_json: Option<&Value>,
         source_template_id: Option<Uuid>,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
         let project_id = self.resolve_project(orgtnt_id, project_id).await?;
@@ -133,27 +151,47 @@ impl WfdAdapter {
         let doc = wfd_json.unwrap_or(&skeleton);
         let bytes = serde_json::to_vec(doc)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        self.storage.write(&key, bytes).await
+        self.storage
+            .write(&key, bytes)
+            .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
 
         repo::insert(
-            &self.pool, wfd_id, orgtnt_id, project_id, name, version, &key,
+            &self.pool,
+            wfd_id,
+            orgtnt_id,
+            project_id,
+            name,
+            version,
+            &key,
             // TODO: gerçek owner auth entegrasyonundan (şimdilik admin)
-            "draft", description, tags, "admin", source_template_id,
-        ).await?;
+            "draft",
+            description,
+            tags,
+            "admin",
+            source_template_id,
+        )
+        .await?;
         Ok((wfd_id, version))
     }
 
     /// Draft'ın ham JSON'unu döner (Wfd parse ETMEZ — eksik/geçersiz olabilir).
-    pub async fn fetch_draft_json(&self, wfd_id: Uuid, version: i32)
-        -> Result<Value, crate::error::WfdError>
-    {
+    pub async fn fetch_draft_json(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<Value, crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "draft" {
-            return Err(crate::error::WfdError::Conflict(
-                format!("{wfd_id} v{version} draft değil (status={})", meta.status)));
+            return Err(crate::error::WfdError::Conflict(format!(
+                "{wfd_id} v{version} draft değil (status={})",
+                meta.status
+            )));
         }
-        let bytes = self.storage.read(&meta.s3_key).await
+        let bytes = self
+            .storage
+            .read(&meta.s3_key)
+            .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
             .to_bytes();
         serde_json::from_slice(&bytes)
@@ -163,23 +201,26 @@ impl WfdAdapter {
     /// Draft JSON + metadata'yı overwrite eder. Validasyon YOK. Cache invalidate.
     pub async fn save_draft(
         &self,
-        wfd_id:      Uuid,
-        version:     i32,
-        wfd_json:    &Value,
+        wfd_id: Uuid,
+        version: i32,
+        wfd_json: &Value,
         description: Option<&str>,
-        tags:        Option<&[String]>,
+        tags: Option<&[String]>,
     ) -> Result<(), crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "draft" {
-            return Err(crate::error::WfdError::Conflict(
-                format!("{wfd_id} v{version} draft değil")));
+            return Err(crate::error::WfdError::Conflict(format!(
+                "{wfd_id} v{version} draft değil"
+            )));
         }
         let bytes = serde_json::to_vec(wfd_json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         // DB status-gate'i ÖNCE koş: satırın hâlâ draft olduğunu atomik doğrular.
         // Eşzamanlı bir publish araya girerse artık immutable JSON'a dokunmayız.
         repo::update_draft(&self.pool, wfd_id, version, description, tags).await?;
-        self.storage.write(&meta.s3_key, bytes).await
+        self.storage
+            .write(&meta.s3_key, bytes)
+            .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
@@ -187,9 +228,11 @@ impl WfdAdapter {
 
     /// Draft'ı yayınlar: tam v2.2 validator, geçerse status='published'.
     /// Geçmezse InvalidJson(validator özeti) döner, draft kalır.
-    pub async fn publish_draft(&self, wfd_id: Uuid, version: i32)
-        -> Result<(), crate::error::WfdError>
-    {
+    pub async fn publish_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<(), crate::error::WfdError> {
         let json = self.fetch_draft_json(wfd_id, version).await?;
         let wfd = Wfd::from_value(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
@@ -204,9 +247,12 @@ impl WfdAdapter {
 
     /// Draft'ı onaya gönderir: tam v2.2 validator (yayınla ile AYNI kapı),
     /// geçerse pending_approval. Geçmezse draft kalır, hata döner.
-    pub async fn submit_draft(&self, wfd_id: Uuid, version: i32, submitted_by: &str)
-        -> Result<(), crate::error::WfdError>
-    {
+    pub async fn submit_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        submitted_by: &str,
+    ) -> Result<(), crate::error::WfdError> {
         let json = self.fetch_draft_json(wfd_id, version).await?;
         let wfd = Wfd::from_value(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
@@ -219,15 +265,22 @@ impl WfdAdapter {
 
     /// Onay bekleyeni yayınlar. Validator yeniden koşar (pending JSON immutable
     /// olmalı ama savunmacı davranıyoruz); geçerse published.
-    pub async fn approve_draft(&self, wfd_id: Uuid, version: i32)
-        -> Result<(), crate::error::WfdError>
-    {
+    pub async fn approve_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<(), crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "pending_approval" {
-            return Err(crate::error::WfdError::Conflict(
-                format!("{wfd_id} v{version} onay beklemiyor (status={})", meta.status)));
+            return Err(crate::error::WfdError::Conflict(format!(
+                "{wfd_id} v{version} onay beklemiyor (status={})",
+                meta.status
+            )));
         }
-        let bytes = self.storage.read(&meta.s3_key).await
+        let bytes = self
+            .storage
+            .read(&meta.s3_key)
+            .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
             .to_bytes();
         let json: Value = serde_json::from_slice(&bytes)
@@ -244,41 +297,58 @@ impl WfdAdapter {
     }
 
     /// Onay bekleyeni reddeder: draft'a döner, gerekçe kaydedilir.
-    pub async fn reject_draft(&self, wfd_id: Uuid, version: i32, note: Option<&str>)
-        -> Result<(), crate::error::WfdError>
-    {
+    pub async fn reject_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        note: Option<&str>,
+    ) -> Result<(), crate::error::WfdError> {
         repo::set_rejected(&self.pool, wfd_id, version, note).await
     }
 
     /// Published bir versiyonu edit'e açar: JSON'unu kopyalayıp yeni draft (max+1) yaratır.
-    pub async fn new_draft_from(&self, src_id: Uuid, src_version: i32)
-        -> Result<(Uuid, i32), crate::error::WfdError>
-    {
+    pub async fn new_draft_from(
+        &self,
+        src_id: Uuid,
+        src_version: i32,
+    ) -> Result<(Uuid, i32), crate::error::WfdError> {
         let src = repo::get_meta_any(&self.pool, src_id, src_version).await?;
         if src.status != "published" {
-            return Err(crate::error::WfdError::Conflict(
-                format!("{src_id} v{src_version} published değil")));
+            return Err(crate::error::WfdError::Conflict(format!(
+                "{src_id} v{src_version} published değil"
+            )));
         }
-        let bytes = self.storage.read(&src.s3_key).await
+        let bytes = self
+            .storage
+            .read(&src.s3_key)
+            .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
             .to_bytes();
         let json: Value = serde_json::from_slice(&bytes)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.create_draft(
-            src.orgtnt_id, Some(src.project_id), &src.name,
-            src.description.as_deref(), &src.tags, Some(&json),
+            src.orgtnt_id,
+            Some(src.project_id),
+            &src.name,
+            src.description.as_deref(),
+            &src.tags,
+            Some(&json),
             src.source_template_id,
-        ).await
+        )
+        .await
     }
 
     /// Draft'ı iskarta eder (JSON + satır). Published dokunulmaz.
-    pub async fn delete_draft(&self, wfd_id: Uuid, version: i32)
-        -> Result<(), crate::error::WfdError>
-    {
+    pub async fn delete_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<(), crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "draft" {
-            return Err(crate::error::WfdError::Conflict(
-                format!("{wfd_id} v{version} draft değil")));
+            return Err(crate::error::WfdError::Conflict(format!(
+                "{wfd_id} v{version} draft değil"
+            )));
         }
         // DB status-gate'i ÖNCE koş; ancak satır silinirse (hâlâ draft'tı)
         // storage'ı best-effort temizle. Eşzamanlı publish JSON'u korur.

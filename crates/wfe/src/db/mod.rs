@@ -8,12 +8,19 @@ use serde::{Deserialize, Serialize};
 /// mariadb/tidb → Mysql, cockroachdb/redshift/timescaledb → Postgres.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum DbDriver { Postgres, Mysql, Mssql, Sqlite }
+pub enum DbDriver {
+    Postgres,
+    Mysql,
+    Mssql,
+    Sqlite,
+}
 
 impl DbDriver {
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "postgres" | "postgresql" | "cockroachdb" | "redshift" | "timescaledb" => Some(Self::Postgres),
+            "postgres" | "postgresql" | "cockroachdb" | "redshift" | "timescaledb" => {
+                Some(Self::Postgres)
+            }
             "mysql" | "mariadb" | "tidb" => Some(Self::Mysql),
             "mssql" | "sqlserver" => Some(Self::Mssql),
             "sqlite" | "sqlite3" => Some(Self::Sqlite),
@@ -25,20 +32,22 @@ impl DbDriver {
 /// Test/çalıştırma için çözülmüş (secret düz metin) bağlantı bilgisi.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
-    pub driver:   DbDriver,
-    pub mode:     String,           // "fields" | "uri"
-    pub host:     Option<String>,
-    pub port:     Option<i32>,
+    pub driver: DbDriver,
+    pub mode: String, // "fields" | "uri"
+    pub host: Option<String>,
+    pub port: Option<i32>,
     pub database: Option<String>,
     pub username: Option<String>,
-    pub secret:   Option<String>,   // parola (fields) veya bağlantı dizesi (uri)
-    pub options:  serde_json::Value,
+    pub secret: Option<String>, // parola (fields) veya bağlantı dizesi (uri)
+    pub options: serde_json::Value,
 }
 
 #[derive(Debug)]
 pub struct DbError(pub String);
 impl std::fmt::Display for DbError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}", self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
 }
 impl std::error::Error for DbError {}
 

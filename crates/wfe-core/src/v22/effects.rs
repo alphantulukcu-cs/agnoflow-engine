@@ -41,11 +41,7 @@ pub fn apply_effects(
 
 /// Bir effect/terminal değerini çözer. String'ler $-kurallarına göre,
 /// obje/array'ler recursive işlenir, diğerleri literal kalır.
-pub fn resolve_value(
-    raw: &Value,
-    ctx: &Value,
-    env: &EffectEnv<'_>,
-) -> Result<Value, EngineError> {
+pub fn resolve_value(raw: &Value, ctx: &Value, env: &EffectEnv<'_>) -> Result<Value, EngineError> {
     match raw {
         Value::String(s) => resolve_dollar_string(s, ctx, env),
         Value::Object(map) => {
@@ -64,11 +60,7 @@ pub fn resolve_value(
     }
 }
 
-fn resolve_dollar_string(
-    s: &str,
-    ctx: &Value,
-    env: &EffectEnv<'_>,
-) -> Result<Value, EngineError> {
+fn resolve_dollar_string(s: &str, ctx: &Value, env: &EffectEnv<'_>) -> Result<Value, EngineError> {
     match s {
         "$actor" => serde_json::to_value(env.actor)
             .map_err(|e| EngineError::EffectValue(format!("$actor serileştirilemedi: {e}"))),
@@ -140,11 +132,7 @@ mod tests {
         }
     }
 
-    fn env<'a>(
-        a: &'a Actor,
-        input: Option<&'a Value>,
-        exec: Option<&'a Value>,
-    ) -> EffectEnv<'a> {
+    fn env<'a>(a: &'a Actor, input: Option<&'a Value>, exec: Option<&'a Value>) -> EffectEnv<'a> {
         EffectEnv {
             actor: a,
             wfe_id: Uuid::nil(),
@@ -213,12 +201,8 @@ mod tests {
     fn missing_refs_become_null() {
         let a = actor();
         let e = env(&a, None, None);
-        let out = apply_effects(
-            &json!({}),
-            &effects(&[("x", json!("$ctx.ghost.path"))]),
-            &e,
-        )
-        .unwrap();
+        let out =
+            apply_effects(&json!({}), &effects(&[("x", json!("$ctx.ghost.path"))]), &e).unwrap();
         assert_eq!(out["x"], Value::Null);
     }
 
@@ -246,7 +230,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out["credit_info"]["amount_requested"], json!(9000));
-        assert_eq!(out["credit_info"]["purpose"], json!("ev"), "kardeş alan korunmalı");
+        assert_eq!(
+            out["credit_info"]["purpose"],
+            json!("ev"),
+            "kardeş alan korunmalı"
+        );
     }
 
     #[test]
@@ -255,7 +243,11 @@ mod tests {
         let e = env(&a, None, None);
         let out = apply_effects(
             &json!({}),
-            &effects(&[("note", json!("düz metin")), ("n", json!(42)), ("b", json!(true))]),
+            &effects(&[
+                ("note", json!("düz metin")),
+                ("n", json!(42)),
+                ("b", json!(true)),
+            ]),
             &e,
         )
         .unwrap();

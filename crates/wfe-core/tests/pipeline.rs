@@ -14,7 +14,7 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
-    AutoexecDef, AutoexecType, CandidateActor, ClaimTimeout, COrgu, EscalationStep, Wfd, Wft,
+    AutoexecDef, AutoexecType, COrgu, CandidateActor, ClaimTimeout, EscalationStep, Wfd, Wft,
     WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
@@ -110,15 +110,27 @@ impl AutoexecRunner for MockRunner {
 // ---- yardımcılar ----
 
 fn clerk(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "branchClerk".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "branchClerk".into(),
+    }
 }
 
 fn analyst(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "creditAnalyst".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "creditAnalyst".into(),
+    }
 }
 
 fn manager(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "branchManager".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "branchManager".into(),
+    }
 }
 
 fn start_input() -> Value {
@@ -130,7 +142,11 @@ fn start_input() -> Value {
 
 /// self__creditAnalyst node'unda bekleyen, analiste atanmış bir WFES kurar.
 fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
-    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
     let wfah = Wfah::empty().push("start".into(), system, None);
     let created_at = wfah.entries()[0].applied_at;
     Wfes {
@@ -156,23 +172,44 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
 
 #[tokio::test]
 async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let orgu = Uuid::new_v4();
     let actor = clerk(orgu);
     let wfe_id = Uuid::new_v4();
 
     let new = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), wfe_id, None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            wfe_id,
+            None,
+        )
         .await
         .unwrap();
 
     assert_eq!(new.wfe_id, wfe_id);
-    assert!(matches!(&new.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst"));
+    assert!(
+        matches!(&new.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst")
+    );
     // initiated_by = $actor gerçek aktörle çözülmeli
-    assert_eq!(new.initial_dynctx["initiated_by"]["role"], json!("branchClerk"));
-    assert_eq!(new.initial_dynctx["applicant"]["name"], json!("Ayşe Yılmaz"));
+    assert_eq!(
+        new.initial_dynctx["initiated_by"]["role"],
+        json!("branchClerk")
+    );
+    assert_eq!(
+        new.initial_dynctx["applicant"]["name"],
+        json!("Ayşe Yılmaz")
+    );
     // M16: WFAH start kaydı gerçek action adını taşır (rezerve "start" değil)
     assert_eq!(new.wfah_entries[0].action, "create_application");
     assert!(new.resolved_c_a.iter().any(|c| c.role == "creditAnalyst"));
@@ -180,13 +217,26 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
 
 #[tokio::test]
 async fn start_rejects_missing_required_context_field() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &json!({"applicant": {}}), Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &json!({"applicant": {}}),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -195,15 +245,28 @@ async fn start_rejects_missing_required_context_field() {
 #[tokio::test]
 async fn start_rejects_undeclared_input_path() {
     // §7.5 simetrisi: start action'ın input tanımında olmayan yol ctx'e sızamaz.
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
     input["status"] = json!("approved"); // bildirilmemiş alan — enjeksiyon denemesi
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -215,14 +278,27 @@ async fn start_rejects_undeclared_input_path() {
 #[tokio::test]
 async fn start_rejects_missing_required_action_input() {
     // start action'ın input.required'ı transition'lardaki gibi zorunludur.
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
     let input = json!({"applicant": {"name": "Ayşe"}}); // credit_info yok
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -233,15 +309,28 @@ async fn start_rejects_missing_required_action_input() {
 
 #[tokio::test]
 async fn start_rejects_readonly_field_in_input() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
     input["credit_score"] = json!(999);
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -250,13 +339,26 @@ async fn start_rejects_readonly_field_in_input() {
 #[tokio::test]
 async fn start_with_named_action_selects_matching_rule() {
     // M16: start.action gerçek ad — istemci action adı verirse yalnız o kural aday olur.
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
 
     let new = engine
-        .start(&golden(), &actor, Uuid::nil(), Some("create_application"), &start_input(), Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            Some("create_application"),
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(new.wfah_entries[0].action, "create_application");
@@ -264,13 +366,26 @@ async fn start_with_named_action_selects_matching_rule() {
 
 #[tokio::test]
 async fn start_with_unknown_action_is_not_eligible() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), Some("ghost_action"), &start_input(), Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            Some("ghost_action"),
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::StartNotEligible));
@@ -278,13 +393,26 @@ async fn start_with_unknown_action_is_not_eligible() {
 
 #[tokio::test]
 async fn start_ineligible_actor_is_rejected() {
-    let org = MockOrg { role_assigned: false }; // rol ataması yok
+    let org = MockOrg {
+        role_assigned: false,
+    }; // rol ataması yok
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::StartNotEligible));
@@ -294,14 +422,26 @@ async fn start_ineligible_actor_is_rejected() {
 
 #[tokio::test]
 async fn apply_on_unclaimed_wfe_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve", &json!({"credit_info": {"amount_requested": 30000}}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotClaimed));
@@ -309,14 +449,26 @@ async fn apply_on_unclaimed_wfe_is_rejected() {
 
 #[tokio::test]
 async fn apply_by_non_owner_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve", &json!({"credit_info": {"amount_requested": 30000}}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotOwner));
@@ -326,15 +478,26 @@ async fn apply_by_non_owner_is_rejected() {
 
 #[tokio::test(start_paused = true)]
 async fn analyst_approve_within_limit_reaches_terminal_approved() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
 
     let commit = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 30000}}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -350,49 +513,86 @@ async fn analyst_approve_within_limit_reaches_terminal_approved() {
     assert_eq!(end_response["amount_granted"], json!(30000));
     assert_eq!(end_response["applicant_name"], json!("Ayşe Yılmaz"));
     // WFAH: action + 3 trigger
-    let actions: Vec<&str> = commit.wfah_entries.iter().map(|e| e.action.as_str()).collect();
+    let actions: Vec<&str> = commit
+        .wfah_entries
+        .iter()
+        .map(|e| e.action.as_str())
+        .collect();
     assert_eq!(
         actions,
-        vec!["analyst_approve", "trigger:kredi_skoru_getir", "trigger:limit_kontrol", "trigger:audit_log"]
+        vec![
+            "analyst_approve",
+            "trigger:kredi_skoru_getir",
+            "trigger:limit_kontrol",
+            "trigger:audit_log"
+        ]
     );
 }
 
 #[tokio::test(start_paused = true)]
 async fn analyst_approve_over_limit_routes_to_branch_manager() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(650, "C", false); // skor düşük → within_limit false
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
 
     let commit = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 90000}}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 90000}}),
+            None,
+        )
         .await
         .unwrap();
 
-    assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
-        "default branch şube müdürüne gitmeli: {:?}", commit.outcome);
-    assert!(commit.resolved_c_a.iter().any(|c| c.role == "branchManager"));
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
+        "default branch şube müdürüne gitmeli: {:?}",
+        commit.outcome
+    );
+    assert!(commit
+        .resolved_c_a
+        .iter()
+        .any(|c| c.role == "branchManager"));
 }
 
 // ================================================================ trigger retry / catch
 
 #[tokio::test(start_paused = true)]
 async fn failing_score_fetch_is_retried_then_caught_and_routed() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner {
         rest: RestBehavior::AlwaysFail,
         calc: json!({"within_limit": true}),
         rest_calls: AtomicU32::new(0),
     };
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
 
     let commit = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 30000}}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -403,36 +603,55 @@ async fn failing_score_fetch_is_retried_then_caught_and_routed() {
     // limit_kontrol when=false → atlanmış olmalı (within_limit yok)
     assert!(commit.new_dynctx.get("within_limit").is_none());
     // wft ilk condition → şube müdürü
-    assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"));
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+    );
     // handled trigger WFAH'ta işaretli
-    let trig = commit.wfah_entries.iter()
-        .find(|e| e.action == "trigger:kredi_skoru_getir").unwrap();
+    let trig = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "trigger:kredi_skoru_getir")
+        .unwrap();
     assert_eq!(trig.input.as_ref().unwrap()["handled"], json!(true));
 }
 
 #[tokio::test(start_paused = true)]
 async fn hanging_autoexec_times_out_and_is_caught() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner {
         rest: RestBehavior::Hang, // 10s timeout'u aşar
         calc: json!({"within_limit": true}),
         rest_calls: AtomicU32::new(0),
     };
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
 
     let commit = engine
-        .apply(&golden(), &wfes, &a, "analyst_approve",
-               &json!({"credit_info": {"amount_requested": 30000}}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
+        )
         .await
         .unwrap();
 
     // WFD.Timeout retry listesinde → 4 deneme, sonra catch
     assert_eq!(runner.rest_calls.load(Ordering::SeqCst), 4);
     assert_eq!(commit.new_dynctx["score_fetch_failed"], json!(true));
-    let trig = commit.wfah_entries.iter()
-        .find(|e| e.action == "trigger:kredi_skoru_getir").unwrap();
+    let trig = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "trigger:kredi_skoru_getir")
+        .unwrap();
     assert_eq!(trig.input.as_ref().unwrap()["error"], json!("WFD.Timeout"));
 }
 
@@ -440,17 +659,28 @@ async fn hanging_autoexec_times_out_and_is_caught() {
 
 #[tokio::test(start_paused = true)]
 async fn manager_reject_takes_default_terminal() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let mut ctx = start_input();
     ctx["score_fetch_failed"] = json!(true);
     let wfes = wfes_at("self__branchManager", Some(m.user_id), ctx);
 
     let commit = engine
-        .apply(&golden(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "reject"}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "reject"}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -465,15 +695,26 @@ async fn manager_reject_takes_default_terminal() {
 
 #[tokio::test(start_paused = true)]
 async fn manager_approve_condition_hits_terminal_approved() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let commit = engine
-        .apply(&golden(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "approve"}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -485,15 +726,26 @@ async fn manager_approve_condition_hits_terminal_approved() {
 
 #[tokio::test]
 async fn undeclared_input_path_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "approve", "credit_score": 999}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve", "credit_score": 999}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -501,9 +753,14 @@ async fn undeclared_input_path_is_rejected() {
 
 #[tokio::test]
 async fn missing_required_input_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
@@ -534,20 +791,34 @@ fn first_match_wfd() -> Wfd {
 
 #[tokio::test(start_paused = true)]
 async fn first_matching_when_wins_in_array_order() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     // 30000 < 1000000 → t_guarded'ın when'i false → t_fallback seçilmeli
     let commit = engine
-        .apply(&first_match_wfd(), &wfes, &m, "manager_decide",
-               &json!({"manager_decision": "approve"}), None)
+        .apply(
+            &first_match_wfd(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+        )
         .await
         .unwrap();
-    assert!(matches!(&commit.outcome, CommitOutcome::Terminal { .. }),
-        "fallback transition'ın wft'si (terminal) seçilmeliydi: {:?}", commit.outcome);
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::Terminal { .. }),
+        "fallback transition'ın wft'si (terminal) seçilmeliydi: {:?}",
+        commit.outcome
+    );
 }
 
 // ================================================================ NoConditionMatched (M3)
@@ -560,14 +831,26 @@ async fn conditional_without_default_and_no_match_errors() {
     });
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let err = engine
-        .apply(&wfd, &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
+        .apply(
+            &wfd,
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NoConditionMatched), "{err}");
@@ -577,40 +860,65 @@ async fn conditional_without_default_and_no_match_errors() {
 
 #[tokio::test]
 async fn claim_checks() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
 
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    assert_eq!(engine.can_claim(&wfd, &wfes, &a, None).await.unwrap(), ClaimCheck::Ok);
+    assert_eq!(
+        engine.can_claim(&wfd, &wfes, &a, None).await.unwrap(),
+        ClaimCheck::Ok
+    );
 
     // yanlış rol → uygun değil
     let c = clerk(Uuid::new_v4());
-    assert_eq!(engine.can_claim(&wfd, &wfes, &c, None).await.unwrap(), ClaimCheck::NotEligible);
+    assert_eq!(
+        engine.can_claim(&wfd, &wfes, &c, None).await.unwrap(),
+        ClaimCheck::NotEligible
+    );
 
     // zaten claim edilmiş
     let claimed = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    assert_eq!(engine.can_claim(&wfd, &claimed, &a, None).await.unwrap(), ClaimCheck::AlreadyClaimed);
+    assert_eq!(
+        engine.can_claim(&wfd, &claimed, &a, None).await.unwrap(),
+        ClaimCheck::AlreadyClaimed
+    );
 }
 
 // ================================================================ possible actions
 
 #[tokio::test]
 async fn owner_sees_available_actions() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
-    let actions = engine.possible_actions(&golden(), &wfes, &m, None).await.unwrap();
+    let actions = engine
+        .possible_actions(&golden(), &wfes, &m, None)
+        .await
+        .unwrap();
     assert_eq!(actions, vec!["manager_decide"]);
 
     // owner olmayan boş liste alır
     let other = manager(Uuid::new_v4());
-    let actions = engine.possible_actions(&golden(), &wfes, &other, None).await.unwrap();
+    let actions = engine
+        .possible_actions(&golden(), &wfes, &other, None)
+        .await
+        .unwrap();
     assert!(actions.is_empty());
 }
 
@@ -618,45 +926,80 @@ async fn owner_sees_available_actions() {
 
 #[tokio::test]
 async fn escalation_fires_after_sla_and_moves_wfe() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
 
     // P3D dolmadan due değil
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, entered_at + Duration::days(2), None).unwrap(),
+        engine
+            .due_escalation(&wfd, &wfes, entered_at + Duration::days(2), None)
+            .unwrap(),
         None
     );
     // P3D sonrası due
     let now = entered_at + Duration::days(3) + Duration::seconds(1);
-    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), Some(0));
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, now, None).unwrap(),
+        Some(0)
+    );
 
     // fire → şube müdürüne taşınır, effects uygulanır (assigned olsa bile çalışır)
-    let commit = engine.fire_escalation(&wfd, &wfes, 0, now, None).await.unwrap();
-    assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"));
-    assert!(commit.new_dynctx["internal_notes"].as_str().unwrap().contains("SLA"));
-    assert_eq!(commit.wfah_entries[0].action, "escalate:self__creditAnalyst:0");
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+    );
+    assert!(commit.new_dynctx["internal_notes"]
+        .as_str()
+        .unwrap()
+        .contains("SLA"));
+    assert_eq!(
+        commit.wfah_entries[0].action,
+        "escalate:self__creditAnalyst:0"
+    );
     assert_eq!(commit.wfah_entries[0].actor.role, "system");
 }
 
 #[tokio::test]
 async fn fired_escalation_step_does_not_refire() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden();
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
     // adım ateşlenmiş gibi işaretle
-    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
-    wfes.wfah = wfes.wfah.push("escalate:self__creditAnalyst:0".into(), system, None);
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
+    wfes.wfah = wfes
+        .wfah
+        .push("escalate:self__creditAnalyst:0".into(), system, None);
 
     let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
     let now = entered_at + Duration::days(10);
-    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), None,
-        "ateşlenen adım tekrar due olmamalı");
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, now, None).unwrap(),
+        None,
+        "ateşlenen adım tekrar due olmamalı"
+    );
 }
 
 // #4 — çok-adımlı aynı-node escalation: her adımın `after`'ı NODE GİRİŞİNDEN ölçülür,
@@ -664,9 +1007,14 @@ async fn fired_escalation_step_does_not_refire() {
 // ateşlenmiş olsa bile adım 1 (P5D) yine node girişinden +5 günde due olmalı (+8'de değil).
 #[tokio::test]
 async fn multi_step_escalation_measures_after_from_node_entry() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
 
     // Golden'a creditAnalyst node'una ikinci bir escalation adımı (P5D) ekle.
     let mut wfd = golden();
@@ -677,28 +1025,55 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node { node: "self__branchManager".into() }),
+            wft: Some(Wft::Node {
+                node: "self__branchManager".into(),
+            }),
             terminate: None,
         });
 
     let t0 = Utc::now();
-    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
     // Kontrollü WFAH: node girişi T0; adım 0 marker'ı T0+3g (gün sonra ateşlendi).
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
     wfes.wfah = Wfah(vec![
-        WfahEntry { seq: 1, action: "start".into(), actor: system.clone(), input: None, applied_at: t0 },
-        WfahEntry { seq: 2, action: "escalate:self__creditAnalyst:0".into(), actor: system.clone(), input: None, applied_at: t0 + Duration::days(3) },
+        WfahEntry {
+            seq: 1,
+            action: "start".into(),
+            actor: system.clone(),
+            input: None,
+            applied_at: t0,
+        },
+        WfahEntry {
+            seq: 2,
+            action: "escalate:self__creditAnalyst:0".into(),
+            actor: system.clone(),
+            input: None,
+            applied_at: t0 + Duration::days(3),
+        },
     ]);
 
     // Adım 0 ateşlendi; adım 1 (P5D) node girişinden +4 günde henüz due DEĞİL.
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(4), None).unwrap(),
+        engine
+            .due_escalation(&wfd, &wfes, t0 + Duration::days(4), None)
+            .unwrap(),
         None,
         "adım 1 node girişinden +5g'de due olmalı, +4g'de değil",
     );
     // Node girişinden +5 gün + 1sn: adım 1 due (marker'dan ölçülseydi +8g olurdu).
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, t0 + Duration::days(5) + Duration::seconds(1), None).unwrap(),
+        engine
+            .due_escalation(
+                &wfd,
+                &wfes,
+                t0 + Duration::days(5) + Duration::seconds(1),
+                None
+            )
+            .unwrap(),
         Some(1),
         "adım 1'in `after`'ı NODE GİRİŞİNDEN ölçülmeli (marker'dan değil)",
     );
@@ -713,20 +1088,36 @@ async fn start_wft_targeting_own_from_node_lands_there() {
     // akış müdür node'una gider; müdür başlatınca memur node'una — burada
     // sadeleştirilmiş biçimde: start.wft kendi from'unu hedefliyor).
     let mut wfd = golden();
-    wfd.start[0].wft = Wft::Node { node: "type_branch__branchClerk".into() };
+    wfd.start[0].wft = Wft::Node {
+        node: "type_branch__branchClerk".into(),
+    };
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let actor = clerk(Uuid::new_v4());
 
     let new = engine
-        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .start(
+            &wfd,
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap();
     assert!(
         matches!(&new.outcome, CommitOutcome::MoveTo { node } if node == "type_branch__branchClerk"),
-        "{:?}", new.outcome
+        "{:?}",
+        new.outcome
     );
 }
 
@@ -742,34 +1133,56 @@ async fn escalation_fires_normally_at_start_node() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node { node: "self__creditAnalyst".into() }),
+            wft: Some(Wft::Node {
+                node: "self__creditAnalyst".into(),
+            }),
             terminate: None,
         });
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfes = wfes_at("type_branch__branchClerk", None, start_input());
     let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
 
     assert_eq!(
-        engine.due_escalation(&wfd, &wfes, entered_at + Duration::hours(12), None).unwrap(),
+        engine
+            .due_escalation(&wfd, &wfes, entered_at + Duration::hours(12), None)
+            .unwrap(),
         None
     );
     let now = entered_at + Duration::days(1) + Duration::seconds(1);
-    assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), Some(0));
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, now, None).unwrap(),
+        Some(0)
+    );
 
-    let commit = engine.fire_escalation(&wfd, &wfes, 0, now, None).await.unwrap();
-    assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst"));
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, None)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst")
+    );
 }
 
 // ================================================================ SLA-3 deadline (2026-07-16)
 
 #[tokio::test]
 async fn deadline_due_fires_terminated_not_error() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
     let deadline = wfes.created_at + Duration::days(30);
     wfes.deadline = Some(deadline);
@@ -798,50 +1211,98 @@ async fn deadline_due_fires_terminated_not_error() {
 
 #[tokio::test]
 async fn start_resolves_deadline_and_allows_exceeding_wfd_timeout() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden(); // timeout: P30D
     let actor = clerk(Uuid::new_v4());
 
     // deadline > wfd.timeout → artık serbest, çağıran WFD tavanını aşabilir
     let before = Utc::now();
     let new = engine
-        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), Some("P40D"))
+        .start(
+            &wfd,
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            Some("P40D"),
+        )
         .await
         .unwrap();
-    let deadline = new.deadline.expect("deadline verildiğinde resolve edilmeli");
+    let deadline = new
+        .deadline
+        .expect("deadline verildiğinde resolve edilmeli");
     assert!(deadline >= before + Duration::days(40) && deadline <= Utc::now() + Duration::days(40));
 
     // deadline ≤ timeout → kabul, mutlak deadline start anından itibaren çözülür
     let before = Utc::now();
     let new = engine
-        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), Some("P10D"))
+        .start(
+            &wfd,
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            Some("P10D"),
+        )
         .await
         .unwrap();
-    let deadline = new.deadline.expect("deadline verildiğinde resolve edilmeli");
+    let deadline = new
+        .deadline
+        .expect("deadline verildiğinde resolve edilmeli");
     assert!(deadline >= before + Duration::days(10) && deadline <= Utc::now() + Duration::days(10));
 
     // deadline verilmedi, wfd.timeout var → wfd.timeout kullanılır
     let new = engine
-        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .start(
+            &wfd,
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap();
-    let deadline = new.deadline.expect("wfd.timeout varken deadline resolve edilmeli");
+    let deadline = new
+        .deadline
+        .expect("wfd.timeout varken deadline resolve edilmeli");
     assert!(deadline >= before + Duration::days(30) && deadline <= Utc::now() + Duration::days(30));
 }
 
 #[tokio::test]
 async fn start_without_deadline_or_timeout_leaves_deadline_null() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfd = golden();
     wfd.timeout = None;
     let actor = clerk(Uuid::new_v4());
 
     let new = engine
-        .start(&wfd, &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .start(
+            &wfd,
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap();
     assert!(new.deadline.is_none());
@@ -852,7 +1313,10 @@ async fn start_without_deadline_or_timeout_leaves_deadline_null() {
 /// self__creditAnalyst'e claim_timeout ekleyen golden varyantı.
 fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
     let mut wfd = golden();
-    wfd.nodes.get_mut("self__creditAnalyst").unwrap().claim_timeout = Some(ClaimTimeout {
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .claim_timeout = Some(ClaimTimeout {
         after: after.into(),
         wft: wft.map(String::from),
     });
@@ -861,19 +1325,30 @@ fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
 
 #[tokio::test]
 async fn claim_timeout_due_without_wft_releases_claim() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_claim_timeout("PT2H", None);
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
 
-    assert!(!engine.claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1), None).unwrap());
+    assert!(!engine
+        .claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1), None)
+        .unwrap());
     let now = claimed_at + Duration::hours(2) + Duration::seconds(1);
     assert!(engine.claim_timeout_due(&wfd, &wfes, now, None).unwrap());
 
-    match engine.fire_claim_timeout(&wfd, &wfes, now, None).await.unwrap() {
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, None)
+        .await
+        .unwrap()
+    {
         ClaimTimeoutOutcome::Release(entry) => {
             assert_eq!(entry.action, "claim_timeout:self__creditAnalyst");
             assert_eq!(entry.actor.role, "system");
@@ -884,19 +1359,33 @@ async fn claim_timeout_due_without_wft_releases_claim() {
 
 #[tokio::test]
 async fn claim_timeout_due_with_wft_moves_like_escalation() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
     let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
 
-    match engine.fire_claim_timeout(&wfd, &wfes, now, None).await.unwrap() {
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, None)
+        .await
+        .unwrap()
+    {
         ClaimTimeoutOutcome::Move(commit) => {
-            assert!(matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"));
-            assert_eq!(commit.wfah_entries[0].action, "claim_timeout:self__creditAnalyst");
+            assert!(
+                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+            );
+            assert_eq!(
+                commit.wfah_entries[0].action,
+                "claim_timeout:self__creditAnalyst"
+            );
         }
         ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
     }
@@ -904,22 +1393,34 @@ async fn claim_timeout_due_with_wft_moves_like_escalation() {
 
 #[tokio::test]
 async fn claim_timeout_not_due_without_claim() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_claim_timeout("PT1H", None);
     // hiç claim edilmemiş (claimed_at None) — asla due olmaz
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    assert!(!engine.claim_timeout_due(&wfd, &wfes, wfes.created_at + Duration::days(1), None).unwrap());
+    assert!(!engine
+        .claim_timeout_due(&wfd, &wfes, wfes.created_at + Duration::days(1), None)
+        .unwrap());
 }
 
 // ================================================================ SLA-2 escalation terminate (2026-07-16)
 
 #[tokio::test]
 async fn escalation_terminate_true_ends_instance_as_terminated() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfd = golden();
     {
         let esc = &mut wfd.nodes.get_mut("self__creditAnalyst").unwrap().escalation[0];
@@ -929,56 +1430,104 @@ async fn escalation_terminate_true_ends_instance_as_terminated() {
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
     let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
 
-    let commit = engine.fire_escalation(&wfd, &wfes, 0, now, None).await.unwrap();
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, None)
+        .await
+        .unwrap();
     let CommitOutcome::Terminated { end_response } = &commit.outcome else {
         panic!("Terminated bekleniyordu");
     };
     assert_eq!(end_response["reason"], json!("SLA.Dwell"));
     assert_eq!(end_response["node"], json!("self__creditAnalyst"));
-    assert_eq!(commit.wfah_entries[0].action, "escalate:self__creditAnalyst:0");
+    assert_eq!(
+        commit.wfah_entries[0].action,
+        "escalate:self__creditAnalyst:0"
+    );
 }
 
 // ================================================================ terminal WFE korunur
 
 #[tokio::test]
 async fn terminal_wfe_rejects_actions() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let mut wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
     wfes.status = WfeStatus::Terminal;
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeTerminal));
-    assert_eq!(engine.can_claim(&golden(), &wfes, &m, None).await.unwrap(), ClaimCheck::Terminal);
+    assert_eq!(
+        engine.can_claim(&golden(), &wfes, &m, None).await.unwrap(),
+        ClaimCheck::Terminal
+    );
 }
 
 /// `Terminated` (SLA ihlali) `Terminal` ile AYNI korumaya tabidir: aksiyon/claim
 /// reddedilir, escalation/possible-actions boş döner (2026-07-16 sözleşmesi).
 #[tokio::test]
 async fn terminated_wfe_is_treated_like_terminal() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
     let mut wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
     wfes.status = WfeStatus::Terminated;
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeTerminal));
-    assert_eq!(engine.can_claim(&golden(), &wfes, &m, None).await.unwrap(), ClaimCheck::Terminal);
-    assert!(engine.possible_actions(&golden(), &wfes, &m, None).await.unwrap().is_empty());
-    assert_eq!(engine.next_escalation(&golden(), &wfes, Utc::now(), None).unwrap(), None);
+    assert_eq!(
+        engine.can_claim(&golden(), &wfes, &m, None).await.unwrap(),
+        ClaimCheck::Terminal
+    );
+    assert!(engine
+        .possible_actions(&golden(), &wfes, &m, None)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        engine
+            .next_escalation(&golden(), &wfes, Utc::now(), None)
+            .unwrap(),
+        None
+    );
 
     // wire format kontrolü: serde "terminated" olarak yazar
-    assert_eq!(serde_json::to_value(&wfes.status).unwrap(), json!("terminated"));
+    assert_eq!(
+        serde_json::to_value(&wfes.status).unwrap(),
+        json!("terminated")
+    );
 }
 
 /// Regresyon: deadline geçmiş ama status hâlâ `Active` (sweeper 60s tick'e kadar
@@ -989,9 +1538,14 @@ async fn terminated_wfe_is_treated_like_terminal() {
 /// yapmamasıydı (2026-07-16 fix).
 #[tokio::test]
 async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let m = manager(Uuid::new_v4());
 
     // unclaimed, status hâlâ Active, deadline geçmiş → can_claim Expired döner (Ok DEĞİL)
@@ -999,7 +1553,10 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
     unclaimed.deadline = Some(unclaimed.created_at - Duration::hours(1));
     assert_eq!(unclaimed.status, WfeStatus::Active);
     assert_eq!(
-        engine.can_claim(&golden(), &unclaimed, &m, None).await.unwrap(),
+        engine
+            .can_claim(&golden(), &unclaimed, &m, None)
+            .await
+            .unwrap(),
         ClaimCheck::Expired,
         "deadline geçmiş ama status hâlâ active olan WFE claim edilebilir görünmemeli"
     );
@@ -1009,11 +1566,22 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
     claimed.deadline = Some(claimed.created_at - Duration::hours(1));
     assert_eq!(claimed.status, WfeStatus::Active);
     let err = engine
-        .apply(&golden(), &claimed, &m, "manager_decide", &json!({"manager_decision": "approve"}), None)
+        .apply(
+            &golden(),
+            &claimed,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::WfeExpired), "{err}");
-    assert!(engine.possible_actions(&golden(), &claimed, &m, None).await.unwrap().is_empty());
+    assert!(engine
+        .possible_actions(&golden(), &claimed, &m, None)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 // ================================================================ WOR-31 fork/join (paralel)
@@ -1029,7 +1597,11 @@ fn parallel_ctx() -> Value {
 }
 
 fn actor_with_role(role: &str) -> Actor {
-    Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::new_v4(), role: role.into() }
+    Actor {
+        orgu_id: Uuid::new_v4(),
+        user_id: Uuid::new_v4(),
+        role: role.into(),
+    }
 }
 
 fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchState {
@@ -1045,7 +1617,11 @@ fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchS
 
 /// Fork SONRASI paralel modda bir WFES kurar: current_node NULL, join persist.
 fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfes {
-    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
     let wfah = Wfah::empty().push("start".into(), system, None);
     let created_at = wfah.entries()[0].applied_at;
     Wfes {
@@ -1068,18 +1644,29 @@ fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfe
 }
 
 fn join_node() -> WftTarget {
-    WftTarget::Node { node: "self__resultCoordinator".into() }
+    WftTarget::Node {
+        node: "self__resultCoordinator".into(),
+    }
 }
 
 fn wfah_actions(commit: &wfe_core::v22::ports::TransitionCommit) -> Vec<&str> {
-    commit.wfah_entries.iter().map(|e| e.action.as_str()).collect()
+    commit
+        .wfah_entries
+        .iter()
+        .map(|e| e.action.as_str())
+        .collect()
 }
 
 #[tokio::test]
 async fn start_review_forks_into_three_branches() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let coord = actor_with_role("coordinator");
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
 
@@ -1093,31 +1680,56 @@ async fn start_review_forks_into_three_branches() {
     };
     assert_eq!(
         branches,
-        &["self__financeApprover", "self__legalApprover", "self__hrApprover"]
+        &[
+            "self__financeApprover",
+            "self__legalApprover",
+            "self__hrApprover"
+        ]
     );
     assert_eq!(join, &join_node());
     // aday cache'i üç kolun rollerinin birleşimi
     for role in ["financeApprover", "legalApprover", "hrApprover"] {
-        assert!(commit.resolved_c_a.iter().any(|c| c.role == role), "{role} eksik");
+        assert!(
+            commit.resolved_c_a.iter().any(|c| c.role == role),
+            "{role} eksik"
+        );
     }
     // `_fork` marker'ı engine tarafından staged (system aktörle)
     assert_eq!(wfah_actions(&commit), vec!["start_review", "_fork"]);
     let fork = commit.wfah_entries.last().unwrap();
     assert_eq!(fork.actor.role, "system");
-    assert_eq!(fork.input.as_ref().unwrap()["branches"][1], json!("self__legalApprover"));
-    assert_eq!(fork.input.as_ref().unwrap()["join"], json!({"node": "self__resultCoordinator"}));
+    assert_eq!(
+        fork.input.as_ref().unwrap()["branches"][1],
+        json!("self__legalApprover")
+    );
+    assert_eq!(
+        fork.input.as_ref().unwrap()["join"],
+        json!({"node": "self__resultCoordinator"})
+    );
 }
 
 #[tokio::test]
 async fn single_mode_node_hint_must_match_current_node() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let coord = actor_with_role("coordinator");
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
 
     let err = engine
-        .apply(&paralel(), &wfes, &coord, "start_review", &json!({}), Some("self__hrApprover"))
+        .apply(
+            &paralel(),
+            &wfes,
+            &coord,
+            "start_review",
+            &json!({}),
+            Some("self__hrApprover"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -1125,13 +1737,22 @@ async fn single_mode_node_hint_must_match_current_node() {
 
 #[tokio::test]
 async fn branch_approve_arrives_without_occupying_join() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Active, None),
         ],
@@ -1140,13 +1761,21 @@ async fn branch_approve_arrives_without_occupying_join() {
     );
 
     let commit = engine
-        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &paralel(),
+            &wfes,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap();
 
     assert!(
         matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node } if from_node == "self__financeApprover"),
-        "{:?}", commit.outcome
+        "{:?}",
+        commit.outcome
     );
     // kol transition effect'i staged
     assert!(commit.new_dynctx["finans_onay_zamani"].is_string());
@@ -1161,13 +1790,22 @@ async fn branch_approve_arrives_without_occupying_join() {
 
 #[tokio::test]
 async fn ambiguous_action_without_node_hint_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Active, None),
         ],
@@ -1191,7 +1829,14 @@ async fn ambiguous_action_without_node_hint_is_rejected() {
 
     // geçersiz ipucu: aktif kol değil
     let err = engine
-        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__coordinator"))
+        .apply(
+            &paralel(),
+            &wfes,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__coordinator"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -1199,9 +1844,14 @@ async fn ambiguous_action_without_node_hint_is_rejected() {
 
 #[tokio::test]
 async fn parallel_apply_enforces_branch_claim_ownership() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
 
     // kol claim edilmemiş → NotClaimed
@@ -1215,7 +1865,14 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
         parallel_ctx(),
     );
     let err = engine
-        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &paralel(),
+            &wfes,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotClaimed), "{err}");
@@ -1223,7 +1880,11 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
     // başka kullanıcı claim etmiş → NotOwner
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(Uuid::new_v4())),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(Uuid::new_v4()),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Active, None),
         ],
@@ -1231,7 +1892,14 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
         parallel_ctx(),
     );
     let err = engine
-        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &paralel(),
+            &wfes,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::NotOwner), "{err}");
@@ -1239,9 +1907,14 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
 
 #[tokio::test]
 async fn last_branch_arrival_completes_join_to_node() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let hr = actor_with_role("hrApprover");
     let wfes = parallel_wfes(
         vec![
@@ -1268,7 +1941,10 @@ async fn last_branch_arrival_completes_join_to_node() {
         "{next:?}"
     );
     // join node'un adayları promotion için resolve edilir
-    assert!(commit.resolved_c_a.iter().any(|c| c.role == "resultCoordinator"));
+    assert!(commit
+        .resolved_c_a
+        .iter()
+        .any(|c| c.role == "resultCoordinator"));
     // engine `_branch_arrived` staged eder; `_join` ADAPTER'ın işidir (T3)
     assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
 }
@@ -1285,9 +1961,14 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     }
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let hr = actor_with_role("hrApprover");
     let wfes = parallel_wfes(
         vec![
@@ -1295,7 +1976,9 @@ async fn last_branch_arrival_completes_join_to_terminal() {
             branch("self__legalApprover", BranchStatus::Arrived, None),
             branch("self__hrApprover", BranchStatus::Active, Some(hr.user_id)),
         ],
-        WftTarget::Terminal { terminal: "terminal_approved".into() },
+        WftTarget::Terminal {
+            terminal: "terminal_approved".into(),
+        },
         parallel_ctx(),
     );
 
@@ -1318,15 +2001,24 @@ async fn last_branch_arrival_completes_join_to_terminal() {
 
 #[tokio::test]
 async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let legal = actor_with_role("legalApprover");
     // finance hâlâ aktif, hr çoktan vardı — yalnız AKTİF sibling iptal edilir
     let wfes = parallel_wfes(
         vec![
             branch("self__financeApprover", BranchStatus::Active, None),
-            branch("self__legalApprover", BranchStatus::Active, Some(legal.user_id)),
+            branch(
+                "self__legalApprover",
+                BranchStatus::Active,
+                Some(legal.user_id),
+            ),
             branch("self__hrApprover", BranchStatus::Arrived, None),
         ],
         join_node(),
@@ -1334,7 +2026,14 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     );
 
     let commit = engine
-        .apply(&paralel(), &wfes, &legal, "reject", &json!({}), Some("self__legalApprover"))
+        .apply(
+            &paralel(),
+            &wfes,
+            &legal,
+            "reject",
+            &json!({}),
+            Some("self__legalApprover"),
+        )
         .await
         .unwrap();
 
@@ -1347,15 +2046,32 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     // superseded marker'ı alır (kol satırı `arrived` kalır).
     assert_eq!(
         wfah_actions(&commit),
-        vec!["reject", "_collapse", "_branch_cancelled", "_branch_superseded"]
+        vec![
+            "reject",
+            "_collapse",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
     );
     let cancel = &commit.wfah_entries[2];
-    assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__financeApprover"));
-    assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
+    assert_eq!(
+        cancel.input.as_ref().unwrap()["node"],
+        json!("self__financeApprover")
+    );
+    assert_eq!(
+        cancel.input.as_ref().unwrap()["reason"],
+        json!("sibling_terminal")
+    );
     assert_eq!(cancel.actor.role, "system");
     let superseded = &commit.wfah_entries[3];
-    assert_eq!(superseded.input.as_ref().unwrap()["node"], json!("self__hrApprover"));
-    assert_eq!(superseded.input.as_ref().unwrap()["reason"], json!("sibling_terminal"));
+    assert_eq!(
+        superseded.input.as_ref().unwrap()["node"],
+        json!("self__hrApprover")
+    );
+    assert_eq!(
+        superseded.input.as_ref().unwrap()["reason"],
+        json!("sibling_terminal")
+    );
 }
 
 #[tokio::test]
@@ -1371,14 +2087,23 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     }
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     // finance acting; legal aktif (iptal edilecek); hr çoktan vardı (iptal EDİLMEZ).
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Arrived, None),
         ],
@@ -1387,7 +2112,14 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     );
 
     let commit = engine
-        .apply(&wfd, &wfes, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &wfd,
+            &wfes,
+            &fin,
+            "reject",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap();
 
@@ -1402,10 +2134,18 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     // acting kol (finance) hiç marker almaz.
     assert_eq!(
         wfah_actions(&commit),
-        vec!["reject", "_collapse", "_branch_cancelled", "_branch_superseded"]
+        vec![
+            "reject",
+            "_collapse",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
     );
     let cancel = &commit.wfah_entries[2];
-    assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
+    assert_eq!(
+        cancel.input.as_ref().unwrap()["node"],
+        json!("self__legalApprover")
+    );
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("collapsed"));
     assert_eq!(cancel.actor.role, "system");
     // WOR-59: claim'siz kolda alanlar açıkça null (alan HER ZAMAN var)
@@ -1425,16 +2165,29 @@ async fn collapse_marker_carries_dropped_claim_owner() {
     }
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     let legal_owner = Uuid::new_v4();
-    let legal = branch("self__legalApprover", BranchStatus::Active, Some(legal_owner));
+    let legal = branch(
+        "self__legalApprover",
+        BranchStatus::Active,
+        Some(legal_owner),
+    );
     let legal_claimed_at = legal.claimed_at.unwrap();
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             legal,
         ],
         join_node(),
@@ -1442,7 +2195,14 @@ async fn collapse_marker_carries_dropped_claim_owner() {
     );
 
     let commit = engine
-        .apply(&wfd, &wfes, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &wfd,
+            &wfes,
+            &fin,
+            "reject",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap();
 
@@ -1469,13 +2229,22 @@ async fn collapse_summary_marker_describes_whole_event() {
     }
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Arrived, None),
         ],
@@ -1484,14 +2253,26 @@ async fn collapse_summary_marker_describes_whole_event() {
     );
 
     let commit = engine
-        .apply(&wfd, &wfes, &fin, "reject", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &wfd,
+            &wfes,
+            &fin,
+            "reject",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap();
 
     // manşet DETAY marker'larından önce gelir, detaylar KALIR
     assert_eq!(
         wfah_actions(&commit),
-        vec!["reject", "_collapse", "_branch_cancelled", "_branch_superseded"]
+        vec![
+            "reject",
+            "_collapse",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
     );
     let summary = &commit.wfah_entries[1];
     assert_eq!(summary.actor.role, "system");
@@ -1509,10 +2290,25 @@ async fn collapse_summary_marker_describes_whole_event() {
     for detail in &commit.wfah_entries[2..] {
         let d = detail.input.as_ref().unwrap();
         assert_eq!(d["reason"], json!("collapsed"), "{}", detail.action);
-        assert_eq!(d["trigger_node"], json!("self__financeApprover"), "{}", detail.action);
+        assert_eq!(
+            d["trigger_node"],
+            json!("self__financeApprover"),
+            "{}",
+            detail.action
+        );
         assert_eq!(d["trigger_action"], json!("reject"), "{}", detail.action);
-        assert_eq!(d["trigger_actor"]["user_id"], json!(fin.user_id), "{}", detail.action);
-        assert_eq!(d["trigger_actor"]["role"], json!("financeApprover"), "{}", detail.action);
+        assert_eq!(
+            d["trigger_actor"]["user_id"],
+            json!(fin.user_id),
+            "{}",
+            detail.action
+        );
+        assert_eq!(
+            d["trigger_actor"]["role"],
+            json!("financeApprover"),
+            "{}",
+            detail.action
+        );
     }
 }
 
@@ -1520,9 +2316,14 @@ async fn collapse_summary_marker_describes_whole_event() {
 async fn system_triggered_collapse_markers_carry_system_trigger() {
     // WOR-63: sistem yollarında (SLA-2 dwell escalation) tetikleyici aksiyon,
     // ilgili sistem marker'ının adıdır; actor system aktörüdür.
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfd = paralel();
     wfd.nodes
         .get_mut("self__financeApprover")
@@ -1558,7 +2359,10 @@ async fn system_triggered_collapse_markers_carry_system_trigger() {
     // geriye dönük alan korunur
     assert_eq!(input["reason"], json!("terminated"));
     assert_eq!(input["trigger_node"], json!("self__financeApprover"));
-    assert_eq!(input["trigger_action"], json!("escalate:self__financeApprover:0"));
+    assert_eq!(
+        input["trigger_action"],
+        json!("escalate:self__financeApprover:0")
+    );
     assert_eq!(input["trigger_actor"]["role"], json!("system"));
 }
 
@@ -1566,9 +2370,14 @@ async fn system_triggered_collapse_markers_carry_system_trigger() {
 async fn collapse_summary_on_terminal_path_has_null_target() {
     // WOR-61: terminal yollarında akış bir node'a gitmez → `target` null,
     // `kind` outcome'u ayırt eder. Sistem yolunda tetikleyici system aktördür.
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfes = parallel_wfes(
         vec![
             branch("self__financeApprover", BranchStatus::Active, None),
@@ -1587,7 +2396,10 @@ async fn collapse_summary_on_terminal_path_has_null_target() {
         .find(|e| e.action == "_collapse")
         .expect("_collapse marker");
     let input = summary.input.as_ref().unwrap();
-    assert!(input["trigger_branch"].is_null(), "SLA-3 tek bir koldan tetiklenmez");
+    assert!(
+        input["trigger_branch"].is_null(),
+        "SLA-3 tek bir koldan tetiklenmez"
+    );
     assert_eq!(input["trigger_action"], json!("timeout:deadline"));
     assert_eq!(input["trigger_actor"]["role"], json!("system"));
     assert_eq!(input["kind"], json!("terminated"));
@@ -1613,9 +2425,14 @@ async fn collapse_outside_parallel_is_rejected() {
     // sınıyoruz — Wfd::from_value validator çalıştırmaz (yalnız parse).
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let coord = actor_with_role("coordinator");
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
 
@@ -1658,13 +2475,22 @@ fn paralel_with_delegate_step() -> Wfd {
 
 #[tokio::test]
 async fn branch_moves_to_normal_node_and_stays_parallel() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Active, None),
         ],
@@ -1674,7 +2500,14 @@ async fn branch_moves_to_normal_node_and_stays_parallel() {
 
     // `delegate` yalnız finance kolunda tanımlı → ipucu gerekmez
     let commit = engine
-        .apply(&paralel_with_delegate_step(), &wfes, &fin, "delegate", &json!({}), None)
+        .apply(
+            &paralel_with_delegate_step(),
+            &wfes,
+            &fin,
+            "delegate",
+            &json!({}),
+            None,
+        )
         .await
         .unwrap();
 
@@ -1684,10 +2517,14 @@ async fn branch_moves_to_normal_node_and_stays_parallel() {
             CommitOutcome::BranchMoveTo { from_node, node }
                 if from_node == "self__financeApprover" && node == "self__financeSenior"
         ),
-        "{:?}", commit.outcome
+        "{:?}",
+        commit.outcome
     );
     // yeni kol node'unun adayları resolve edilir
-    assert!(commit.resolved_c_a.iter().any(|c| c.role == "financeSenior"));
+    assert!(commit
+        .resolved_c_a
+        .iter()
+        .any(|c| c.role == "financeSenior"));
     // kol hareketi paralel marker üretmez
     assert_eq!(wfah_actions(&commit), vec!["delegate"]);
 }
@@ -1704,13 +2541,22 @@ async fn nested_parallel_at_runtime_is_rejected() {
     });
     let wfd = Wfd::from_value(v).unwrap();
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
         vec![
-            branch("self__financeApprover", BranchStatus::Active, Some(fin.user_id)),
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
             branch("self__legalApprover", BranchStatus::Active, None),
             branch("self__hrApprover", BranchStatus::Active, None),
         ],
@@ -1719,7 +2565,14 @@ async fn nested_parallel_at_runtime_is_rejected() {
     );
 
     let err = engine
-        .apply(&wfd, &wfes, &fin, "approve", &json!({}), Some("self__financeApprover"))
+        .apply(
+            &wfd,
+            &wfes,
+            &fin,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
         .await
         .unwrap_err();
     assert!(
@@ -1734,9 +2587,14 @@ async fn start_wft_parallel_is_rejected_at_runtime() {
     let mut wfd = paralel();
     wfd.start[0].wft = wfd.transitions[0].wft.clone(); // t_fork'un parallel wft'i
 
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let req = actor_with_role("requester");
 
     let err = engine
@@ -1759,12 +2617,22 @@ async fn start_wft_parallel_is_rejected_at_runtime() {
 
 #[tokio::test]
 async fn branch_claim_timeout_measured_from_branch_claim() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfd = paralel();
-    wfd.nodes.get_mut("self__financeApprover").unwrap().claim_timeout =
-        Some(ClaimTimeout { after: "PT2H".into(), wft: None });
+    wfd.nodes
+        .get_mut("self__financeApprover")
+        .unwrap()
+        .claim_timeout = Some(ClaimTimeout {
+        after: "PT2H".into(),
+        wft: None,
+    });
 
     let fin = Uuid::new_v4();
     let wfes = parallel_wfes(
@@ -1780,7 +2648,12 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
 
     // kol sayacı kol claimed_at'ından ölçülür
     assert!(!engine
-        .claim_timeout_due(&wfd, &wfes, claimed_at + Duration::hours(1), Some("self__financeApprover"))
+        .claim_timeout_due(
+            &wfd,
+            &wfes,
+            claimed_at + Duration::hours(1),
+            Some("self__financeApprover")
+        )
         .unwrap());
     let now = claimed_at + Duration::hours(2) + Duration::seconds(1);
     assert!(engine
@@ -1809,9 +2682,14 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
 
 #[tokio::test]
 async fn branch_escalation_fires_from_branch_entered_at() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfd = paralel();
     wfd.nodes
         .get_mut("self__financeApprover")
@@ -1820,7 +2698,9 @@ async fn branch_escalation_fires_from_branch_entered_at() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node { node: "self__resultCoordinator".into() }),
+            wft: Some(Wft::Node {
+                node: "self__resultCoordinator".into(),
+            }),
             terminate: None,
         });
 
@@ -1838,7 +2718,12 @@ async fn branch_escalation_fires_from_branch_entered_at() {
     // dwell KOL girişinden ölçülür
     assert_eq!(
         engine
-            .due_escalation(&wfd, &wfes, entered_at + Duration::hours(12), Some("self__financeApprover"))
+            .due_escalation(
+                &wfd,
+                &wfes,
+                entered_at + Duration::hours(12),
+                Some("self__financeApprover")
+            )
             .unwrap(),
         None
     );
@@ -1859,7 +2744,8 @@ async fn branch_escalation_fires_from_branch_entered_at() {
         .unwrap();
     assert!(
         matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node } if from_node == "self__financeApprover"),
-        "{:?}", commit.outcome
+        "{:?}",
+        commit.outcome
     );
     assert_eq!(
         wfah_actions(&commit),
@@ -1869,9 +2755,14 @@ async fn branch_escalation_fires_from_branch_entered_at() {
 
 #[tokio::test]
 async fn branch_escalation_terminate_cancels_sibling_branches() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfd = paralel();
     wfd.nodes
         .get_mut("self__financeApprover")
@@ -1915,18 +2806,32 @@ async fn branch_escalation_terminate_cancels_sibling_branches() {
         ]
     );
     let cancel = &commit.wfah_entries[2];
-    assert_eq!(cancel.input.as_ref().unwrap()["node"], json!("self__legalApprover"));
-    assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("terminated"));
+    assert_eq!(
+        cancel.input.as_ref().unwrap()["node"],
+        json!("self__legalApprover")
+    );
+    assert_eq!(
+        cancel.input.as_ref().unwrap()["reason"],
+        json!("terminated")
+    );
     // WOR-60: SLA-2 terminate de arrived kolun onayını geçersizleştirir
     let superseded = &commit.wfah_entries[3];
-    assert_eq!(superseded.input.as_ref().unwrap()["node"], json!("self__hrApprover"));
+    assert_eq!(
+        superseded.input.as_ref().unwrap()["node"],
+        json!("self__hrApprover")
+    );
 }
 
 #[tokio::test]
 async fn deadline_in_parallel_mode_cancels_all_active_branches() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let mut wfes = parallel_wfes(
         vec![
             branch("self__financeApprover", BranchStatus::Active, None),
@@ -1990,9 +2895,14 @@ fn golden_with_reassign() -> Wfd {
 
 #[tokio::test]
 async fn reassign_by_authorized_manager_to_eligible_target() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_reassign();
 
     let orgu = Uuid::new_v4();
@@ -2007,7 +2917,10 @@ async fn reassign_by_authorized_manager_to_eligible_target() {
         .expect("yetkili amir uygun hedefe devredebilmeli");
 
     assert_eq!(entry.action, "reassign");
-    assert_eq!(entry.actor.user_id, mgr.user_id, "marker aktörü amir olmalı");
+    assert_eq!(
+        entry.actor.user_id, mgr.user_id,
+        "marker aktörü amir olmalı"
+    );
     let input = entry.input.as_ref().unwrap();
     assert_eq!(input["from"], json!(owner.user_id.to_string()));
     assert_eq!(input["to"], json!(target.user_id.to_string()));
@@ -2015,9 +2928,14 @@ async fn reassign_by_authorized_manager_to_eligible_target() {
 
 #[tokio::test]
 async fn reassign_to_pool_writes_unclaim_marker() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_reassign();
 
     let orgu = Uuid::new_v4();
@@ -2038,9 +2956,14 @@ async fn reassign_to_pool_writes_unclaim_marker() {
 
 #[tokio::test]
 async fn reassign_by_unauthorized_actor_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_reassign();
 
     let orgu = Uuid::new_v4();
@@ -2053,14 +2976,22 @@ async fn reassign_by_unauthorized_actor_is_rejected() {
         .reassign(&wfd, &wfes, &intruder, Some(&target), None, Utc::now())
         .await
         .unwrap_err();
-    assert!(matches!(err, EngineError::Unauthorized), "beklenen Unauthorized, gelen: {err:?}");
+    assert!(
+        matches!(err, EngineError::Unauthorized),
+        "beklenen Unauthorized, gelen: {err:?}"
+    );
 }
 
 #[tokio::test]
 async fn reassign_on_node_without_rule_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     // reassign kuralı EKLENMEMİŞ düz golden — devir tamamen kapalı.
     let wfd = golden();
 
@@ -2074,14 +3005,22 @@ async fn reassign_on_node_without_rule_is_rejected() {
         .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
         .await
         .unwrap_err();
-    assert!(matches!(err, EngineError::Unauthorized), "kural yoksa devir kapalı olmalı");
+    assert!(
+        matches!(err, EngineError::Unauthorized),
+        "kural yoksa devir kapalı olmalı"
+    );
 }
 
 #[tokio::test]
 async fn reassign_to_ineligible_target_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_reassign();
 
     let orgu = Uuid::new_v4();
@@ -2102,9 +3041,14 @@ async fn reassign_to_ineligible_target_is_rejected() {
 
 #[tokio::test]
 async fn reassign_on_terminal_wfe_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine { org: &org, exec: &runner };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
     let wfd = golden_with_reassign();
 
     let orgu = Uuid::new_v4();
@@ -2117,5 +3061,8 @@ async fn reassign_on_terminal_wfe_is_rejected() {
         .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
         .await
         .unwrap_err();
-    assert!(matches!(err, EngineError::WfeTerminal), "terminal WFE'de devir reddedilmeli");
+    assert!(
+        matches!(err, EngineError::WfeTerminal),
+        "terminal WFE'de devir reddedilmeli"
+    );
 }

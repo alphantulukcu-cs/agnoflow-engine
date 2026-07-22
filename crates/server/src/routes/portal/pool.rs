@@ -308,11 +308,8 @@ async fn list_pool(
         }
 
         let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
-        let claim_deadline = wf_wfe::executor::compute_claim_deadline(
-            wfd,
-            Some(&row.branch_node),
-            row.claimed_at,
-        );
+        let claim_deadline =
+            wf_wfe::executor::compute_claim_deadline(wfd, Some(&row.branch_node), row.claimed_at);
         tasks.push(PoolTask {
             id: row.id,
             title: row.title,

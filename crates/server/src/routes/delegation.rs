@@ -30,12 +30,20 @@ fn parse_uuid_header(headers: &HeaderMap, name: &str) -> Result<Uuid, AppError> 
         .get(name)
         .and_then(|v| v.to_str().ok())
         .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or_else(|| AppError(format!("{name} header required (UUID)"), StatusCode::BAD_REQUEST))
+        .ok_or_else(|| {
+            AppError(
+                format!("{name} header required (UUID)"),
+                StatusCode::BAD_REQUEST,
+            )
+        })
 }
 
 /// X-Admin-Key mevcut VE cfg.admin_api_key ile eşleşiyor mu (amir/admin yolu).
 fn is_admin(headers: &HeaderMap, s: &AppState) -> bool {
-    match (&s.cfg.admin_api_key, headers.get("x-admin-key").and_then(|v| v.to_str().ok())) {
+    match (
+        &s.cfg.admin_api_key,
+        headers.get("x-admin-key").and_then(|v| v.to_str().ok()),
+    ) {
         (Some(expected), Some(got)) => expected == got,
         _ => false,
     }
@@ -72,7 +80,12 @@ async fn create_delegation(
 ) -> Result<Json<Vec<wf_org::models::Delegation>>, AppError> {
     let actor_user = parse_uuid_header(&headers, "x-actor-user")?;
     let actor_orgu = parse_uuid_header(&headers, "x-actor-orgu")?;
-    let orgtnt_id = s.executor.org.orgtnt_for_orgu(actor_orgu).await.map_err(AppError::from)?;
+    let orgtnt_id = s
+        .executor
+        .org
+        .orgtnt_for_orgu(actor_orgu)
+        .await
+        .map_err(AppError::from)?;
     let admin = is_admin(&headers, &s);
 
     // delegator = self (default) veya admin ise gövdedeki kullanıcı.
@@ -116,12 +129,19 @@ pub(crate) async fn create_delegations(
     created_by: Uuid,
 ) -> Result<Vec<wf_org::models::Delegation>, AppError> {
     // grantee geçerli bir CandidateActor mı? (auth anında parse hatası olmasın)
-    serde_json::from_value::<CandidateActor>(grantee.clone())
-        .map_err(|e| AppError(format!("grantee geçersiz CandidateActor: {e}"), StatusCode::BAD_REQUEST))?;
+    serde_json::from_value::<CandidateActor>(grantee.clone()).map_err(|e| {
+        AppError(
+            format!("grantee geçersiz CandidateActor: {e}"),
+            StatusCode::BAD_REQUEST,
+        )
+    })?;
 
     let valid_from = valid_from.unwrap_or_else(chrono::Utc::now);
     if valid_to <= valid_from {
-        return Err(AppError("valid_to, valid_from'dan sonra olmalı".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "valid_to, valid_from'dan sonra olmalı".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
 
     // Delege edilecek koltuk(lar).
@@ -136,7 +156,10 @@ pub(crate) async fn create_delegations(
         v.sort();
         v.dedup();
         if v.is_empty() {
-            return Err(AppError("delegator'ın delege edilebilir koltuğu yok".into(), StatusCode::BAD_REQUEST));
+            return Err(AppError(
+                "delegator'ın delege edilebilir koltuğu yok".into(),
+                StatusCode::BAD_REQUEST,
+            ));
         }
         v
     } else {
@@ -193,7 +216,12 @@ async fn revoke_delegation(
 ) -> Result<StatusCode, AppError> {
     let actor_user = parse_uuid_header(&headers, "x-actor-user")?;
     let actor_orgu = parse_uuid_header(&headers, "x-actor-orgu")?;
-    let orgtnt_id = s.executor.org.orgtnt_for_orgu(actor_orgu).await.map_err(AppError::from)?;
+    let orgtnt_id = s
+        .executor
+        .org
+        .orgtnt_for_orgu(actor_orgu)
+        .await
+        .map_err(AppError::from)?;
     let admin = is_admin(&headers, &s);
 
     let d = delegation::get_by_id(&s.pool, id)
@@ -202,8 +230,13 @@ async fn revoke_delegation(
         .ok_or_else(|| AppError("vekalet bulunamadı".into(), StatusCode::NOT_FOUND))?;
     // Yalnız veren (delegator) veya admin iptal edebilir; tenant sınırı içinde.
     if d.orgtnt_id != orgtnt_id || (d.delegator_user_id != actor_user && !admin) {
-        return Err(AppError("bu vekaleti iptal etme yetkiniz yok".into(), StatusCode::FORBIDDEN));
+        return Err(AppError(
+            "bu vekaleti iptal etme yetkiniz yok".into(),
+            StatusCode::FORBIDDEN,
+        ));
     }
-    delegation::revoke(&s.pool, id, orgtnt_id).await.map_err(AppError::from)?;
+    delegation::revoke(&s.pool, id, orgtnt_id)
+        .await
+        .map_err(AppError::from)?;
     Ok(StatusCode::NO_CONTENT)
 }

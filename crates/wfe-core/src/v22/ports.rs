@@ -92,14 +92,22 @@ impl Wfes {
 /// Transition sonucunun gideceği yer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommitOutcome {
-    MoveTo { node: String },
-    Terminal { end_response: Value },
+    MoveTo {
+        node: String,
+    },
+    Terminal {
+        end_response: Value,
+    },
     /// Engine-defined fail (§5 root timeout vb.) — WFE `error` durumuna alınır,
     /// başarılı `Terminal` sonlanmasından ayrıdır.
-    Failed { end_response: Value },
+    Failed {
+        end_response: Value,
+    },
     /// SLA ihlali (deadline aşımı / dwell terminate) — WFE `terminated` durumuna
     /// alınır (2026-07-16). Hata değil, başarılı `Terminal` da değil.
-    Terminated { end_response: Value },
+    Terminated {
+        end_response: Value,
+    },
     /// WOR-31 fork: her kol için branch satırı yaratılır, `current_node = NULL`,
     /// `join_target` persist edilir (paralel moda giriş).
     ForkTo {
@@ -108,10 +116,15 @@ pub enum CommitOutcome {
     },
     /// WOR-31: tek kolun token hareketi — kol claim'i + entered_at sıfırlanır,
     /// paralel mod sürer.
-    BranchMoveTo { from_node: String, node: String },
+    BranchMoveTo {
+        from_node: String,
+        node: String,
+    },
     /// WOR-31: kol join hedefine vardı, engine'in görüşüne göre ≥1 başka aktif
     /// kol kaldı — kol `arrived` işaretlenir (join node'u İŞGAL ETMEZ).
-    BranchArrived { from_node: String },
+    BranchArrived {
+        from_node: String,
+    },
     /// WOR-31: varan kol engine'in görüşüne göre SONUNCU — paralel mod biter;
     /// `next` join hedefi: `MoveTo{join}` veya join terminal ise `Terminal{..}`.
     /// Yarış adapter doğrulaması + executor retry ile çözülür (T3); engine saftır.

@@ -62,19 +62,35 @@ impl OrgPort for MockOrg {
 }
 
 fn clerk(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "branchClerk".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "branchClerk".into(),
+    }
 }
 
 fn analyst(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "creditAnalyst".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "creditAnalyst".into(),
+    }
 }
 
 fn manager(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "branchManager".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "branchManager".into(),
+    }
 }
 
 fn credit_dept_manager(orgu: Uuid) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: "creditDeptManager".into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: "creditDeptManager".into(),
+    }
 }
 
 fn start_input(amount_requested: i64) -> Value {
@@ -85,7 +101,11 @@ fn start_input(amount_requested: i64) -> Value {
 }
 
 fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
-    let system = Actor { orgu_id: Uuid::nil(), user_id: Uuid::nil(), role: "system".into() };
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
     let wfah = Wfah::empty().push("start".into(), system, None);
     let created_at = wfah.entries()[0].applied_at;
     Wfes {
@@ -111,10 +131,16 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
 
 #[tokio::test]
 async fn owner_can_view_regardless_of_role() {
-    let org = MockOrg { role_assigned: false };
+    let org = MockOrg {
+        role_assigned: false,
+    };
     let owner_id = Uuid::new_v4();
     // owner has no relation to node c_a nor listable — only assignment matters
-    let owner = Actor { orgu_id: Uuid::new_v4(), user_id: owner_id, role: "branchClerk".into() };
+    let owner = Actor {
+        orgu_id: Uuid::new_v4(),
+        user_id: owner_id,
+        role: "branchClerk".into(),
+    };
     let wfes = wfes_at("self__creditAnalyst", Some(owner_id), start_input(30_000));
 
     assert!(can_view(&golden(), &wfes, &owner, &org).await.unwrap());
@@ -126,23 +152,31 @@ async fn owner_can_view_regardless_of_role() {
 /// olan kullanıcı yine de sonucu (dynctx/end_response) görebilmeli.
 #[tokio::test]
 async fn wfah_participant_can_view_terminal_wfe() {
-    let org = MockOrg { role_assigned: false };
+    let org = MockOrg {
+        role_assigned: false,
+    };
     let orgu = Uuid::new_v4();
     let participant = clerk(orgu);
 
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
-    wfes.wfah = wfes
-        .wfah
-        .push("reject".into(), participant.clone(), Some(json!({"red_sebebi": "x"})));
+    wfes.wfah = wfes.wfah.push(
+        "reject".into(),
+        participant.clone(),
+        Some(json!({"red_sebebi": "x"})),
+    );
     wfes.status = WfeStatus::Terminal;
     wfes.current_node = None;
 
-    assert!(can_view(&golden(), &wfes, &participant, &org).await.unwrap());
+    assert!(can_view(&golden(), &wfes, &participant, &org)
+        .await
+        .unwrap());
 }
 
 #[tokio::test]
 async fn non_participant_cannot_view_terminal_wfe() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let orgu = Uuid::new_v4();
     // clerk: WFAH'ta yalnız system + başka bir kullanıcı var; listable rolleri
     // (branchManager/creditDeptManager) ile de eşleşmiyor
@@ -159,8 +193,14 @@ async fn non_participant_cannot_view_terminal_wfe() {
 /// System aktörünün (nil uuid) WFAH kayıtları katılımcı grant'i üretmez.
 #[tokio::test]
 async fn system_wfah_entries_do_not_grant_view() {
-    let org = MockOrg { role_assigned: false };
-    let nil_viewer = Actor { orgu_id: Uuid::new_v4(), user_id: Uuid::nil(), role: "x".into() };
+    let org = MockOrg {
+        role_assigned: false,
+    };
+    let nil_viewer = Actor {
+        orgu_id: Uuid::new_v4(),
+        user_id: Uuid::nil(),
+        role: "x".into(),
+    };
 
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
     wfes.status = WfeStatus::Terminal;
@@ -174,7 +214,9 @@ async fn system_wfah_entries_do_not_grant_view() {
 
 #[tokio::test]
 async fn actor_authorized_on_current_node_c_a_can_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let orgu = Uuid::new_v4();
     let a = analyst(orgu); // self__creditAnalyst node c_a = {c_orgu: self, c_r: [creditAnalyst]}
     let wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
@@ -186,7 +228,9 @@ async fn actor_authorized_on_current_node_c_a_can_view() {
 
 #[tokio::test]
 async fn unrelated_actor_cannot_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let orgu = Uuid::new_v4();
     // clerk: not owner, not node c_a (creditAnalyst), not in either listable rule
     // (branchManager / creditDeptManager)
@@ -200,7 +244,9 @@ async fn unrelated_actor_cannot_view() {
 
 #[tokio::test]
 async fn listable_actor_without_when_can_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let orgu = Uuid::new_v4();
     // listable[0]: {c_a: {c_orgu: self, c_r: [branchManager]}} — no `when`
     let m = manager(orgu);
@@ -211,7 +257,9 @@ async fn listable_actor_without_when_can_view() {
 
 #[tokio::test]
 async fn listable_actor_with_when_true_can_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let orgu = Uuid::new_v4();
     // listable[1]: {when: "$ctx.credit_info.amount_requested >= 100000",
     //               c_a: {c_orgu: parent, c_r: [creditDeptManager]}}
@@ -223,7 +271,9 @@ async fn listable_actor_with_when_true_can_view() {
 
 #[tokio::test]
 async fn listable_actor_with_when_false_cannot_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let orgu = Uuid::new_v4();
     let d = credit_dept_manager(orgu);
     // amount_requested below the listable[1] `when` threshold
@@ -239,7 +289,11 @@ fn paralel() -> Wfd {
 }
 
 fn role_actor(orgu: Uuid, role: &str) -> Actor {
-    Actor { orgu_id: orgu, user_id: Uuid::new_v4(), role: role.into() }
+    Actor {
+        orgu_id: orgu,
+        user_id: Uuid::new_v4(),
+        role: role.into(),
+    }
 }
 
 fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchState {
@@ -263,13 +317,17 @@ fn parallel_wfes(branches: Vec<BranchState>) -> Wfes {
     );
     wfes.current_node = None;
     wfes.branches = branches;
-    wfes.join_target = Some(WftTarget::Node { node: "self__resultCoordinator".into() });
+    wfes.join_target = Some(WftTarget::Node {
+        node: "self__resultCoordinator".into(),
+    });
     wfes
 }
 
 #[tokio::test]
 async fn parallel_active_branch_c_a_actor_can_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let fin = role_actor(Uuid::new_v4(), "financeApprover");
     let wfes = parallel_wfes(vec![
         branch("self__financeApprover", BranchStatus::Active, None),
@@ -283,10 +341,16 @@ async fn parallel_active_branch_c_a_actor_can_view() {
 /// sonradan değişip c_a eşleşmez olsa da) kol sahibi olarak görmeye devam eder.
 #[tokio::test]
 async fn parallel_branch_claimer_can_view_without_role() {
-    let org = MockOrg { role_assigned: false };
+    let org = MockOrg {
+        role_assigned: false,
+    };
     let claimer = role_actor(Uuid::new_v4(), "financeApprover");
     let wfes = parallel_wfes(vec![
-        branch("self__financeApprover", BranchStatus::Active, Some(claimer.user_id)),
+        branch(
+            "self__financeApprover",
+            BranchStatus::Active,
+            Some(claimer.user_id),
+        ),
         branch("self__legalApprover", BranchStatus::Active, None),
     ]);
 
@@ -296,7 +360,9 @@ async fn parallel_branch_claimer_can_view_without_role() {
 /// `arrived` kol artık aktif node değildir — o kolun c_a'sı VIEW grant'i üretmez.
 #[tokio::test]
 async fn parallel_arrived_branch_c_a_does_not_grant_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let fin = role_actor(Uuid::new_v4(), "financeApprover");
     let wfes = parallel_wfes(vec![
         branch("self__financeApprover", BranchStatus::Arrived, None),
@@ -308,7 +374,9 @@ async fn parallel_arrived_branch_c_a_does_not_grant_view() {
 
 #[tokio::test]
 async fn parallel_unrelated_actor_cannot_view() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let outsider = role_actor(Uuid::new_v4(), "requester");
     let wfes = parallel_wfes(vec![
         branch("self__financeApprover", BranchStatus::Active, None),

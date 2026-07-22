@@ -15,8 +15,9 @@
 
 -- WOR-15 ile aynı gerekçe: migration tek başına koşabilmeli.
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+SET search_path = wf, org, public;
 
-CREATE TABLE wf.wfe_branch (
+CREATE TABLE IF NOT EXISTS wf.wfe_branch (
     branch_id   uuid        PRIMARY KEY DEFAULT uuid_generate_v4(),
     wfe_id      uuid        NOT NULL REFERENCES wf.wfe(wfe_id) ON DELETE CASCADE,
     branch_node text        NOT NULL,
@@ -29,8 +30,8 @@ CREATE TABLE wf.wfe_branch (
     updated_at  timestamptz NOT NULL DEFAULT now(),
     UNIQUE (wfe_id, branch_node)
 );
-CREATE INDEX wfe_branch_wfe_idx    ON wf.wfe_branch(wfe_id);
-CREATE INDEX wfe_branch_status_idx ON wf.wfe_branch(wfe_id, status);
+CREATE INDEX IF NOT EXISTS wfe_branch_wfe_idx    ON wf.wfe_branch(wfe_id);
+CREATE INDEX IF NOT EXISTS wfe_branch_status_idx ON wf.wfe_branch(wfe_id, status);
 
 ALTER TABLE wf.wfe ADD COLUMN IF NOT EXISTS join_target jsonb;
 

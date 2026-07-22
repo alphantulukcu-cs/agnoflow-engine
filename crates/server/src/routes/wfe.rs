@@ -370,7 +370,13 @@ async fn list_wfe(
         };
         let rev = revs.get(&row.wfe_id).copied().unwrap_or(0);
         let branches = branches_by_wfe.remove(&row.wfe_id).unwrap_or_default();
-        out.push(WfeListItem { priority, claim_deadline, rev, branches, row });
+        out.push(WfeListItem {
+            priority,
+            claim_deadline,
+            rev,
+            branches,
+            row,
+        });
     }
     Ok(Json(out))
 }

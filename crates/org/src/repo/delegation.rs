@@ -61,10 +61,7 @@ pub async fn list_by_delegator(
 }
 
 /// Tenant'taki TÜM vekaletler (admin yönetim görünümü), en yeni önce.
-pub async fn list_by_tenant(
-    pool: &PgPool,
-    orgtnt_id: Uuid,
-) -> Result<Vec<Delegation>, OrgError> {
+pub async fn list_by_tenant(pool: &PgPool, orgtnt_id: Uuid) -> Result<Vec<Delegation>, OrgError> {
     sqlx::query_as::<_, Delegation>(&format!(
         "SELECT {COLS} FROM org.delegation
          WHERE orgtnt_id = $1
@@ -105,10 +102,7 @@ pub async fn active_candidates(
 }
 
 /// Tek vekaleti getirir (sahiplik kontrolü için).
-pub async fn get_by_id(
-    pool: &PgPool,
-    delegation_id: Uuid,
-) -> Result<Option<Delegation>, OrgError> {
+pub async fn get_by_id(pool: &PgPool, delegation_id: Uuid) -> Result<Option<Delegation>, OrgError> {
     sqlx::query_as::<_, Delegation>(&format!(
         "SELECT {COLS} FROM org.delegation WHERE delegation_id = $1"
     ))
@@ -119,11 +113,7 @@ pub async fn get_by_id(
 }
 
 /// Vekaleti iptal eder (active=false). Tenant sınırı içinde; etkilenen satır varsa true.
-pub async fn revoke(
-    pool: &PgPool,
-    delegation_id: Uuid,
-    orgtnt_id: Uuid,
-) -> Result<bool, OrgError> {
+pub async fn revoke(pool: &PgPool, delegation_id: Uuid, orgtnt_id: Uuid) -> Result<bool, OrgError> {
     let r = sqlx::query(
         "UPDATE org.delegation SET active = false, updated_at = now()
          WHERE delegation_id = $1 AND orgtnt_id = $2",

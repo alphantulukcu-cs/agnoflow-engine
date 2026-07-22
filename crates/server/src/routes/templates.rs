@@ -17,13 +17,20 @@ use serde_json::Value;
 use uuid::Uuid;
 use wf_wfd::template::{self, WfdTemplate};
 
-fn default_kind() -> String { "workflow".into() }
+fn default_kind() -> String {
+    "workflow".into()
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(list_selectable).post(create_template))
         .route("/manage", get(list_manageable))
-        .route("/:id", get(get_template_meta).patch(update_template).delete(delete_template))
+        .route(
+            "/:id",
+            get(get_template_meta)
+                .patch(update_template)
+                .delete(delete_template),
+        )
         .route("/:id/json", get(template_json))
         .route("/:id/usage", get(template_usage))
         .route("/:id/visibility", get(get_visibility).put(put_visibility))
@@ -82,10 +89,17 @@ async fn list_selectable(
 ) -> Result<Json<Vec<WfdTemplate>>, AppError> {
     // Projede çalışma hakkı olmayan, galeriyi de göremez.
     require_can_design(&s.pool, &auth, q.project_id).await?;
-    template::list_selectable(&s.pool, auth.orgtnt_id, q.project_id, auth.user_id, auth.role == "admin", q.kind.as_deref())
-        .await
-        .map(Json)
-        .map_err(map_wfd_err)
+    template::list_selectable(
+        &s.pool,
+        auth.orgtnt_id,
+        q.project_id,
+        auth.user_id,
+        auth.role == "admin",
+        q.kind.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(map_wfd_err)
 }
 
 #[derive(Deserialize)]
@@ -99,10 +113,16 @@ async fn list_manageable(
     auth: AppAuth,
     Query(q): Query<ManageQuery>,
 ) -> Result<Json<Vec<WfdTemplate>>, AppError> {
-    template::list_manageable(&s.pool, auth.orgtnt_id, auth.user_id, auth.role == "admin", q.kind.as_deref())
-        .await
-        .map(Json)
-        .map_err(map_wfd_err)
+    template::list_manageable(
+        &s.pool,
+        auth.orgtnt_id,
+        auth.user_id,
+        auth.role == "admin",
+        q.kind.as_deref(),
+    )
+    .await
+    .map(Json)
+    .map_err(map_wfd_err)
 }
 
 #[derive(Deserialize)]
@@ -132,7 +152,10 @@ async fn create_template(
 ) -> Result<(StatusCode, Json<WfdTemplate>), AppError> {
     let name = b.name.trim();
     if name.is_empty() {
-        return Err(AppError("Şablon adı boş olamaz".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "Şablon adı boş olamaz".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     match b.scope.as_str() {
         "global" => {
@@ -146,7 +169,10 @@ async fn create_template(
         }
         "project" => {
             let pid = b.project_id.ok_or_else(|| {
-                AppError("Proje şablonunda project_id zorunlu".into(), StatusCode::BAD_REQUEST)
+                AppError(
+                    "Proje şablonunda project_id zorunlu".into(),
+                    StatusCode::BAD_REQUEST,
+                )
             })?;
             wf_wfd::project::assert_in_tenant(&s.pool, pid, auth.orgtnt_id)
                 .await
@@ -162,7 +188,10 @@ async fn create_template(
     }
 
     if !matches!(b.kind.as_str(), "workflow" | "context") {
-        return Err(AppError("kind 'workflow' ya da 'context' olmalı".into(), StatusCode::BAD_REQUEST));
+        return Err(AppError(
+            "kind 'workflow' ya da 'context' olmalı".into(),
+            StatusCode::BAD_REQUEST,
+        ));
     }
     let tpl = template::create(
         &s.pool,
@@ -180,10 +209,19 @@ async fn create_template(
 
     if b.visible_project_ids.is_some() || b.visible_user_ids.is_some() {
         // Proje kısıtı yalnız global şablonda anlamlı.
-        let projects = if b.scope == "global" { b.visible_project_ids.as_deref() } else { None };
-        template::set_visibility(&s.pool, tpl.template_id, projects, b.visible_user_ids.as_deref())
-            .await
-            .map_err(map_wfd_err)?;
+        let projects = if b.scope == "global" {
+            b.visible_project_ids.as_deref()
+        } else {
+            None
+        };
+        template::set_visibility(
+            &s.pool,
+            tpl.template_id,
+            projects,
+            b.visible_user_ids.as_deref(),
+        )
+        .await
+        .map_err(map_wfd_err)?;
     }
     Ok((StatusCode::CREATED, Json(tpl)))
 }
@@ -238,7 +276,10 @@ async fn template_json(
     if tpl.orgtnt_id != auth.orgtnt_id {
         return Err(AppError("Şablon bulunamadı".into(), StatusCode::NOT_FOUND));
     }
-    template::get_json(&s.pool, id).await.map(Json).map_err(map_wfd_err)
+    template::get_json(&s.pool, id)
+        .await
+        .map(Json)
+        .map_err(map_wfd_err)
 }
 
 #[derive(Deserialize)]
@@ -281,7 +322,9 @@ async fn get_visibility(
 ) -> Result<Json<Value>, AppError> {
     let tpl = template::get(&s.pool, id).await.map_err(map_wfd_err)?;
     require_can_manage_template(&s, &auth, &tpl).await?;
-    let (projects, users) = template::visibility(&s.pool, id).await.map_err(map_wfd_err)?;
+    let (projects, users) = template::visibility(&s.pool, id)
+        .await
+        .map_err(map_wfd_err)?;
     Ok(Json(serde_json::json!({
         "visible_project_ids": projects,
         "visible_user_ids": users,
@@ -305,7 +348,11 @@ async fn put_visibility(
     let tpl = template::get(&s.pool, id).await.map_err(map_wfd_err)?;
     require_can_manage_template(&s, &auth, &tpl).await?;
     // Proje kısıtı yalnız global şablonda; verilen projeler tenant'a ait olmalı.
-    let projects = if tpl.scope == "global" { b.visible_project_ids.as_deref() } else { None };
+    let projects = if tpl.scope == "global" {
+        b.visible_project_ids.as_deref()
+    } else {
+        None
+    };
     if let Some(pids) = projects {
         for pid in pids {
             wf_wfd::project::assert_in_tenant(&s.pool, *pid, auth.orgtnt_id)
@@ -324,7 +371,10 @@ async fn put_visibility(
             .await
             .map_err(internal)?;
             if ok.is_none() {
-                return Err(AppError(format!("Kullanıcı bulunamadı: {uid}"), StatusCode::NOT_FOUND));
+                return Err(AppError(
+                    format!("Kullanıcı bulunamadı: {uid}"),
+                    StatusCode::NOT_FOUND,
+                ));
             }
         }
     }

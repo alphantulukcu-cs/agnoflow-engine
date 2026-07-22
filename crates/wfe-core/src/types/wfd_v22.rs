@@ -526,7 +526,9 @@ mod wft_roundtrip_tests {
         }));
         match wft {
             Wft::Parallel { parallel } => {
-                assert!(matches!(parallel.join, WftTarget::Terminal { terminal } if terminal == "t1"));
+                assert!(
+                    matches!(parallel.join, WftTarget::Terminal { terminal } if terminal == "t1")
+                );
             }
             other => panic!("expected Wft::Parallel, got {other:?}"),
         }

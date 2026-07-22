@@ -54,9 +54,13 @@ impl AppAuth {
     }
 }
 
-pub fn encode_app_jwt(secret: &str, user_id: Uuid, orgtnt_id: Uuid, role: &str, ttl_hours: u64)
-    -> Result<String, AppError>
-{
+pub fn encode_app_jwt(
+    secret: &str,
+    user_id: Uuid,
+    orgtnt_id: Uuid,
+    role: &str,
+    ttl_hours: u64,
+) -> Result<String, AppError> {
     let exp = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -69,8 +73,17 @@ pub fn encode_app_jwt(secret: &str, user_id: Uuid, orgtnt_id: Uuid, role: &str, 
         typ: "app".into(),
         exp,
     };
-    encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_bytes()))
-        .map_err(|e| AppError(format!("JWT encode: {e}"), StatusCode::INTERNAL_SERVER_ERROR))
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(secret.as_bytes()),
+    )
+    .map_err(|e| {
+        AppError(
+            format!("JWT encode: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })
 }
 
 pub fn decode_app_jwt(secret: &str, token: &str) -> Result<AppAuth, AppError> {
@@ -79,10 +92,18 @@ pub fn decode_app_jwt(secret: &str, token: &str) -> Result<AppAuth, AppError> {
         &DecodingKey::from_secret(secret.as_bytes()),
         &Validation::default(),
     )
-    .map_err(|_| AppError("Geçersiz veya süresi dolmuş token".into(), StatusCode::UNAUTHORIZED))?;
+    .map_err(|_| {
+        AppError(
+            "Geçersiz veya süresi dolmuş token".into(),
+            StatusCode::UNAUTHORIZED,
+        )
+    })?;
     let c = data.claims;
     if c.typ != "app" {
-        return Err(AppError("Geçersiz token tipi".into(), StatusCode::UNAUTHORIZED));
+        return Err(AppError(
+            "Geçersiz token tipi".into(),
+            StatusCode::UNAUTHORIZED,
+        ));
     }
     Ok(AppAuth {
         user_id: Uuid::parse_str(&c.sub)
@@ -101,7 +122,10 @@ pub struct MaybeAppAuth(pub Option<AppAuth>);
 impl FromRequestParts<AppState> for MaybeAppAuth {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let token = parts
             .headers
             .get("Authorization")
@@ -121,14 +145,12 @@ async fn membership_role(
     user_id: Uuid,
     project_id: Uuid,
 ) -> Result<Option<String>, AppError> {
-    sqlx::query_scalar(
-        "SELECT role FROM wf.project_member WHERE user_id = $1 AND project_id = $2",
-    )
-    .bind(user_id)
-    .bind(project_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))
+    sqlx::query_scalar("SELECT role FROM wf.project_member WHERE user_id = $1 AND project_id = $2")
+        .bind(user_id)
+        .bind(project_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 /// WFD tasarımı yapabilir mi: tenant admin ya da projenin üyesi (admin/user farketmez).
@@ -140,7 +162,10 @@ pub async fn require_can_design(
     if auth.role == "admin" {
         return Ok(());
     }
-    if membership_role(pool, auth.user_id, project_id).await?.is_some() {
+    if membership_role(pool, auth.user_id, project_id)
+        .await?
+        .is_some()
+    {
         return Ok(());
     }
     Err(AppError(
@@ -158,7 +183,11 @@ pub async fn require_can_manage_project(
     if auth.role == "admin" {
         return Ok(());
     }
-    if membership_role(pool, auth.user_id, project_id).await?.as_deref() == Some("admin") {
+    if membership_role(pool, auth.user_id, project_id)
+        .await?
+        .as_deref()
+        == Some("admin")
+    {
         return Ok(());
     }
     Err(AppError(
@@ -171,16 +200,21 @@ pub async fn require_can_manage_project(
 impl FromRequestParts<AppState> for AppAuth {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
         let token = parts
             .headers
             .get("Authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
-            .ok_or_else(|| AppError(
-                "Authorization: Bearer <token> required".into(),
-                StatusCode::UNAUTHORIZED,
-            ))?;
+            .ok_or_else(|| {
+                AppError(
+                    "Authorization: Bearer <token> required".into(),
+                    StatusCode::UNAUTHORIZED,
+                )
+            })?;
         decode_app_jwt(&state.cfg.jwt_secret, token)
     }
 }
@@ -208,9 +242,10 @@ pub struct UserView {
     pub projects: Vec<ProjectMembership>,
 }
 
-pub async fn load_memberships(pool: &sqlx::PgPool, user_id: Uuid)
-    -> Result<Vec<ProjectMembership>, AppError>
-{
+pub async fn load_memberships(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+) -> Result<Vec<ProjectMembership>, AppError> {
     let rows: Vec<(Uuid, String, String)> = sqlx::query_as(
         "SELECT m.project_id, p.name, m.role
          FROM wf.project_member m JOIN wf.project p USING (project_id)
@@ -222,7 +257,11 @@ pub async fn load_memberships(pool: &sqlx::PgPool, user_id: Uuid)
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(rows
         .into_iter()
-        .map(|(project_id, project_name, role)| ProjectMembership { project_id, project_name, role })
+        .map(|(project_id, project_name, role)| ProjectMembership {
+            project_id,
+            project_name,
+            role,
+        })
         .collect())
 }
 
@@ -288,13 +327,12 @@ async fn login(
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
     .ok_or_else(bad)?;
 
-    let hash: String = sqlx::query_scalar(
-        "SELECT password_hash FROM wf.app_user WHERE user_id = $1",
-    )
-    .bind(user.user_id)
-    .fetch_one(&s.pool)
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    let hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM wf.app_user WHERE user_id = $1")
+            .bind(user.user_id)
+            .fetch_one(&s.pool)
+            .await
+            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
     if !bcrypt::verify(&body.password, &hash)
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
@@ -302,7 +340,13 @@ async fn login(
         return Err(bad());
     }
 
-    let token = encode_app_jwt(&s.cfg.jwt_secret, user.user_id, user.orgtnt_id, &user.role, 12)?;
+    let token = encode_app_jwt(
+        &s.cfg.jwt_secret,
+        user.user_id,
+        user.orgtnt_id,
+        &user.role,
+        12,
+    )?;
     let user = user_view(&s.pool, user).await?;
     Ok(Json(LoginResponse { token, user }))
 }

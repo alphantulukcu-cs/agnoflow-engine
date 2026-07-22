@@ -79,6 +79,15 @@ v2.1 ile aynı: start'tan BFS reachability (escalation kenarları DAHİL), eriş
 
 v2.1 ile aynı: input path'leri, readonly yasağı, `wfes_effects.set` path+tip (catch ve escalation effects dahil), `$exec.response.*` = hata, ZEN parse + boolean sonuç, `WFD.ALL` tek başına ve son retrier'da, `catch.error_equals` default `["WFD.ALL"]`.
 
+## 6c. Attachment (ek-belge) Validation
+
+Root `attachments` katalogu + `nodes.<key>.attachments` referansları için custom validator (`check_attachments`):
+- Grup içi `item.id` tekil olmalı — aksi `attachment_item_dup`.
+- Node'un referansladığı her grup key'i katalogda VAR olmalı — aksi `attachment_ref`.
+- Bir node aynı grubu birden fazla referanslayamaz — aksi `attachment_ref_dup`.
+
+Alan opsiyoneldir; katalog boş/yoksa hiçbir kural tetiklenmez. Dosyaların KENDİSİ engine'de değildir — validator yalnız katalog+referans tutarlılığını dener. Runtime gate ve varlık kontrolü portal edge'indedir (bkz. DECISIONS Madde 8): `nodes.<key>.attachments` referanslı grupların `required` item'ları yüklenmeden o node'dan aksiyon submit edilemez (`422 attachment.missing`). Start node'unda attachment (henüz wfe_id yok) gate EDİLMEZ.
+
 ## 7. Transition Runtime Pipeline
 
 ```text

@@ -1,3 +1,4 @@
+mod attachments;
 mod config;
 mod error;
 mod routes;
@@ -35,6 +36,9 @@ async fn main() {
         .expect("db connect failed");
 
     let storage = wf_wfd::build_operator(&cfg.storage).expect("storage init failed");
+    let attachment_storage = attachments::AttachmentStore::new(
+        wf_wfd::build_operator(&cfg.attachment_storage).expect("attachment storage init failed"),
+    );
 
     let org_adapter = Arc::new(OrgAdapter::new(pool.clone()));
     let wfd_adapter = Arc::new(wf_wfd::WfdAdapter::new(pool.clone(), storage));
@@ -61,6 +65,7 @@ async fn main() {
         pool: pool.clone(),
         executor,
         wfd: wfd_adapter,
+        attachments: Arc::new(attachment_storage),
         cfg: cfg.clone(),
     };
 

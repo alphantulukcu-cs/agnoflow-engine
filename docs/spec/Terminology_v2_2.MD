@@ -194,3 +194,14 @@ startRule.c_a inline formu ve from/action eksikligi (c_a artik start node'da; am
 $ctx.status state konvansiyonu, wft.c_a inline form, $exec.response.*   (v2.1'den devam)
 terminal:true, {ctx:...}, {ref:...}, _step_<action>, c_a[].from          (v1/v2'den devam)
 ```
+
+## Attachment (Ek-belge)
+
+| Terim | Anlam |
+|---|---|
+| **Attachment katalogu** | Root `attachments` — adlandırılmış grupların sözlüğü. Her grup `items[]` taşır. Bir kez tanımlanır, node'lardan adıyla referanslanır. |
+| **Attachment grubu** | Katalogdaki bir kayıt: `{label?, description?, items[]}`. Aynı grup birden fazla node'dan referanslanabilir. |
+| **Attachment item (dosya slotu)** | `{id, label?, description?, required?, formats?}`. `id` = "verilen dosya ismi", grup içinde tekil. `required` (default true) yüklenmeden gruba bağlı node'dan aksiyon alınamaz. |
+| **Attachment format kuralı** | `formats[]` içindeki bir kayıt: `{accept: string[], max_size_mb?}`. Bir MIME grubu + o gruba ÖZEL boyut sınırı. Farklı formatlar farklı MB (örn. pdf/jpg→4MB, xml/zip→20MB). `formats` boş/yoksa: her tip, sınırsız. |
+| **Node attachment referansı** | `nodes.<key>.attachments` — grup key'leri dizisi. WFE bu node'da beklerken referanslı grupların `required` dosyaları yüklenmeden aksiyon submit edilemez. |
+| **AttachmentStore** | Server portal katmanının opendal store'u. Storage anahtarı `attachments/{wfe_id}/{grup}/{item}`. Engine core buna DEĞMEZ; dosya varlığı/yükleme yalnız edge'dedir. |

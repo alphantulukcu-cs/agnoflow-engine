@@ -37,3 +37,15 @@ Alınan tasarım kararları: `docs/spec/DECISIONS_v2_2.md`.
 
 `DATABASE_URL`, `PORT`, `JWT_SECRET` (zorunlu), `STORAGE_BACKEND=local|s3` (+`STORAGE_PATH`),
 `CORS_ORIGINS` (virgülle; unset = localhost dev), `ADMIN_API_KEY` (/org koruması; unset = dev uyarısı).
+Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE_BACKEND=local|s3`
+(+`ATTACHMENT_STORAGE_PATH`, local default `../work-pool-portal/storage`; `ATTACHMENT_STORAGE_S3_BUCKET/REGION`).
+
+## Attachments (ek-belge) sözleşmesi
+
+- WFD şeması: root `attachments` katalogu (adlandırılmış gruplar → `items[]`) + `nodes.<key>.attachments`
+  (grup key referansları). Engine core dosya I/O YAPMAZ — yalnız katalog+referansı metadata tutar.
+- Varlık kontrolü + yükleme server portal edge'inde: `AttachmentStore` (opendal), storage anahtarı
+  `attachments/{wfe_id}/{grup}/{item}`. Rotalar hem direkt `/wfe/*` (X-Actor, portal bunu kullanır) hem
+  JWT `/portal/wfe/*` ağacında: `GET /wfe/:id/attachments` (durum), `PUT/GET/DELETE .../:group/:item`.
+- Gate server-side: `apply_action`/`submit_action` hedef node'un `required` dosyaları eksikse
+  `422 code:"attachment.missing"` döner. Detay: `docs/spec/DECISIONS_v2_2.md` Madde 8.

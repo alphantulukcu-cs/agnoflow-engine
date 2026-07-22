@@ -7,6 +7,7 @@ use wfe_core::validator::{validate, ValidationReport};
 
 const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
 const PARALLEL_FIXTURE: &str = include_str!("fixtures/example-wfd_paralel-onay_v2_2.json");
+const ATTACHMENT_FIXTURE: &str = include_str!("fixtures/example-wfd_belge-onay_v2_2.json");
 
 fn fixture_value() -> Value {
     serde_json::from_str(FIXTURE).unwrap()
@@ -488,6 +489,44 @@ fn parallel_fixture_is_valid() {
         report.warnings.is_empty(),
         "uyarılar: {:#?}",
         report.warnings
+    );
+}
+
+#[test]
+fn attachment_fixture_is_valid() {
+    let report = validate_value(serde_json::from_str(ATTACHMENT_FIXTURE).unwrap());
+    assert!(
+        report.errors.is_empty(),
+        "belge-onay fixture temiz geçmeli, hatalar: {:#?}",
+        report.errors
+    );
+    assert!(report.warnings.is_empty(), "uyarılar: {:#?}", report.warnings);
+}
+
+#[test]
+fn attachment_ref_to_unknown_group_is_error() {
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    v["nodes"]["self__creditAnalyst"]["attachments"] = json!(["olmayan_grup"]);
+    let report = validate_value(v);
+    assert!(
+        report.errors.iter().any(|e| e.code == "attachment_ref"),
+        "bilinmeyen attachment grubu referansı hata vermeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn attachment_duplicate_item_id_is_error() {
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    v["attachments"]["basvuru_belgeleri"]["items"] = json!([
+        { "id": "kimlik", "required": true },
+        { "id": "kimlik", "required": false }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report.errors.iter().any(|e| e.code == "attachment_item_dup"),
+        "grup içi tekrar eden item id hata vermeli, hatalar: {:#?}",
+        report.errors
     );
 }
 

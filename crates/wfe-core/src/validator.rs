@@ -53,6 +53,7 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_parallel(wfd, &mut report);
     check_expressions(wfd, &mut report);
     check_action_inputs(wfd, &mut report);
+    check_attachments(wfd, &mut report);
     check_effect_paths(wfd, &mut report);
     check_retries(wfd, &mut report);
     check_string_namespaces(wfd, &mut report);
@@ -763,6 +764,44 @@ fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
                     format!("input yolu '{path}' x-wf-readonly — kullanıcı yazamaz"),
                 ),
                 PathResolution::Found | PathResolution::Opaque => {}
+            }
+        }
+    }
+}
+
+// ---- §6b: attachments katalogu + node referansları ----
+
+fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
+    // Katalog içi: item.id grup içinde tekil olmalı.
+    for (group, def) in &wfd.attachments {
+        let mut seen_ids = HashSet::new();
+        for item in &def.items {
+            if !seen_ids.insert(item.id.clone()) {
+                report.error(
+                    "attachment_item_dup",
+                    format!("attachments[{group}].items"),
+                    format!("attachment item id '{}' grup içinde birden fazla tanımlı", item.id),
+                );
+            }
+        }
+    }
+    // Node referansları: katalogda var olmalı; aynı grup bir node'da tekrar edilmemeli.
+    for (node_key, node) in &wfd.nodes {
+        let mut seen_refs = HashSet::new();
+        for group_ref in &node.attachments {
+            if !seen_refs.insert(group_ref.clone()) {
+                report.error(
+                    "attachment_ref_dup",
+                    format!("nodes[{node_key}].attachments"),
+                    format!("attachment grubu '{group_ref}' bu node'da birden fazla referanslı"),
+                );
+            }
+            if !wfd.attachments.contains_key(group_ref) {
+                report.error(
+                    "attachment_ref",
+                    format!("nodes[{node_key}].attachments"),
+                    format!("attachment grubu '{group_ref}' root attachments katalogunda yok"),
+                );
             }
         }
     }

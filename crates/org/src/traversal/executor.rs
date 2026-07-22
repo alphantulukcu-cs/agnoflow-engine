@@ -105,7 +105,7 @@ async fn fetch_by_ids(pool: &PgPool, ids: &[Uuid], orgt_id: Uuid) -> Result<Vec<
 // kullanılmaz. Zincirleme (`.parent` vb.) için her üyeliğin tree'si (orgt_id) korunur; bu yüzden
 // DISTINCT YOK — dedup çağırana aittir (standalone kullanımda `dedup_orgus`, orgu_id'ye göre).
 // resolve_orgu'nun `*:` özel-case'iyle (resolve_global_type) aynı eşleşme semantiği.
-async fn fetch_global_type(
+pub(crate) async fn fetch_global_type(
     pool: &PgPool,
     orgtnt_id: Uuid,
     filter: &FilterExpr,
@@ -123,9 +123,8 @@ async fn fetch_global_type(
     );
     let mut args = PgArguments::default();
     args.add(orgtnt_id);
-    for (k, v) in bindings {
-        args.add(k);
-        args.add(v);
+    for p in bindings {
+        args.add(p);
     }
     sqlx::query_as_with::<_, Orgu, _>(&sql, args)
         .fetch_all(pool)
@@ -133,8 +132,23 @@ async fn fetch_global_type(
         .map_err(OrgError::Database)
 }
 
-fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<(String, String)>) {
+fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<String>) {
     match expr {
+        // Rol yaprağı: relational — birimin org.orgu_r grant'ı var mı?
+        FilterExpr::Leaf(tf) if tf.key == "role" => {
+            let v = *idx;
+            *idx += 1;
+            let sql = format!(
+                "EXISTS (SELECT 1 FROM org.orgu_r orr \
+                    JOIN org.r rr ON orr.r_id = rr.r_id \
+                  WHERE orr.orgu_id = m.orgu_id AND rr.name = ${v} \
+                    AND rr.is_active = true \
+                    AND (orr.valid_from  IS NULL OR orr.valid_from  <= now()) \
+                    AND (orr.valid_until IS NULL OR orr.valid_until >  now()))"
+            );
+            (sql, vec![tf.val.clone()])
+        }
+        // Tip/JSONB yaprağı: mevcut davranış.
         FilterExpr::Leaf(tf) => {
             let k = *idx;
             *idx += 1;
@@ -144,7 +158,7 @@ fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<(String, Strin
                 "(m.orgu_type->>${} = ${} OR m.orgu_type->${} @> to_jsonb(${}::text))",
                 k, v, k, v
             );
-            (sql, vec![(tf.key.clone(), tf.val.clone())])
+            (sql, vec![tf.key.clone(), tf.val.clone()])
         }
         FilterExpr::Not(inner) => {
             let (s, b) = filter_sql(inner, idx);
@@ -161,10 +175,7 @@ fn filter_sql(expr: &FilterExpr, idx: &mut usize) -> (String, Vec<(String, Strin
     }
 }
 
-fn collect_filter_parts(
-    exprs: &[FilterExpr],
-    idx: &mut usize,
-) -> (Vec<String>, Vec<(String, String)>) {
+fn collect_filter_parts(exprs: &[FilterExpr], idx: &mut usize) -> (Vec<String>, Vec<String>) {
     let mut parts = Vec::new();
     let mut binds = Vec::new();
     for e in exprs {
@@ -180,14 +191,13 @@ async fn run_filtered(
     sql: String,
     ids: &[Uuid],
     orgt_id: Uuid,
-    bindings: Vec<(String, String)>,
+    bindings: Vec<String>,
 ) -> Result<Vec<Orgu>, OrgError> {
     let mut args = PgArguments::default();
     args.add(ids.to_vec());
     args.add(orgt_id);
-    for (k, v) in bindings {
-        args.add(k);
-        args.add(v);
+    for p in bindings {
+        args.add(p);
     }
     sqlx::query_as_with::<_, Orgu, _>(&sql, args)
         .fetch_all(pool)

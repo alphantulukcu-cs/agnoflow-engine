@@ -1,6 +1,9 @@
 //! Simülasyon endpoint'leri — editör WFD'yi kaydetmeden dener.
 //! v2.2: Engine saf olduğundan store yok; SimState istemciyle gidip gelir.
-//! Claim akışı simülasyonda atlanır (apply öncesi state aktöre atanır).
+//! Claim YAZIMI simülasyonda atlanır (apply öncesi state aktöre atanır) ama
+//! claim UYGUNLUĞU atlanmaz: gerçek akıştaki matcher'ın aynısı (Engine::can_claim)
+//! her possible-actions/apply'da denetlenir — aksi halde sim'de herkes her şeyi
+//! yapabilir ve sim gerçek davranışı yanlış gösterir.
 
 use crate::{error::AppError, state::AppState};
 use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
@@ -8,10 +11,14 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
-use wf_wfe::{executor::PossibleAction, sim::SimState, LiveAutoexecRunner, OrgAdapter};
+use wf_wfe::{
+    executor::{active_branch_nodes, PossibleAction},
+    sim::SimState,
+    LiveAutoexecRunner, OrgAdapter,
+};
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
-use wfe_core::v22::pipeline::Engine;
+use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::validator;
 
 pub fn router(state: AppState) -> Router {
@@ -54,6 +61,75 @@ struct SimStartBody {
     input: Value,
 }
 
+/// Sim claim-eşdeğeri uygunluk — gerçek `WfeExecutor::can_claim` ile aynı kural:
+/// zaten sahipse uygun; değilse `Engine::can_claim` (matcher §7.1, delegation dahil).
+/// Sahiplik ATANMAMIŞ wfes üzerinde denetlenir (sim'in geçici pre-claim'i yetkiyi
+/// gölgelemesin diye).
+async fn sim_eligible(
+    engine: &Engine<'_>,
+    wfd: &Wfd,
+    sim_state: &SimState,
+    actor: &Actor,
+    node: Option<&str>,
+) -> Result<bool, AppError> {
+    let wfes = sim_state.to_wfes(None);
+    let owned = match node {
+        Some(n) => wfes
+            .branches
+            .iter()
+            .any(|b| b.branch_node == n && b.claimed_by == Some(actor.user_id)),
+        None => wfes.assigned_to == Some(actor.user_id),
+    };
+    if owned {
+        return Ok(true);
+    }
+    let check = engine
+        .can_claim(wfd, &wfes, actor, node)
+        .await
+        .map_err(AppError::from)?;
+    Ok(matches!(check, ClaimCheck::Ok))
+}
+
+/// Sim aksiyon listesi — `possible_actions_for`'un uygunluk-farkındalı ikizi:
+/// yalnız aktörün claim-uygun olduğu node/kolların aksiyonları döner.
+async fn sim_actions_for(
+    engine: &Engine<'_>,
+    wfd: &Wfd,
+    sim_state: &SimState,
+    actor: &Actor,
+) -> Result<Vec<PossibleAction>, AppError> {
+    let wfes_owned = sim_state.to_wfes(Some(actor.user_id));
+    if wfes_owned.join_target.is_some() {
+        let mut out = Vec::new();
+        for node in active_branch_nodes(&wfes_owned) {
+            if !sim_eligible(engine, wfd, sim_state, actor, Some(&node)).await? {
+                continue;
+            }
+            let actions = engine
+                .possible_actions(wfd, &wfes_owned, actor, Some(&node))
+                .await
+                .map_err(AppError::from)?;
+            out.extend(actions.into_iter().map(|action| PossibleAction {
+                action,
+                node: Some(node.clone()),
+            }));
+        }
+        Ok(out)
+    } else {
+        if !sim_eligible(engine, wfd, sim_state, actor, None).await? {
+            return Ok(vec![]);
+        }
+        let actions = engine
+            .possible_actions(wfd, &wfes_owned, actor, None)
+            .await
+            .map_err(AppError::from)?;
+        Ok(actions
+            .into_iter()
+            .map(|action| PossibleAction { action, node: None })
+            .collect())
+    }
+}
+
 #[derive(serde::Serialize)]
 struct SimStartResponse {
     sim_state: SimState,
@@ -90,11 +166,7 @@ async fn sim_start(
         .map_err(AppError::from)?;
     let sim_state = SimState::from_new_wfe(&new);
 
-    let wfes = sim_state.to_wfes(Some(body.actor.user_id));
-    let possible_actions =
-        wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
-            .await
-            .map_err(AppError::from)?;
+    let possible_actions = sim_actions_for(&engine, &wfd, &sim_state, &body.actor).await?;
 
     Ok(Json(SimStartResponse {
         sim_state,
@@ -138,6 +210,17 @@ async fn sim_apply(
     };
 
     let mut sim_state = body.sim_state;
+
+    // Claim YAZIMI atlanır ama uygunluk atlanmaz: gerçek akışta bu aktör claim
+    // alamayacaksa sim'de de aksiyon uygulayamamalı (yetki delik olmasın).
+    if !sim_eligible(&engine, &wfd, &sim_state, &body.actor, body.node.as_deref()).await? {
+        return Err(AppError(
+            "aktör bu adım için yetkili değil (c_a eşleşmiyor) — gerçek akışta claim reddedilirdi"
+                .into(),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+
     // simülasyon claim'i atlar — state uygulanmadan önce aktöre atanır
     let wfes = sim_state.to_wfes(Some(body.actor.user_id));
 
@@ -161,10 +244,7 @@ async fn sim_apply(
     let possible_actions = if terminal {
         vec![]
     } else {
-        let wfes = sim_state.to_wfes(Some(body.actor.user_id));
-        wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
-            .await
-            .map_err(AppError::from)?
+        sim_actions_for(&engine, &wfd, &sim_state, &body.actor).await?
     };
 
     Ok(Json(SimApplyResponse {
@@ -196,9 +276,7 @@ async fn sim_possible_actions(
         exec: &runner,
     };
 
-    let wfes = body.sim_state.to_wfes(Some(body.actor.user_id));
-    wf_wfe::executor::possible_actions_for(&engine, &wfd, &wfes, &body.actor)
+    sim_actions_for(&engine, &wfd, &body.sim_state, &body.actor)
         .await
         .map(Json)
-        .map_err(AppError::from)
 }

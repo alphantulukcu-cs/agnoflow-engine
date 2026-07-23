@@ -67,8 +67,9 @@ fn branch_owner_is(wfes: &Wfes, node: Option<&str>, user_id: Uuid) -> bool {
 }
 
 /// WOR-31: WFE'nin şu an aktif kollarının node adları (paralel timer taraması
-/// bunlar üzerinden döner). Paralel modda değilse boş.
-fn active_branch_nodes(wfes: &Wfes) -> Vec<String> {
+/// bunlar üzerinden döner). Paralel modda değilse boş. `pub`: sim rotaları da
+/// kol-bazlı uygunluk/aksiyon listesi için kullanır.
+pub fn active_branch_nodes(wfes: &Wfes) -> Vec<String> {
     wfes.branches
         .iter()
         .filter(|b| b.status == BranchStatus::Active)

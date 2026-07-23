@@ -51,3 +51,10 @@ pub fn build_operator(cfg: &StorageConfig) -> Result<Operator, opendal::Error> {
 pub fn s3_key(wfd_id: uuid::Uuid, version: i32) -> String {
     format!("wfd/{wfd_id}/{version}.json")
 }
+
+/// Editör layout companion'ının storage anahtarı — şema-VALID WFD dokümanından AYRI
+/// opaque JSON (node pozisyonları + edge path'leri + reject/collapse bayrakları). Engine
+/// dokümanı `additionalProperties:false` olduğu için layout burada, yanında saklanır.
+pub fn layout_key(wfd_id: uuid::Uuid, version: i32) -> String {
+    format!("wfd/{wfd_id}/{version}.layout.json")
+}

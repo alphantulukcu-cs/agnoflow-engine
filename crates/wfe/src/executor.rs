@@ -188,6 +188,11 @@ pub struct WfeView {
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     pub join_target: Option<WftTarget>,
+    /// Madde 6: tek-kol modda viewer `current_node`'u claim edebilir mi ve NASIL
+    /// (paralel modda daima `None` — kol-bazlı `BranchView.claim_as`'e bak). `None`
+    /// = claim edemez / zaten claim'li / claim aşaması değil.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_as: Option<ClaimProvenance>,
     /// WOR-65: WFE revizyon token'ı (bkz. `Wfes::rev()`). İstemci bunu okuyup
     /// bir sonraki apply/claim'de `expected_rev` olarak geri gönderirse, arada
     /// durum değişmişse 409 `conflict.stale_revision` alır. WFE-seviyesidir —
@@ -204,6 +209,47 @@ pub struct BranchView {
     #[serde(flatten)]
     pub state: BranchState,
     pub c_a: Vec<CandidateActor>,
+    /// Madde 6: viewer bu kolu claim edebilir mi ve NASIL — sorgu-anında
+    /// `claim_decision` ile. `None` = claim edemez / kol claim'li / claim aşaması
+    /// değil. `delegated` ise UI "X adına vekaleten" gösterir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_as: Option<ClaimProvenance>,
+}
+
+/// Viewer'ın bir (kol) node'unu claim edebilirliği (Madde 6 vekalet-farkında).
+/// `AuthDecision`'ın serileşen görünüm karşılığı; `Denied` → `None` (alan düşer).
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum ClaimProvenance {
+    /// Aktör kurala DOĞRUDAN uyuyor.
+    Direct,
+    /// Aktör VEKALETEN uyuyor: `delegator_user_id`'nin koltuğunu (`seat_*`) temsil eder.
+    Delegated {
+        delegation_id: Uuid,
+        delegator_user_id: Uuid,
+        seat_orgu_id: Uuid,
+        seat_role: String,
+    },
+}
+
+impl ClaimProvenance {
+    fn from_auth(d: AuthDecision) -> Option<Self> {
+        match d {
+            AuthDecision::Direct => Some(ClaimProvenance::Direct),
+            AuthDecision::Delegated {
+                delegation_id,
+                delegator_user_id,
+                seat_orgu_id,
+                seat_role,
+            } => Some(ClaimProvenance::Delegated {
+                delegation_id,
+                delegator_user_id,
+                seat_orgu_id,
+                seat_role,
+            }),
+            AuthDecision::Denied => None,
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -531,18 +577,47 @@ impl WfeExecutor {
         // motorun org resolver'ıyla doğru çözülür — portal bunu düz okur). Anchor'sız
         // Selector `self` için default anchor = viewer; anchor-tabanlı formlarda viewer
         // önemsiz. arrived/cancelled kollarda c_a boş (claim edilemezler).
+        // Madde 6: aktif & claim'siz kol için viewer'ın claim provenance'ı (direct/
+        // delegated) — `claim_decision` `&wfes`'in tamamını istediği için kollar
+        // REFERANSLA dönülür (branch state klonlanır); wfes bozulmaz.
         let engine = self.engine();
         let mut branch_views = Vec::with_capacity(wfes.branches.len());
-        for b in wfes.branches {
-            let c_a = if b.status == BranchStatus::Active {
+        for b in &wfes.branches {
+            let active = b.status == BranchStatus::Active;
+            let c_a = if active {
                 engine
                     .resolve_node_c_a(&wfd, &b.branch_node, ctx, &wfes.wfah, viewer, wfes.orgtnt_id)
                     .await?
             } else {
                 Vec::new()
             };
-            branch_views.push(BranchView { state: b, c_a });
+            let claim_as = if active && b.claimed_by.is_none() {
+                ClaimProvenance::from_auth(
+                    engine
+                        .claim_decision(&wfd, &wfes, viewer, Some(&b.branch_node))
+                        .await?,
+                )
+            } else {
+                None
+            };
+            branch_views.push(BranchView {
+                state: b.clone(),
+                c_a,
+                claim_as,
+            });
         }
+
+        // Madde 6: tek-kol modda (join_target yok) viewer current_node'u claim
+        // edebilir mi — aktif & henüz claim'siz ise. Paralel modda daima None.
+        let claim_as = if wfes.join_target.is_none()
+            && wfes.status == WfeStatus::Active
+            && wfes.assigned_to.is_none()
+            && wfes.current_node.is_some()
+        {
+            ClaimProvenance::from_auth(engine.claim_decision(&wfd, &wfes, viewer, None).await?)
+        } else {
+            None
+        };
 
         Ok(WfeView {
             wfe_id,
@@ -559,6 +634,7 @@ impl WfeExecutor {
             rev,
             branches: branch_views,
             join_target: wfes.join_target,
+            claim_as,
         })
     }
 

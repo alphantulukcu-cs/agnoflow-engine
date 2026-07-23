@@ -326,16 +326,60 @@ impl WfdAdapter {
             .to_bytes();
         let json: Value = serde_json::from_slice(&bytes)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        self.create_draft(
-            src.orgtnt_id,
-            Some(src.project_id),
-            &src.name,
-            src.description.as_deref(),
-            &src.tags,
-            Some(&json),
-            src.source_template_id,
-        )
-        .await
+        let created = self
+            .create_draft(
+                src.orgtnt_id,
+                Some(src.project_id),
+                &src.name,
+                src.description.as_deref(),
+                &src.tags,
+                Some(&json),
+                src.source_template_id,
+            )
+            .await?;
+        // Editör layout'unu (varsa) yeni drafta taşı — step id'leri import-id anahtarlı
+        // ve versiyondan bağımsız olduğundan blob aynen kopyalanır (best-effort).
+        if let Ok(Some(layout)) = self.fetch_layout(src_id, src_version).await {
+            let _ = self.save_layout(created.0, created.1, &layout).await;
+        }
+        Ok(created)
+    }
+
+    /// Editör layout companion'ını (opaque JSON) yazar. Şema-VALID doküman değildir;
+    /// parse/validate YOK. Versiyonun var olduğunu doğrular (herhangi status).
+    pub async fn save_layout(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        layout: &Value,
+    ) -> Result<(), crate::error::WfdError> {
+        repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        let key = storage::layout_key(wfd_id, version);
+        let bytes = serde_json::to_vec(layout)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        self.storage
+            .write(&key, bytes)
+            .await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Layout companion'ını döner; blob yoksa None (hata değil).
+    pub async fn fetch_layout(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<Option<Value>, crate::error::WfdError> {
+        let key = storage::layout_key(wfd_id, version);
+        match self.storage.read(&key).await {
+            Ok(buf) => {
+                let v = serde_json::from_slice(&buf.to_bytes())
+                    .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+                Ok(Some(v))
+            }
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(crate::error::WfdError::Storage(e.to_string())),
+        }
     }
 
     /// Draft'ı iskarta eder (JSON + satır). Published dokunulmaz.

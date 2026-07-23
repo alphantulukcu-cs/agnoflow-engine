@@ -36,6 +36,7 @@ pub fn router(state: AppState) -> Router {
         .route("/:id/:version", get(get_wfd))
         .route("/:id/:version/new-draft", post(new_draft))
         .route("/:id/:version/usage", get(wfe_usage))
+        .route("/:id/:version/layout", get(get_layout).put(put_layout))
         .with_state(state)
 }
 
@@ -411,6 +412,31 @@ async fn new_draft(
     Ok(Json(
         serde_json::json!({ "wfd_id": wfd_id, "version": version }),
     ))
+}
+
+/// Editör layout companion'ı — şema-VALID WFD dokümanından AYRI, opaque JSON (pozisyon +
+/// edge path + reject/collapse). GET auth'suz (get_wfd gibi; readonly reload da auth'suz
+/// çeker), blob yoksa `null` döner. Editör publish sonrası PUT'lar (design yetkisi gerekli).
+async fn get_layout(
+    State(s): State<AppState>,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    let layout = s.wfd.fetch_layout(id, ver).await.map_err(map_wfd_err)?;
+    Ok(Json(layout.unwrap_or(Value::Null)))
+}
+
+async fn put_layout(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+    Json(layout): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    s.wfd
+        .save_layout(id, ver, &layout)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(map_wfd_err)
 }
 
 #[derive(Deserialize)]

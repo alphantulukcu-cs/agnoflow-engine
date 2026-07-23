@@ -75,6 +75,10 @@ struct WfeDetailResponse {
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     join_target: Option<WftTarget>,
+    /// Madde 6: tek-kol modda viewer'ın claim provenance'ı (direct/delegated); paralel
+    /// modda `None` — kol-bazlı `branches[].claim_as`'e bakılır.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_as: Option<wf_wfe::executor::ClaimProvenance>,
     /// WOR-65: WFE revizyon token'ı — `/wfe/:id` (WfeView) ile AYNI değer.
     /// Portal bunu saklayıp `POST /portal/wfe/:id/action` gövdesinde
     /// `expected_rev` olarak geri gönderir; arada durum değiştiyse 409 +
@@ -178,6 +182,7 @@ async fn get_wfe_detail(
         available_actions,
         branches: view.branches,
         join_target: view.join_target,
+        claim_as: view.claim_as,
         rev: view.rev,
     }))
 }

@@ -1,4 +1,4 @@
-# workflow-engine
+# agnoflow-engine
 
 Çok-tenant'lı, deterministik **workflow engine** — WFD v2.2 modelini (Named Nodes,
 Single-Rule C_A) çalıştırır. İnsan adımları, otomasyonlar ve koşullar tek bir runtime
@@ -23,7 +23,7 @@ tüm veritabanı/HTTP erişimi dış crate'lerdeki adapter'larda yapılır.
 ## Proje yapısı
 
 ```
-workflow-engine/                 # Cargo workspace kökü
+agnoflow-engine/                 # Cargo workspace kökü
 ├── Cargo.toml / Cargo.lock      # Workspace tanımı
 ├── crates/                      # Tüm Rust crate'leri (yukarıdaki harita)
 │   ├── wfe-core/                #   saf engine

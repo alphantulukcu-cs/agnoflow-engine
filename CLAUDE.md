@@ -1,4 +1,4 @@
-# CLAUDE.md — workflow-engine
+# CLAUDE.md — agnoflow-engine
 
 Bu repo **WFD v2.2** (Named Nodes, Single-Rule C_A) modelini çalıştıran çok-tenant'lı
 workflow engine'dir. Spec ile kod çelişirse SPEC kazanır: kanonik dosyalar

@@ -1,0 +1,10 @@
+target/
+node_modules/
+.git/
+storage/
+data/
+public/
+*.md
+docs/
+.env
+.env.*

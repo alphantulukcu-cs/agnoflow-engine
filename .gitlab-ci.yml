@@ -1,0 +1,33 @@
+# agnoflow-engine (backend) — staging image build & push
+#
+# Akış: `staging` branch'ine push → runner image build eder → image.cs.com.tr'ye
+# pushlar. Flux (agnoflow-infra) yeni tag'i tarar ve agnoflow-staging'e deploy eder.
+#
+# Ön koşullar (infra tarafında hazır):
+#  - Runner docker'a erişebiliyor ve image.cs.com.tr'ye (Nexus) ZATEN login → docker login adımı yok.
+#  - $EFP_RUNNER_TAG değişkeni tanımlı (uygun runner'ı seçer).
+
+stages:
+  - build
+
+variables:
+  IMAGE: image.cs.com.tr/agnoflow/agnoflow-backend
+
+build-image:
+  stage: build
+  tags:
+    - $EFP_RUNNER_TAG
+  rules:
+    # Yalnız staging branch'inde çalış.
+    - if: '$CI_COMMIT_BRANCH == "staging"'
+  script:
+    # Tag = staging-<pipeline iid>: monoton artan tamsayı → Flux ImagePolicy
+    # '^staging-(?P<ts>[0-9]+)$' + numerical policy ile en yeni build seçilir.
+    - export TAG="staging-$CI_PIPELINE_IID"
+    - echo "Building $IMAGE:$TAG"
+    - docker build -t "$IMAGE:$TAG" -t "$IMAGE:staging" .
+    - docker push "$IMAGE:$TAG"
+    - docker push "$IMAGE:staging"
+    - echo "Pushed $IMAGE:$TAG (+ :staging convenience tag)"
+  # NOT: Runner login değilse buraya login ekle (CI/CD variable'larla, maskeli):
+  #   - echo "$NEXUS_PASSWORD" | docker login image.cs.com.tr -u "$NEXUS_USER" --password-stdin

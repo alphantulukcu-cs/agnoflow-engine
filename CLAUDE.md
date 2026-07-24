@@ -33,6 +33,31 @@ Alınan tasarım kararları: `docs/spec/DECISIONS_v2_2.md`.
 - Migration'lar psql ile manuel uygulanır (`migrations/org`, `migrations/wf` sırasıyla); sqlx migrate kullanılmıyor.
 - Çok elemanlı eski c_a array'i ile karşılaşırsan OTOMATİK dönüştürme — dur ve sor (M10).
 
+## Git remote / push politikası
+
+- İki remote: `origin` = GitHub, `gitlab` = kurumsal GitLab
+  (`gitlab.cs.com.tr:agnoflow/src/agnoflow-backend.git`).
+- **`main` HER İKİ remote'ta senkron tutulur.** Kullanıcı "push" dediğinde main'i **hem GitHub
+  hem GitLab**'e at: `git push origin main && git push gitlab main`. Birine push edilirse
+  diğerine de edilir — ayrı düşmesinler.
+- **`staging` branch'ine ASLA push/merge etme** — kullanıcı açıkça "deploy" / "deployla"
+  demedikçe. `gitlab staging`'e push CI/CD'yi tetikler (build → image.cs.com.tr → Flux →
+  `agnoflow-staging` deploy). Deploy istenince: `git push gitlab main:staging`.
+- **Commit mesajlarına ASLA `Co-Authored-By: Claude ...` veya benzeri Claude/AI imzası yazılmaz.**
+
+## Deployment (staging — Kubernetes + Flux GitOps)
+
+Deployment manifest'leri AYRI repoda: **`agnoflow-infra`** (GitLab `agnoflow/config/agnoflow-infra`),
+Flux ile cluster'a uygulanır. Bu repo yalnız kod + `Dockerfile` + `.gitlab-ci.yml` tutar.
+
+- **Akış:** `staging`'e push → GitLab CI image build → `image.cs.com.tr/agnoflow/agnoflow-backend:staging-<CI_PIPELINE_IID>` push → Flux ImageUpdateAutomation tag'i agnoflow-infra'ya bump'lar → `agnoflow-staging` namespace'ine deploy.
+- **CI** (`.gitlab-ci.yml`) yalnız `staging` branch'inde koşar; runner `$EFP_RUNNER_TAG`, Nexus'a zaten login (docker build/push).
+- **Image:** multi-stage Rust `Dockerfile`, `wf-server` :3000, non-root uid 1000.
+- **Cluster:** node `10.10.10.189`; Flux logimesh ile aynı `flux-system`'i paylaşır → tüm Flux nesnelerimiz `agnoflow-*` prefix'li (çakışma önlendi). Secret'lar SOPS (age) ile şifreli (infra repoda).
+- **DB:** cluster içi postgres (`agnoflow-staging` ns). Migration OTOMATİK DEĞİL — şema elle uygulanır (ilk kurulumda yerel DB pg_dump'landı).
+- **ADMIN_API_KEY staging'de TANIMSIZ** → `/org` dev gibi açık (frontend admin header göndermiyor).
+- **Erişim:** `http://agnoflow.staging.cs.com.tr` (şimdilik HTTP; TLS cert bekleniyor) + `agnoflow.10-10-10-189.nip.io`.
+
 ## Ortam değişkenleri
 
 `DATABASE_URL`, `PORT`, `JWT_SECRET` (zorunlu), `STORAGE_BACKEND=local|s3` (+`STORAGE_PATH`),

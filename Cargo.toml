@@ -25,3 +25,6 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-http         = { version = "0.5", features = ["cors"] }
 dotenvy            = "0.15"
+utoipa             = { version = "5.5", features = ["axum_extras", "chrono", "uuid", "preserve_order"] }
+utoipa-axum        = "0.1.3"
+utoipa-swagger-ui  = { version = "8.1", features = ["axum"] }

@@ -1,24 +1,26 @@
+use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::v22::ports::{BranchState, BranchStatus, WfdStore};
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", post(start_wfe).get(list_wfe))
-        .route("/:id/actions", post(apply_action))
-        .route("/:id", get(query_wfe))
-        .route("/:id/claim", post(claim_wfe))
-        .route("/:id/reassign", post(reassign_wfe))
-        .route("/:id/possible-actions", get(possible_actions))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(start_wfe, list_wfe))
+        .routes(routes!(apply_action))
+        .routes(routes!(query_wfe))
+        .routes(routes!(claim_wfe))
+        .routes(routes!(reassign_wfe))
+        .routes(routes!(possible_actions))
         .merge(super::attachments::routes())
         .with_state(state)
 }
@@ -56,7 +58,7 @@ fn parse_uuid_header(headers: &HeaderMap, name: &str) -> Result<Uuid, AppError> 
         })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct StartBody {
     wfd_id: Uuid,
     version: i32,
@@ -72,6 +74,10 @@ struct StartBody {
     deadline: Option<String>,
 }
 
+#[utoipa::path(post, path = "/", tag = "wfe",
+    request_body = StartBody,
+    responses((status = 200, description = "Başlatılan WFE (WfeStartResult)", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn start_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -92,7 +98,7 @@ async fn start_wfe(
         .map_err(AppError::from)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct ApplyBody {
     action: String,
     #[serde(default)]
@@ -115,6 +121,11 @@ struct ApplyBody {
     expected_rev: Option<u32>,
 }
 
+#[utoipa::path(post, path = "/{id}/actions", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = ApplyBody,
+    responses((status = 200, description = "Uygulanan aksiyon sonucu (WfeApplyResult)", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn apply_action(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -175,7 +186,8 @@ async fn apply_action(
 /// davranış), `{"node": "..."}` verilirse paralel kol ipucu. Body zorunlu bir
 /// `Json<T>` extractor'ı OLMADIĞI için (geriye uyumluluk: eski istemciler hiç
 /// gövde göndermez) ham `Bytes` üzerinden opsiyonel ayrıştırılır.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, ToSchema)]
+#[schema(as = WfeClaimBody)]
 struct ClaimBody {
     #[serde(default)]
     node: Option<String>,
@@ -195,6 +207,11 @@ fn parse_claim_body(bytes: &axum::body::Bytes) -> Result<ClaimBody, AppError> {
         .map_err(|e| AppError(format!("invalid claim body: {e}"), StatusCode::BAD_REQUEST))
 }
 
+#[utoipa::path(post, path = "/{id}/claim", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = ClaimBody,
+    responses((status = 200, description = "Claim sonucu (ClaimOutcome)", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn claim_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -217,7 +234,7 @@ async fn claim_wfe(
 
 /// Madde 7: yetkili claim devri. `to` = devralacak tam aktör üçlüsü; `null`/atlanırsa
 /// havuza bırakma (force-unclaim). `node` = WOR-31 paralel modda kol seçimi.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct ReassignBody {
     #[serde(default)]
     to: Option<TargetActor>,
@@ -225,13 +242,18 @@ struct ReassignBody {
     node: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct TargetActor {
     orgu_id: Uuid,
     user_id: Uuid,
     role: String,
 }
 
+#[utoipa::path(post, path = "/{id}/reassign", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = ReassignBody,
+    responses((status = 200, description = "Devir sonucu (ReassignOutcome)", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn reassign_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -251,6 +273,10 @@ async fn reassign_wfe(
         .map_err(AppError::from)
 }
 
+#[utoipa::path(get, path = "/{id}", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    responses((status = 200, description = "WFE görünümü (WfeView)", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn query_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -264,6 +290,10 @@ async fn query_wfe(
         .map_err(AppError::from)
 }
 
+#[utoipa::path(get, path = "/{id}/possible-actions", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    responses((status = 200, description = "Aktörün uygulayabileceği aksiyonlar", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn possible_actions(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -277,7 +307,8 @@ async fn possible_actions(
         .map_err(AppError::from)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct WfeListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
@@ -328,6 +359,9 @@ fn branch_list_row_to_state(r: wf_wfe::models::BranchListRow) -> BranchState {
     }
 }
 
+#[utoipa::path(get, path = "/", tag = "wfe", params(WfeListQuery),
+    responses((status = 200, description = "Tenant'ın WFE listesi (WfeListItem[])", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn list_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,

@@ -5,11 +5,14 @@
 //! her possible-actions/apply'da denetlenir — aksi halde sim'de herkes her şeyi
 //! yapabilir ve sim gerçek davranışı yanlış gösterir.
 
+use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfe::{
     executor::{active_branch_nodes, PossibleAction},
@@ -21,11 +24,11 @@ use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::validator;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/start", post(sim_start))
-        .route("/apply", post(sim_apply))
-        .route("/possible-actions", post(sim_possible_actions))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(sim_start))
+        .routes(routes!(sim_apply))
+        .routes(routes!(sim_possible_actions))
         .with_state(state)
 }
 
@@ -50,9 +53,10 @@ fn parse_and_validate(wfd_json: Value) -> Result<Wfd, AppError> {
 
 // ── /start ──────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct SimStartBody {
     wfd: Value,
+    #[schema(value_type = Object)]
     actor: Actor,
     /// M16: verilirse yalnız bu action adını taşıyan start kuralları aday olur.
     #[serde(default)]
@@ -130,12 +134,17 @@ async fn sim_actions_for(
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct SimStartResponse {
+    #[schema(value_type = Object)]
     sim_state: SimState,
+    #[schema(value_type = Vec<Object>)]
     possible_actions: Vec<PossibleAction>,
 }
 
+#[utoipa::path(post, path = "/start", tag = "simulate",
+    request_body = SimStartBody,
+    responses((status = 200, description = "Sim başlangıç durumu + olası aksiyonlar", body = SimStartResponse)))]
 async fn sim_start(
     State(s): State<AppState>,
     Json(body): Json<SimStartBody>,
@@ -176,10 +185,12 @@ async fn sim_start(
 
 // ── /apply ───────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct SimApplyBody {
     wfd: Value,
+    #[schema(value_type = Object)]
     sim_state: SimState,
+    #[schema(value_type = Object)]
     actor: Actor,
     action: String,
     #[serde(default)]
@@ -189,14 +200,19 @@ struct SimApplyBody {
     node: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct SimApplyResponse {
+    #[schema(value_type = Object)]
     sim_state: SimState,
     terminal: bool,
     end_response: Option<Value>,
+    #[schema(value_type = Vec<Object>)]
     possible_actions: Vec<PossibleAction>,
 }
 
+#[utoipa::path(post, path = "/apply", tag = "simulate",
+    request_body = SimApplyBody,
+    responses((status = 200, description = "Aksiyon sonrası sim durumu", body = SimApplyResponse)))]
 async fn sim_apply(
     State(s): State<AppState>,
     Json(body): Json<SimApplyBody>,
@@ -257,13 +273,18 @@ async fn sim_apply(
 
 // ── /possible-actions ────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct SimPossibleActionsBody {
     wfd: Value,
+    #[schema(value_type = Object)]
     sim_state: SimState,
+    #[schema(value_type = Object)]
     actor: Actor,
 }
 
+#[utoipa::path(post, path = "/possible-actions", tag = "simulate",
+    request_body = SimPossibleActionsBody,
+    responses((status = 200, description = "Aktörün claim-uygun olduğu olası aksiyonlar", body = serde_json::Value)))]
 async fn sim_possible_actions(
     State(s): State<AppState>,
     Json(body): Json<SimPossibleActionsBody>,

@@ -1,17 +1,20 @@
 // workflow-engine/crates/server/src/routes/portal/auth.rs
 
+use utoipa_axum::router::OpenApiRouter;
 use super::jwt::{encode_jwt, PortalActor};
 use crate::{error::AppError, state::AppState};
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 
-pub fn router(state: AppState) -> Router {
-    Router::new().route("/login", post(login)).with_state(state)
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new().routes(routes!(login)).with_state(state)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
@@ -19,7 +22,7 @@ pub struct LoginRequest {
     pub orgu_id: Uuid,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct LoginUser {
     pub id: Uuid,
     pub full_name: String,
@@ -27,7 +30,8 @@ pub struct LoginUser {
     pub orgu_id: Uuid,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
+#[schema(as = PortalLoginResponse)]
 pub struct LoginResponse {
     pub token: String,
     pub user: LoginUser,
@@ -40,6 +44,10 @@ struct UserRow {
     password_hash: Option<String>,
 }
 
+#[utoipa::path(post,
+    operation_id = "portal_login", path = "/login", tag = "portal",
+    request_body = LoginRequest,
+    responses((status = 200, description = "JWT token + portal kullanıcı görünümü", body = LoginResponse)))]
 async fn login(
     State(s): State<AppState>,
     Json(body): Json<LoginRequest>,

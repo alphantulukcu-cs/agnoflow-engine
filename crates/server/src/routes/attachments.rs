@@ -8,39 +8,39 @@
 //! (opendal `AttachmentStore`) yürür; yetki `executor.query` (görünürlük) ile
 //! doğrulanır. Aksiyon gate'i `routes/wfe.rs::apply_action` içinde uygulanır.
 
+use utoipa_axum::router::OpenApiRouter;
 use crate::attachments::{status_for_node, AttachmentGroupStatus};
 use crate::{error::AppError, state::AppState};
 use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::get,
-    Json, Router,
+    Json,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::{AttachmentItem, Wfd};
 use wfe_core::v22::ports::WfdStore;
 
 /// `/wfe` router'ına merge edilir.
-pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/:id/attachments", get(status))
-        .route(
-            "/:id/attachments/:group/:item",
-            get(download).put(upload).delete(remove),
-        )
+pub fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new()
+        .routes(routes!(status))
+        .routes(routes!(download, upload, remove))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct NodeAttachmentStatus {
     satisfied: bool,
+    #[schema(value_type = Vec<Object>)]
     groups: Vec<AttachmentGroupStatus>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct AttachmentsResponse {
     /// node slug → o node'un attachment durumu. Tek-node modda tek anahtar; paralel
     /// modda her aktif kol node'u için bir anahtar. İstemci, aksiyonu uygularken
@@ -117,6 +117,10 @@ fn validate_upload(item: &AttachmentItem, content_type: Option<&str>, len: usize
     }
 }
 
+#[utoipa::path(get, path = "/{id}/attachments", tag = "attachments",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    responses((status = 200, description = "Aktif node'ların attachment durumu", body = AttachmentsResponse)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn status(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -150,6 +154,15 @@ async fn status(
     Ok(Json(AttachmentsResponse { attachments: map }))
 }
 
+#[utoipa::path(put, path = "/{id}/attachments/{group}/{item}", tag = "attachments",
+    params(
+        ("id" = Uuid, Path, description = "WFE id"),
+        ("group" = String, Path, description = "Attachment grup key"),
+        ("item" = String, Path, description = "Attachment item id"),
+    ),
+    request_body(content = Vec<u8>, description = "Dosya içeriği (binary)"),
+    responses((status = 200, description = "Yükleme sonucu", body = serde_json::Value)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn upload(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -189,6 +202,14 @@ async fn upload(
     })))
 }
 
+#[utoipa::path(get, path = "/{id}/attachments/{group}/{item}", tag = "attachments",
+    params(
+        ("id" = Uuid, Path, description = "WFE id"),
+        ("group" = String, Path, description = "Attachment grup key"),
+        ("item" = String, Path, description = "Attachment item id"),
+    ),
+    responses((status = 200, description = "Dosya içeriği (octet-stream)", body = Vec<u8>)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn download(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -213,6 +234,14 @@ async fn download(
     Ok((StatusCode::OK, h, Bytes::from(bytes)))
 }
 
+#[utoipa::path(delete, path = "/{id}/attachments/{group}/{item}", tag = "attachments",
+    params(
+        ("id" = Uuid, Path, description = "WFE id"),
+        ("group" = String, Path, description = "Attachment grup key"),
+        ("item" = String, Path, description = "Attachment item id"),
+    ),
+    responses((status = 204, description = "Silindi")),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn remove(
     State(s): State<AppState>,
     headers: HeaderMap,

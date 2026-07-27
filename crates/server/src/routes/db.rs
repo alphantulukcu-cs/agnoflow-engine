@@ -1,33 +1,33 @@
+use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfe::db::{self, crypto, DbConfig, DbDriver};
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/connections", get(list).post(create))
-        .route("/connections/test", post(test_draft))
-        .route(
-            "/connections/:id",
-            axum::routing::put(update).delete(delete),
-        )
-        .route("/connections/:id/test", post(test_saved))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list, create))
+        .routes(routes!(test_draft))
+        .routes(routes!(update, delete))
+        .routes(routes!(test_saved))
         .with_state(state)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct TenantQuery {
     orgtnt_id: Uuid,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct ConnBody {
     orgtnt_id: Option<Uuid>,
     name: Option<String>,
@@ -66,6 +66,9 @@ fn to_config(b: &ConnBody, secret: Option<String>) -> Result<DbConfig, AppError>
     })
 }
 
+#[utoipa::path(get, path = "/connections", tag = "db", params(TenantQuery),
+    responses((status = 200, description = "DB bağlantı listesi (secret hariç)", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list(
     State(s): State<AppState>,
     Query(q): Query<TenantQuery>,
@@ -89,6 +92,10 @@ async fn list(
     Ok(Json(json!(items)))
 }
 
+#[utoipa::path(post, path = "/connections", tag = "db",
+    request_body = ConnBody,
+    responses((status = 200, description = "Oluşturulan bağlantı id", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn create(
     State(s): State<AppState>,
     Json(b): Json<ConnBody>,
@@ -117,6 +124,10 @@ async fn create(
     Ok(Json(json!({ "id": id })))
 }
 
+#[utoipa::path(put, path = "/connections/{id}", tag = "db",
+    params(("id" = Uuid, Path, description = "Bağlantı id")), request_body = ConnBody,
+    responses((status = 204, description = "Güncellendi")),
+    security(("x_admin_key" = [])))]
 async fn update(
     State(s): State<AppState>,
     Path(id): Path<Uuid>,
@@ -145,6 +156,10 @@ async fn update(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(delete, path = "/connections/{id}", tag = "db",
+    params(("id" = Uuid, Path, description = "Bağlantı id")),
+    responses((status = 204, description = "Silindi")),
+    security(("x_admin_key" = [])))]
 async fn delete(State(s): State<AppState>, Path(id): Path<Uuid>) -> Result<StatusCode, AppError> {
     sqlx::query("DELETE FROM wf.db_connection WHERE id=$1")
         .bind(id)
@@ -154,6 +169,10 @@ async fn delete(State(s): State<AppState>, Path(id): Path<Uuid>) -> Result<Statu
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(post, path = "/connections/test", tag = "db",
+    request_body = ConnBody,
+    responses((status = 200, description = "Bağlantı testi sonucu (ok/message)", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn test_draft(
     State(_s): State<AppState>,
     Json(b): Json<ConnBody>,
@@ -162,6 +181,10 @@ async fn test_draft(
     Ok(Json(run_test(&cfg).await))
 }
 
+#[utoipa::path(post, path = "/connections/{id}/test", tag = "db",
+    params(("id" = Uuid, Path, description = "Bağlantı id")),
+    responses((status = 200, description = "Kayıtlı bağlantı testi sonucu (ok/message)", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn test_saved(
     State(s): State<AppState>,
     Path(id): Path<Uuid>,

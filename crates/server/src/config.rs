@@ -14,6 +14,9 @@ pub struct Config {
     /// /org admin API'si için zorunlu anahtar (X-Admin-Key). Yoksa dev modu:
     /// koruma kapalı, startup'ta uyarı loglanır (WOR-10).
     pub admin_api_key: Option<String>,
+    /// Swagger UI + `/api-docs/openapi.json` mount edilsin mi. Default açık;
+    /// `ENABLE_SWAGGER=false|0|off` ile (örn. prod'da) kapatılır.
+    pub enable_swagger: bool,
 }
 
 impl Config {
@@ -38,6 +41,9 @@ impl Config {
                     ]
                 }),
             admin_api_key: std::env::var("ADMIN_API_KEY").ok(),
+            enable_swagger: std::env::var("ENABLE_SWAGGER")
+                .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "off"))
+                .unwrap_or(true),
         })
     }
 }

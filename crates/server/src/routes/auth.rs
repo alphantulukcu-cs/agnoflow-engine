@@ -3,22 +3,24 @@
 // okunur. İleride Keycloak'a geçişte yalnız token doğrulama (AppAuth extractor +
 // login ucu) değişir, yetki modeli aynı kalır.
 
+use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
 use axum::{
     async_trait,
     extract::{FromRequestParts, State},
     http::{request::Parts, StatusCode},
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/login", post(login))
-        .route("/me", get(me))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(login))
+        .routes(routes!(me))
         .with_state(state)
 }
 
@@ -221,14 +223,14 @@ impl FromRequestParts<AppState> for AppAuth {
 
 // ── Kullanıcı görünümü (login/me/users ortak şekli) ─────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ProjectMembership {
     pub project_id: Uuid,
     pub project_name: String,
     pub role: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct UserView {
     pub user_id: Uuid,
     pub orgtnt_id: Uuid,
@@ -297,19 +299,24 @@ pub async fn user_view(pool: &sqlx::PgPool, row: UserRow) -> Result<UserView, Ap
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct LoginBody {
     orgtnt_id: Option<Uuid>,
     email: String,
     password: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
+#[schema(as = AppLoginResponse)]
 struct LoginResponse {
     token: String,
     user: UserView,
 }
 
+#[utoipa::path(post,
+    operation_id = "auth_login", path = "/login", tag = "auth",
+    request_body = LoginBody,
+    responses((status = 200, description = "JWT token + kullanıcı görünümü", body = LoginResponse)))]
 async fn login(
     State(s): State<AppState>,
     Json(body): Json<LoginBody>,
@@ -371,6 +378,9 @@ async fn login(
 }
 
 /// Token'daki kimlikle güncel kullanıcı durumu (rol/atama değişmiş olabilir).
+#[utoipa::path(get, path = "/me", tag = "auth",
+    responses((status = 200, description = "Güncel kullanıcı görünümü", body = UserView)),
+    security(("bearer_jwt" = [])))]
 async fn me(State(s): State<AppState>, auth: AppAuth) -> Result<Json<UserView>, AppError> {
     let row = sqlx::query_as::<_, UserRow>(&format!(
         "SELECT {USER_COLS} FROM wf.app_user WHERE user_id = $1 AND is_active = true",

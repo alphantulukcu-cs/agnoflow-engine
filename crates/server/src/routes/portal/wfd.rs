@@ -1,25 +1,27 @@
 //! Portal WFD endpoint'leri — başlatılabilir WFD listesi + başlatma (v2.2).
 
+use utoipa_axum::router::OpenApiRouter;
 use super::jwt::PortalActor;
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfah::Wfah;
 use wfe_core::v22::matcher::{authorize, MatchEnv};
 use wfe_core::v22::ports::WfdStore;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(list_wfds))
-        .route("/:wfd_id/start", post(start_wfd))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_wfds))
+        .routes(routes!(start_wfd))
         .with_state(state)
 }
 
@@ -30,13 +32,16 @@ struct WfdMetaRow {
     version: i32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WfdListItem {
     id: Uuid,
     name: String,
     version: i32,
 }
 
+#[utoipa::path(get, path = "/", tag = "portal",
+    responses((status = 200, description = "Aktörün başlatabileceği published WFD listesi", body = Vec<WfdListItem>)),
+    security(("bearer_jwt" = [])))]
 async fn list_wfds(
     State(s): State<AppState>,
     actor: PortalActor,
@@ -99,7 +104,7 @@ async fn list_wfds(
     Ok(Json(result))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct StartRequest {
     /// M16: verilirse yalnız bu action adını taşıyan start kuralları aday olur.
     #[serde(default)]
@@ -112,12 +117,17 @@ struct StartRequest {
     deadline: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct StartResponse {
     wfe_id: Uuid,
     current_node: Option<String>,
 }
 
+#[utoipa::path(post, path = "/{wfd_id}/start", tag = "portal",
+    params(("wfd_id" = Uuid, Path, description = "WFD id")),
+    request_body = StartRequest,
+    responses((status = 200, description = "Başlatılan WFE", body = StartResponse)),
+    security(("bearer_jwt" = [])))]
 async fn start_wfd(
     State(s): State<AppState>,
     actor: PortalActor,

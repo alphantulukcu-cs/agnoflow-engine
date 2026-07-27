@@ -4,16 +4,18 @@
 // Genel adminin şablonuna proje admini dokunamaz; proje admininkine
 // tenant admin dokunabilir. Kullanıcılar yalnız seçilebilir listeyi görür.
 
+use utoipa_axum::router::OpenApiRouter;
 use super::auth::{require_can_design, require_can_manage_project, AppAuth};
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, patch, post},
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfd::template::{self, WfdTemplate};
 
@@ -21,19 +23,14 @@ fn default_kind() -> String {
     "workflow".into()
 }
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(list_selectable).post(create_template))
-        .route("/manage", get(list_manageable))
-        .route(
-            "/:id",
-            get(get_template_meta)
-                .patch(update_template)
-                .delete(delete_template),
-        )
-        .route("/:id/json", get(template_json))
-        .route("/:id/usage", get(template_usage))
-        .route("/:id/visibility", get(get_visibility).put(put_visibility))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_selectable, create_template))
+        .routes(routes!(list_manageable))
+        .routes(routes!(get_template_meta, update_template, delete_template))
+        .routes(routes!(template_json))
+        .routes(routes!(template_usage))
+        .routes(routes!(get_visibility, put_visibility))
         .with_state(state)
 }
 
@@ -73,7 +70,8 @@ async fn require_can_manage_template(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct SelectableQuery {
     project_id: Uuid,
     /// 'workflow' | 'context' — verilmezse ikisi de döner.
@@ -82,6 +80,9 @@ struct SelectableQuery {
 }
 
 /// Yeni WFD galerisinde görünecek şablonlar — kullanıcı ve proje süzgeçli.
+#[utoipa::path(get, path = "/", tag = "templates", params(SelectableQuery),
+    responses((status = 200, description = "Seçilebilir şablonlar", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn list_selectable(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -102,12 +103,16 @@ async fn list_selectable(
     .map_err(map_wfd_err)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ManageQuery {
     #[serde(default)]
     kind: Option<String>,
 }
 
+#[utoipa::path(get, path = "/manage", tag = "templates", params(ManageQuery),
+    responses((status = 200, description = "Yönetilebilir şablonlar", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn list_manageable(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -125,7 +130,7 @@ async fn list_manageable(
     .map_err(map_wfd_err)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateTemplateBody {
     /// 'workflow' (varsayılan) | 'context'
     #[serde(default = "default_kind")]
@@ -145,6 +150,10 @@ struct CreateTemplateBody {
     visible_user_ids: Option<Vec<Uuid>>,
 }
 
+#[utoipa::path(post, path = "/", tag = "templates",
+    request_body = CreateTemplateBody,
+    responses((status = 201, description = "Oluşturulan şablon", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn create_template(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -228,6 +237,10 @@ async fn create_template(
 
 /// Şablon metadata'sı — türetme rozeti gibi salt-okur kullanımlar için;
 /// tenant'taki her oturum açmış kullanıcı okuyabilir.
+#[utoipa::path(get, path = "/{id}", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")),
+    responses((status = 200, description = "Şablon metadata", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn get_template_meta(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -241,6 +254,10 @@ async fn get_template_meta(
 }
 
 /// Şablon AİLESİNDEN türetilmiş WFD sayısı (tüm versiyonlar üzerinden).
+#[utoipa::path(get, path = "/{id}/usage", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")),
+    responses((status = 200, description = "Türetilmiş WFD sayısı", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn template_usage(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -267,6 +284,10 @@ async fn template_usage(
 }
 
 /// Şablonun ham WFD dokümanı — galeriden seçildiğinde taslağın kaynağı.
+#[utoipa::path(get, path = "/{id}/json", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")),
+    responses((status = 200, description = "Ham WFD dokümanı", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn template_json(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -282,7 +303,7 @@ async fn template_json(
         .map_err(map_wfd_err)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateTemplateBody {
     #[serde(default)]
     description: Option<String>,
@@ -290,6 +311,10 @@ struct UpdateTemplateBody {
     is_active: Option<bool>,
 }
 
+#[utoipa::path(patch, path = "/{id}", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")), request_body = UpdateTemplateBody,
+    responses((status = 200, description = "Güncel şablon", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn update_template(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -304,6 +329,10 @@ async fn update_template(
         .map_err(map_wfd_err)
 }
 
+#[utoipa::path(delete, path = "/{id}", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")),
+    responses((status = 204, description = "Silindi")),
+    security(("bearer_jwt" = [])))]
 async fn delete_template(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -315,6 +344,10 @@ async fn delete_template(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(get, path = "/{id}/visibility", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")),
+    responses((status = 200, description = "Görünürlük kısıtları", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn get_visibility(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -331,7 +364,7 @@ async fn get_visibility(
     })))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct VisibilityBody {
     #[serde(default)]
     visible_project_ids: Option<Vec<Uuid>>,
@@ -339,6 +372,10 @@ struct VisibilityBody {
     visible_user_ids: Option<Vec<Uuid>>,
 }
 
+#[utoipa::path(put, path = "/{id}/visibility", tag = "templates",
+    params(("id" = Uuid, Path, description = "Şablon id")), request_body = VisibilityBody,
+    responses((status = 204, description = "Kaydedildi")),
+    security(("bearer_jwt" = [])))]
 async fn put_visibility(
     State(s): State<AppState>,
     auth: AppAuth,

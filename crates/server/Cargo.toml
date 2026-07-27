@@ -25,5 +25,8 @@ tower-http         = { workspace = true }
 tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 dotenvy            = { workspace = true }
+utoipa             = { workspace = true }
+utoipa-axum        = { workspace = true }
+utoipa-swagger-ui  = { workspace = true }
 jsonwebtoken       = "9"
 bcrypt             = "0.15"

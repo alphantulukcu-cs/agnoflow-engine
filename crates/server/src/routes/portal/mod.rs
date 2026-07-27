@@ -5,11 +5,11 @@ pub mod pool;
 pub mod wfd;
 pub mod wfe;
 
+use utoipa_axum::router::OpenApiRouter;
 use crate::state::AppState;
-use axum::Router;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
         .nest("/auth", auth::router(state.clone()))
         .nest("/pool", pool::router(state.clone()))
         .nest("/wfd", wfd::router(state.clone()))

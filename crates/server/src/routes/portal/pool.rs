@@ -2,27 +2,29 @@
 //! Listeleme denormalize current_c_a cache'i ile SQL'de; can-claim/claim
 //! kararı engine matcher'ı ile verilir (c_u kuralları dahil), yazım CAS'tır.
 
+use utoipa_axum::router::OpenApiRouter;
 use super::jwt::PortalActor;
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::v22::matcher::{authorize, MatchEnv};
 use wfe_core::v22::ports::WfdStore;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(list_pool))
-        .route("/:wfe_id/can-claim", get(can_claim))
-        .route("/:wfe_id/claim", post(claim))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_pool))
+        .routes(routes!(can_claim))
+        .routes(routes!(claim))
         .with_state(state)
 }
 
@@ -66,7 +68,7 @@ struct BranchPoolRow {
 
 /// Response şekli — SLA görünüm alanları (2026-07-16): `priority` (1-10,
 /// otomatik) ve `claim_deadline` (claimed_at + node.claim_timeout).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PoolTask {
     pub id: Uuid,
     pub title: String,
@@ -91,6 +93,9 @@ pub struct PoolTask {
     pub rev: i32,
 }
 
+#[utoipa::path(get, path = "/", tag = "portal",
+    responses((status = 200, description = "Aktörün havuzundaki görevler (öncelik sıralı)", body = Vec<PoolTask>)),
+    security(("bearer_jwt" = [])))]
 async fn list_pool(
     State(s): State<AppState>,
     actor: PortalActor,
@@ -360,7 +365,7 @@ async fn list_pool(
     Ok(Json(tasks))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct CanClaimResponse {
     can_claim: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -369,12 +374,17 @@ struct CanClaimResponse {
 
 /// WOR-31 T4: paralel modda kol seçimi — `?node=<branch_node>`; birden fazla
 /// aktif kol varsa hangi kolun sorulduğunu belirtmek için gereklidir.
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct NodeQuery {
     #[serde(default)]
     node: Option<String>,
 }
 
+#[utoipa::path(get, path = "/{wfe_id}/can-claim", tag = "portal",
+    params(("wfe_id" = Uuid, Path, description = "WFE id"), NodeQuery),
+    responses((status = 200, description = "Bu görev claim edilebilir mi", body = CanClaimResponse)),
+    security(("bearer_jwt" = [])))]
 async fn can_claim(
     State(s): State<AppState>,
     actor: PortalActor,
@@ -389,7 +399,7 @@ async fn can_claim(
     Ok(Json(CanClaimResponse { can_claim, reason }))
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ClaimResponse {
     success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -398,7 +408,8 @@ struct ClaimResponse {
 
 /// WOR-31 T4: gövde opsiyonel (bkz. `routes/wfe.rs::parse_claim_body`) — eski
 /// istemciler hiç body göndermez, `{"node": "..."}` paralel kol ipucu taşır.
-#[derive(Deserialize, Default)]
+#[derive(Deserialize, Default, ToSchema)]
+#[schema(as = PortalClaimBody)]
 struct ClaimBody {
     #[serde(default)]
     node: Option<String>,
@@ -410,6 +421,11 @@ struct ClaimBody {
     expected_rev: Option<u32>,
 }
 
+#[utoipa::path(post, path = "/{wfe_id}/claim", tag = "portal",
+    params(("wfe_id" = Uuid, Path, description = "WFE id")),
+    request_body = ClaimBody,
+    responses((status = 200, description = "Claim sonucu", body = ClaimResponse)),
+    security(("bearer_jwt" = [])))]
 async fn claim(
     State(s): State<AppState>,
     actor: PortalActor,

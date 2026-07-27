@@ -8,15 +8,16 @@
 //! item'lar yüklenmeden o node'dan hiçbir aksiyon submit edilemez (gate hem
 //! `get_wfe_detail`'de bilgi, hem `submit_action`'da zorlama olarak uygulanır).
 
+use utoipa_axum::router::OpenApiRouter;
 use super::jwt::PortalActor;
 use crate::{error::AppError, state::AppState};
 use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::get,
-    Json, Router,
+    Json,
 };
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::ports::WfdStore;
@@ -28,11 +29,8 @@ pub use crate::attachments::{
 };
 
 /// wfe router'ına merge edilir (aynı `/:wfe_id` uzayında). State merge'den sonra bağlanır.
-pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/:wfe_id/attachments/:group/:item",
-        get(download).put(upload).delete(remove),
-    )
+pub fn routes() -> OpenApiRouter<AppState> {
+    OpenApiRouter::new().routes(routes!(download, upload, remove))
 }
 
 // ---- WFD çözümü (orgtnt sahipliği + aktif WFE doğrulaması) ----
@@ -86,6 +84,15 @@ fn find_item<'a>(
 
 // ---- handler'lar ----
 
+#[utoipa::path(put,
+    operation_id = "portal_attachment_upload", path = "/{wfe_id}/attachments/{group}/{item}", tag = "attachments",
+    params(
+        ("wfe_id" = Uuid, Path, description = "WFE id"),
+        ("group" = String, Path, description = "Attachment grup key"),
+        ("item" = String, Path, description = "Grup içi item id")),
+    request_body = Vec<u8>,
+    responses((status = 200, description = "Yüklendi", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn upload(
     State(s): State<AppState>,
     actor: PortalActor,
@@ -141,6 +148,14 @@ async fn upload(
     })))
 }
 
+#[utoipa::path(get,
+    operation_id = "portal_attachment_download", path = "/{wfe_id}/attachments/{group}/{item}", tag = "attachments",
+    params(
+        ("wfe_id" = Uuid, Path, description = "WFE id"),
+        ("group" = String, Path, description = "Attachment grup key"),
+        ("item" = String, Path, description = "Grup içi item id")),
+    responses((status = 200, description = "Dosya içeriği (application/octet-stream)")),
+    security(("bearer_jwt" = [])))]
 async fn download(
     State(s): State<AppState>,
     actor: PortalActor,
@@ -163,6 +178,14 @@ async fn download(
     Ok((StatusCode::OK, h, Bytes::from(bytes)))
 }
 
+#[utoipa::path(delete,
+    operation_id = "portal_attachment_remove", path = "/{wfe_id}/attachments/{group}/{item}", tag = "attachments",
+    params(
+        ("wfe_id" = Uuid, Path, description = "WFE id"),
+        ("group" = String, Path, description = "Attachment grup key"),
+        ("item" = String, Path, description = "Grup içi item id")),
+    responses((status = 204, description = "Silindi")),
+    security(("bearer_jwt" = [])))]
 async fn remove(
     State(s): State<AppState>,
     actor: PortalActor,

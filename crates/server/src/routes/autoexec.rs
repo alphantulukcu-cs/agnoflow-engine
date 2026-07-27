@@ -1,23 +1,26 @@
 //! Autoexec test endpoint'i — editör bir autoexec tanımını gerçek çalıştırır.
 //! v2.2: AutoexecDef {type, timeout_seconds, config} formatı.
 
+use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
-use axum::{extract::State, routing::post, Json, Router};
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfe::LiveAutoexecRunner;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::AutoexecDef;
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv};
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/test", post(test_autoexec))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(test_autoexec))
         .with_state(state)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct TestAutoexecBody {
     /// v2.2 autoexec tanımı: {"type": "rest|sql|calc", "config": {...}, "timeout_seconds"?}
     autoexec: Value,
@@ -25,7 +28,7 @@ pub struct TestAutoexecBody {
     dynctx: Value,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct TestAutoexecResponse {
     success: bool,
     result: Option<Value>,
@@ -34,6 +37,9 @@ pub struct TestAutoexecResponse {
     request_info: Option<Value>,
 }
 
+#[utoipa::path(post, path = "/test", tag = "autoexec",
+    request_body = TestAutoexecBody,
+    responses((status = 200, description = "Autoexec çalıştırma sonucu (success/result/error/request_info)", body = TestAutoexecResponse)))]
 async fn test_autoexec(
     State(s): State<AppState>,
     Json(body): Json<TestAutoexecBody>,

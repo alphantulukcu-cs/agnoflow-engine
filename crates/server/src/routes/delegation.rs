@@ -5,23 +5,25 @@
 //! header'larından çözülür; orgtnt actor'ün orgu'sundan türetilir. Koltuk sahipliği
 //! (delegator seat_role'ü gerçekten taşıyor mu) grant öncesi doğrulanır.
 
+use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_org::repo::delegation;
 use wfe_core::types::wfd_v22::CandidateActor;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", post(create_delegation).get(list_mine))
-        .route("/:id", axum::routing::delete(revoke_delegation))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(create_delegation, list_mine))
+        .routes(routes!(revoke_delegation))
         .with_state(state)
 }
 
@@ -49,13 +51,14 @@ fn is_admin(headers: &HeaderMap, s: &AppState) -> bool {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct Seat {
     orgu_id: Uuid,
     role: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
+#[schema(as = DelegationCreateBody)]
 struct CreateBody {
     /// Amir/admin başkası adına verirken; atlanırsa self-service (delegator = actor).
     #[serde(default)]
@@ -73,6 +76,10 @@ struct CreateBody {
     valid_to: chrono::DateTime<chrono::Utc>,
 }
 
+#[utoipa::path(post, path = "/", tag = "delegation",
+    request_body = CreateBody,
+    responses((status = 200, description = "Oluşturulan vekalet kayıtları", body = serde_json::Value)),
+    security(("x_actor_user" = []), ("x_actor_orgu" = [])))]
 async fn create_delegation(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -198,6 +205,9 @@ pub(crate) async fn create_delegations(
     Ok(created)
 }
 
+#[utoipa::path(get, path = "/", tag = "delegation",
+    responses((status = 200, description = "Aktörün verdiği vekaletler", body = serde_json::Value)),
+    security(("x_actor_user" = []), ("x_actor_orgu" = [])))]
 async fn list_mine(
     State(s): State<AppState>,
     headers: HeaderMap,
@@ -209,6 +219,10 @@ async fn list_mine(
     Ok(Json(rows))
 }
 
+#[utoipa::path(delete, path = "/{id}", tag = "delegation",
+    params(("id" = Uuid, Path, description = "Vekalet id")),
+    responses((status = 204, description = "İptal edildi")),
+    security(("x_actor_user" = []), ("x_actor_orgu" = [])))]
 async fn revoke_delegation(
     State(s): State<AppState>,
     headers: HeaderMap,

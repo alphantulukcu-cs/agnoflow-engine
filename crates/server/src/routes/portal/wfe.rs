@@ -2,26 +2,28 @@
 //! Assignment/permission kontrolleri engine pipeline'ındadır (§7.1-7.2);
 //! burada yalnızca görünüm zenginleştirme yapılır.
 
+use utoipa_axum::router::OpenApiRouter;
 use super::jwt::PortalActor;
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
-    Json, Router,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::WftTarget;
 use wf_wfe::executor::BranchView;
 use wfe_core::v22::ports::WfdStore;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/:wfe_id", get(get_wfe_detail))
-        .route("/:wfe_id/action", post(submit_action))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(get_wfe_detail))
+        .routes(routes!(submit_action))
         .merge(super::attachments::routes())
         .with_state(state)
 }
@@ -34,13 +36,13 @@ fn to_actor(actor: &PortalActor) -> Actor {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct ActionInputSchema {
     required: Vec<String>,
     optional: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct AvailableAction {
     name: String,
     label: Option<String>,
@@ -54,12 +56,13 @@ struct AvailableAction {
     /// durumu. Boşsa attachment gate yok. Portal, `attachments_satisfied=false`
     /// iken submit butonunu disable eder ve eksik dosyalar için upload gösterir.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<Object>)]
     attachments: Vec<super::attachments::AttachmentGroupStatus>,
     /// Kaynak node'un tüm `required` dosyaları yüklü mü? attachments boşsa `true`.
     attachments_satisfied: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 struct WfeDetailResponse {
     wfe_id: Uuid,
     wfd_name: String,
@@ -71,13 +74,16 @@ struct WfeDetailResponse {
     /// WOR-31 T4: paralel mod kol durumları — `/wfe/:id` (WfeView) ile aynı şekil:
     /// `[{node, status, claimed_by, claimed_at, entered_at, c_a}]`; `c_a` sorgu-anında
     /// çözülmüş kol claim adayları (bkz. `BranchView`); paralel değilken boş dizi.
+    #[schema(value_type = Vec<Object>)]
     branches: Vec<BranchView>,
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
+    #[schema(value_type = Object)]
     join_target: Option<WftTarget>,
     /// Madde 6: tek-kol modda viewer'ın claim provenance'ı (direct/delegated); paralel
     /// modda `None` — kol-bazlı `branches[].claim_as`'e bakılır.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
     claim_as: Option<wf_wfe::executor::ClaimProvenance>,
     /// WOR-65: WFE revizyon token'ı — `/wfe/:id` (WfeView) ile AYNI değer.
     /// Portal bunu saklayıp `POST /portal/wfe/:id/action` gövdesinde
@@ -94,6 +100,10 @@ struct WfeInfoRow {
     wfd_name: String,
 }
 
+#[utoipa::path(get, path = "/{wfe_id}", tag = "portal",
+    params(("wfe_id" = Uuid, Path, description = "WFE id")),
+    responses((status = 200, description = "WFE detayı + uygulanabilir aksiyonlar", body = WfeDetailResponse)),
+    security(("bearer_jwt" = [])))]
 async fn get_wfe_detail(
     State(s): State<AppState>,
     actor: PortalActor,
@@ -187,7 +197,7 @@ async fn get_wfe_detail(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct ActionRequest {
     action: String,
     #[serde(default)]
@@ -202,7 +212,7 @@ struct ActionRequest {
     expected_rev: Option<u32>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 struct ActionResponse {
     wfe_status: String,
     current_node: Option<String>,
@@ -210,6 +220,11 @@ struct ActionResponse {
     end_response: Option<Value>,
 }
 
+#[utoipa::path(post, path = "/{wfe_id}/action", tag = "portal",
+    params(("wfe_id" = Uuid, Path, description = "WFE id")),
+    request_body = ActionRequest,
+    responses((status = 200, description = "Aksiyon sonucu", body = ActionResponse)),
+    security(("bearer_jwt" = [])))]
 async fn submit_action(
     State(s): State<AppState>,
     actor: PortalActor,

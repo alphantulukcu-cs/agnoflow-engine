@@ -1,62 +1,50 @@
+use utoipa_axum::router::OpenApiRouter;
 use crate::error::AppError;
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, patch, post},
-    Json, Router,
+    Json,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_org::{
     repo,
     traversal::{executor, parser},
 };
 
-pub fn router(pool: PgPool) -> Router {
-    Router::new()
-        .route("/orgtnt", get(list_orgtnt))
-        .route("/orgtnt/:id", get(get_orgtnt))
-        .route("/orgtnt/:id/orgt", get(list_orgt_by_tenant))
-        .route(
-            "/orgtnt/:id/users",
-            get(list_users_by_tenant).post(create_user),
-        )
-        .route(
-            "/orgtnt/:id/roles",
-            get(list_roles_by_tenant).post(create_role),
-        )
-        .route("/orgtnt/:id/roles/:rid", patch(update_role))
-        .route("/orgtnt/:id/actors", get(list_actors))
-        .route(
-            "/orgtnt/:id/assignments",
-            post(create_assignment).delete(revoke_assignment),
-        )
-        .route(
-            "/orgtnt/:id/orgu-roles",
-            post(create_orgu_role).delete(delete_orgu_role),
-        )
-        .route(
-            "/orgtnt/:id/delegations",
-            get(list_delegations).post(create_delegation_admin),
-        )
-        .route(
-            "/orgtnt/:id/delegations/:did",
-            axum::routing::delete(revoke_delegation_admin),
-        )
-        .route("/orgt/:id/orgu", get(list_orgu_by_tree))
-        .route("/users/:id/orgu", get(list_user_orgu))
-        .route("/users/:id/roles", get(list_user_roles))
-        .route("/orgu/:id", get(get_orgu))
-        .route("/orgu/:id/traverse", get(traverse_orgu))
+pub fn router(pool: PgPool) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_orgtnt))
+        .routes(routes!(get_orgtnt))
+        .routes(routes!(list_orgt_by_tenant))
+        .routes(routes!(list_users_by_tenant, create_user))
+        .routes(routes!(list_roles_by_tenant, create_role))
+        .routes(routes!(update_role))
+        .routes(routes!(list_actors))
+        .routes(routes!(create_assignment, revoke_assignment))
+        .routes(routes!(create_orgu_role, delete_orgu_role))
+        .routes(routes!(list_delegations, create_delegation_admin))
+        .routes(routes!(revoke_delegation_admin))
+        .routes(routes!(list_orgu_by_tree))
+        .routes(routes!(list_user_orgu))
+        .routes(routes!(list_user_roles))
+        .routes(routes!(get_orgu))
+        .routes(routes!(traverse_orgu))
         .with_state(pool)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct PageQuery {
     limit: Option<i64>,
     offset: Option<i64>,
 }
 
+#[utoipa::path(get, path = "/orgtnt", tag = "org", params(PageQuery),
+    responses((status = 200, description = "Tenant listesi", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_orgtnt(
     State(pool): State<PgPool>,
     Query(page): Query<PageQuery>,
@@ -69,6 +57,10 @@ async fn list_orgtnt(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/orgtnt/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")),
+    responses((status = 200, description = "Tenant", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn get_orgtnt(
     State(pool): State<PgPool>,
     Path(id): Path<Uuid>,
@@ -79,6 +71,10 @@ async fn get_orgtnt(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/orgtnt/{id}/orgt", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), PageQuery),
+    responses((status = 200, description = "Tenant'ın org ağaçları", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_orgt_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -92,6 +88,10 @@ async fn list_orgt_by_tenant(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/orgtnt/{id}/users", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), PageQuery),
+    responses((status = 200, description = "Tenant kullanıcıları", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_users_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -105,6 +105,10 @@ async fn list_users_by_tenant(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/orgtnt/{id}/roles", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), PageQuery),
+    responses((status = 200, description = "Tenant rolleri", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_roles_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -120,7 +124,7 @@ async fn list_roles_by_tenant(
 
 /// Simülasyon aktör listesi: tenant'taki tüm (kullanıcı, birim, rol) atamaları.
 /// Aktör switcher bundan beslenir — her satır bir X-Actor (orgu+user+role) demektir.
-#[derive(Serialize, FromRow)]
+#[derive(Serialize, FromRow, ToSchema)]
 struct ActorRow {
     user_id: Uuid,
     full_name: String,
@@ -141,6 +145,10 @@ const ACTOR_SELECT: &str = "SELECT u.u_id AS user_id, u.full_name, u.username, u
        AND ur.ur_type <> 'excluded'
        AND u.is_active = true AND r.is_active = true";
 
+#[utoipa::path(get, path = "/orgtnt/{id}/actors", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")),
+    responses((status = 200, description = "Simülasyon aktör listesi", body = Vec<ActorRow>)),
+    security(("x_admin_key" = [])))]
 async fn list_actors(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -156,13 +164,19 @@ async fn list_actors(
 }
 
 /// Sim playground: yeni kullanıcı ekle.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
+#[schema(as = OrgCreateUserBody)]
 struct CreateUserBody {
     username: String,
     full_name: String,
     email: Option<String>,
 }
 
+#[utoipa::path(post,
+    operation_id = "org_create_user", path = "/orgtnt/{id}/users", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = CreateUserBody,
+    responses((status = 200, description = "Oluşturulan kullanıcı", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn create_user(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -181,12 +195,16 @@ async fn create_user(
 }
 
 /// Yeni rol ekle veya aynı isimli pasif rolü yeniden aktifleştir.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateRoleBody {
     name: String,
     display_name: Option<String>,
 }
 
+#[utoipa::path(post, path = "/orgtnt/{id}/roles", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = CreateRoleBody,
+    responses((status = 200, description = "Oluşturulan rol", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn create_role(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -207,12 +225,17 @@ async fn create_role(
 
 /// Rol adını/görünen adını günceller. Kullanıcı atamaları r_id üzerinden kaldığı
 /// için değişiklik rolün geçtiği tüm aktör listelerine yansır.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateRoleBody {
     name: String,
     display_name: String,
 }
 
+#[utoipa::path(patch, path = "/orgtnt/{id}/roles/{rid}", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), ("rid" = Uuid, Path, description = "Rol id")),
+    request_body = UpdateRoleBody,
+    responses((status = 200, description = "Güncellenen rol", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn update_role(
     State(pool): State<PgPool>,
     Path((orgtnt_id, r_id)): Path<(Uuid, Uuid)>,
@@ -234,13 +257,17 @@ async fn update_role(
 
 /// Sim playground: (kullanıcı, birim, rol) atamasını garantiler → dönüşte hazır aktör satırı.
 /// Kritere uygun aktör yoksa UI bununla bir aktör üretir.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct AssignBody {
     u_id: Uuid,
     orgu_id: Uuid,
     role_name: String,
 }
 
+#[utoipa::path(post, path = "/orgtnt/{id}/assignments", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = AssignBody,
+    responses((status = 200, description = "Hazır aktör satırı", body = ActorRow)),
+    security(("x_admin_key" = [])))]
 async fn create_assignment(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -264,13 +291,18 @@ async fn create_assignment(
 }
 
 /// Atama kaldırma: (u_id, orgu_id, role_name) query paramlarıyla granted rolü siler.
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct RevokeAssignQuery {
     u_id: Uuid,
     orgu_id: Uuid,
     role_name: String,
 }
 
+#[utoipa::path(delete, path = "/orgtnt/{id}/assignments", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), RevokeAssignQuery),
+    responses((status = 204, description = "Atama kaldırıldı")),
+    security(("x_admin_key" = [])))]
 async fn revoke_assignment(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -291,12 +323,16 @@ async fn revoke_assignment(
 }
 
 /// Orgu'ya rol grant'ı: birimdeki tüm kullanıcılar bu rolü devralır (check_user_role).
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct OrguRoleBody {
     orgu_id: Uuid,
     role_name: String,
 }
 
+#[utoipa::path(post, path = "/orgtnt/{id}/orgu-roles", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = OrguRoleBody,
+    responses((status = 204, description = "Birim-rol grant'ı eklendi")),
+    security(("x_admin_key" = [])))]
 async fn create_orgu_role(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -316,12 +352,17 @@ async fn create_orgu_role(
 }
 
 /// Orgu rol grant'ını kaldırma: (orgu_id, role_name) query paramlarıyla.
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct RevokeOrguRoleQuery {
     orgu_id: Uuid,
     role_name: String,
 }
 
+#[utoipa::path(delete, path = "/orgtnt/{id}/orgu-roles", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), RevokeOrguRoleQuery),
+    responses((status = 204, description = "Birim-rol grant'ı kaldırıldı")),
+    security(("x_admin_key" = [])))]
 async fn delete_orgu_role(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -340,6 +381,10 @@ async fn delete_orgu_role(
     }
 }
 
+#[utoipa::path(get, path = "/orgt/{id}/orgu", tag = "org",
+    params(("id" = Uuid, Path, description = "Org ağacı id"), PageQuery),
+    responses((status = 200, description = "Ağaçtaki org birimleri", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_orgu_by_tree(
     State(pool): State<PgPool>,
     Path(orgt_id): Path<Uuid>,
@@ -353,6 +398,10 @@ async fn list_orgu_by_tree(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/users/{id}/orgu", tag = "org",
+    params(("id" = Uuid, Path, description = "Kullanıcı id"), PageQuery),
+    responses((status = 200, description = "Kullanıcının org birimleri", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_user_orgu(
     State(pool): State<PgPool>,
     Path(user_id): Path<Uuid>,
@@ -366,6 +415,10 @@ async fn list_user_orgu(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/users/{id}/roles", tag = "org",
+    params(("id" = Uuid, Path, description = "Kullanıcı id"), PageQuery),
+    responses((status = 200, description = "Kullanıcının rolleri", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_user_roles(
     State(pool): State<PgPool>,
     Path(user_id): Path<Uuid>,
@@ -379,6 +432,10 @@ async fn list_user_roles(
         .map_err(Into::into)
 }
 
+#[utoipa::path(get, path = "/orgu/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Org birimi id")),
+    responses((status = 200, description = "Org birimi", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn get_orgu(
     State(pool): State<PgPool>,
     Path(orgu_id): Path<Uuid>,
@@ -389,11 +446,16 @@ async fn get_orgu(
         .map_err(Into::into)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct TraverseQuery {
     expr: String,
 }
 
+#[utoipa::path(get, path = "/orgu/{id}/traverse", tag = "org",
+    params(("id" = Uuid, Path, description = "Org birimi id"), TraverseQuery),
+    responses((status = 200, description = "Traversal sonucu org birimleri", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn traverse_orgu(
     State(pool): State<PgPool>,
     Path(orgu_id): Path<Uuid>,
@@ -429,6 +491,10 @@ fn normalize_traverse_expr(expr: &str) -> String {
 
 // ── Madde 6: vekalet/delegasyon (admin yönetim; /org X-Admin-Key kapısı altında) ──
 
+#[utoipa::path(get, path = "/orgtnt/{id}/delegations", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")),
+    responses((status = 200, description = "Tenant vekaletleri", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn list_delegations(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -439,25 +505,30 @@ async fn list_delegations(
         .map_err(AppError::from)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct SeatBody {
     orgu_id: Uuid,
     role: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct AdminDelegationBody {
     delegator_user_id: Uuid,
     #[serde(default)]
     seat: Option<SeatBody>,
     #[serde(default)]
     all: bool,
+    #[schema(value_type = Object)]
     grantee: serde_json::Value,
     #[serde(default)]
     valid_from: Option<chrono::DateTime<chrono::Utc>>,
     valid_to: chrono::DateTime<chrono::Utc>,
 }
 
+#[utoipa::path(post, path = "/orgtnt/{id}/delegations", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = AdminDelegationBody,
+    responses((status = 200, description = "Oluşturulan vekaletler", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
 async fn create_delegation_admin(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
@@ -479,6 +550,10 @@ async fn create_delegation_admin(
     Ok(Json(created))
 }
 
+#[utoipa::path(delete, path = "/orgtnt/{id}/delegations/{did}", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), ("did" = Uuid, Path, description = "Vekalet id")),
+    responses((status = 204, description = "Vekalet kaldırıldı")),
+    security(("x_admin_key" = [])))]
 async fn revoke_delegation_admin(
     State(pool): State<PgPool>,
     Path((orgtnt_id, did)): Path<(Uuid, Uuid)>,

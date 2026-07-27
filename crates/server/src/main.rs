@@ -1,15 +1,19 @@
 mod attachments;
 mod config;
 mod error;
+mod openapi;
 mod routes;
 mod state;
 
-use axum::{response::IntoResponse, Router};
+use axum::response::IntoResponse;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::Executor;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use utoipa::OpenApi;
+use utoipa_axum::router::OpenApiRouter;
+use utoipa_swagger_ui::SwaggerUi;
 use wf_wfe::{LiveAutoexecRunner, OrgAdapter, WfeAdapter, WfeExecutor};
 
 #[tokio::main]
@@ -78,7 +82,7 @@ async fn main() {
         );
     }
     // Aynı X-Admin-Key kapısını hem /org hem /db router'ına uygular.
-    let guard = |router: Router| -> Router {
+    let guard = |router: OpenApiRouter| -> OpenApiRouter {
         match admin_key.clone() {
             Some(key) => router.layer(axum::middleware::from_fn(
                 move |req: axum::extract::Request, next: axum::middleware::Next| {
@@ -104,7 +108,8 @@ async fn main() {
     let org_router = guard(routes::org::router(pool.clone()));
     let db_router = guard(routes::db::router(state.clone()));
 
-    let app = Router::new()
+    // Tüm route'lar OpenApiRouter olarak toplanır → tek OpenApi belgesi üretilir.
+    let api_router = OpenApiRouter::with_openapi(openapi::ApiDoc::openapi())
         .nest("/org", org_router)
         .nest("/db", db_router)
         .nest("/auth", routes::auth::router(state.clone()))
@@ -116,8 +121,19 @@ async fn main() {
         .nest("/wfe", routes::wfe::router(state.clone()))
         .nest("/delegation", routes::delegation::router(state.clone()))
         .nest("/autoexec", routes::autoexec::router(state.clone()))
-        .nest("/portal", routes::portal::router(state.clone()))
-        .layer(cors_layer(&cfg));
+        .nest("/portal", routes::portal::router(state.clone()));
+
+    let (router, api) = api_router.split_for_parts();
+
+    // ENABLE_SWAGGER=false ise Swagger UI + spec mount EDİLMEZ (prod için).
+    let mut app = router;
+    if cfg.enable_swagger {
+        app = app.merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api));
+        tracing::info!("Swagger UI: /swagger-ui  (spec: /api-docs/openapi.json)");
+    } else {
+        tracing::info!("ENABLE_SWAGGER=false — Swagger UI kapalı");
+    }
+    let app = app.layer(cors_layer(&cfg));
 
     let addr = format!("0.0.0.0:{}", cfg.port);
     tracing::info!("listening on {addr}");

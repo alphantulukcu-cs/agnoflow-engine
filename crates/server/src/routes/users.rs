@@ -1,25 +1,24 @@
 // Kullanıcı yönetimi — yalnız tenant admin (AppAuth.require_admin).
 // Değişmez kural: bir tenant'ta son aktif admin silinemez, pasifleştirilemez, düşürülemez.
 
+use utoipa_axum::router::OpenApiRouter;
 use super::auth::{load_memberships, user_view, AppAuth, UserRow, UserView, USER_COLS};
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, put},
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(list_users).post(create_user))
-        .route(
-            "/:id",
-            axum::routing::patch(update_user).delete(delete_user),
-        )
-        .route("/:id/projects", put(set_projects))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_users, create_user))
+        .routes(routes!(update_user, delete_user))
+        .routes(routes!(set_projects))
         .with_state(state)
 }
 
@@ -71,6 +70,9 @@ async fn guard_last_admin(pool: &sqlx::PgPool, target: &UserRow) -> Result<(), A
     Ok(())
 }
 
+#[utoipa::path(get, path = "/", tag = "users",
+    responses((status = 200, description = "Tenant kullanıcıları", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn list_users(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -91,7 +93,8 @@ async fn list_users(
     Ok(Json(out))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
+#[schema(as = UsersCreateUserBody)]
 struct CreateUserBody {
     email: String,
     display_name: String,
@@ -103,6 +106,11 @@ struct CreateUserBody {
     can_publish: Option<bool>,
 }
 
+#[utoipa::path(post,
+    operation_id = "users_create_user", path = "/", tag = "users",
+    request_body = CreateUserBody,
+    responses((status = 201, description = "Oluşturulan kullanıcı", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn create_user(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -153,7 +161,7 @@ async fn create_user(
     Ok((StatusCode::CREATED, Json(view)))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateUserBody {
     #[serde(default)]
     display_name: Option<String>,
@@ -168,6 +176,10 @@ struct UpdateUserBody {
     can_publish: Option<bool>,
 }
 
+#[utoipa::path(patch, path = "/{id}", tag = "users",
+    params(("id" = Uuid, Path, description = "Kullanıcı id")), request_body = UpdateUserBody,
+    responses((status = 200, description = "Güncel kullanıcı", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn update_user(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -231,6 +243,10 @@ async fn update_user(
     user_view(&s.pool, row).await.map(Json)
 }
 
+#[utoipa::path(delete, path = "/{id}", tag = "users",
+    params(("id" = Uuid, Path, description = "Kullanıcı id")),
+    responses((status = 204, description = "Silindi")),
+    security(("bearer_jwt" = [])))]
 async fn delete_user(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -248,13 +264,17 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct AssignmentBody {
     project_id: Uuid,
     role: String, // 'admin' (project admin) | 'user' (tasarımcı)
 }
 
 /// Kullanıcının proje atamalarını topluca değiştirir (replace semantiği).
+#[utoipa::path(put, path = "/{id}/projects", tag = "users",
+    params(("id" = Uuid, Path, description = "Kullanıcı id")), request_body = Vec<AssignmentBody>,
+    responses((status = 200, description = "Güncel proje üyelikleri", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn set_projects(
     State(s): State<AppState>,
     auth: AppAuth,

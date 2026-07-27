@@ -1,46 +1,46 @@
+use utoipa_axum::router::OpenApiRouter;
 use super::auth::{require_can_design, require_can_manage_project, AppAuth, MaybeAppAuth};
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, patch, post},
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::v22::ports::WfdStore;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", post(upload_wfd).get(list_wfd))
-        .route("/validate", post(validate_wfd))
-        .route("/usage-summary", get(usage_summary))
-        .route("/execution-stats", get(execution_stats))
-        .route("/unit-workload", get(unit_workload))
-        .route("/node-load", get(node_load))
-        .route("/aging-executions", get(aging_executions))
-        .route("/escalation-forecast", get(escalation_forecast))
-        .route("/dashboard-summary", get(dashboard_summary))
-        .route("/draft", post(create_draft))
-        .route(
-            "/draft/:id/:version",
-            get(get_draft).put(save_draft).delete(delete_draft),
-        )
-        .route("/draft/:id/:version/publish", post(publish_draft))
-        .route("/draft/:id/:version/submit", post(submit_draft))
-        .route("/draft/:id/:version/approve", post(approve_draft))
-        .route("/draft/:id/:version/reject", post(reject_draft))
-        .route("/:id/:version/meta", patch(update_wfd_meta))
-        .route("/:id/:version", get(get_wfd))
-        .route("/:id/:version/new-draft", post(new_draft))
-        .route("/:id/:version/usage", get(wfe_usage))
-        .route("/:id/:version/layout", get(get_layout).put(put_layout))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(upload_wfd, list_wfd))
+        .routes(routes!(validate_wfd))
+        .routes(routes!(usage_summary))
+        .routes(routes!(execution_stats))
+        .routes(routes!(unit_workload))
+        .routes(routes!(node_load))
+        .routes(routes!(aging_executions))
+        .routes(routes!(escalation_forecast))
+        .routes(routes!(dashboard_summary))
+        .routes(routes!(create_draft))
+        .routes(routes!(get_draft, save_draft, delete_draft))
+        .routes(routes!(publish_draft))
+        .routes(routes!(submit_draft))
+        .routes(routes!(approve_draft))
+        .routes(routes!(reject_draft))
+        .routes(routes!(update_wfd_meta))
+        .routes(routes!(get_wfd))
+        .routes(routes!(new_draft))
+        .routes(routes!(wfe_usage))
+        .routes(routes!(get_layout, put_layout))
         .with_state(state)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 struct ListQuery {
     orgtnt_id: Uuid,
     /// Verilirse liste bu projeyle sınırlanır.
@@ -49,6 +49,9 @@ struct ListQuery {
     offset: Option<i64>,
 }
 
+#[utoipa::path(get, path = "/", tag = "wfd", params(ListQuery),
+    responses((status = 200, description = "WFD meta listesi", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn list_wfd(
     State(s): State<AppState>,
     MaybeAppAuth(auth): MaybeAppAuth,
@@ -139,7 +142,7 @@ async fn resolve_project_for_write(
     Ok(project_id)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UploadBody {
     orgtnt_id: Uuid,
     /// Verilmezse tenant'ın varsayılan projesi kullanılır (eski istemci uyumu).
@@ -149,6 +152,10 @@ struct UploadBody {
     wfd: Value,
 }
 
+#[utoipa::path(post, path = "/", tag = "wfd",
+    request_body = UploadBody,
+    responses((status = 200, description = "wfd_id + version", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn upload_wfd(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -166,6 +173,9 @@ async fn upload_wfd(
 }
 
 /// Editör için: kaydetmeden doğrula — hata/uyarı listesi döner.
+#[utoipa::path(post, path = "/validate", tag = "wfd",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "valid/errors/warnings", body = serde_json::Value)))]
 async fn validate_wfd(Json(wfd_json): Json<Value>) -> Result<Json<Value>, AppError> {
     let wfd = match wfe_core::types::wfd_v22::Wfd::from_value(wfd_json) {
         Ok(w) => w,
@@ -186,6 +196,9 @@ async fn validate_wfd(Json(wfd_json): Json<Value>) -> Result<Json<Value>, AppErr
     })))
 }
 
+#[utoipa::path(get, path = "/{id}/{version}", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "WFD v2.2 dokümanı", body = serde_json::Value)))]
 async fn get_wfd(
     State(s): State<AppState>,
     Path((wfd_id, version)): Path<(Uuid, i32)>,
@@ -197,7 +210,7 @@ async fn get_wfd(
         .map_err(|e| AppError(e.to_string(), StatusCode::NOT_FOUND))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct CreateDraftBody {
     orgtnt_id: Uuid,
     /// Verilmezse tenant'ın varsayılan projesi kullanılır (eski istemci uyumu).
@@ -216,6 +229,10 @@ struct CreateDraftBody {
     source_template_id: Option<Uuid>,
 }
 
+#[utoipa::path(post, path = "/draft", tag = "wfd",
+    request_body = CreateDraftBody,
+    responses((status = 200, description = "wfd_id + version", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn create_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -249,6 +266,10 @@ async fn create_draft(
     ))
 }
 
+#[utoipa::path(get, path = "/draft/{id}/{version}", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "Taslak WFD json", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn get_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -262,7 +283,7 @@ async fn get_draft(
         .map_err(map_wfd_err)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct SaveDraftBody {
     wfd: Value,
     #[serde(default)]
@@ -272,6 +293,10 @@ struct SaveDraftBody {
     tags: Option<Vec<String>>,
 }
 
+#[utoipa::path(put, path = "/draft/{id}/{version}", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")), request_body = SaveDraftBody,
+    responses((status = 204, description = "Kaydedildi")),
+    security(("bearer_jwt" = [])))]
 async fn save_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -318,6 +343,10 @@ async fn require_can_publish_wfd(
     ))
 }
 
+#[utoipa::path(post, path = "/draft/{id}/{version}/publish", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn publish_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -333,6 +362,10 @@ async fn publish_draft(
 
 /// Taslağı yayın onayına gönderir (tasarım yetkisi yeter). Validator kapısı
 /// yayınla AYNIDIR — geçersiz doküman onaya giremez.
+#[utoipa::path(post, path = "/draft/{id}/{version}/submit", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn submit_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -356,6 +389,10 @@ async fn submit_draft(
         .map_err(map_wfd_err)
 }
 
+#[utoipa::path(post, path = "/draft/{id}/{version}/approve", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn approve_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -369,12 +406,16 @@ async fn approve_draft(
         .map_err(map_wfd_err)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct RejectBody {
     #[serde(default)]
     reason: Option<String>,
 }
 
+#[utoipa::path(post, path = "/draft/{id}/{version}/reject", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")), request_body = RejectBody,
+    responses((status = 200, body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn reject_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -389,6 +430,10 @@ async fn reject_draft(
         .map_err(map_wfd_err)
 }
 
+#[utoipa::path(delete, path = "/draft/{id}/{version}", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 204, description = "Silindi")),
+    security(("bearer_jwt" = [])))]
 async fn delete_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -402,6 +447,10 @@ async fn delete_draft(
         .map_err(map_wfd_err)
 }
 
+#[utoipa::path(post, path = "/{id}/{version}/new-draft", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "Yeni taslak wfd_id + version", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn new_draft(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -417,6 +466,9 @@ async fn new_draft(
 /// Editör layout companion'ı — şema-VALID WFD dokümanından AYRI, opaque JSON (pozisyon +
 /// edge path + reject/collapse). GET auth'suz (get_wfd gibi; readonly reload da auth'suz
 /// çeker), blob yoksa `null` döner. Editör publish sonrası PUT'lar (design yetkisi gerekli).
+#[utoipa::path(get, path = "/{id}/{version}/layout", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "Editör layout blob (null olabilir)", body = serde_json::Value)))]
 async fn get_layout(
     State(s): State<AppState>,
     Path((id, ver)): Path<(Uuid, i32)>,
@@ -425,6 +477,10 @@ async fn get_layout(
     Ok(Json(layout.unwrap_or(Value::Null)))
 }
 
+#[utoipa::path(put, path = "/{id}/{version}/layout", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")), request_body = serde_json::Value,
+    responses((status = 204, description = "Kaydedildi")),
+    security(("bearer_jwt" = [])))]
 async fn put_layout(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -439,7 +495,7 @@ async fn put_layout(
         .map_err(map_wfd_err)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateWfdMetaBody {
     #[serde(default)]
     name: Option<String>,
@@ -447,6 +503,10 @@ struct UpdateWfdMetaBody {
     description: Option<String>,
 }
 
+#[utoipa::path(patch, path = "/{id}/{version}/meta", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")), request_body = UpdateWfdMetaBody,
+    responses((status = 200, description = "Güncel WFD meta listesi", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn update_wfd_meta(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -474,6 +534,9 @@ async fn update_wfd_meta(
 
 /// Bu published versiyonu kullanan WFE örneklerinin durum dağılımı.
 /// `active` = anlık çalışan örnek sayısı.
+#[utoipa::path(get, path = "/{id}/{version}/usage", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "Bu versiyonu kullanan WFE durum dağılımı", body = serde_json::Value)))]
 async fn wfe_usage(
     State(s): State<AppState>,
     Path((id, ver)): Path<(Uuid, i32)>,
@@ -509,6 +572,8 @@ async fn wfe_usage(
 
 /// Tenant genelinde wfd_id başına anlık aktif WFE sayısı — dashboard özeti için
 /// tek istekte tüm sayımları döner (satır başına /usage çağırmaya gerek kalmaz).
+#[utoipa::path(get, path = "/usage-summary", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = serde_json::Value)))]
 async fn usage_summary(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -523,6 +588,8 @@ async fn usage_summary(
 }
 
 /// Tenant genelinde WFE execution durum dağılımı (dashboard grafiği için).
+#[utoipa::path(get, path = "/execution-stats", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = ExecutionStatsRow)))]
 async fn execution_stats(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -531,7 +598,7 @@ async fn execution_stats(
     Ok(Json(serde_json::json!(stats)))
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Default, serde::Serialize, ToSchema)]
 struct ExecutionStatsRow {
     active: i64,
     terminal: i64,
@@ -586,7 +653,7 @@ async fn load_execution_stats(
     })
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct UnitWorkloadRow {
     orgu_id: Uuid,
     orgu_name: String,
@@ -596,6 +663,8 @@ struct UnitWorkloadRow {
 
 /// Tenant genelinde current_c_a'ya göre birim başına anlık iş yükü — en çok
 /// işi olan org unit'ler (dashboard insight).
+#[utoipa::path(get, path = "/unit-workload", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = Vec<UnitWorkloadRow>)))]
 async fn unit_workload(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -640,7 +709,7 @@ async fn load_unit_workload(
         .collect())
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct NodeLoadRow {
     wfd_id: Uuid,
     node: String,
@@ -649,6 +718,8 @@ struct NodeLoadRow {
 
 /// Tenant genelinde (workflow, node) çifti başına aktif WFE sayısı — hangi
 /// duraklarda yığılma var (dashboard insight).
+#[utoipa::path(get, path = "/node-load", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = Vec<NodeLoadRow>)))]
 async fn node_load(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -686,7 +757,7 @@ async fn load_node_load(
         .collect())
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct AgingRow {
     wfe_id: Uuid,
     wfd_id: Uuid,
@@ -697,6 +768,8 @@ struct AgingRow {
 
 /// En uzun süredir güncellenmeyen aktif execution'lar — hareketsiz/"stuck"
 /// iş akışları (dashboard insight).
+#[utoipa::path(get, path = "/aging-executions", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = Vec<AgingRow>)))]
 async fn aging_executions(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -737,7 +810,7 @@ async fn load_aging_executions(
         .collect())
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct EscalationRow {
     wfe_id: Uuid,
     wfd_id: Uuid,
@@ -753,6 +826,8 @@ struct EscalationRow {
 /// Yaklaşan/geciken escalation deadline'ları — en yakın vadeden başlayarak
 /// (dashboard insight). Node giriş anı gerçek WFAH kaydından hesaplanır
 /// (yaklaşık değer değil); bkz. `Engine::next_escalation`.
+#[utoipa::path(get, path = "/escalation-forecast", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = Vec<EscalationRow>)))]
 async fn escalation_forecast(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -801,7 +876,7 @@ async fn load_escalation_forecast(
     Ok(out)
 }
 
-#[derive(Default, serde::Serialize)]
+#[derive(Default, serde::Serialize, ToSchema)]
 struct OrgSummaryRow {
     tree_count: i64,
     unit_count: i64,
@@ -813,8 +888,9 @@ struct OrgSummaryRow {
     region_count: i64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct DashboardSummary {
+    #[schema(value_type = Vec<Object>)]
     wfds: Vec<wf_wfd::models::WfdMeta>,
     active_by_wfd: HashMap<String, i64>,
     exec_stats: ExecutionStatsRow,
@@ -825,6 +901,8 @@ struct DashboardSummary {
     org_summary: OrgSummaryRow,
 }
 
+#[utoipa::path(get, path = "/dashboard-summary", tag = "wfd", params(ListQuery),
+    responses((status = 200, body = DashboardSummary)))]
 async fn dashboard_summary(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,

@@ -2,28 +2,29 @@
 // list: tenant admin hepsini, üye yalnız atandıklarını görür.
 // create: yalnız tenant admin. update: tenant admin ya da o projenin admin'i.
 
+use utoipa_axum::router::OpenApiRouter;
 use super::auth::{require_can_design, require_can_manage_project, AppAuth};
 use crate::{error::AppError, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, patch},
-    Json, Router,
+    Json,
 };
 use serde::Deserialize;
+use utoipa::ToSchema;
+use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfd::models::Project;
 
-pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/", get(list_projects).post(create_project))
-        .route("/:id", get(get_project))
-        .route("/:id", patch(update_project))
-        .route("/:id/members", get(list_members))
+pub fn router(state: AppState) -> OpenApiRouter {
+    OpenApiRouter::new()
+        .routes(routes!(list_projects, create_project))
+        .routes(routes!(get_project, update_project))
+        .routes(routes!(list_members))
         .with_state(state)
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 struct MemberRow {
     user_id: Uuid,
     display_name: String,
@@ -32,6 +33,10 @@ struct MemberRow {
 }
 
 /// Projenin üyeleri — görünürlük seçimi için; proje admini de görebilir.
+#[utoipa::path(get, path = "/{id}/members", tag = "project",
+    params(("id" = Uuid, Path, description = "Proje id")),
+    responses((status = 200, description = "Proje üyeleri", body = Vec<MemberRow>)),
+    security(("bearer_jwt" = [])))]
 async fn list_members(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -65,6 +70,9 @@ async fn list_members(
     ))
 }
 
+#[utoipa::path(get, path = "/", tag = "project",
+    responses((status = 200, description = "Görünür projeler", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn list_projects(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -88,7 +96,8 @@ async fn list_projects(
     ))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
+#[schema(as = ProjectCreateBody)]
 struct CreateBody {
     /// Geriye uyum için kabul edilir ama token'daki tenant esas alınır.
     #[serde(default)]
@@ -98,6 +107,10 @@ struct CreateBody {
     description: Option<String>,
 }
 
+#[utoipa::path(post, path = "/", tag = "project",
+    request_body = CreateBody,
+    responses((status = 201, description = "Oluşturulan proje", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn create_project(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -122,6 +135,10 @@ async fn create_project(
         .map_err(map_wfd_err)
 }
 
+#[utoipa::path(get, path = "/{id}", tag = "project",
+    params(("id" = Uuid, Path, description = "Proje id")),
+    responses((status = 200, description = "Proje", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn get_project(
     State(s): State<AppState>,
     auth: AppAuth,
@@ -137,7 +154,7 @@ async fn get_project(
     Ok(Json(project))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 struct UpdateBody {
     #[serde(default)]
     name: Option<String>,
@@ -145,6 +162,10 @@ struct UpdateBody {
     description: Option<String>,
 }
 
+#[utoipa::path(patch, path = "/{id}", tag = "project",
+    params(("id" = Uuid, Path, description = "Proje id")), request_body = UpdateBody,
+    responses((status = 200, description = "Güncel proje", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
 async fn update_project(
     State(s): State<AppState>,
     auth: AppAuth,

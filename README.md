@@ -55,7 +55,8 @@ agnoflow-engine/                 # Cargo workspace kökü
 
 **Ortam değişkenleri** (bkz. [.env.example](.env.example)):
 `DATABASE_URL`, `PORT`, `JWT_SECRET` (zorunlu); `STORAGE_BACKEND=local|s3` (+`STORAGE_PATH`);
-`CORS_ORIGINS`; `ADMIN_API_KEY`; ek-belge deposu için `ATTACHMENT_STORAGE_*`.
+`CORS_ORIGINS`; `ADMIN_API_KEY`; ek-belge deposu için `ATTACHMENT_STORAGE_*`;
+`ENABLE_SWAGGER` (default açık; `=false` ile Swagger UI kapatılır).
 
 ```bash
 # Migration'lar psql ile manuel, sırasıyla uygulanır (sqlx migrate kullanılmaz)
@@ -66,6 +67,37 @@ cargo build
 cargo test --workspace        # her değişiklikten sonra
 cargo run -p server
 ```
+
+## API dokümantasyonu — Swagger UI
+
+Sunucu ayaktayken tüm HTTP API'nin (77 path / 102 operasyon) eksiksiz OpenAPI 3.1
+dokümanı ve interaktif Swagger UI'ı serve edilir:
+
+| Yol | İçerik |
+|---|---|
+| `GET /swagger-ui` | İnteraktif Swagger UI (Try it out) |
+| `GET /api-docs/openapi.json` | Ham OpenAPI 3.1 spec |
+
+`ENABLE_SWAGGER=false` ise ikisi de mount edilmez (prod'da kapatmak için).
+
+**Güvenlik şemaları** (Authorize 🔓 diyaloğunda görünür):
+`bearer_jwt` (app + portal JWT), `x_actor_orgu`/`x_actor_user`/`x_actor_role` (direkt
+`/wfe/*`), `x_admin_key` (`/org`, `/db`). Her uç kendi gerektirdiği şemayı bildirir.
+
+**Swagger'da giriş yapıp test etme (JWT'li uçlar):**
+
+1. **Token al:** `POST /portal/auth/login` (`{username, password}`) veya
+   `POST /auth/login` (`{email, password}`) → **Try it out** → **Execute** → yanıttaki
+   `token` (JWT) değerini kopyala.
+2. **Authorize:** Sağ üstteki **Authorize** 🔓 → `bearer_jwt` kutusuna token'ı yapıştır
+   (`Bearer ` yazma, otomatik eklenir) → **Authorize** → **Close**.
+3. Artık kilitli 🔒 uçlar `Authorization: Bearer <token>` ile çağrılır.
+
+> Direkt `/wfe/*` uçları JWT değil `X-Actor-Orgu/User/Role` üç header'ını ister —
+> Authorize'da o kutulara UUID/rol değerlerini gir. `/org` `/db` için `X-Admin-Key` kutusu.
+
+**Ortamlar:** lokal `http://localhost:3000/swagger-ui`,
+staging `http://agnoflow.staging.cs.com.tr/swagger-ui`.
 
 ## Dokümantasyon
 

@@ -79,7 +79,7 @@ impl WfdAdapter {
         let project_id = self.resolve_project(orgtnt_id, project_id).await?;
         let version = repo::next_version(&self.pool, project_id, name).await?;
         let wfd_id = Uuid::new_v4();
-        let key = storage::s3_key(wfd_id, version);
+        let key = storage::s3_key(orgtnt_id, wfd_id, version);
 
         let bytes = serde_json::to_vec(wfd_json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
@@ -138,7 +138,7 @@ impl WfdAdapter {
         let project_id = self.resolve_project(orgtnt_id, project_id).await?;
         let version = repo::next_version(&self.pool, project_id, name).await?;
         let wfd_id = Uuid::new_v4();
-        let key = storage::s3_key(wfd_id, version);
+        let key = storage::s3_key(orgtnt_id, wfd_id, version);
 
         let skeleton = serde_json::json!({
             "wfd_version": "2.2",
@@ -353,8 +353,8 @@ impl WfdAdapter {
         version: i32,
         layout: &Value,
     ) -> Result<(), crate::error::WfdError> {
-        repo::get_meta_any(&self.pool, wfd_id, version).await?;
-        let key = storage::layout_key(wfd_id, version);
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        let key = storage::layout_key(meta.orgtnt_id, wfd_id, version);
         let bytes = serde_json::to_vec(layout)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.storage
@@ -370,14 +370,24 @@ impl WfdAdapter {
         wfd_id: Uuid,
         version: i32,
     ) -> Result<Option<Value>, crate::error::WfdError> {
-        let key = storage::layout_key(wfd_id, version);
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        let key = storage::layout_key(meta.orgtnt_id, wfd_id, version);
+        let parse = |buf: opendal::Buffer| -> Result<Value, crate::error::WfdError> {
+            serde_json::from_slice(&buf.to_bytes())
+                .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))
+        };
         match self.storage.read(&key).await {
-            Ok(buf) => {
-                let v = serde_json::from_slice(&buf.to_bytes())
-                    .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-                Ok(Some(v))
+            Ok(buf) => Ok(Some(parse(buf)?)),
+            // Tenant prefix'ine geçmeden ÖNCE yazılmış layout'lar eski anahtarda
+            // kalır (layout anahtarı DB'de saklanmaz). Geriye dönük oku.
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => {
+                let legacy = storage::legacy_layout_key(wfd_id, version);
+                match self.storage.read(&legacy).await {
+                    Ok(buf) => Ok(Some(parse(buf)?)),
+                    Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(crate::error::WfdError::Storage(e.to_string())),
+                }
             }
-            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(crate::error::WfdError::Storage(e.to_string())),
         }
     }

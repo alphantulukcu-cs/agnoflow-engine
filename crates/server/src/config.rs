@@ -58,5 +58,8 @@ fn attachment_storage_from_env() -> wf_wfd::StorageConfig {
             .unwrap_or_else(|_| "../work-pool-portal/storage".into()),
         s3_bucket: std::env::var("ATTACHMENT_STORAGE_S3_BUCKET").ok(),
         s3_region: std::env::var("ATTACHMENT_STORAGE_S3_REGION").ok(),
+        s3_endpoint: std::env::var("ATTACHMENT_STORAGE_S3_ENDPOINT").ok(),
+        s3_access_key_id: std::env::var("ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID").ok(),
+        s3_secret_access_key: std::env::var("ATTACHMENT_STORAGE_S3_SECRET_ACCESS_KEY").ok(),
     }
 }

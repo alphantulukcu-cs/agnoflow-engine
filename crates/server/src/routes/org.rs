@@ -18,7 +18,9 @@ pub fn router(pool: PgPool) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(list_orgtnt))
         .routes(routes!(get_orgtnt))
-        .routes(routes!(list_orgt_by_tenant))
+        .routes(routes!(list_orgt_by_tenant, create_orgt))
+        .routes(routes!(update_orgt))
+        .routes(routes!(set_default_orgt))
         .routes(routes!(list_users_by_tenant, create_user))
         .routes(routes!(list_roles_by_tenant, create_role))
         .routes(routes!(update_role))
@@ -85,6 +87,60 @@ async fn list_orgt_by_tenant(
     let limit = page.limit.unwrap_or(50).clamp(1, 200);
     let offset = page.offset.unwrap_or(0).max(0);
     repo::orgt::list_by_tenant(&pool, orgtnt_id, limit, offset)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct OrgtBody {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[utoipa::path(post, path = "/orgtnt/{id}/orgt", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = OrgtBody,
+    responses((status = 200, description = "Oluşturulan org ağacı", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn create_orgt(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<OrgtBody>,
+) -> Result<Json<wf_org::models::Orgt>, AppError> {
+    repo::orgt::create(&pool, orgtnt_id, &body.name, body.description.as_deref())
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[utoipa::path(patch, path = "/orgt/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Org ağacı id")), request_body = OrgtBody,
+    responses((status = 200, description = "Güncellenen org ağacı", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn update_orgt(
+    State(pool): State<PgPool>,
+    Path(orgt_id): Path<Uuid>,
+    Json(body): Json<OrgtBody>,
+) -> Result<Json<wf_org::models::Orgt>, AppError> {
+    repo::orgt::update(&pool, orgt_id, &body.name, body.description.as_deref())
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[utoipa::path(post, path = "/orgt/{id}/set-default", tag = "org",
+    params(("id" = Uuid, Path, description = "Org ağacı id")),
+    responses((status = 200, description = "Varsayılan yapılan org ağacı", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn set_default_orgt(
+    State(pool): State<PgPool>,
+    Path(orgt_id): Path<Uuid>,
+) -> Result<Json<wf_org::models::Orgt>, AppError> {
+    let orgtnt_id = repo::orgt::get_orgtnt_id(&pool, orgt_id)
+        .await
+        .map_err(AppError::from)?;
+    repo::orgt::set_default(&pool, orgtnt_id, orgt_id)
         .await
         .map(Json)
         .map_err(Into::into)

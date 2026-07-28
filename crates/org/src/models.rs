@@ -61,6 +61,17 @@ pub struct Role {
 }
 
 #[derive(Debug, Serialize, FromRow)]
+pub struct OrguTypeDef {
+    pub type_id: Uuid,
+    pub orgtnt_id: Uuid,
+    pub key: String,
+    pub display_name: String,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
 pub struct UserOrgu {
     pub u_orgu_id: Uuid,
     pub orgtnt_id: Uuid,

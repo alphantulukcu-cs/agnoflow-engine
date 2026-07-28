@@ -188,6 +188,20 @@ pub async fn create_user(
     .map_err(OrgError::Database)
 }
 
+pub async fn update_user(pool: &PgPool, user_id: Uuid, full_name: &str) -> Result<User, OrgError> {
+    sqlx::query_as::<_, User>(
+        "UPDATE org.u
+         SET full_name = $2
+         WHERE u_id = $1 AND is_active = true
+         RETURNING u_id, orgtnt_id, username, full_name, email, is_active, created_at",
+    )
+    .bind(user_id)
+    .bind(full_name)
+    .fetch_one(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
 /// Rolü ada göre bulur; yoksa oluşturur (display_name = name).
 pub async fn ensure_role(pool: &PgPool, orgtnt_id: Uuid, name: &str) -> Result<Role, OrgError> {
     if let Some(r) = sqlx::query_as::<_, Role>(

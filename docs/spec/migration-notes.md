@@ -1,6 +1,6 @@
 # WFD Migration Notes — v2 / v2.1 → v2.2
 
-Bu doküman, mevcut engine/editor kodunun v2.2 modeline taşınması için delta'yı listeler ve önceki tüm migration notlarının yerini alır. Kanonik referanslar: `wfd_schema_v2_2.json`, `Terminology_v2_2.MD`, `wfd-custom-validator-runtime-semantics_v2_2.md`, golden fixture `example-wfd_kredi-basvuru_v2_2.json`, referans Rust modeli `wfd_types_v2_2.rs`.
+Bu doküman, mevcut engine/editor kodunun v2.2 modeline taşınması için delta'yı listeler ve önceki tüm migration notlarının yerini alır. Kanonik referanslar: `schema.json`, `terminology.md`, `runtime-semantics.md`, golden fixture `examples/kredi-basvuru.golden.json`, referans Rust modeli `reference-types.rs`.
 
 Not: v2.1 hiç deploy edilmediyse bu doküman tek adımda v2 → v2.2 geçişi olarak okunur; M1–M9 v2.1'den taşınan maddelerdir, M10–M14 v2.2'nin ekleridir.
 
@@ -115,11 +115,11 @@ transitions[]      -> edge (conditional wft = when-label'li coklu edge)
 escalation         -> kesikli edge ("after" label)
 ```
 
-Sanal node üretme katmanı silinir; export ajv (draft 2020-12) ile `wfd_schema_v2_2.json`'a valide edilir; `ui_*` alanları export'ta yoktur. c_a editörü tek-kural formudur: orgu seçici + rol çoklu-seçim + kişi çoklu-seçim.
+Sanal node üretme katmanı silinir; export ajv (draft 2020-12) ile `schema.json`'a valide edilir; `ui_*` alanları export'ta yoktur. c_a editörü tek-kural formudur: orgu seçici + rol çoklu-seçim + kişi çoklu-seçim.
 
 ## Doğrulama Sırası (CI kapıları)
 
 1. JSON Schema validation (golden fixture geçmeli).
 2. Custom validator: cross-ref + slug/uniqueness + context path + ZEN parse.
 3. Graf analizi: BFS reachability (escalation kenarları DAHİL) + çıkışsız node.
-4. Rust kabul testi: `wfd_types_v2_2.rs` fixture'ı parse eder, slug'ları doğrular.
+4. Rust kabul testi: `reference-types.rs` fixture'ı parse eder, slug'ları doğrular.

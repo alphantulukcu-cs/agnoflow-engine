@@ -20,7 +20,7 @@ use wfe_core::v22::matcher::AuthDecision;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv, ExecFailure, Wfes};
 
-const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
+const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).unwrap()

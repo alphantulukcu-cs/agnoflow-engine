@@ -27,7 +27,7 @@ use wfe_core::v22::ports::{
 use wfe_core::{ConflictKind, EngineError};
 
 const PARALLEL_FIXTURE: &str =
-    include_str!("../../wfe-core/tests/fixtures/example-wfd_paralel-onay_v2_2.json");
+    include_str!("../../wfe-core/tests/fixtures/paralel-onay.json");
 
 // ---- mock'lar (pipeline.rs kalıbı; authorize anchor = actor.orgu_id) ----------
 
@@ -774,7 +774,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     .unwrap();
 
     let w = store.snapshot(wfe_id);
-    // kol satırı `arrived` KALIR (yeni statü yok — bkz. DECISIONS_v2_2.md)
+    // kol satırı `arrived` KALIR (yeni statü yok — bkz. decisions.md)
     let legal_row = w
         .branches
         .iter()

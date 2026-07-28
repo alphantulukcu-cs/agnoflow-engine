@@ -1,5 +1,5 @@
 //! v2.2 c_orgu çözümlemesi — Selector (ORGTRVLANG) ve Anchor (ctx / wfah) formları.
-//! Spec: Terminology_v2_2.MD; wfah occurrence default "last" (M9).
+//! Spec: terminology.md; wfah occurrence default "last" (M9).
 
 use crate::error::EngineError;
 use crate::ports::OrgPort;

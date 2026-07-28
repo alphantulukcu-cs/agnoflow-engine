@@ -1,6 +1,6 @@
 # WFD Custom Validator & Runtime Semantics — Named Nodes Model v2.2
 
-`wfd_schema_v2_2.json`'ın yakalayamadığı kuralları tanımlar; önceki tüm sürümlerin yerini alır. Referans implementasyon: `wfd_types_v2_2.rs` (slug + matcher + kabul testleri).
+`schema.json`'ın yakalayamadığı kuralları tanımlar; önceki tüm sürümlerin yerini alır. Referans implementasyon: `reference-types.rs` (slug + matcher + kabul testleri).
 
 ---
 
@@ -9,7 +9,7 @@
 v2.1 ile aynı: `from`→nodes, `action`→actions, `trigger[].use`→autoexec, tüm `wft.node/terminal` (conditions, default, escalation dahil)→nodes/terminals. Unique: node key'leri, `start[].id`, `transitions[].id`, `terminals[].id`, action/autoexec key'leri; node ve terminal id'leri global namespace'te çakışmaz.
 
 `terminals[].id` ek olarak **case-insensitive unique** olmak zorunda ("Start" ile "sTaRT"
-aynı isim sayılır — bkz. DECISIONS_v2_2.md "Terminal id = kullanıcı adı"). Editör terminal
+aynı isim sayılır — bkz. decisions.md "Terminal id = kullanıcı adı"). Editör terminal
 id'yi kullanıcının girdiği isimden üretir (`assignTerminalKeys`), bu yüzden case-insensitive
 uniqueness authoring-time'da zaten sağlanır; validator bunu editör-dışı üretilen dokümanlar
 için de kesin kural olarak uygular. Runtime lookup (`wft.terminal` çözümü, §7 pipeline)
@@ -119,7 +119,7 @@ v2.1 ile aynı: escalation zamanlayıcısı node-giriş anından başlar (WFAH't
 ## 5b. Parallel Fork/Join Validation (WOR-31)
 
 `wft`'in 4. formu: `{"parallel": {"branches": [...], "join": {node|terminal}}}` (bkz.
-DECISIONS_v2_2.md WOR-31 — eski `WftRule::Parallel`'in WOR-25'te kaldırılışını
+decisions.md WOR-31 — eski `WftRule::Parallel`'in WOR-25'te kaldırılışını
 yeniden tasarlayarak supersede eder; `join_when` YOK, join deklaratif bir hedef).
 `wfe-core/src/validator.rs::check_parallel`:
 

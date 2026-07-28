@@ -2,11 +2,166 @@
 
 Bu doküman WFD domain kavramlarının kanonik referansıdır ve önceki tüm Terminology sürümlerinin yerini alır.
 
-v2.2'nin iki ana kararı, ilk tasarım kararlarına (orijinal `Terminology.MD`) dönüştür:
+v2.2'nin iki ana kararı, ilk tasarım kararlarına dönüştür:
 1. **C_A tek kuraldır** — "Candidate Actor for an ACT (C_A): Union of C_ORGU, C_R and C_U". OR'lu kural listesi (array) sonradan sızmış bir drift'ti, kaldırılmıştır.
 2. **Her C_A bir node'dur** — "Each C_A is a node." Node kimliği c_a'dan deterministik türetilir; `label` sadece görünümdür.
 
-ORGANIZATION, USER/ROLE/ACTOR, ORGTRVLANG, DynCtx/WFAH/WFES tanımları öncekiyle aynıdır; burada tekrarlanmaz.
+> **Bu doküman kendi kendine yeter (2026-07-28).** Daha önce ORGANIZATION,
+> USER/ROLE/ACTOR, ORGTRVLANG ve DynCtx/WFAH/WFES tanımları için ayrı bir
+> `Terminology.MD` dosyasına bağımlıydı. O dosya kaldırıldı; ilgili bölümler
+> aşağıya, **çalışan koddan doğrulanarak** taşındı. Projede başka terminoloji
+> dokümanı YOKTUR.
+
+---
+
+## ORGANIZATION
+
+**Organization Tree (ORGT):** Hiyerarşik ağaç. ORGT dışında her node'un tam olarak bir
+parent'ı vardır. Her ORGT'nin bir veya daha fazla organizasyon tenant'ı (**ORGTNT**)
+vardır; ORGTNT o organizasyonun köküdür.
+
+**Organization Tenant (ORGTNT):** Bir organizasyonun kökü.
+
+**Organization Unit (ORGU):** ORGT'deki bir node. Birden fazla ORGTNT altında
+bulunabilir (`org.orgt_orgu` üyelik tablosu; ağaç üyeliği ORGU kimliğinden ayrıdır).
+
+**ORGU Type (ORGU_T):** ORGU'nun `orgu_type` JSONB etiketi — `{"key": value}` biçimi;
+boş olabilir. Filtreler bu harita üzerinde çalışır (bkz. ORGTRVLANG filtre semantiği).
+Özel durum: `orgu_type` içinde **`*` anahtarı varsa ORGU her filtreyle eşleşir**
+(joker birim).
+
+**Aktiflik:** Traversal yalnız aktif satırları görür — hem `orgu.is_active` hem
+`orgt_orgu.is_active` true olmalıdır.
+
+### Depolama — PostgreSQL ltree
+
+ORGT, **ltree** eklentisiyle saklanır; her ORGU kökten kendine olan tam yolu
+nokta ayrılmış label dizisi olarak (`orgt_orgu.path`) tutar. `path` üzerinde
+**GiST**, `orgu_type` üzerinde JSONB indeksi kullanılır.
+
+```
+ORGTNT root  →  path: '1'
+Division     →  path: '1.10'
+Branch       →  path: '1.10.100'
+Credit Dept  →  path: '1.10.100.1001'
+```
+
+| Operatör | Anlam |
+|---|---|
+| `@>` | ancestor'ıdır |
+| `<@` | descendant'ıdır |
+| `subpath(p, offset, len)` | alt yol |
+| `nlevel(p)` | derinlik |
+
+---
+
+## ORGTRVLANG — ORGT TRAVERSAL DİLİ
+
+C_A'nın `c_orgu` alanı bu dille yazılır. Referans implementasyon:
+`crates/org/src/traversal/parser.rs` (sözdizimi) + `executor.rs` (SQL semantiği).
+**Kod ile bu bölüm çelişirse kod kazanır** — bölüm koddan türetilmiştir.
+
+### Sözdizimi
+
+Bir ifade bir **anchor** ve nokta ile zincirlenen **adım**lardan oluşur:
+
+```
+self[.adım][.adım]...
+*:[filtre][.adım]...
+```
+
+- **`self` öneki zorunludur.** Çıplak `siblings` GEÇERSİZDİR (`ParseError::MissingSelf`);
+  doğrusu `self.siblings`. Tek başına `self` = anchor ORGU'nun kendisi (adım yok).
+- **`*:[filtre]`** anchor'dan BAĞIMSIZ global kaynak kümedir: ORGTNT genelinde filtreye
+  uyan tüm ORGU'lar. Yalnız ilk adım olarak gelir, sonrasında normal adımlarla
+  zincirlenir (`*:[type:sube].parent` = tüm şubelerin parent'ları).
+
+### Adımlar
+
+| Adım | Anlam |
+|---|---|
+| `parent` | Doğrudan parent |
+| `siblings` | Aynı parent'ın diğer çocukları (kendisi hariç) |
+| `siblings[F]` | Filtreye uyan kardeşler |
+| `children` | Doğrudan çocuklar |
+| `children[F]` | Filtreye uyan doğrudan çocuklar |
+| `up[F]` | Yukarı doğru **en yakın** eşleşen ancestor (anchor başına tek) |
+| `down[F]` | Aşağı doğru **en yakın** eşleşen descendant |
+| `ancestors` | TÜM ancestor'lar (kendisi hariç) |
+| `ancestors[F]` | Filtreye uyan tüm ancestor'lar |
+| `*:[F]` | Global tip selektörü (yalnız ilk adım) |
+
+`up`/`down` "en yakın"dır (`up` derinliğe göre DESC + anchor başına DISTINCT ON);
+`ancestors` ise sınırsız kümedir. Zincir serbesttir — 9 sabit kalıpla sınırlı
+DEĞİLDİR (`self.siblings.children[kredi]`, `self.up[bolge].children[il].children[sube]`
+geçerlidir). Her adım bir öncekinin çıktısını anchor kümesi olarak alır; sonuçlar
+`orgu_id`'ye göre tekilleştirilir.
+
+### Filtre dili (`[...]` içi)
+
+| Biçim | Anlam |
+|---|---|
+| `[sube]` | Kısayol — `type:sube` demektir (anahtar verilmezse `type`) |
+| `[key:val]` | `orgu_type` JSONB'de `key` → `val` |
+| `[role:analyst]` | **İlişkisel** — birimin aktif `org.orgu_r` grant'ı var mı (zaman aralığı `valid_from`/`valid_until` ile kontrol edilir) |
+| `[a,b]` | Aynı anahtar için virgül = OR (`[role:doviz,kredi]`) |
+| `&&` `\|\|` `!` `( )` | Boolean birleşim (`[role:doviz,kredi && type:sube]`, `[!type:pasif]`) |
+
+Tip yaprağı hem skaler hem dizi değerle eşleşir
+(`orgu_type->>key = val` OR `orgu_type->key @> val`). Boş filtre (`[]`) hatadır.
+
+```
+self.children[role:doviz,kredi && type:sube]
+self.up[bolge].children[il]
+*:[type:sube]
+self.ancestors[!type:pasif]
+```
+
+---
+
+## USER / ROLE / ACTOR
+
+**User (U):** ORGT içinde tekil ID'si olan kullanıcı. Birden fazla ORGU'ya bağlı olabilir.
+
+**Role (R):** ORGT içinde tekil ID'si olan anahtar kelime.
+
+**User Role (UR):** `(U, [{ORGU:type, timeslice}, R]..)` — ORGU kapsamı ORGTRVLANG ile
+veya doğrudan ORGU:type ile verilebilir. Bir U; ORGU'dan bağımsız, belirli ORGU'lar
+için veya belirli ORGU_T'ler için, zaman aralıklı ya da aralıksız birden fazla R
+taşıyabilir.
+
+**Actor (A):** Bir WFE üzerinde ACT uygulayan **(ORGU, (U, R))** üçlüsü. Tam eşleşen
+bir tuple'dır — C_A eşleşmesi bu üçlü üzerinden yapılır.
+
+---
+
+## DynCtx / WFAH / WFES
+
+**Workflow Definition (WFD):** Bir iş akışının tamamını tanımlayan JSON.
+
+**Workflow Execution (WFE):** Bir WFD'nin tekil örneği (instance).
+
+**Dynamic Context (DynCtx):** WFE'nin değişken durumunu tutan JSON.
+**Değişmezdir (immutable)** — ya tümü yeni bir örneğe kopyalanır ya da diff'ler
+saklanıp yeni DynCtx merge ile elde edilir.
+
+**WFE Starting Context (WFE-SDynCtx):** WFE başlatılırken sahip olduğu bağlam.
+WFE'yi başlatan **A** gibi zorunlu parçalar içerir; ek zorunlu parçalar WFD'de
+tanımlanabilir.
+
+**Workflow Actions History (WFAH):** WFE'ye uygulanmış `(ACT, A)` tuple'larının geçmişi.
+
+**Workflow Execution State (WFES):** WFE'nin tam durumu = DynCtx ∪ WFAH.
+
+**Action (ACT):** Uygulandığında WFES'i değiştirebilen eylem.
+
+**Permission (P):** `P(WFES, A, ACT) → true | false`. Tam değerdir.
+
+**Workflow Transition (WFT):** `WFT(WFES, A, ACT) → (yeni WFES, yeni C_A)`.
+
+**Possible Actions (P_ACT):** `P_ACT(WFES) → {A, ACT}`.
+
+**Possible Actions for an Actor (P_ACT_A):** `P_ACT_A(WFES, A) → {ACT}`.
 
 ---
 
@@ -181,6 +336,47 @@ L, WFE-level ek görünürlüktür; ACT/claim vermez. v2.2'de her kayıt TEK c_a
 ```
 
 Claim/owner/ACT semantiği öncekiyle aynıdır (unassigned: C_A görür+claim eder; assigned: sadece owner ACT; escalation taşırsa assignment temizlenir).
+
+---
+
+## SCHEMA ANNOTATION UZANTILARI
+
+`context` bir JSON Schema 2020-12 dokümanıdır; `context.properties` altındaki
+field'lar iki WFD'ye özel uzantı taşıyabilir.
+
+**`x-wf-readonly`** *(boolean)* — `true` ise field'ı yalnız engine yazar
+(`wfes_effects` üzerinden); kullanıcı ve editör doğrudan yazamaz. Golden
+fixture'larda kullanılır.
+
+**`x-visibility`** *(obje)* — field seviyesinde görünürlük kuralı; şekli C_A ile
+aynıdır (`c_orgu` / `c_r` / `c_u`). Kriterler **bağımsızdır ve aralarında OR
+vardır**; kural sağlanmazsa Actor field'ı DynCtx'te göremez. Listable erişimi
+olan Actor için de geçerlidir. Ayrıntı: **VISIBILITY / V** bölümü.
+
+> `x-wf-readonly`'nin eski `_step_<action>` injection discriminator rolü
+> v2.2'de GEÇERSİZDİR — `_step_*` kaldırılmıştır (bkz. DEPRECATED).
+
+---
+
+## CANVAS NODE MODELİ (yalnız editör)
+
+> Bu kavramlar wfd-editor'ün görsel canvas'ına özgüdür. **WFD JSON'ında doğrudan
+> karşılıkları yoktur**; editör export sırasında bunları standart WFD yapısına
+> dönüştürür. Engine bu terimleri bilmez.
+
+**CaGroup Node:** Bir veya daha fazla `ActionStep`'i gruplayan container node.
+WFD JSON'ında bir `nodes.<key>` girdisine (yani bir `c_a`'ya) karşılık gelir.
+
+**ActionStep Node:** Bir `ACT` + `c_a` kombinasyonunun görsel temsili —
+`transitions[]` veya `start[]` içindeki tek bir kural.
+
+**AutoexecStepNode:** `autoexec` içeren bir transition'ın canvas temsili
+(`rest`, `sql` veya `calc`).
+
+**SwitchStepNode:** `wft.conditions` array'inin görsel temsili; her dal bir
+`WftCondition`.
+
+**TerminalStepNode:** `terminals[]` içindeki bir `TerminalDef`'in temsili.
 
 ---
 

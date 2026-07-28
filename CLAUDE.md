@@ -3,7 +3,7 @@
 Bu repo **WFD v2.2** (Named Nodes, Single-Rule C_A) modelini çalıştıran çok-tenant'lı
 workflow engine'dir. Spec ile kod çelişirse SPEC kazanır: kanonik dosyalar
 `docs/spec/` altındadır (kaynak: WFD-EDITOR reposu `docs/spec/`; senkron tutulur).
-Alınan tasarım kararları: `docs/spec/DECISIONS_v2_2.md`.
+Alınan tasarım kararları: `docs/spec/decisions.md`.
 
 ## Crate haritası
 
@@ -28,7 +28,7 @@ Alınan tasarım kararları: `docs/spec/DECISIONS_v2_2.md`.
 
 ## Çalışma kuralları
 
-- Her değişiklikten sonra `cargo test --workspace`; golden fixture (`docs/spec/example-wfd_kredi-basvuru_v2_2.json`) DEĞİŞTİRİLMEZ — kod fixture'a uyar.
+- Her değişiklikten sonra `cargo test --workspace`; golden fixture (`docs/spec/examples/kredi-basvuru.golden.json`) DEĞİŞTİRİLMEZ — kod fixture'a uyar.
 - Zamana bağlı testlerde `#[tokio::test(start_paused = true)]` kullan (retry/timeout gerçek beklemeden koşar).
 - Migration'lar psql ile manuel uygulanır (`migrations/org`, `migrations/wf` sırasıyla); sqlx migrate kullanılmıyor.
 - Çok elemanlı eski c_a array'i ile karşılaşırsan OTOMATİK dönüştürme — dur ve sor (M10).
@@ -73,4 +73,4 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
   `attachments/{wfe_id}/{grup}/{item}`. Rotalar hem direkt `/wfe/*` (X-Actor, portal bunu kullanır) hem
   JWT `/portal/wfe/*` ağacında: `GET /wfe/:id/attachments` (durum), `PUT/GET/DELETE .../:group/:item`.
 - Gate server-side: `apply_action`/`submit_action` hedef node'un `required` dosyaları eksikse
-  `422 code:"attachment.missing"` döner. Detay: `docs/spec/DECISIONS_v2_2.md` Madde 8.
+  `422 code:"attachment.missing"` döner. Detay: `docs/spec/decisions.md` Madde 8.

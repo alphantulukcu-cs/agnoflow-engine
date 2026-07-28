@@ -1,5 +1,5 @@
 //! WFD v2.2 modeli — Named Nodes, Single-Rule C_A.
-//! Kanonik referans: docs/spec/wfd_types_v2_2.rs + wfd_schema_v2_2.json.
+//! Kanonik referans: docs/spec/reference-types.rs + schema.json.
 //! Kural: kod ile spec çelişirse spec kazanır.
 
 use crate::error::EngineError;

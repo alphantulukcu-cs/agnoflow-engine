@@ -2011,7 +2011,7 @@ fn stage_parallel_markers(
             // Henüz çalışılan kol: işi yarıda kaldı.
             BranchStatus::Active => cancelled.push(b),
             // WOR-60: onaylanmış ama join'lenmemiş kol: onayı geçersizleşti.
-            // Kol satırının statüsü `arrived` KALIR (bkz. DECISIONS_v2_2.md) —
+            // Kol satırının statüsü `arrived` KALIR (bkz. decisions.md) —
             // izlenebilirlik marker ile sağlanır, şema değişmez.
             BranchStatus::Arrived => superseded.push(b),
             BranchStatus::Cancelled => {}

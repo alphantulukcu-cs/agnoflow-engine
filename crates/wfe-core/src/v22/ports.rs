@@ -80,7 +80,7 @@ impl Wfes {
     /// **Kapsam istisnası (bilinçli):** `WfeStore::claim` WFAH'a yazmaz (saf CAS
     /// UPDATE'tir), dolayısıyla claim revizyonu ARTIRMAZ. Claim yarışları kendi
     /// `claimed_by IS NULL` CAS'ıyla korunur. `release_claim` ise WFAH marker'ı
-    /// yazdığı için revizyonu artırır. Ayrıntı: `docs/spec/DECISIONS_v2_2.md`.
+    /// yazdığı için revizyonu artırır. Ayrıntı: `docs/spec/decisions.md`.
     ///
     /// WFAH boşsa 0 — pratikte olmaz (`Engine::start` daima ≥1 kayıt stage eder),
     /// ama 0 "hiç revizyon yok" olarak güvenli biçimde okunur.

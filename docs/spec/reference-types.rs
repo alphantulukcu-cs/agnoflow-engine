@@ -1,4 +1,4 @@
-// wfd_types_v2_2.rs — Engine icin v2.2 referans serde modeli + canonical slug turetme.
+// reference-types.rs — Engine icin v2.2 referans serde modeli + canonical slug turetme.
 // Kabul testleri (main): (1) golden fixture kayipsiz parse, (2) her node key == slug(c_a),
 // (3) canonical c_a uniqueness.
 #![allow(dead_code)]
@@ -51,7 +51,20 @@ pub struct NodeDef {
     #[serde(default)]
     pub escalation: Vec<EscalationStep>,
     #[serde(default)]
+    pub claim_timeout: Option<ClaimTimeout>, // SLA-1: claim eden aktor zamaninda aksiyon almazsa
+    #[serde(default)]
     pub attachments: Vec<String>,     // root attachments katalogundaki grup key referanslari
+}
+
+/// SLA-1. Sure claim anindan itibaren olculur. `wft` verilmezse claim temizlenir
+/// ve is ayni havuza doner; verilirse WFE o hedefe tasinir.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimTimeout {
+    pub after: String,
+    /// Bare node/terminal key — {node}/{terminal} sarmalayicisi YOK.
+    #[serde(default)]
+    pub wft: Option<String>,
 }
 
 /// Ek-belge katalog grubu. Dosyalar engine'de degil portal opendal storage'inda tutulur.
@@ -96,7 +109,12 @@ pub struct EscalationStep {
     pub after: String,
     #[serde(default)]
     pub wfes_effects: Option<WfesEffects>,
-    pub wft: Wft,
+    /// wft XOR terminate — biri zorunlu (2026-07-16 SLA sozlesmesi, validator XOR).
+    #[serde(default)]
+    pub wft: Option<Wft>,
+    /// SLA-2: true ise instance `terminated` olur (end_response reason = SLA.Dwell).
+    #[serde(default)]
+    pub terminate: Option<bool>,
 }
 
 /// Tek C_A kurali. match = resolved(c_orgu) AND (rol_match OR user_match).

@@ -812,6 +812,10 @@
           },
           "description": "SLA zinciri: WFE bu node'a girdikten itibaren sure asiminda siradaki adim uygulanir. Assigned WFE'de de calisir; escalation WFT'si WFE'yi yeni node'a tasirsa assignment temizlenir."
         },
+        "claim_timeout": {
+          "$ref": "#/$defs/claimTimeout",
+          "description": "SLA-1: claim eden aktor 'after' suresinde aksiyon almazsa devreye girer. wft yoksa claim temizlenir ve is ayni havuza doner."
+        },
         "attachments": {
           "type": "array",
           "minItems": 1,
@@ -824,12 +828,28 @@
       },
       "description": "Node key = c_a'dan turetilen canonical slug (validator yeniden hesaplayip karsilastirir). Ayni canonical c_a ikinci bir node'da BULUNAMAZ."
     },
+    "claimTimeout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "after"
+      ],
+      "properties": {
+        "after": {
+          "$ref": "#/$defs/duration"
+        },
+        "wft": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Hedef node veya terminal key'i (bare string — {node}/{terminal} sarmalayicisi YOK). Belirtilmezse claim ayni havuza doner."
+        }
+      }
+    },
     "escalationStep": {
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "after",
-        "wft"
+        "after"
       ],
       "properties": {
         "after": {
@@ -840,8 +860,34 @@
         },
         "wft": {
           "$ref": "#/$defs/wft"
+        },
+        "terminate": {
+          "const": true
         }
-      }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "wft"
+          ],
+          "not": {
+            "required": [
+              "terminate"
+            ]
+          }
+        },
+        {
+          "required": [
+            "terminate"
+          ],
+          "not": {
+            "required": [
+              "wft"
+            ]
+          }
+        }
+      ],
+      "description": "wft XOR terminate: normal SLA-2 devri hedef node/terminal'e tasir; terminate:true instance'i 'terminated' durumuna dusurur (end_response.reason = SLA.Dwell)."
     },
     "wftNode": {
       "type": "object",

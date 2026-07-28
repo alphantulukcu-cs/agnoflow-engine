@@ -23,7 +23,7 @@ use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, Wfes,
 };
 
-const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
+const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).unwrap()
@@ -1586,7 +1586,7 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
 
 // ================================================================ WOR-31 fork/join (paralel)
 
-const PARALLEL_FIXTURE: &str = include_str!("fixtures/example-wfd_paralel-onay_v2_2.json");
+const PARALLEL_FIXTURE: &str = include_str!("fixtures/paralel-onay.json");
 
 fn paralel() -> Wfd {
     Wfd::from_json(PARALLEL_FIXTURE).unwrap()

@@ -1,9 +1,9 @@
 //! WOR-23 kabul testleri — golden fixture v2.2 parse + slug + uniqueness + versiyon kapısı.
-//! Spec: docs/spec/WFD_MIGRATION_NOTES_v2_2.md, wfd-custom-validator-runtime-semantics_v2_2.md §2.
+//! Spec: docs/spec/migration-notes.md, runtime-semantics.md §2.
 
 use wfe_core::types::wfd_v22::{COrgu, CandidateActor, Wfd};
 
-const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
+const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).expect("golden fixture v2.2 parse etmeli")

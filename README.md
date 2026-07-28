@@ -39,9 +39,16 @@ agnoflow-engine/                 # Cargo workspace kökü
 │
 ├── docs/                        # Tüm dokümantasyon (tek çatı)
 │   ├── spec/                    #   KANONİK WFD v2.2 spec — gerçeğin kaynağı
+│   │   ├── README.md            #     indeks: hangi dosya neyi anlatır
+│   │   ├── terminology.md       #     domain sözlüğü (tek)
+│   │   ├── schema.json          #     JSON Schema 2020-12
+│   │   ├── runtime-semantics.md #     matcher / slug / pipeline / graf
+│   │   ├── decisions.md         #     WOR-* karar kaydı
+│   │   ├── migration-notes.md   #     v2/v2.1 → v2.2 delta
+│   │   ├── reference-types.rs   #     referans serde modeli
+│   │   └── examples/            #     kredi-basvuru.golden.json (DEĞİŞTİRİLMEZ) + 2 örnek
 │   ├── AUTOEXEC_GUIDE.md        #   autoexec (rest/sql/calc) rehberi
-│   ├── superpowers/             #   tasarım spec'leri, plan'lar, notlar
-│   └── legacy/                  #   eski doküman snapshot'ları (arşiv)
+│   └── superpowers/             #   tasarım spec'leri, plan'lar, notlar (tarihsel)
 │
 └── CLAUDE.md                    # Geliştirici/agent çalışma kuralları + değişmezler
 ```
@@ -106,5 +113,4 @@ staging `http://agnoflow.staging.cs.com.tr/swagger-ui`.
 | [`docs/spec/`](docs/spec/) | Kanonik WFD v2.2 spesifikasyonu + örnek WFD'ler + şema |
 | [`docs/AUTOEXEC_GUIDE.md`](docs/AUTOEXEC_GUIDE.md) | Autoexec (rest/sql/calc) rehberi |
 | [`docs/superpowers/`](docs/superpowers/) | Tasarım spec'leri, plan'lar ve notlar |
-| [`docs/legacy/`](docs/legacy/) | Eski doküman snapshot'ları (arşiv) |
 | [CLAUDE.md](CLAUDE.md) | Geliştirici/agent çalışma kuralları ve değişmezler |

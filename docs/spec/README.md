@@ -1,17 +1,36 @@
-# CLAUDE.md — WFD v2.2 Migration Guide (wfd-editor + workflow-engine)
+# WFD Spesifikasyonu — KANONİK KAYNAK
 
-Bu repo WFD v2.2 (Named Nodes, Single-Rule C_A) spec'ine taşınmaktadır. Spec dokümanları kanoniktir; kod ile spec çelişirse SPEC kazanır ve kod düzeltilir.
+Bu dizin **WFD v2.2** (Named Nodes, Single-Rule C_A) modelinin tek gerçek kaynağıdır.
+Kod ile spec çelişirse **SPEC KAZANIR** ve kod düzeltilir.
 
-## Kanonik Spec Dosyaları (docs/spec/ altında)
+Aynı dizin `agnoflow-backend/docs/spec/` ve `agnoflow-frontend/docs/spec/` altında
+**birebir aynı** tutulur. Değişiklik yaparken iki kopyayı da güncelle.
 
-- `wfd_schema_v2_2.json` — yapısal doğrulama (JSON Schema 2020-12)
-- `Terminology_v2_2.MD` — domain kavramları
-- `wfd-custom-validator-runtime-semantics_v2_2.md` — davranış: matcher'lar, slug algoritması, pipeline, graf
-- `WFD_MIGRATION_NOTES_v2_2.md` — delta (M1–M14)
-- `example-wfd_kredi-basvuru_v2_2.json` — GOLDEN FIXTURE: her parse/validate/execute testi önce bununla geçmelidir
-- `wfd_types_v2_2.rs` — doğrulanmış referans serde modeli + slug + matcher (fixture'ı parse eder)
+## Ne nerede
 
-Detay gerektiğinde bu dosyaları oku; içeriklerini buraya kopyalama.
+| Dosya | İçerik | Ne zaman bakılır |
+|---|---|---|
+| [`terminology.md`](terminology.md) | Domain sözlüğü — ORGT/ORGU, ORGTRVLANG, C_A, WFE/WFES/WFAH, node/transition/wft, visibility | "Bu kavram ne demek?" |
+| [`schema.json`](schema.json) | JSON Schema 2020-12 — yapısal doğrulama | "Bu alan geçerli mi, tipi ne?" |
+| [`runtime-semantics.md`](runtime-semantics.md) | Davranış — matcher'lar, slug algoritması, pipeline, graf kuralları | "Çalışma anında ne olur?" |
+| [`decisions.md`](decisions.md) | WOR-* karar kaydı — neden böyle, alternatifler neden elendi | "Bu neden böyle yapılmış?" |
+| [`migration-notes.md`](migration-notes.md) | v2 / v2.1 → v2.2 delta (M1–M14) | "Eski model neydi, ne değişti?" |
+| [`reference-types.rs`](reference-types.rs) | Doğrulanmış referans serde modeli + slug + matcher | "Rust tarafı nasıl modellenir?" |
+| [`examples/`](examples/) | Örnek WFD'ler (aşağı bak) | "Gerçek bir WFD neye benzer?" |
+
+### examples/
+
+| Dosya | Kapsam |
+|---|---|
+| [`examples/kredi-basvuru.golden.json`](examples/kredi-basvuru.golden.json) | **GOLDEN FIXTURE — DEĞİŞTİRİLMEZ.** Her parse/validate/execute testi önce bununla geçmelidir; kod fixture'a uyar, fixture koda değil. |
+| [`examples/paralel-onay.json`](examples/paralel-onay.json) | Fork/join, kol-bazlı SLA ve escalation |
+| [`examples/belge-onay.json`](examples/belge-onay.json) | Ek-belge (attachments) katalogu ve node referansları |
+
+**Sürüm dosya adlarında DEĞİL veridedir** — `schema.json` içindeki `$id` ve WFD'lerdeki
+`wfd_version: "2.2"` alanı. Yeni sürüm gelirse bu dizin YERİNDE güncellenir; yan yana
+ikinci bir sürüm dizini açılmaz (çoklu-sürüm drift'i bilinçli olarak engellenmiştir).
+
+Detay gerektiğinde bu dosyaları oku; içeriklerini başka yere kopyalama.
 
 ## Model Özeti (her oturumda geçerli)
 
@@ -39,7 +58,7 @@ Detay gerektiğinde bu dosyaları oku; içeriklerini buraya kopyalama.
 
 ## Engine (Rust) Hedefleri
 
-- `docs/spec/wfd_types_v2_2.rs` → `src/wfd/` entegrasyonu; fixture parse + slug doğrulama kabul testi
+- `docs/spec/reference-types.rs` → `src/wfd/` entegrasyonu; fixture parse + slug doğrulama kabul testi
 - İki ayrı matcher: `authorize(c_a, actor, wfe)` ve `visible(x_visibility, actor, wfe)` (§3 ve §4)
 - validator: cross-ref + slug/uniqueness + graf (BFS, escalation kenarları DAHİL) + çıkışsız node
 - runtime: current_node, ilk-match seçim, atomik commit, retry/catch/timeout, escalation scheduler, `$node`

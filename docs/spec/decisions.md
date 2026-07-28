@@ -36,10 +36,14 @@ Spec güncellendiğinde iki repo senkronize edilir; kanonik kaynak WFD-EDITOR/do
 
 **Kök dosya:** `WFD-EDITOR/WFD-Specification.json` stale (deprecated `_step_*`,
 `terminal:true`, c_a içi `from`, 2 kurallı `start.c_a`). Golden fixture
-(`docs/spec/example-wfd_kredi-basvuru_v2_2.json`) zaten kanonik örnek olduğundan
-ikinci referans drift üretir → dosya `WFD-EDITOR/docs/legacy/` altına arşivlendi
-(silinmedi, tarihsel referans). 2 kurallı `start.c_a` dosyayla birlikte ölür;
-ayrıca modellenmesi gerekmiyor.
+(`docs/spec/examples/kredi-basvuru.golden.json`) zaten kanonik örnek olduğundan
+ikinci referans drift üretir → dosya `docs/legacy/` altına arşivlenmişti.
+2 kurallı `start.c_a` dosyayla birlikte ölür; ayrıca modellenmesi gerekmiyor.
+
+**Güncelleme (2026-07-28):** `docs/legacy/` arşivi her iki repodan tamamen
+KALDIRILDI — arşiv kopyaları (eski `Terminology-*`, `WFD-Specification.json`,
+`CLAUDE-*` snapshot'ları) tam da önlemek istenen drift'i üretiyordu. Tarihsel
+referans git geçmişindedir; çalışan ağaçta tek spec kaynağı `docs/spec/`'tir.
 
 ## WOR-28 — Eski seeded WFD fixture'ları
 
@@ -167,8 +171,8 @@ sınıfı kökten kapanır.
 - `check_graph` (§5, BFS reachability) Parallel'i de kenar kaynağı sayar: fork
   node → her branch + fork → join hedefi.
 
-**Golden fixture (`example-wfd_kredi-basvuru_v2_2.json`) DEĞİŞMEDİ** — WOR-31
-ayrı bir fixture ile örneklenir: `docs/spec/example-wfd_paralel-onay_v2_2.json`
+**Golden fixture (`examples/kredi-basvuru.golden.json`) DEĞİŞMEDİ** — WOR-31
+ayrı bir fixture ile örneklenir: `docs/spec/examples/paralel-onay.json`
 (satın alma onayı: review node'undan finans/hukuk/ik kollarına fork, her kolda
 bir onay node'u — approve → join, reject → red terminal — join'de sonuç node'u
 ve nihai transition ile başarı terminal'i).
@@ -559,7 +563,7 @@ engine tarafında charset/format kısıtı yok, sadece uniqueness). Terminal isi
   kaynaklı, sadece UI-side guard değil). Runtime lookup (`pipeline.rs::resolve_wft`)
   case-sensitive exact-match olarak DEĞİŞMEDİ — case-insensitivity yalnızca authoring-time
   uniqueness kuralı.
-- Golden fixture (`example-wfd_kredi-basvuru_v2_2.json`) değişmedi — `terminal_approved` /
+- Golden fixture (`examples/kredi-basvuru.golden.json`) değişmedi — `terminal_approved` /
   `terminal_rejected` zaten case-insensitive unique.
 
 ## WFE-seviyesi VIEW: WFAH katılımcısına kalıcı okuma hakkı (2026-07-14)
@@ -636,7 +640,7 @@ engine'e HİÇ gitmeden `422 code: "attachment.missing"` döner (UI-only gating'
 Yükleme/indirme/silme: `PUT/GET/DELETE /wfe/:id/attachments/:group/:item` (ham gövde;
 upload'ta içerik tipi bir `formats` kuralına uymalı ve uyan kuralın `max_size_mb`'si
 uygulanır — uymazsa 415, aşarsa 413). Aynı endpoint'ler JWT `/portal/wfe/*`
-ağacında da vardır. Örnek fixture: `example-wfd_belge-onay_v2_2.json`.
+ağacında da vardır. Örnek fixture: `examples/belge-onay.json`.
 (`wfe-core/src/types/wfd_v22.rs` AttachmentGroup/Item, `validator.rs::check_attachments`,
 `server/src/attachments.rs`, `server/src/routes/attachments.rs`,
 `server/src/routes/portal/attachments.rs`, `server/src/routes/wfe.rs::apply_action`.)

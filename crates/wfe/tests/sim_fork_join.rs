@@ -21,7 +21,7 @@ use wfe_core::v22::ports::{AutoexecRunner, ExecEnv, ExecFailure};
 use wfe_core::EngineError;
 
 const PARALLEL_FIXTURE: &str =
-    include_str!("../../wfe-core/tests/fixtures/example-wfd_paralel-onay_v2_2.json");
+    include_str!("../../wfe-core/tests/fixtures/paralel-onay.json");
 
 // ---- mock'lar (fork_join.rs / pipeline.rs kalıbı — authorize anchor = actor.orgu_id) ----
 

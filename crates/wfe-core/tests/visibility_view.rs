@@ -26,8 +26,8 @@ use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::ports::{BranchState, BranchStatus, Wfes};
 use wfe_core::v22::visibility::can_view;
 
-const FIXTURE: &str = include_str!("fixtures/example-wfd_kredi-basvuru_v2_2.json");
-const PARALLEL_FIXTURE: &str = include_str!("fixtures/example-wfd_paralel-onay_v2_2.json");
+const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
+const PARALLEL_FIXTURE: &str = include_str!("fixtures/paralel-onay.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).unwrap()

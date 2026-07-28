@@ -1,5 +1,5 @@
 //! WFD v2.2 custom validator — şemanın yakalayamadığı kurallar.
-//! Spec: docs/spec/wfd-custom-validator-runtime-semantics_v2_2.md §1, §2b, §5, §6.
+//! Spec: docs/spec/runtime-semantics.md §1, §2b, §5, §6.
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
 use crate::types::wfd_v22::{ParallelSpec, Wfd, Wft, WftCondition, WftTarget};

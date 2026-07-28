@@ -190,6 +190,7 @@ impl WfeStore for MemStore {
         _orgtnt_id: Uuid,
         wfah_entry: &WfahEntry,
         _branch: Option<&str>,
+        new_dynctx: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
         let mut map = self.wfes.lock().unwrap();
         let wfes = map
@@ -197,6 +198,9 @@ impl WfeStore for MemStore {
             .ok_or_else(|| EngineError::WfePort(format!("not found: {wfe_id}")))?;
         wfes.assigned_to = None;
         wfes.claimed_at = None;
+        if let Some(ctx) = new_dynctx {
+            wfes.dynctx = wfe_core::types::dynctx::DynCtx(ctx.clone());
+        }
         wfes.wfah.0.push(wfah_entry.clone());
         Ok(())
     }

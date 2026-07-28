@@ -2,7 +2,7 @@
 //! transaction'ında uygulanır (M8 / WOR-43; WOR-7 fix).
 
 use async_trait::async_trait;
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
 use wfe_core::types::wfd_v22::WftTarget;
@@ -679,12 +679,15 @@ impl WfeStore for WfeAdapter {
 
     /// SLA-1 claim timeout (wft'siz kol, bkz. `Engine::fire_claim_timeout`):
     /// node DEĞİŞMEDEN claimed_by/claimed_at temizlenir + WFAH marker eklenir.
+    /// `new_dynctx` verilmişse (SLA-1 `wfes_effects`) ctx satırı da AYNI
+    /// transaction'da marker'ın seq'i ile yazılır.
     async fn release_claim(
         &self,
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         wfah_entry: &WfahEntry,
         branch: Option<&str>,
+        new_dynctx: Option<&Value>,
     ) -> Result<(), EngineError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         match branch {
@@ -714,6 +717,17 @@ impl WfeStore for WfeAdapter {
                 .await
                 .map_err(db_err)?;
             }
+        }
+
+        if let Some(ctx) = new_dynctx {
+            sqlx::query("INSERT INTO wf.wfe_dynctx (wfe_id, seq, ctx) VALUES ($1, $2, $3)")
+                .bind(wfe_id)
+                .bind(wfah_entry.seq as i32)
+                .bind(ctx)
+                .execute(&mut *tx)
+                .await
+                // WOR-65: seq çakışması = eşzamanlı commit (bkz. `insert_err`).
+                .map_err(insert_err)?;
         }
 
         insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;

@@ -644,3 +644,116 @@ ağacında da vardır. Örnek fixture: `examples/belge-onay.json`.
 (`wfe-core/src/types/wfd_v22.rs` AttachmentGroup/Item, `validator.rs::check_attachments`,
 `server/src/attachments.rs`, `server/src/routes/attachments.rs`,
 `server/src/routes/portal/attachments.rs`, `server/src/routes/wfe.rs::apply_action`.)
+
+---
+
+## SLA sözleşmesi ikinci tur (2026-07-28): terminal-hedef yasağı + SLA-1 effects
+
+**Sorun 1 — SLA-2'nin effect'i.** `escalation[].wfes_effects` opsiyoneldi ve editör bu
+alanı hiç yazmıyordu; SLA süresi dolduğunda DynCtx'e hiçbir şey yazılmıyordu ("SLA aşımı"
+notu, breach damgası vb. modellenemiyordu). SLA-1 (`claim_timeout`) ise şemada
+`wfes_effects` alanını hiç TAŞIMIYORDU.
+
+**Karar 1.** SLA-1'e opsiyonel `wfes_effects` eklendi; her iki SLA türü de editörden
+düzenlenebilir. Süre dolduğunda effect'ler **system aktörü** adına uygulanır: `$actor` =
+`{role: "system"}`, `$node` = SLA'nın tetiklendiği node. `$action.input.*` /
+`$exec.result.*` YASAK (`sla_effect_namespace`) — SLA'yı ne bir aksiyon ne bir autoexec
+tetikler, bu yollar sessizce `null` yazardı. Verilmezse hiçbir şey yazılmaz.
+
+SLA-1'in `wft`'siz (havuza-dönüş) yolu `commit()`'ten geçmez — node/status değişmez —
+bu yüzden `ClaimTimeoutOutcome::Release` artık `WfahEntry` yerine
+`ClaimRelease { wfah_entry, new_dynctx: Option<Value> }` taşır ve
+`WfeStore::release_claim` yeni ctx'i marker'ın seq'i ile AYNI transaction'da
+`wf.wfe_dynctx`'e yazar (`None` → ctx satırı yazılmaz).
+
+**Sorun 2 — SLA hedefinin terminal olması.** SLA-1/SLA-2 bir terminal'i hedefleyebiliyordu.
+Bu, zaman aşımını "başarılı bitiş" gibi kaydediyor: terminal'in `wfes_effects`'i ve
+`wfe_end_response`'u sanki biri aksiyon almış gibi uygulanıyor, `SLA.Dwell` sinyali
+kayboluyor ve raporlamada breach ile normal kapanış ayırt edilemiyordu.
+
+**Karar 2.** SLA hedefleri **yalnız node** olabilir (`sla_terminal_target`). Akışı zaman
+aşımıyla bitirmek için SLA-2'nin `terminate: true` adımı kullanılır
+(`end_response.reason = "SLA.Dwell"`). Kapsam: `{"terminal": …}`, `conditions[].terminal`,
+`conditions.default.terminal`, `{"collapse": {"terminal": …}}` → hata.
+`{"parallel": …}`'in `join` hedefi **muaftır** — join, kollar bittikten sonraki ayrı bir
+hop'tur; SLA'nın indiği yer kolların giriş node'larıdır (hepsi zaten node).
+
+**Uyumluluk.** Terminal hedefli SLA taşıyan mevcut WFD'ler artık `validate` hatası verir
+(upload + fetch kapısı). Elle düzeltilmeleri gerekir: hedefi bir node yapın ya da SLA-2'de
+`terminate: true`'ya çevirin. Editör de aynı kuralı uygular — SLA hedef listelerinde
+terminal'ler artık listelenmez, mevcut terminal-hedefli kayıt "kayıt yok" hatası verir.
+(`wfe-core/src/types/wfd_v22.rs::ClaimTimeout`, `validator.rs::check_sla` +
+`sla_terminal_landings` + `check_sla_effect_namespaces`,
+`v22/pipeline.rs::fire_claim_timeout`, `v22/ports.rs::release_claim`,
+`wfe/src/wfe_adapter.rs`, `docs/spec/schema.json`.)
+
+---
+
+## SLA yetki sınırı (2026-07-28, ikinci düzeltme): akışı yalnız SLA-3 bitirir
+
+**Sorun.** Terminal-hedef yasağı getirildikten sonra SLA-2'nin `terminate: true` adımı
+tek "akışı bitirme" yolu olarak kaldı. Ama sorunun kökü hedefin terminal olması değil,
+**SLA-1/SLA-2'nin bitirme yetkisi olması**: ikisi de tek bir node'daki bekleme süresini
+ölçer. O sürenin dolması "iş bitti" değil "bu adımda tıkandı" demektir; işi kapatma
+kararı bir node'un beklemesine değil, TÜM akışın bütçesine bakmalıdır.
+
+**Karar.** Zaman aşımıyla akışı `terminated` yapma yetkisi YALNIZ **SLA-3**'e (root
+`timeout`, `end_response.reason = "SLA.Deadline"`) aittir.
+
+- `escalation[].terminate` **kaldırıldı** (`escalation_terminate_removed`); `wft`
+  ZORUNLU oldu (`escalation_wft_required`). `SLA.Dwell` artık üretilmez.
+- SLA-1 zaten bitiremiyordu (ya claim'i havuza bırakır ya bir node'a taşır) —
+  terminal-hedef yasağı bunu tamamlar.
+- Alan struct'ta `Option<bool>` olarak KALIR ama yalnız reddetmek için: aksi halde
+  `deny_unknown_fields` yüzünden eski dokümanlar ham serde parse hatası verirdi;
+  böyle anlaşılır bir validasyon mesajı verilebiliyor. Yeni dokümanlara yazılmaz.
+- Kardeş kolları düşürme ihtiyacı `wft: {"collapse": {"node": …}}` ile karşılanır —
+  paralel mod biter, akış hedef node'da AKTİF kalır (bitmez).
+
+**Editör.** "Akışı sonlandır (terminate)" seçeneği kaldırıldı. Eski dokümanlardan gelen
+`terminate: true` adımı SESSİZCE DÜŞÜRÜLMEZ: kendi grubuna işaret eden bir adım olarak
+import edilir ve `ESCALATION_SELF_TARGET` hatası kullanıcıya ne yapması gerektiğini
+söyler (hedefi değiştir ya da adımı sil; akışın toplam süresi için "Tamamlanma süresi").
+
+**Uyumluluk.** `terminate: true` taşıyan mevcut WFD'ler upload/fetch'te reddedilir.
+(`wfe-core/src/types/wfd_v22.rs::EscalationStep`, `validator.rs::check_sla`,
+`v22/pipeline.rs::fire_escalation`, `docs/spec/schema.json`.)
+
+---
+
+## SLA hedef formu (2026-07-28, üçüncü düzeltme): `wft` yalnız `{node}`
+
+**Sorun.** Terminal-hedef yasağı ve `terminate` kaldırılması yalnız DOĞRUDAN yolu
+kapatıyordu. `escalation[].wft` hâlâ tam bir `Wft` olduğu için dolaylı yollar açıktı:
+`{"conditions": [{"when": …, "terminal": …}]}` bir switch üzerinden terminal'e iniyor,
+`{"parallel": …}` bir fork açıyor, `{"collapse": …}` kardeş kolları düşürüyordu. Editör
+tarafında da escalation hedefi bir `switch` step'i olabiliyor ve `buildSwitchWft` ile
+conditions'a açılıyordu.
+
+**Karar.** SLA-2'nin `wft`'i YALNIZ `{"node": …}` formunu kabul eder
+(`sla_target_not_node`; terminal için ayrıca daha açıklayıcı `sla_terminal_target`).
+Şemada `$ref` `wft` → `wftNode` olarak daraltıldı. SLA-1 zaten bare node key taşıyordu.
+
+Gerekçe: SLA tek bir node'daki bekleme süresini ölçer. Bir zamanlayıcının verebileceği
+tek meşru sonuç "işi sıradaki sorumluya devret"tir. Dallanma (conditions), fork
+(parallel), kol düşürme (collapse) ve akışı bitirme birer KARARDIR — bunları bir aksiyon
+ya da SLA-3 verir. Autoexec zaten bir `wft` hedefi değildir (wire formatında varyantı
+yok), dolayısıyla "SLA → autoexec → terminal" yolu hiç var olmadı.
+
+Böylece bir SLA-2 adımının tek olası runtime sonucu `MoveTo` (paralel modda
+`BranchMoveTo`, join hedefliyse `BranchArrived`) olur. Önceki turda kardeş-kol düşürme
+için önerilen `wft: {"collapse": {"node": …}}` da bu kararla YASAKTIR — o yol bir
+aksiyona aittir (`branch_collapse_to_node_ends_parallel_and_moves_wfe`).
+
+**Editör.** Hedef listeleri yalnız aktör grubu (CaGroup) gösterir; `switch` hedefi artık
+conditions'a AÇILMAZ (`useExport`'tan `buildSwitchWft` çağrısı kaldırıldı). Yeni
+validasyon kodu `SLA_TARGET_NOT_CAGROUP` bitiş adımı / dallanma / otomasyon / paralel
+hedeflerini adıyla bildirir. Import: `{node}` dışındaki her form (ve eski `terminate`)
+kendi grubuna işaret eden bir placeholder olarak alınır — adım kaybolmaz, hata olarak
+görünür (`ESCALATION_SELF_TARGET`).
+
+**Uyumluluk.** `escalation[].wft` içinde conditions/parallel/collapse/terminal taşıyan
+mevcut WFD'ler upload/fetch'te reddedilir.
+(`wfe-core/src/validator.rs::check_sla` + `wft_form_name`, `docs/spec/schema.json`
+`escalationStep.wft → wftNode`, `agnoflow-frontend/src/utils/validation.ts::slaTargetProblem`,
+`src/hooks/useExport.ts`, `src/utils/wfdImport.ts`.)

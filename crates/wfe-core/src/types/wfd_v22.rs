@@ -104,12 +104,19 @@ pub struct NodeDef {
 }
 
 /// SLA-1 — claim timeout (havuz node'u üzerinde). `wft` yoksa aynı havuza döner
-/// (claimed_by/claimed_at temizlenir); varsa belirtilen node/terminal'e taşınır.
+/// (claimed_by/claimed_at temizlenir); varsa belirtilen node'a taşınır.
+/// 2026-07-28: `wft` TERMINAL olamaz (SLA node'lar arası devirdir — validator
+/// `sla_terminal_target`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClaimTimeout {
     /// ISO 8601 duration — claim anından itibaren.
     pub after: String,
+    /// 2026-07-28 (SLA-1 effects): opsiyonel DynCtx yazımı — süre dolduğunda
+    /// `$actor` = system aktörü, `$node` = SLA'nın tetiklendiği node. `$action.input.*`
+    /// ve `$exec.result.*` bu bağlamda YOKTUR (validator `sla_effect_namespace`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wft: Option<String>,
 }
@@ -121,10 +128,17 @@ pub struct EscalationStep {
     pub after: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
-    /// wft XOR terminate — biri zorunlu (2026-07-16 SLA sözleşmesi, validator XOR).
+    /// SLA-2 hedefi — ZORUNLU (validator `escalation_wft_required`). Yalnız NODE
+    /// olabilir: terminal hedef 2026-07-28'de yasaklandı (`sla_terminal_target`).
+    /// `Option` kalır ki eksikliği serde parse hatası yerine anlaşılır bir
+    /// validasyon mesajı üretsin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wft: Option<Wft>,
-    /// SLA-2: true ise instance `terminated` olur (end_response `{"reason":"SLA.Dwell",...}`).
+    /// KALDIRILDI (2026-07-28) — SLA-2 akışı BİTİREMEZ; yalnız SLA-3 (root `timeout`)
+    /// bitirir. Alan sırf eski WFD'lere anlaşılır hata verebilmek için deserialize
+    /// edilir (`deny_unknown_fields` yüzünden aksi halde ham parse hatası olurdu);
+    /// validator `escalation_terminate_removed` ile reddeder ve yeni dokümanlara
+    /// asla yazılmaz.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminate: Option<bool>,
 }

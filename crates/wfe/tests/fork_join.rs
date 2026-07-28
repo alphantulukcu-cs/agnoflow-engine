@@ -404,9 +404,13 @@ impl WfeStore for ParStore {
         _orgtnt_id: Uuid,
         wfah_entry: &WfahEntry,
         branch: Option<&str>,
+        new_dynctx: Option<&serde_json::Value>,
     ) -> Result<(), EngineError> {
         let mut map = self.wfes.lock().unwrap();
         let w = map.get_mut(&wfe_id).unwrap();
+        if let Some(ctx) = new_dynctx {
+            w.dynctx = wfe_core::types::dynctx::DynCtx(ctx.clone());
+        }
         match branch {
             Some(node) => {
                 for b in &mut w.branches {

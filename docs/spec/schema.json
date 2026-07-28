@@ -814,7 +814,7 @@
         },
         "claim_timeout": {
           "$ref": "#/$defs/claimTimeout",
-          "description": "SLA-1: claim eden aktor 'after' suresinde aksiyon almazsa devreye girer. wft yoksa claim temizlenir ve is ayni havuza doner."
+          "description": "SLA-1: claim eden aktor 'after' suresinde aksiyon almazsa devreye girer. wft yoksa claim temizlenir ve is ayni havuza doner; wft NODE olmak zorundadir (terminal yasak)."
         },
         "attachments": {
           "type": "array",
@@ -838,10 +838,14 @@
         "after": {
           "$ref": "#/$defs/duration"
         },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects",
+          "description": "SLA-1 opsiyonel DynCtx yazimi (2026-07-28). Sure dolarken system aktoru tetikler: $ctx.*, $actor, $node, $timestamp, $wfe_id kullanilabilir; $action.input.* ve $exec.result.* YASAK (validator sla_effect_namespace)."
+        },
         "wft": {
           "type": "string",
           "minLength": 1,
-          "description": "Hedef node veya terminal key'i (bare string — {node}/{terminal} sarmalayicisi YOK). Belirtilmezse claim ayni havuza doner."
+          "description": "Hedef NODE key'i (bare string — {node} sarmalayicisi YOK). TERMINAL olamaz (2026-07-28, validator sla_terminal_target). Belirtilmezse claim ayni havuza doner."
         }
       }
     },
@@ -849,7 +853,8 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "after"
+        "after",
+        "wft"
       ],
       "properties": {
         "after": {
@@ -859,35 +864,11 @@
           "$ref": "#/$defs/wfesEffects"
         },
         "wft": {
-          "$ref": "#/$defs/wft"
-        },
-        "terminate": {
-          "const": true
+          "$ref": "#/$defs/wftNode",
+          "description": "SLA-2 hedefi — ZORUNLU ve YALNIZ {node} formu. terminal / conditions / parallel / collapse formlari 2026-07-28'de yasaklandi (validator sla_target_not_node, sla_terminal_target): SLA yalniz sıradaki aktor havuzuna devreder; dallanma, fork, kol dusurme ve akisi bitirme bir AKSIYONUN ya da SLA-3'un (root timeout) kararidir."
         }
       },
-      "oneOf": [
-        {
-          "required": [
-            "wft"
-          ],
-          "not": {
-            "required": [
-              "terminate"
-            ]
-          }
-        },
-        {
-          "required": [
-            "terminate"
-          ],
-          "not": {
-            "required": [
-              "wft"
-            ]
-          }
-        }
-      ],
-      "description": "wft XOR terminate: normal SLA-2 devri hedef node/terminal'e tasir; terminate:true instance'i 'terminated' durumuna dusurur (end_response.reason = SLA.Dwell)."
+      "description": "SLA-2 (node escalation[]). Sure dolunca is bir sonraki NODE'a (aktor havuzuna) devredilir. wft ZORUNLUDUR (escalation_wft_required) ve yalnizca {node} olabilir — terminal/conditions/parallel/collapse yasak. 2026-07-28: 'terminate' KALDIRILDI (escalation_terminate_removed) — akisi bitirmek yalniz SLA-3'un isidir. wfes_effects opsiyoneldir ve $action.input.* / $exec.result.* tasiyamaz (sla_effect_namespace)."
     },
     "wftNode": {
       "type": "object",

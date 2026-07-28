@@ -63,13 +63,22 @@ pub struct EscalationForecast {
     pub overdue: bool,
 }
 
-/// `fire_claim_timeout` sonucu — `wft` verilmişse node/terminal taşıması
+/// `fire_claim_timeout` sonucu — `wft` verilmişse node taşıması
 /// (`TransitionCommit` — normal `commit()` yolu), verilmemişse yalnızca
 /// claimed_by/claimed_at temizliği (`release_claim` yolu, node DEĞİŞMEZ).
 #[derive(Debug, Clone)]
 pub enum ClaimTimeoutOutcome {
     Move(TransitionCommit),
-    Release(WfahEntry),
+    Release(ClaimRelease),
+}
+
+/// `ClaimTimeoutOutcome::Release` gövdesi — node/status DEĞİŞMEZ, yalnız
+/// assignment temizlenir. 2026-07-28: SLA-1 `wfes_effects` taşıyorsa yeni DynCtx
+/// de bu yolla persist edilir (`new_dynctx = None` → effects yok, ctx'e dokunulmaz).
+#[derive(Debug, Clone)]
+pub struct ClaimRelease {
+    pub wfah_entry: WfahEntry,
+    pub new_dynctx: Option<Value>,
 }
 
 /// `Terminal` ve `Terminated` her ikisi de "aktif değil" sınıfıdır: yeni
@@ -975,8 +984,8 @@ impl<'a> Engine<'a> {
 
     /// Vadesi gelen escalation adımını uygular; assigned WFE'de de çalışır,
     /// taşımada assignment temizlenir (store commit'i her MoveTo'da temizler).
-    /// SLA-2 (2026-07-16): `terminate: true` ise wft'e bakılmaksızın instance
-    /// `terminated` olur (end_response `{"reason":"SLA.Dwell","node":...}`).
+    /// SLA-2 akışı BİTİRMEZ (2026-07-28): her adım bir node'a devirdir; `terminated`
+    /// yalnız SLA-3 (root `timeout`, bkz. `fire_deadline_timeout`) tarafından üretilir.
     /// `branch`: WOR-31 — paralel modda escalation KOL-bazlı ateşlenir; kol
     /// node'u verilirse adım o kolun node tanımından okunur ve wft çözümü
     /// paralel-farkında yapılır (varış / kol hareketi / WFE-terminal).
@@ -1035,37 +1044,13 @@ impl<'a> Engine<'a> {
         }];
         seq += 1;
 
-        if step.terminate == Some(true) {
-            let outcome = CommitOutcome::Terminated {
-                end_response: json!({"reason": "SLA.Dwell", "node": node_key}),
-            };
-            // WOR-31: paralel modda terminate diğer aktif kolları da iptal eder.
-            stage_parallel_markers(
-                wfes,
-                &Trigger {
-                    branch,
-                    action: Some(&trigger_action),
-                    actor: &system,
-                },
-                &outcome,
-                &mut wfah_entries,
-                &mut seq,
-                now,
-            );
-            return Ok(TransitionCommit {
-                wfe_id: wfes.wfe_id,
-                orgtnt_id: wfes.orgtnt_id,
-                new_dynctx: staged,
-                wfah_entries,
-                outcome,
-                resolved_c_a: vec![],
-            });
-        }
-
-        // XOR validator garanti eder: terminate yoksa wft vardır.
+        // `wft` zorunludur (validator `escalation_wft_required`) ve YALNIZ `{node}`
+        // formu geçerlidir (`sla_target_not_node` / `sla_terminal_target`): SLA-2 ne
+        // akışı bitirir ne dallanma/fork/collapse kararı verir. `resolve_wft` genel
+        // yolu korunur (paralel modda BranchMoveTo çözümü oradan gelir).
         let wft = step.wft.as_ref().ok_or_else(|| {
             EngineError::InvalidWfd(format!(
-                "escalation adımı wft veya terminate içermeli: {node_key}[{step_idx}]"
+                "escalation adımı wft içermeli: {node_key}[{step_idx}]"
             ))
         })?;
         let mode = match (branch, wfes.join_target.as_ref()) {
@@ -1211,9 +1196,11 @@ impl<'a> Engine<'a> {
     }
 
     /// Vadesi gelen claim timeout'u uygular. `wft` verilmişse escalation fire
-    /// benzeri node/terminal taşıması (assignment zaten commit'te temizlenir);
+    /// benzeri node taşıması (assignment zaten commit'te temizlenir);
     /// verilmemişse yalnızca claimed_by/claimed_at CAS ile temizlenir (sayaç
     /// sıfırlanır, node DEĞİŞMEZ) — `WfeStore::release_claim` ile persist edilir.
+    /// 2026-07-28: `ct.wfes_effects` varsa her iki yolda da STAGED DynCtx'e uygulanır
+    /// (`$actor` = system, `$node` = SLA'nın tetiklendiği node).
     /// `branch`: WOR-31 — paralel modda kol node'u verilir; Release yolu kolun
     /// claim'inin sıfırlanmasını temsil eder (persist T3'te kol-farkında),
     /// Move yolu paralel-farkında wft çözümünden geçer.
@@ -1248,6 +1235,22 @@ impl<'a> Engine<'a> {
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let marker = format!("claim_timeout:{node_key}");
 
+        // SLA-1 effects (2026-07-28): varsa DynCtx'e uygulanır; yoksa staged ctx
+        // aynen kalır ve Release yolu ctx satırı YAZMAZ (`new_dynctx: None`).
+        let mut staged = wfes.dynctx.as_value().clone();
+        let has_effects = ct.wfes_effects.is_some();
+        if let Some(effects) = &ct.wfes_effects {
+            let env = EffectEnv {
+                actor: &system,
+                wfe_id: wfes.wfe_id,
+                node: Some(node_key),
+                action_input: None,
+                exec_result: None,
+                now,
+            };
+            staged = apply_effects(&staged, effects, &env)?;
+        }
+
         match &ct.wft {
             None => {
                 let wfah_entry = WfahEntry {
@@ -1257,19 +1260,16 @@ impl<'a> Engine<'a> {
                     input: Some(json!({"after": ct.after})),
                     applied_at: now,
                 };
-                Ok(ClaimTimeoutOutcome::Release(wfah_entry))
+                Ok(ClaimTimeoutOutcome::Release(ClaimRelease {
+                    wfah_entry,
+                    new_dynctx: has_effects.then_some(staged),
+                }))
             }
             Some(target) => {
-                // Bare string hedef — node/terminal ayrımı validator'ın garanti
-                // ettiği referansa göre çözülür (wft-target-exists).
-                let wft = if wfd.nodes.contains_key(target) {
-                    Wft::Node {
-                        node: target.clone(),
-                    }
-                } else {
-                    Wft::Terminal {
-                        terminal: target.clone(),
-                    }
+                // Bare string hedef — validator `sla_terminal_target` gereği yalnız
+                // node olabilir; referansın varlığı `cross_ref` ile garantidir.
+                let wft = Wft::Node {
+                    node: target.clone(),
                 };
                 let mut wfah_entries = vec![WfahEntry {
                     seq,
@@ -1292,7 +1292,6 @@ impl<'a> Engine<'a> {
                     }
                     (None, _) => WftMode::Single,
                 };
-                let staged = wfes.dynctx.as_value().clone();
                 let (outcome, resolved_c_a, final_ctx) = self
                     .resolve_wft(
                         &wft,

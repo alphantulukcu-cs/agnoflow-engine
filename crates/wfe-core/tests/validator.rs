@@ -407,28 +407,22 @@ fn start_with_named_action_selects_matching_rule() {
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
 
-// ---- 2026-07-16 SLA sözleşmesi: escalation wft XOR terminate + claim_timeout ----
+// ---- SLA sözleşmesi: escalation + claim_timeout ----
+// 2026-07-28: SLA-1/SLA-2 akışı BİTİREMEZ — `terminate` kaldırıldı, `wft` zorunlu;
+// zaman aşımıyla akışı bitiren tek kural root `timeout` (SLA-3).
 
 #[test]
-fn escalation_with_both_wft_and_terminate_is_error() {
+fn escalation_terminate_is_rejected_as_removed() {
     let mut v = fixture_value();
     v["nodes"]["self__creditAnalyst"]["escalation"][0]["terminate"] = json!(true);
-    // wft zaten fixture'da mevcut — ikisi birden XOR ihlali
-    assert!(has_error(&validate_value(v), "escalation_xor"));
+    assert!(has_error(
+        &validate_value(v),
+        "escalation_terminate_removed"
+    ));
 }
 
 #[test]
-fn escalation_with_neither_wft_nor_terminate_is_error() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["escalation"][0]
-        .as_object_mut()
-        .unwrap()
-        .remove("wft");
-    assert!(has_error(&validate_value(v), "escalation_xor"));
-}
-
-#[test]
-fn escalation_terminate_true_without_wft_is_valid() {
+fn escalation_terminate_without_wft_is_still_rejected() {
     let mut v = fixture_value();
     v["nodes"]["self__creditAnalyst"]["escalation"][0]
         .as_object_mut()
@@ -436,11 +430,19 @@ fn escalation_terminate_true_without_wft_is_valid() {
         .remove("wft");
     v["nodes"]["self__creditAnalyst"]["escalation"][0]["terminate"] = json!(true);
     let report = validate_value(v);
-    assert!(
-        !has_error(&report, "escalation_xor"),
-        "hatalar: {:#?}",
-        report.errors
-    );
+    // Hem kaldırılmış alan hem eksik hedef bildirilir.
+    assert!(has_error(&report, "escalation_terminate_removed"));
+    assert!(has_error(&report, "escalation_wft_required"));
+}
+
+#[test]
+fn escalation_without_wft_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("wft");
+    assert!(has_error(&validate_value(v), "escalation_wft_required"));
 }
 
 #[test]
@@ -475,6 +477,95 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
 
+// ---- 2026-07-28: SLA hedefleri terminal OLAMAZ (sla_terminal_target) ----
+
+#[test]
+fn claim_timeout_terminal_target_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "terminal_rejected"});
+    assert!(has_error(&validate_value(v), "sla_terminal_target"));
+}
+
+#[test]
+fn escalation_terminal_target_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
+        json!({"terminal": "terminal_rejected"});
+    assert!(has_error(&validate_value(v), "sla_terminal_target"));
+}
+
+// SLA-2 hedefi YALNIZ `{node}` olabilir — conditions/parallel/collapse formları da yasak.
+
+#[test]
+fn escalation_conditional_target_is_error() {
+    let mut v = fixture_value();
+    // Hedeflerin HEPSİ node olsa bile koşullu dallanma SLA'nın kararı değildir.
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] = json!({
+        "conditions": [{ "when": "$ctx.within_limit == true", "node": "self__branchManager" }],
+        "default": { "node": "parent__creditDeptManager" }
+    });
+    assert!(has_error(&validate_value(v), "sla_target_not_node"));
+}
+
+#[test]
+fn escalation_parallel_target_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] = json!({
+        "parallel": {
+            "branches": ["self__branchManager", "parent__creditDeptManager"],
+            "join": { "node": "type_branch__branchClerk" }
+        }
+    });
+    assert!(has_error(&validate_value(v), "sla_target_not_node"));
+}
+
+#[test]
+fn escalation_collapse_target_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
+        json!({ "collapse": { "node": "self__branchManager" } });
+    assert!(has_error(&validate_value(v), "sla_target_not_node"));
+}
+
+#[test]
+fn escalation_node_target_has_no_terminal_error() {
+    let v = fixture_value();
+    // Fixture'ın SLA-2 adımı `{"node": "self__branchManager"}` — kural ihlali yok.
+    assert!(!has_error(&validate_value(v), "sla_terminal_target"));
+}
+
+// ---- 2026-07-28: SLA effects namespace kısıtı (sla_effect_namespace) ----
+
+#[test]
+fn sla_effects_action_input_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wfes_effects"]["set"]["internal_notes"] =
+        json!("$action.input.note");
+    assert!(has_error(&validate_value(v), "sla_effect_namespace"));
+}
+
+#[test]
+fn claim_timeout_effects_exec_result_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] = json!({
+        "after": "PT2H",
+        "wfes_effects": { "set": { "internal_notes": "$exec.result.body.msg" } }
+    });
+    assert!(has_error(&validate_value(v), "sla_effect_namespace"));
+}
+
+#[test]
+fn claim_timeout_effects_with_system_tokens_is_valid() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] = json!({
+        "after": "PT2H",
+        "wfes_effects": { "set": { "internal_notes": "$node", "analyst_approved_at": "$timestamp" } }
+    });
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
 // ---- WOR-31: Parallel fork/join ----
 
 #[test]
@@ -500,7 +591,11 @@ fn attachment_fixture_is_valid() {
         "belge-onay fixture temiz geçmeli, hatalar: {:#?}",
         report.errors
     );
-    assert!(report.warnings.is_empty(), "uyarılar: {:#?}", report.warnings);
+    assert!(
+        report.warnings.is_empty(),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
 }
 
 #[test]
@@ -524,7 +619,10 @@ fn attachment_duplicate_item_id_is_error() {
     ]);
     let report = validate_value(v);
     assert!(
-        report.errors.iter().any(|e| e.code == "attachment_item_dup"),
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "attachment_item_dup"),
         "grup içi tekrar eden item id hata vermeli, hatalar: {:#?}",
         report.errors
     );

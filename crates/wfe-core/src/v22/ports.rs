@@ -210,12 +210,15 @@ pub trait WfeStore: Send + Sync {
     /// temizlenir + WFAH marker eklenir — `commit()`'ten ayrı çünkü node/status
     /// değişmiyor (bkz. `Engine::fire_claim_timeout` / `ClaimTimeoutOutcome::Release`).
     /// `branch`: WOR-31 — paralel modda o kolun claim'i sıfırlanır.
+    /// `new_dynctx`: 2026-07-28 — SLA-1 `wfes_effects` uygulanmışsa yeni ctx AYNI
+    /// transaction'da `wf.wfe_dynctx`'e yazılır; `None` ise ctx'e dokunulmaz.
     async fn release_claim(
         &self,
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         wfah_entry: &WfahEntry,
         branch: Option<&str>,
+        new_dynctx: Option<&Value>,
     ) -> Result<(), EngineError>;
     /// Madde 7: yetkili devir. `claim`'in CAS'ının aksine zaten sahipli (ya da
     /// havuzdaki) bir satırı override eder — uygunluk `Engine::reassign`'da

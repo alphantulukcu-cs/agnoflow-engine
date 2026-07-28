@@ -655,8 +655,9 @@ impl WfeExecutor {
     }
 
     /// Tek WFE için zamanlayıcı kontrolü — sıra (2026-07-16 SLA sözleşmesi):
-    /// 1. instance deadline (SLA-3), 2. claim timeout (SLA-1), 3. escalation
-    /// (SLA-2, `terminate:true` dahil). Bir şey ateşlendiyse true döner
+    /// 1. instance deadline (SLA-3 — akışı `terminated` yapan TEK kural),
+    /// 2. claim timeout (SLA-1), 3. escalation (SLA-2 — yalnız node devri).
+    /// Bir şey ateşlendiyse true döner
     /// (M5/M6 — WOR-46/47).
     pub async fn tick_timers(&self, wfe_id: Uuid) -> Result<bool, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
@@ -686,9 +687,15 @@ impl WfeExecutor {
             if engine.claim_timeout_due(&wfd, &wfes, now, b)? {
                 match engine.fire_claim_timeout(&wfd, &wfes, now, b).await? {
                     ClaimTimeoutOutcome::Move(commit) => self.wfe.commit(&commit).await?,
-                    ClaimTimeoutOutcome::Release(entry) => {
+                    ClaimTimeoutOutcome::Release(release) => {
                         self.wfe
-                            .release_claim(wfe_id, wfes.orgtnt_id, &entry, b)
+                            .release_claim(
+                                wfe_id,
+                                wfes.orgtnt_id,
+                                &release.wfah_entry,
+                                b,
+                                release.new_dynctx.as_ref(),
+                            )
                             .await?
                     }
                 }

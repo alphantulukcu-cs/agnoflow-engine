@@ -111,6 +111,49 @@ Unhandled fail'de hicbir sey commit edilmez.
 
 v2.1 ile aynı: escalation zamanlayıcısı node-giriş anından başlar (WFAH'tan türetilir), sıralı adımlar birer kez tetiklenir, assigned WFE'de de çalışır, taşımada assignment temizlenir, WFAH'a system actor yazılır, adım tek transaction'dır. `autoexec.timeout_seconds` aşımı `WFD.Timeout`; root `timeout` aşımı engine-defined fail + WFAH kaydı.
 
+### 8a. SLA-1/SLA-2 akışı BİTİREMEZ (2026-07-28)
+
+Zaman aşımıyla akışı sonlandırma yetkisi **yalnız SLA-3'e** (root `timeout`) aittir —
+o, tüm işin mutlak son teslim süresidir. SLA-1 ve SLA-2 birer **sorumluluk devridir**;
+bir adımın süresi dolmuş olması işin bittiği anlamına gelmez. İki kural:
+
+1. **`escalation[].terminate` kaldırıldı** (`escalation_terminate_removed`). `wft`
+   artık ZORUNLUDUR (`escalation_wft_required`). `SLA.Dwell` end_response'u üretilmez;
+   `terminated` durumunu üreten tek zamanlayıcı yolu `timeout:deadline`
+   (`SLA.Deadline`) kalır.
+2. **SLA hedefi YALNIZ bir node olabilir.** SLA-1'in `claim_timeout.wft`'i zaten bare
+   bir node key'idir; SLA-2'nin `wft`'i de yalnız `{"node": …}` formunu kabul eder
+   (şemada `$ref: wftNode`). Diğer formların hepsi hata:
+
+   | Form | Hata kodu | Neden |
+   |---|---|---|
+   | `{"terminal": …}` | `sla_terminal_target` | akışı bitirir → SLA-3'ün işi |
+   | `{"conditions": […]}` | `sla_target_not_node` | dallanma bir karardır |
+   | `{"parallel": …}` | `sla_target_not_node` | fork açmak bir karardır |
+   | `{"collapse": …}` | `sla_target_not_node` | kardeş kolları düşürmek bir karardır |
+
+   Böylece **dolaylı** yollar da kapanır: SLA bir switch'i hedefleyip onun bir kolundan
+   terminal'e inemez, çünkü switch hedefi zaten yasaktır. Autoexec hiçbir zaman bir `wft`
+   hedefi değildi (wire formatında öyle bir varyant yok).
+
+Sonuç: bir SLA-2 adımının tek olası runtime sonucu `MoveTo` (paralel modda
+`BranchMoveTo` / join hedefiyse `BranchArrived`) — `Terminated`, `CollapseTo` ya da
+`ForkTo` üretmesi imkânsızdır. Kardeş kolları düşürmek isteyen akışlar bunu bir
+AKSİYONUN `wft: {"collapse": …}` hedefiyle yapar.
+
+### 8b. SLA effects (opsiyonel DynCtx yazımı)
+
+SLA-1 ve SLA-2 adımları opsiyonel `wfes_effects` taşır (SLA-2'de zaten vardı; SLA-1'e
+2026-07-28'de eklendi). Süre dolduğunda effect'ler **system aktörü** adına staged
+DynCtx'e uygulanır ve aynı transaction'da persist edilir — SLA-1'in `wft`'siz
+(havuza-dönüş) yolunda node/status değişmediği hâlde ctx satırı yazılır.
+
+Kullanılabilir namespace: `$ctx.*`, `$actor` (= `{role: "system"}`), `$node` (SLA'nın
+tetiklendiği node), `$timestamp`, `$wfe_id`. **`$action.input.*` ve `$exec.result.*`
+YASAKTIR** — SLA'yı bir aksiyon ya da autoexec tetiklemez, bu yollar sessizce `null`
+yazardı; validator reddeder (`sla_effect_namespace`). `wfes_effects` verilmezse hiçbir
+şey yazılmaz (rastgele bir aksiyonun effect'leri devralınmaz).
+
 ## 9. WFD Yükleme
 
 - Tanınmayan `wfd_version` = yükleme reddi. Root'ta bilinmeyen alan yasak.

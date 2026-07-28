@@ -2,7 +2,7 @@
 //! Spec: docs/spec/runtime-semantics.md §1, §2b, §5, §6.
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
-use crate::types::wfd_v22::{ParallelSpec, Wfd, Wft, WftCondition, WftTarget};
+use crate::types::wfd_v22::{ParallelSpec, Wfd, WfesEffects, Wft, WftCondition, WftTarget};
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -903,20 +903,88 @@ fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
     }
 }
 
-// ---- 2026-07-16 SLA sözleşmesi: escalation wft XOR terminate + claim_timeout ----
+// ---- 2026-07-16 SLA sözleşmesi: escalation + claim_timeout ----
+// ---- 2026-07-28: SLA-1/SLA-2 YALNIZ bir node'a devreder. Akışı bitiremez
+//      (`terminate` kaldırıldı, terminal hedef yasak — bitirme yalnız SLA-3'ün işi) ve
+//      dallanma/fork/collapse kararı veremez (`wft` yalnız `{node}` formu).
+//      + SLA effects namespace kısıtı ----
+
+/// `Wft`'in wire formunun kullanıcıya gösterilecek adı — SLA hedef formu hatasında
+/// hangi biçimin kullanıldığını söylemek için.
+fn wft_form_name(wft: &Wft) -> &'static str {
+    match wft {
+        Wft::Node { .. } => "node",
+        Wft::Terminal { .. } => "terminal",
+        Wft::Conditional { .. } => "conditions (koşullu dallanma)",
+        Wft::Parallel { .. } => "parallel (fork/join)",
+        Wft::Collapse { .. } => "collapse (kolları düşür)",
+    }
+}
+
+/// SLA bağlamında `$action.input.*` ve `$exec.result.*` YOKTUR (tetikleyici system
+/// aktörü; ne aksiyon girdisi ne autoexec sonucu vardır) — sessizce `null` yazmak
+/// yerine WFD reddedilir. `$ctx.*`, `$actor`, `$node`, `$timestamp`, `$wfe_id` geçerli.
+fn check_sla_effect_namespaces(effects: &WfesEffects, path: &str, report: &mut ValidationReport) {
+    for (target, raw) in &effects.set {
+        walk_strings(raw, &format!("{path}.set[{target}]"), &mut |s, p| {
+            for bad in ["$action.input.", "$exec.result."] {
+                if s.contains(bad) {
+                    report.error(
+                        "sla_effect_namespace",
+                        p.to_string(),
+                        format!(
+                            "SLA effects'inde '{bad}*' kullanılamaz (system tetikler — aksiyon girdisi/autoexec sonucu yok): '{s}'"
+                        ),
+                    );
+                }
+            }
+        });
+    }
+}
 
 fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
             let path = format!("nodes[{key}].escalation[{j}]");
-            let has_wft = esc.wft.is_some();
-            let terminates = esc.terminate.unwrap_or(false);
-            if has_wft == terminates {
+            // 2026-07-28: SLA-2 akışı BİTİREMEZ — `terminate` kaldırıldı, `wft` zorunlu.
+            if esc.terminate.is_some() {
                 report.error(
-                    "escalation_xor",
-                    path,
-                    "escalation adımı `wft` VEYA `terminate: true` içermeli — ikisi birden ya da hiçbiri olamaz".into(),
+                    "escalation_terminate_removed",
+                    format!("{path}.terminate"),
+                    "`terminate` kaldırıldı — SLA-2 akışı bitiremez; yalnız root `timeout` (SLA-3) bitirir. Adımı bir node hedefine (`wft`) çevirin ya da adımı kaldırın".into(),
                 );
+            }
+            if esc.wft.is_none() {
+                report.error(
+                    "escalation_wft_required",
+                    path.clone(),
+                    "escalation adımı bir node hedefi (`wft`) içermelidir".into(),
+                );
+            }
+            // SLA-2 hedefi YALNIZ `{node}` olabilir: terminal (akışı bitirir),
+            // conditions (dallanma kararı), parallel (fork) ve collapse (kolları
+            // düşürür) formlarının hepsi bir AKSİYONUN verebileceği kararlardır —
+            // bir zamanlayıcının değil. SLA sadece "sıradaki havuza devret" yapar.
+            match &esc.wft {
+                None | Some(Wft::Node { .. }) => {}
+                Some(Wft::Terminal { terminal }) => report.error(
+                    "sla_terminal_target",
+                    format!("{path}.wft"),
+                    format!(
+                        "SLA-2 escalation hedefi terminal olamaz ('{terminal}') — SLA yalnız node'lar arası devirdir; akışı zaman aşımıyla bitiren tek kural root `timeout` (SLA-3)"
+                    ),
+                ),
+                Some(other) => report.error(
+                    "sla_target_not_node",
+                    format!("{path}.wft"),
+                    format!(
+                        "SLA-2 escalation hedefi yalnız `{{node}}` olabilir — '{}' formu kullanılamaz. Dallanma/fork/collapse bir aksiyonun kararıdır; SLA yalnız sıradaki havuza devreder",
+                        wft_form_name(other)
+                    ),
+                ),
+            }
+            if let Some(effects) = &esc.wfes_effects {
+                check_sla_effect_namespaces(effects, &format!("{path}.wfes_effects"), report);
             }
         }
         if let Some(ct) = &node.claim_timeout {
@@ -924,14 +992,25 @@ fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
             if let Err(e) = parse_iso8601_duration(&ct.after) {
                 report.error("duration_format", format!("{path}.after"), e.to_string());
             }
+            if let Some(effects) = &ct.wfes_effects {
+                check_sla_effect_namespaces(effects, &format!("{path}.wfes_effects"), report);
+            }
             if let Some(target) = &ct.wft {
-                let known =
-                    wfd.nodes.contains_key(target) || wfd.terminals.iter().any(|t| t.id == *target);
-                if !known {
+                // SLA-1 hedefi YALNIZ node olabilir (2026-07-28). Terminal referansı
+                // ayrı bir hata verir; hiç bilinmiyorsa cross_ref.
+                if wfd.terminals.iter().any(|t| t.id == *target) {
+                    report.error(
+                        "sla_terminal_target",
+                        format!("{path}.wft"),
+                        format!(
+                            "SLA-1 claim_timeout hedefi terminal olamaz ('{target}') — bir node seçin ya da hedefi kaldırıp claim'i havuza bırakın"
+                        ),
+                    );
+                } else if !wfd.nodes.contains_key(target) {
                     report.error(
                         "cross_ref",
                         format!("{path}.wft"),
-                        format!("bilinmeyen node/terminal '{target}'"),
+                        format!("bilinmeyen node '{target}'"),
                     );
                 }
             }

@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use uuid::Uuid;
 use wfe_core::error::EngineError;
@@ -14,8 +15,8 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
-    AutoexecDef, AutoexecType, COrgu, CandidateActor, ClaimTimeout, EscalationStep, Wfd, Wft,
-    WftTarget,
+    AutoexecDef, AutoexecType, COrgu, CandidateActor, ClaimTimeout, EscalationStep, Wfd,
+    WfesEffects, Wft, WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
@@ -1318,6 +1319,7 @@ fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
         .unwrap()
         .claim_timeout = Some(ClaimTimeout {
         after: after.into(),
+        wfes_effects: None,
         wft: wft.map(String::from),
     });
     wfd
@@ -1349,9 +1351,14 @@ async fn claim_timeout_due_without_wft_releases_claim() {
         .await
         .unwrap()
     {
-        ClaimTimeoutOutcome::Release(entry) => {
-            assert_eq!(entry.action, "claim_timeout:self__creditAnalyst");
-            assert_eq!(entry.actor.role, "system");
+        ClaimTimeoutOutcome::Release(release) => {
+            assert_eq!(
+                release.wfah_entry.action,
+                "claim_timeout:self__creditAnalyst"
+            );
+            assert_eq!(release.wfah_entry.actor.role, "system");
+            // wfes_effects yok → ctx satırı yazılmaz
+            assert!(release.new_dynctx.is_none());
         }
         ClaimTimeoutOutcome::Move(_) => panic!("wft yokken Release bekleniyordu"),
     }
@@ -1391,6 +1398,98 @@ async fn claim_timeout_due_with_wft_moves_like_escalation() {
     }
 }
 
+// ---- 2026-07-28: SLA-1 wfes_effects (opsiyonel DynCtx yazımı) ----
+
+/// `golden_with_claim_timeout` + `wfes_effects` — SLA-1 dolduğunda ctx'e yazar.
+fn golden_with_claim_timeout_effects(after: &str, wft: Option<&str>) -> Wfd {
+    let mut wfd = golden_with_claim_timeout(after, wft);
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .claim_timeout
+        .as_mut()
+        .unwrap()
+        .wfes_effects = Some(WfesEffects {
+        set: BTreeMap::from([
+            (
+                "internal_notes".to_string(),
+                json!("Claim süresi doldu, iş havuza döndü."),
+            ),
+            ("analyst_approved_at".to_string(), json!("$timestamp")),
+        ]),
+    });
+    wfd
+}
+
+#[tokio::test]
+async fn claim_timeout_release_applies_wfes_effects() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let wfd = golden_with_claim_timeout_effects("PT2H", None);
+    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    let claimed_at = wfes.created_at;
+    wfes.claimed_at = Some(claimed_at);
+    let now = claimed_at + Duration::hours(2) + Duration::seconds(1);
+
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, None)
+        .await
+        .unwrap()
+    {
+        ClaimTimeoutOutcome::Release(release) => {
+            let ctx = release
+                .new_dynctx
+                .expect("wfes_effects varken yeni ctx bekleniyordu");
+            assert_eq!(
+                ctx["internal_notes"],
+                json!("Claim süresi doldu, iş havuza döndü.")
+            );
+            assert_eq!(ctx["analyst_approved_at"], json!(now.to_rfc3339()));
+        }
+        ClaimTimeoutOutcome::Move(_) => panic!("wft yokken Release bekleniyordu"),
+    }
+}
+
+#[tokio::test]
+async fn claim_timeout_move_applies_wfes_effects_before_wft() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let wfd = golden_with_claim_timeout_effects("PT1H", Some("self__branchManager"));
+    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    let claimed_at = wfes.created_at;
+    wfes.claimed_at = Some(claimed_at);
+    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
+
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, None)
+        .await
+        .unwrap()
+    {
+        ClaimTimeoutOutcome::Move(commit) => {
+            assert!(
+                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+            );
+            assert_eq!(
+                commit.new_dynctx["internal_notes"],
+                json!("Claim süresi doldu, iş havuza döndü.")
+            );
+        }
+        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
+    }
+}
+
 #[tokio::test]
 async fn claim_timeout_not_due_without_claim() {
     let org = MockOrg {
@@ -1409,10 +1508,13 @@ async fn claim_timeout_not_due_without_claim() {
         .unwrap());
 }
 
-// ================================================================ SLA-2 escalation terminate (2026-07-16)
+// ============================================ SLA-2 akışı BİTİREMEZ (2026-07-28)
 
+/// `terminate` kaldırıldı: hedefsiz bir escalation adımı artık akışı sonlandırmaz,
+/// hata verir. Akışı zaman aşımıyla bitiren TEK kural SLA-3 (root `timeout`) —
+/// bkz. `deadline_due_fires_terminated_not_error`.
 #[tokio::test]
-async fn escalation_terminate_true_ends_instance_as_terminated() {
+async fn escalation_without_wft_errors_instead_of_terminating() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -1425,8 +1527,30 @@ async fn escalation_terminate_true_ends_instance_as_terminated() {
     {
         let esc = &mut wfd.nodes.get_mut("self__creditAnalyst").unwrap().escalation[0];
         esc.wft = None;
-        esc.terminate = Some(true);
+        esc.terminate = Some(true); // eski alan; runtime artık dikkate almaz
     }
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
+
+    let err = engine
+        .fire_escalation(&wfd, &wfes, 0, now, None)
+        .await
+        .expect_err("hedefsiz escalation hata vermeli");
+    assert!(matches!(err, EngineError::InvalidWfd(_)), "err: {err:?}");
+}
+
+/// Hedefi olan adım normal node devri yapar — `Terminated` ASLA üretmez.
+#[tokio::test]
+async fn escalation_with_node_target_moves_and_never_terminates() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
     let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
 
@@ -1434,11 +1558,11 @@ async fn escalation_terminate_true_ends_instance_as_terminated() {
         .fire_escalation(&wfd, &wfes, 0, now, None)
         .await
         .unwrap();
-    let CommitOutcome::Terminated { end_response } = &commit.outcome else {
-        panic!("Terminated bekleniyordu");
-    };
-    assert_eq!(end_response["reason"], json!("SLA.Dwell"));
-    assert_eq!(end_response["node"], json!("self__creditAnalyst"));
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
+        "outcome: {:?}",
+        commit.outcome
+    );
     assert_eq!(
         commit.wfah_entries[0].action,
         "escalate:self__creditAnalyst:0"
@@ -2312,10 +2436,13 @@ async fn collapse_summary_marker_describes_whole_event() {
     }
 }
 
+/// 2026-07-28 değişmezi: kol SLA-2'si kardeş kolları DÜŞÜRMEZ. `wft` yalnız `{node}`
+/// olabildiği için collapse/terminate yolları kapalı — kol yalnız kendi hedefine
+/// hareket eder, kardeşler aktif kalır. (WOR-63'ün kol-kapsamlı sistem-collapse
+/// senaryosu bu yüzden artık mümkün değil; sistem tetikli collapse'ın TEK yolu SLA-3
+/// deadline'ıdır — bkz. `collapse_summary_on_terminal_path_has_null_target`.)
 #[tokio::test]
-async fn system_triggered_collapse_markers_carry_system_trigger() {
-    // WOR-63: sistem yollarında (SLA-2 dwell escalation) tetikleyici aksiyon,
-    // ilgili sistem marker'ının adıdır; actor system aktörüdür.
+async fn branch_escalation_does_not_touch_sibling_branches() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -2332,8 +2459,10 @@ async fn system_triggered_collapse_markers_carry_system_trigger() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: None,
-            terminate: Some(true),
+            wft: Some(Wft::Node {
+                node: "self__coordinator".into(),
+            }),
+            terminate: None,
         });
     let wfes = parallel_wfes(
         vec![
@@ -2350,20 +2479,20 @@ async fn system_triggered_collapse_markers_carry_system_trigger() {
         .await
         .unwrap();
 
-    let cancel = commit
-        .wfah_entries
-        .iter()
-        .find(|e| e.action == "_branch_cancelled")
-        .expect("_branch_cancelled");
-    let input = cancel.input.as_ref().unwrap();
-    // geriye dönük alan korunur
-    assert_eq!(input["reason"], json!("terminated"));
-    assert_eq!(input["trigger_node"], json!("self__financeApprover"));
-    assert_eq!(
-        input["trigger_action"],
-        json!("escalate:self__financeApprover:0")
+    assert!(
+        matches!(
+            &commit.outcome,
+            CommitOutcome::BranchMoveTo { from_node, node }
+                if from_node == "self__financeApprover" && node == "self__coordinator"
+        ),
+        "outcome: {:?}",
+        commit.outcome
     );
-    assert_eq!(input["trigger_actor"]["role"], json!("system"));
+    // Yalnız escalation marker'ı — hiçbir iptal/collapse marker'ı YOK.
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["escalate:self__financeApprover:0"]
+    );
 }
 
 #[tokio::test]
@@ -2631,6 +2760,7 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
         .unwrap()
         .claim_timeout = Some(ClaimTimeout {
         after: "PT2H".into(),
+        wfes_effects: None,
         wft: None,
     });
 
@@ -2672,9 +2802,13 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
         .await
         .unwrap()
     {
-        ClaimTimeoutOutcome::Release(entry) => {
-            assert_eq!(entry.action, "claim_timeout:self__financeApprover");
-            assert_eq!(entry.actor.role, "system");
+        ClaimTimeoutOutcome::Release(release) => {
+            assert_eq!(
+                release.wfah_entry.action,
+                "claim_timeout:self__financeApprover"
+            );
+            assert_eq!(release.wfah_entry.actor.role, "system");
+            assert!(release.new_dynctx.is_none());
         }
         ClaimTimeoutOutcome::Move(_) => panic!("wft yokken Release bekleniyordu"),
     }
@@ -2750,75 +2884,6 @@ async fn branch_escalation_fires_from_branch_entered_at() {
     assert_eq!(
         wfah_actions(&commit),
         vec!["escalate:self__financeApprover:0", "_branch_arrived"]
-    );
-}
-
-#[tokio::test]
-async fn branch_escalation_terminate_cancels_sibling_branches() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-    };
-    let mut wfd = paralel();
-    wfd.nodes
-        .get_mut("self__financeApprover")
-        .unwrap()
-        .escalation
-        .push(EscalationStep {
-            after: "P1D".into(),
-            wfes_effects: None,
-            wft: None,
-            terminate: Some(true),
-        });
-
-    let wfes = parallel_wfes(
-        vec![
-            branch("self__financeApprover", BranchStatus::Active, None),
-            branch("self__legalApprover", BranchStatus::Active, None),
-            branch("self__hrApprover", BranchStatus::Arrived, None),
-        ],
-        join_node(),
-        parallel_ctx(),
-    );
-    let now = wfes.branches[0].entered_at + Duration::days(1) + Duration::seconds(1);
-
-    let commit = engine
-        .fire_escalation(&wfd, &wfes, 0, now, Some("self__financeApprover"))
-        .await
-        .unwrap();
-    let CommitOutcome::Terminated { end_response } = &commit.outcome else {
-        panic!("Terminated bekleniyordu: {:?}", commit.outcome);
-    };
-    assert_eq!(end_response["reason"], json!("SLA.Dwell"));
-    assert_eq!(end_response["node"], json!("self__financeApprover"));
-    // yalnız DİĞER aktif kol (legal) iptal marker'ı alır
-    assert_eq!(
-        wfah_actions(&commit),
-        vec![
-            "escalate:self__financeApprover:0",
-            "_collapse",
-            "_branch_cancelled",
-            "_branch_superseded"
-        ]
-    );
-    let cancel = &commit.wfah_entries[2];
-    assert_eq!(
-        cancel.input.as_ref().unwrap()["node"],
-        json!("self__legalApprover")
-    );
-    assert_eq!(
-        cancel.input.as_ref().unwrap()["reason"],
-        json!("terminated")
-    );
-    // WOR-60: SLA-2 terminate de arrived kolun onayını geçersizleştirir
-    let superseded = &commit.wfah_entries[3];
-    assert_eq!(
-        superseded.input.as_ref().unwrap()["node"],
-        json!("self__hrApprover")
     );
 }
 

@@ -22,15 +22,17 @@ pub fn router(pool: PgPool) -> OpenApiRouter {
         .routes(routes!(list_users_by_tenant, create_user))
         .routes(routes!(list_roles_by_tenant, create_role))
         .routes(routes!(update_role))
+        .routes(routes!(list_orgu_types, create_orgu_type))
+        .routes(routes!(update_orgu_type, delete_orgu_type))
         .routes(routes!(list_actors))
         .routes(routes!(create_assignment, revoke_assignment))
         .routes(routes!(create_orgu_role, delete_orgu_role))
         .routes(routes!(list_delegations, create_delegation_admin))
         .routes(routes!(revoke_delegation_admin))
-        .routes(routes!(list_orgu_by_tree))
+        .routes(routes!(list_orgu_by_tree, create_orgu))
         .routes(routes!(list_user_orgu))
         .routes(routes!(list_user_roles))
-        .routes(routes!(get_orgu))
+        .routes(routes!(get_orgu, update_orgu, delete_orgu))
         .routes(routes!(traverse_orgu))
         .with_state(pool)
 }
@@ -255,6 +257,78 @@ async fn update_role(
         .map_err(Into::into)
 }
 
+#[derive(Deserialize, ToSchema)]
+struct CreateOrguTypeBody {
+    key: String,
+    display_name: String,
+}
+
+#[utoipa::path(get, path = "/orgtnt/{id}/orgu-types", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")),
+    responses((status = 200, description = "Org birimi tipi kataloğu", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn list_orgu_types(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+) -> Result<Json<Vec<wf_org::models::OrguTypeDef>>, AppError> {
+    repo::orgu_type::list(&pool, orgtnt_id)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[utoipa::path(post, path = "/orgtnt/{id}/orgu-types", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = CreateOrguTypeBody,
+    responses((status = 200, description = "Oluşturulan/reaktifleştirilen tip", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn create_orgu_type(
+    State(pool): State<PgPool>,
+    Path(orgtnt_id): Path<Uuid>,
+    Json(body): Json<CreateOrguTypeBody>,
+) -> Result<Json<wf_org::models::OrguTypeDef>, AppError> {
+    repo::orgu_type::create(&pool, orgtnt_id, &body.key, &body.display_name)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[utoipa::path(patch, path = "/orgtnt/{id}/orgu-types/{type_id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), ("type_id" = Uuid, Path, description = "Tip id")),
+    request_body = CreateOrguTypeBody,
+    responses((status = 200, description = "Güncellenen tip", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn update_orgu_type(
+    State(pool): State<PgPool>,
+    Path((orgtnt_id, type_id)): Path<(Uuid, Uuid)>,
+    Json(body): Json<CreateOrguTypeBody>,
+) -> Result<Json<wf_org::models::OrguTypeDef>, AppError> {
+    repo::orgu_type::update(&pool, orgtnt_id, type_id, &body.key, &body.display_name)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[utoipa::path(delete, path = "/orgtnt/{id}/orgu-types/{type_id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id"), ("type_id" = Uuid, Path, description = "Tip id")),
+    responses((status = 204, description = "Tip pasifleştirildi")),
+    security(("x_admin_key" = [])))]
+async fn delete_orgu_type(
+    State(pool): State<PgPool>,
+    Path((orgtnt_id, type_id)): Path<(Uuid, Uuid)>,
+) -> Result<axum::http::StatusCode, AppError> {
+    let removed = repo::orgu_type::deactivate(&pool, orgtnt_id, type_id)
+        .await
+        .map_err(AppError::from)?;
+    if removed {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError(
+            "orgu tipi bulunamadı".into(),
+            axum::http::StatusCode::NOT_FOUND,
+        ))
+    }
+}
+
 /// Sim playground: (kullanıcı, birim, rol) atamasını garantiler → dönüşte hazır aktör satırı.
 /// Kritere uygun aktör yoksa UI bununla bir aktör üretir.
 #[derive(Deserialize, ToSchema)]
@@ -398,6 +472,42 @@ async fn list_orgu_by_tree(
         .map_err(Into::into)
 }
 
+#[derive(Deserialize, ToSchema)]
+struct CreateOrguBody {
+    name: String,
+    type_key: String,
+    #[serde(default)]
+    parent_orgu_id: Option<Uuid>,
+}
+
+#[utoipa::path(post, path = "/orgt/{id}/orgu", tag = "org",
+    params(("id" = Uuid, Path, description = "Org ağacı id")), request_body = CreateOrguBody,
+    responses((status = 200, description = "Oluşturulan org birimi", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn create_orgu(
+    State(pool): State<PgPool>,
+    Path(orgt_id): Path<Uuid>,
+    Json(body): Json<CreateOrguBody>,
+) -> Result<Json<wf_org::models::Orgu>, AppError> {
+    let orgtnt_id = repo::orgt::get_orgtnt_id(&pool, orgt_id)
+        .await
+        .map_err(AppError::from)?;
+    repo::orgu_type::require_active(&pool, orgtnt_id, &body.type_key)
+        .await
+        .map_err(AppError::from)?;
+    repo::orgu::create(
+        &pool,
+        orgtnt_id,
+        orgt_id,
+        body.parent_orgu_id,
+        &body.name,
+        &body.type_key,
+    )
+    .await
+    .map(Json)
+    .map_err(Into::into)
+}
+
 #[utoipa::path(get, path = "/users/{id}/orgu", tag = "org",
     params(("id" = Uuid, Path, description = "Kullanıcı id"), PageQuery),
     responses((status = 200, description = "Kullanıcının org birimleri", body = serde_json::Value)),
@@ -444,6 +554,52 @@ async fn get_orgu(
         .await
         .map(Json)
         .map_err(Into::into)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct UpdateOrguBody {
+    name: String,
+    type_key: String,
+}
+
+#[utoipa::path(patch, path = "/orgu/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Org birimi id")), request_body = UpdateOrguBody,
+    responses((status = 200, description = "Güncellenen org birimi", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn update_orgu(
+    State(pool): State<PgPool>,
+    Path(orgu_id): Path<Uuid>,
+    Json(body): Json<UpdateOrguBody>,
+) -> Result<Json<wf_org::models::Orgu>, AppError> {
+    let orgtnt_id = repo::orgu::get_orgtnt_id(&pool, orgu_id)
+        .await
+        .map_err(AppError::from)?;
+    repo::orgu_type::require_active(&pool, orgtnt_id, &body.type_key)
+        .await
+        .map_err(AppError::from)?;
+    repo::orgu::update(&pool, orgu_id, &body.name, &body.type_key)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+#[derive(Serialize, ToSchema)]
+struct DeleteOrguResponse {
+    deactivated_count: i64,
+}
+
+#[utoipa::path(delete, path = "/orgu/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Org birimi id")),
+    responses((status = 200, description = "Pasifleştirilen birim sayısı", body = DeleteOrguResponse)),
+    security(("x_admin_key" = [])))]
+async fn delete_orgu(
+    State(pool): State<PgPool>,
+    Path(orgu_id): Path<Uuid>,
+) -> Result<Json<DeleteOrguResponse>, AppError> {
+    let deactivated_count = repo::orgu::delete_cascade(&pool, orgu_id)
+        .await
+        .map_err(AppError::from)?;
+    Ok(Json(DeleteOrguResponse { deactivated_count }))
 }
 
 #[derive(Deserialize, IntoParams)]

@@ -19,3 +19,12 @@ pub async fn list_by_tenant(
     .await
     .map_err(OrgError::Database)
 }
+
+/// Bir org ağacının bağlı olduğu tenant — orgu create route'u orgtnt_id'yi buradan çözer.
+pub async fn get_orgtnt_id(pool: &PgPool, orgt_id: Uuid) -> Result<Uuid, OrgError> {
+    sqlx::query_scalar::<_, Uuid>("SELECT orgtnt_id FROM org.orgt WHERE orgt_id = $1")
+        .bind(orgt_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| OrgError::NotFound(format!("orgt {orgt_id}")))
+}

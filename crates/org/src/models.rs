@@ -20,6 +20,7 @@ pub struct Orgt {
     pub name: String,
     pub description: Option<String>,
     pub is_active: bool,
+    pub is_default: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

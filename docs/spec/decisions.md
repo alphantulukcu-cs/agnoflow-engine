@@ -834,3 +834,42 @@ temizlendi. Editör tarafında `contextAuthoredRequired` alanı ve `deriveFullCo
 `required` üretimi kaldırıldı; yerine yayın öncesi kullanıcıya dönük iki uyarı eklendi
 (tüketilmeyen input / yazılmayan context alanı) ve bunlar giderilmeden export/upload
 edilemez.
+
+## WOR-70b (2026-07-29) — `required` non-null; gönderilmeyen `optional` `null` yazar
+
+WOR-70'in devamı; aynı gün, kullanıcı düzeltmesi üzerine.
+
+**Sorun:** WOR-70'te "absent-input skip" getirilmişti — effect değeri tam olarak
+`$action.input.<yol>` ise ve yol istekte yoksa set atlanıyordu. Gerekçe opsiyonel
+input'un mevcut değeri silmesini önlemekti. Ama bu, `optional`'ın anlamını
+bulanıklaştırıyordu: alan "yazılmamış" mı, "boş yazılmış" mı belirsizdi ve ctx'te
+alanın var olup olmaması isteğin şekline bağlı hale geliyordu.
+
+**Karar (kullanıcı):** `required` ile `optional` arasındaki fark ctx'e yazılıp
+yazılmamasında DEĞİL, yazılan değerdedir.
+
+- İkisi de `wfes_effects` ile ctx'e eşlenmek ZORUNDADIR. `optional` olması muafiyet
+  değildir — `unused_action_input` her ikisini de denetler (WOR-70'te de böyleydi).
+- `required`: gönderilmek zorunda VE `null` olamaz → yeni hata
+  `zorunlu input 'x' null olamaz` (`validate_action_input`). Denetim YALNIZ bildirilen
+  yolun kendisine bakar; `required: ["applicant"]` ile `{"applicant":{"name":null}}`
+  geçerlidir (alt alanı zorunlu istiyorsan `applicant.name`'i ayrıca bildir).
+- `optional`: gönderilmeyebilir; gönderilmediğinde ctx'e `null` YAZILIR.
+  **absent-input skip KALDIRILDI** — `apply_effects` her satırı koşulsuz uygular.
+
+Böylece `ek_bilgi` gibi bir alan context'te tanımlı, bir aksiyonun `optional` girdisi
+ve o aksiyonun effects'inde `"ek_bilgi": "$action.input.ek_bilgi"` ile eşlenmiş
+olabilir; kullanıcı doldurmazsa `null` kalır. Alan ölü değildir — yazarı var, değeri boş.
+
+**Yan etkinin ele alınışı:** koşulsuz yazım, bir alanı hem opsiyonel girdi hem başka
+bir yazar (escalation / autoexec / terminal / başka kural) yazdığında diğerinin
+değerini `null`'a çevirir. Sessiz bırakmak yerine tasarım anında bildirilir:
+`optional_input_nulls_other_writer` **UYARISI** (yayını engellemez — bilinçli tasarım
+olabilir). Golden fixture bu durumun canlı örneğidir (`internal_notes`: iki aksiyonun
+opsiyonel girdisi + `self__creditAnalyst` escalation'ı) ve fixture bu tek uyarıyı
+BEKLENEN olarak taşır; `golden_fixture_is_valid` testi onu ismen kabul eder, başka
+uyarıya izin vermez.
+
+**Reddedilen alternatif:** golden fixture'daki çakışmayı kaldırmak (internal_notes'u
+opsiyonel listelerden çıkarmak). Örneğin öğretici değeri korundu — kuralın gerçek bir
+akışta nasıl göründüğü fixture'da görünsün.

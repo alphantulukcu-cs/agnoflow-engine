@@ -374,6 +374,11 @@ isimde parametreler bulunmak zorunda."* Değerin ctx'e taşınması ayrı bir ad
 yalnız `wfes_effects` ile olur (runtime-semantics §7.5a); tutarlılığı
 `context_field_never_written` + `unused_action_input` kuralları korur (§6b).
 
+**`required` ↔ `optional` (WOR-70b).** İkisi de `wfes_effects` ile ctx'e eşlenmek
+zorundadır; `optional` olmak muafiyet değildir. Fark yalnız değerde: `required`
+gönderilmek zorunda ve `null` olamaz, `optional` gönderilmezse alan `null` kalır.
+Ayrıntı: runtime-semantics §7.5a.
+
 ---
 
 ## CANVAS NODE MODELİ (yalnız editör)

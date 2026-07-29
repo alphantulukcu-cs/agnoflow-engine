@@ -2132,8 +2132,8 @@ fn parse_wfd_uuid(wfd: &Wfd) -> Result<Uuid, EngineError> {
     Ok(Uuid::parse_str(&wfd.id).unwrap_or(Uuid::nil()))
 }
 
-/// §7.5 — aksiyon girdisi sözleşme denetimi: `input.required` yolları mevcut olmalı,
-/// `required ∪ optional` dışında kalan leaf yol reddedilir.
+/// §7.5 — aksiyon girdisi sözleşme denetimi: `input.required` yolları mevcut VE
+/// non-null olmalı, `required ∪ optional` dışında kalan leaf yol reddedilir.
 ///
 /// WOR-70: bu fonksiyon ctx'e ARTIK YAZMAZ. Girdinin ctx'e taşınması yalnız
 /// `wfes_effects.set` üzerinden `$action.input.<yol>` ile olur — context'e tek yazma
@@ -2141,6 +2141,14 @@ fn parse_wfd_uuid(wfd: &Wfd) -> Result<Uuid, EngineError> {
 /// cevaplanabilir; validator de her declared input'un tüketildiğini zorlar
 /// (`unused_action_input`) ve hiç yazılmayan context alanını reddeder
 /// (`context_field_never_written`).
+///
+/// `required` ↔ `optional` ayrımı (WOR-70b): ikisi de `wfes_effects` ile ctx'e
+/// eşlenmek ZORUNDADIR (validator `unused_action_input`); fark yalnız değerdedir —
+/// `required` gönderilmek zorunda ve `null` OLAMAZ, `optional` gönderilmeyebilir ve
+/// gönderilmediğinde ctx'e `null` yazılır. Null denetimi YALNIZ bildirilen yolun
+/// kendisine bakar: `required: ["applicant"]` ile `{"applicant": {"name": null}}`
+/// geçerlidir; `name`'in de dolu olması isteniyorsa `applicant.name` ayrıca
+/// `input.required`'a yazılır.
 fn validate_action_input(action: &ActionDef, input: &Value) -> Result<(), EngineError> {
     let declared: Vec<&String> = action
         .input
@@ -2150,10 +2158,18 @@ fn validate_action_input(action: &ActionDef, input: &Value) -> Result<(), Engine
         .collect();
 
     for required in &action.input.required {
-        if get_path(input, required).is_none() {
-            return Err(EngineError::InvalidInput(format!(
-                "zorunlu input '{required}' eksik"
-            )));
+        match get_path(input, required) {
+            None => {
+                return Err(EngineError::InvalidInput(format!(
+                    "zorunlu input '{required}' eksik"
+                )))
+            }
+            Some(Value::Null) => {
+                return Err(EngineError::InvalidInput(format!(
+                    "zorunlu input '{required}' null olamaz"
+                )))
+            }
+            Some(_) => {}
         }
     }
 

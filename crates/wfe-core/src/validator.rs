@@ -56,6 +56,7 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_context_required_removed(wfd, &mut report);
     check_context_field_writers(wfd, &mut report);
     check_action_input_consumed(wfd, &mut report);
+    check_optional_input_overwrites(wfd, &mut report);
     check_attachments(wfd, &mut report);
     check_effect_paths(wfd, &mut report);
     check_retries(wfd, &mut report);
@@ -990,6 +991,129 @@ fn check_action_input_consumed(wfd: &Wfd, report: &mut ValidationReport) {
                 ),
             );
         }
+    }
+}
+
+/// Kural 4 (UYARI) — gönderilmeyen opsiyonel girdi, başka bir yazarın değerini `null`'a
+/// çevirir. Hata değil (bilinçli tasarım olabilir), ama akış yazarı bunu tasarım anında
+/// görmeli: `optional` bir girdiyle yazılan alanı BAŞKA bir yazar da yazıyorsa
+/// (escalation/autoexec/terminal ya da başka bir kural), girdi gönderilmediğinde o
+/// değer kaybolur (bkz. effects::apply_effects).
+fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
+    // (hedef yol, site açıklaması, opsiyonel-girdi kaynaklı mı)
+    let mut writers: Vec<(String, String, bool)> = Vec::new();
+
+    let mut push_rule = |path: &str,
+                         action_name: &str,
+                         effects: &WfesEffects,
+                         site: String,
+                         writers: &mut Vec<(String, String, bool)>| {
+        let optional_sourced = effects.set.get(path).is_some_and(|raw| {
+            let Some(input_path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) else {
+                return false;
+            };
+            let Some(action) = wfd.actions.get(action_name) else {
+                return false;
+            };
+            // Yalnız opsiyonel bildirimi karşılıyorsa; zorunlu bildirimi de karşılıyorsa
+            // gönderilmesi garanti olduğundan null'a dönmez.
+            action
+                .input
+                .optional
+                .iter()
+                .any(|o| paths_overlap(o, input_path))
+                && !action
+                    .input
+                    .required
+                    .iter()
+                    .any(|r| paths_overlap(r, input_path))
+        });
+        writers.push((path.to_string(), site, optional_sourced));
+    };
+
+    for s in &wfd.start {
+        if let Some(e) = &s.wfes_effects {
+            for path in e.set.keys() {
+                let site = format!("start[{}]", s.id);
+                push_rule(path, &s.action, e, site, &mut writers);
+            }
+        }
+        for trig in &s.trigger {
+            if let Some(c) = &trig.catch {
+                for path in c.wfes_effects.set.keys() {
+                    writers.push((path.clone(), format!("start[{}] catch", s.id), false));
+                }
+            }
+        }
+    }
+    for t in &wfd.transitions {
+        if let Some(e) = &t.wfes_effects {
+            for path in e.set.keys() {
+                let site = format!("'{}' aksiyonu", t.action);
+                push_rule(path, &t.action, e, site, &mut writers);
+            }
+        }
+        for trig in &t.trigger {
+            if let Some(c) = &trig.catch {
+                for path in c.wfes_effects.set.keys() {
+                    writers.push((path.clone(), format!("transitions[{}] catch", t.id), false));
+                }
+            }
+        }
+    }
+    for (key, node) in &wfd.nodes {
+        for esc in &node.escalation {
+            if let Some(e) = &esc.wfes_effects {
+                for path in e.set.keys() {
+                    writers.push((path.clone(), format!("'{key}' escalation'ı"), false));
+                }
+            }
+        }
+        if let Some(ct) = &node.claim_timeout {
+            if let Some(e) = &ct.wfes_effects {
+                for path in e.set.keys() {
+                    writers.push((path.clone(), format!("'{key}' claim süresi"), false));
+                }
+            }
+        }
+    }
+    for t in &wfd.terminals {
+        if let Some(e) = &t.wfes_effects {
+            for path in e.set.keys() {
+                writers.push((path.clone(), format!("'{}' terminali", t.id), false));
+            }
+        }
+    }
+    for (name, ax) in &wfd.autoexec {
+        if let Some(e) = &ax.wfes_effects {
+            for path in e.set.keys() {
+                writers.push((path.clone(), format!("'{name}' otomasyonu"), false));
+            }
+        }
+    }
+
+    let mut reported: HashSet<String> = HashSet::new();
+    for (path, site, optional_sourced) in &writers {
+        if !optional_sourced || !reported.insert(path.clone()) {
+            continue;
+        }
+        let others: Vec<&str> = writers
+            .iter()
+            .filter(|(p, s, _)| s != site && paths_overlap(p, path))
+            .map(|(_, s, _)| s.as_str())
+            .collect();
+        if others.is_empty() {
+            continue;
+        }
+        report.warn(
+            "optional_input_nulls_other_writer",
+            site.clone(),
+            format!(
+                "'{path}' alanını opsiyonel bir girdi yazıyor; aynı alanı {} da yazıyor. \
+                 Girdi gönderilmezse bu alan null olur ve diğer yazarın değeri kaybolur.",
+                others.join(", ")
+            ),
+        );
     }
 }
 

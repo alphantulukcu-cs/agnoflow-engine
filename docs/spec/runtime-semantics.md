@@ -89,7 +89,8 @@ denetimi YOKTUR:
 |---|---|
 | `context_required_removed` | `context.required` ya da `context.properties.*` altında `required` varsa WFD REDDEDİLİR (kökte de, iç içe de). Şema düzeyinde de yasak: `contextSchemaNode.not.required`. |
 | `context_field_never_written` | Her context **yaprağı** en az bir `wfes_effects.set` hedefi tarafından kapsanmalı. Kapsama iki yönlüdür: `applicant` yazımı `applicant.name`'i kapsar, `initiated_by.role` yazımı opak `initiated_by` yaprağını kapsar. Hiç yazılmayan alan = hiç dolmayacak alan → hata. |
-| `unused_action_input` | Bir kuralın (`start[]` / `transitions[]`) aksiyonunun bildirdiği her input yolu (`required ∪ optional`), o kuralın effects'inde `$action.input.<yol>` ile tüketilmeli. Tüketici olarak kuralın kendi `wfes_effects`'i, `trigger[].catch.wfes_effects`'i ve tetiklediği `autoexec.<ad>.wfes_effects` sayılır. |
+| `unused_action_input` | Bir kuralın (`start[]` / `transitions[]`) aksiyonunun bildirdiği her input yolu (`required ∪ optional` — opsiyonel olması muaf tutmaz), o kuralın effects'inde `$action.input.<yol>` ile tüketilmeli. Tüketici olarak kuralın kendi `wfes_effects`'i, `trigger[].catch.wfes_effects`'i ve tetiklediği `autoexec.<ad>.wfes_effects` sayılır. |
+| `optional_input_nulls_other_writer` *(UYARI)* | Bir alanı hem opsiyonel girdi hem başka bir yazar yazıyorsa: girdi gönderilmezse diğerinin değeri `null`'a döner. Yayını engellemez (§7.5a). |
 
 Taranan effect siteleri (yazar kümesi): `start[].wfes_effects`, `start[].trigger[].catch`,
 `transitions[].wfes_effects`, `transitions[].trigger[].catch`, `nodes[].escalation[]`,
@@ -142,12 +143,31 @@ Gerekçe: bir ctx alanının değeri nereden geldiği akışa bakılarak cevapla
 ("iki yazma yolu" belirsizliği kalksın). Sözleşmenin bütünlüğü §6b'nin üç kuralıyla
 korunur: yazılmayan alan da, tüketilmeyen input da WFD'yi reddettirir.
 
-**Absent-input skip:** effect değeri TAM OLARAK `"$action.input.<yol>"` ise ve o yol
-gelen istekte YOKSA set ATLANIR — `null` yazılmaz. Bu kural olmadan opsiyonel input
-ifade edilemezdi: gönderilmeyen `internal_notes`, escalation'ın yazdığı notu silerdi.
-Ayrım "yok" ile "null gönderildi" arasındadır — açıkça `null` gönderilirse yazılır.
-Kural yalnız bu tam-eşleşme formuna özgüdür; `$ctx.*` ve `$exec.result.*` eskisi gibi
-davranır (yol yok → `null`).
+**`required` ↔ `optional`: tek fark değerdir (WOR-70b).** İkisi de `wfes_effects` ile
+ctx'e eşlenmek ZORUNDADIR — `optional` olması bu zorunluluğu kaldırmaz (validator
+`unused_action_input` her ikisini de denetler). Fark yalnız yazılan değerde:
+
+| | İstek | Ctx'te sonuç |
+|---|---|---|
+| `required` | Gönderilmek zorunda, değeri `null` OLAMAZ (`zorunlu input 'x' null olamaz`) | Her zaman gerçek bir değer |
+| `optional` | Gönderilmeyebilir | Gönderildiyse değeri, gönderilmediyse **`null`** |
+
+Yani `ek_bilgi` context'te tanımlı, bir aksiyonun `optional` girdisi ve o aksiyonun
+effects'inde `"ek_bilgi": "$action.input.ek_bilgi"` yazılıyorsa bu GEÇERLİ bir
+kullanımdır; kullanıcı doldurmazsa alan `null` kalır. Alan "ölü" değildir — yazarı
+vardır, değeri boştur.
+
+Null denetimi YALNIZ bildirilen yolun kendisine bakar: `required: ["applicant"]` ile
+`{"applicant": {"name": null}}` geçerlidir. `name`'in de dolu olması isteniyorsa
+`applicant.name` ayrıca `input.required`'a yazılır.
+
+**Yan etki ve uyarısı:** her `set` satırı koşulsuz uygulandığı için, bir alanı hem
+opsiyonel girdi hem BAŞKA bir yazar (escalation / autoexec / terminal / başka bir kural)
+yazıyorsa, girdi gönderilmediğinde diğerinin yazdığı değer `null`'a döner. Validator
+bunu `optional_input_nulls_other_writer` UYARISI ile bildirir — yayını engellemez
+(bilinçli tasarım olabilir), ama akış yazarı tuzağı tasarım anında görür. Golden
+fixture bu durumun canlı örneğini taşır (`internal_notes`: iki aksiyonun opsiyonel
+girdisi + analist havuzunun escalation'ı).
 
 ## 8. Escalation / Timeout Runtime
 

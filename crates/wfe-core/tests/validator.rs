@@ -34,9 +34,21 @@ fn golden_fixture_is_valid() {
         "golden fixture temiz geçmeli, hatalar: {:#?}",
         report.errors
     );
-    assert!(
-        report.warnings.is_empty(),
-        "uyarılar: {:#?}",
+    // WOR-70b: golden fixture'da `internal_notes` alanını hem iki aksiyonun OPSİYONEL
+    // girdisi hem analist havuzunun escalation'ı yazıyor. Girdi gönderilmezse alan
+    // null'a döner ve SLA notu kaybolur — bilinçli tasarım olabileceği için hata değil
+    // UYARI. Fixture bu uyarıyı BEKLENEN tek uyarı olarak taşır (örnek değeri var:
+    // kuralın gerçek bir akışta nasıl göründüğünü gösteriyor).
+    let unexpected: Vec<_> = report
+        .warnings
+        .iter()
+        .filter(|w| w.code != "optional_input_nulls_other_writer")
+        .collect();
+    assert!(unexpected.is_empty(), "beklenmeyen uyarılar: {unexpected:#?}");
+    assert_eq!(
+        report.warnings.len(),
+        1,
+        "yalnız internal_notes uyarısı beklenir: {:#?}",
         report.warnings
     );
 }
@@ -875,5 +887,50 @@ fn autoexec_effects_count_as_input_consumers() {
         !has_error(&report, "unused_action_input"),
         "tetiklenen autoexec'in effects'i de tüketici sayılmalı, hatalar: {:#?}",
         report.errors
+    );
+}
+
+// ---- WOR-70b: required non-null + opsiyonel girdinin null'lama uyarısı ----
+
+#[test]
+fn optional_input_with_no_other_writer_is_not_warned() {
+    let mut v = fixture_value();
+    // internal_notes'u yalnız manager_decide yazsın: analist transition'ından ve
+    // escalation'dan kaldır → tek yazar kalır, uyarı üretilmemeli.
+    v["transitions"][0]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("internal_notes");
+    v["actions"]["analyst_approve"]["input"]["optional"] = json!([]);
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("wfes_effects");
+    let report = validate_value(v);
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.code == "optional_input_nulls_other_writer"),
+        "tek yazar varsa uyarı olmamalı: {:#?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn required_sourced_input_does_not_trigger_the_warning() {
+    let mut v = fixture_value();
+    // manager_decision yalnız `required` — gönderilmesi garanti, null'a dönmez.
+    // Aynı alanı bir terminal effect'i de yazsın: uyarı ÜRETİLMEMELİ.
+    v["terminals"][0]["wfes_effects"] = json!({ "set": { "manager_decision": "approve" } });
+    let report = validate_value(v);
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.code == "optional_input_nulls_other_writer"
+                && w.message.contains("manager_decision")),
+        "zorunlu girdi kaynaklı yazar uyarı üretmemeli: {:#?}",
+        report.warnings
     );
 }

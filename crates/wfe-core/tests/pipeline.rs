@@ -266,9 +266,11 @@ async fn declared_input_alone_does_not_reach_ctx() {
 }
 
 #[tokio::test]
-async fn absent_optional_input_does_not_wipe_existing_ctx_value() {
-    // WOR-70 absent-input skip: `internal_notes` opsiyonel; gönderilmediğinde
-    // manager_decide'ın effect'i onu null'a çevirip escalation notunu SİLMEMELİ.
+async fn absent_optional_input_nulls_the_field() {
+    // WOR-70b: `internal_notes` opsiyonel; gönderilmediğinde manager_decide'ın effect'i
+    // onu `null` yazar — escalation'ın yazdığı not KAYBOLUR. Bu, optional'ın required'dan
+    // tek farkıdır (required gönderilmek zorunda ve null olamaz). Validator aynı alanı
+    // iki yazarın yazdığını `optional_input_nulls_other_writer` uyarısıyla bildirir.
     let org = MockOrg {
         role_assigned: true,
     };
@@ -302,8 +304,8 @@ async fn absent_optional_input_does_not_wipe_existing_ctx_value() {
         .expect("aksiyon uygulanmalı");
     assert_eq!(
         commit.new_dynctx["internal_notes"],
-        json!("SLA aşımı: analist 3 gün içinde işlem yapmadı, müdüre eskalasyon."),
-        "gönderilmeyen opsiyonel input mevcut değeri ezmemeli"
+        Value::Null,
+        "gönderilmeyen opsiyonel input alanı null'a çevirmeli"
     );
     assert_eq!(commit.new_dynctx["manager_decision"], json!("reject"));
 }
@@ -3195,4 +3197,105 @@ async fn reassign_on_terminal_wfe_is_rejected() {
         matches!(err, EngineError::WfeTerminal),
         "terminal WFE'de devir reddedilmeli"
     );
+}
+
+#[tokio::test]
+async fn required_input_sent_as_null_is_rejected() {
+    // WOR-70b: `required` gönderilmek zorunda VE null olamaz.
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let actor = clerk(Uuid::new_v4());
+    let mut input = start_input();
+    input["credit_info"] = Value::Null;
+
+    let err = engine
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidInput(m) if m.contains("null olamaz")),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn required_input_allows_null_in_undeclared_subfield() {
+    // Null denetimi YALNIZ bildirilen yola bakar: `required: ["applicant"]` ile
+    // applicant.income null gelebilir (income ayrıca required bildirilmemiş).
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let actor = clerk(Uuid::new_v4());
+    let mut input = start_input();
+    input["applicant"]["income"] = Value::Null;
+
+    let new = engine
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
+        .await
+        .expect("bildirilmemiş alt alanın null'u geçerli");
+    assert_eq!(new.initial_dynctx["applicant"]["income"], Value::Null);
+    assert_eq!(new.initial_dynctx["applicant"]["name"], json!("Ayşe Yılmaz"));
+}
+
+#[tokio::test]
+async fn optional_input_sent_as_value_is_written() {
+    // Karşı taraf: opsiyonel girdi GÖNDERİLDİĞİNDE değeri ctx'e yazılır.
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let orgu = Uuid::new_v4();
+    let m = manager(orgu);
+    let wfes = wfes_at(
+        "self__branchManager",
+        Some(m.user_id),
+        json!({
+            "applicant": {"name": "Ayşe Yılmaz", "tckid": "12345678901", "income": 30000},
+            "credit_info": {"amount_requested": 5000}
+        }),
+    );
+
+    let commit = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve", "internal_notes": "müdür notu"}),
+            None,
+        )
+        .await
+        .expect("aksiyon uygulanmalı");
+    assert_eq!(commit.new_dynctx["internal_notes"], json!("müdür notu"));
 }

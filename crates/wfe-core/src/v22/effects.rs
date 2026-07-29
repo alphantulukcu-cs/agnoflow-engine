@@ -23,6 +23,13 @@ pub struct EffectEnv<'a> {
 
 /// Effects'i staged ctx üzerine uygular; yeni bir ctx döner (immutable).
 /// Set path'leri dotted olabilir — ara objeler oluşturulur.
+///
+/// WOR-70 — **absent-input skip:** değer TAM OLARAK `"$action.input.<yol>"` ise ve o yol
+/// istekte yoksa set ATLANIR (null yazılmaz). Girdinin ctx'e tek taşıyıcısı effects
+/// olduğundan opsiyonel input'lar bu kural olmadan ifade edilemezdi: gönderilmeyen
+/// opsiyonel alan `null` yazıp önceden (escalation/başka aksiyon) yazılmış değeri
+/// silerdi. Yalnız bu tam-eşleşme formu atlanır — `$ctx.*`, `$exec.result.*` ve
+/// string içinde geçen referanslar eski davranışta kalır (yok → null).
 pub fn apply_effects(
     ctx: &Value,
     effects: &WfesEffects,
@@ -33,10 +40,25 @@ pub fn apply_effects(
         _ => Map::new(),
     };
     for (path, raw) in &effects.set {
+        if is_absent_action_input(raw, env) {
+            continue;
+        }
         let resolved = resolve_value(raw, ctx, env)?;
         set_path(&mut root, path, resolved);
     }
     Ok(Value::Object(root))
+}
+
+/// Değer tam olarak `$action.input.<yol>` mü ve o yol gelen input'ta YOK mu?
+fn is_absent_action_input(raw: &Value, env: &EffectEnv<'_>) -> bool {
+    let Some(s) = raw.as_str() else { return false };
+    let Some(path) = s.strip_prefix("$action.input.") else {
+        return false;
+    };
+    match env.action_input {
+        Some(input) => get_path(input, path).is_none(),
+        None => true,
+    }
 }
 
 /// Bir effect/terminal değerini çözer. String'ler $-kurallarına göre,
@@ -203,6 +225,59 @@ mod tests {
         let e = env(&a, None, None);
         let out =
             apply_effects(&json!({}), &effects(&[("x", json!("$ctx.ghost.path"))]), &e).unwrap();
+        assert_eq!(out["x"], Value::Null);
+    }
+
+    #[test]
+    fn absent_action_input_skips_the_write() {
+        // WOR-70: gönderilmeyen OPSİYONEL input, önceden yazılmış değeri SİLMEZ.
+        let a = actor();
+        let input = json!({ "manager_decision": "approve" });
+        let e = env(&a, Some(&input), None);
+        let ctx = json!({ "internal_notes": "escalation notu" });
+        let out = apply_effects(
+            &ctx,
+            &effects(&[
+                ("manager_decision", json!("$action.input.manager_decision")),
+                ("internal_notes", json!("$action.input.internal_notes")),
+            ]),
+            &e,
+        )
+        .unwrap();
+        assert_eq!(out["manager_decision"], json!("approve"));
+        assert_eq!(
+            out["internal_notes"],
+            json!("escalation notu"),
+            "gönderilmeyen opsiyonel input mevcut değeri ezmemeli"
+        );
+    }
+
+    #[test]
+    fn present_but_null_action_input_is_written() {
+        // Açıkça `null` GÖNDERİLDİYSE yazılır — "yok" ile "null" ayrı şeyler.
+        let a = actor();
+        let input = json!({ "internal_notes": null });
+        let e = env(&a, Some(&input), None);
+        let out = apply_effects(
+            &json!({ "internal_notes": "eski" }),
+            &effects(&[("internal_notes", json!("$action.input.internal_notes"))]),
+            &e,
+        )
+        .unwrap();
+        assert_eq!(out["internal_notes"], Value::Null);
+    }
+
+    #[test]
+    fn absent_skip_does_not_apply_to_other_namespaces() {
+        // Kural yalnız $action.input tam-eşleşmesine özgü; $ctx.* eskisi gibi null yazar.
+        let a = actor();
+        let e = env(&a, None, None);
+        let out = apply_effects(
+            &json!({ "x": "eski" }),
+            &effects(&[("x", json!("$ctx.ghost.path"))]),
+            &e,
+        )
+        .unwrap();
         assert_eq!(out["x"], Value::Null);
     }
 

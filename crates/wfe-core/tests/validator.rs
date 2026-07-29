@@ -721,3 +721,159 @@ fn parallel_branch_dead_end_is_error() {
         report.errors
     );
 }
+
+// ---- WOR-70: context yazma sözleşmesi ----
+
+#[test]
+fn attachment_and_parallel_fixtures_are_valid() {
+    // Üç fixture de yeni sözleşmeye (context.required yok, her alan yazılıyor,
+    // her input tüketiliyor) uymalı.
+    for (name, raw) in [
+        ("belge-onay", ATTACHMENT_FIXTURE),
+        ("paralel-onay", PARALLEL_FIXTURE),
+    ] {
+        let wfd = Wfd::from_json(raw).expect("fixture parse etmeli");
+        let report = validate(&wfd);
+        assert!(
+            report.is_valid(),
+            "{name} geçerli olmalı, hatalar: {:#?}",
+            report.errors
+        );
+    }
+}
+
+#[test]
+fn root_context_required_is_error() {
+    let mut v = fixture_value();
+    v["context"]["required"] = json!(["applicant"]);
+    assert!(has_error(&validate_value(v), "context_required_removed"));
+}
+
+#[test]
+fn nested_context_required_is_error() {
+    let mut v = fixture_value();
+    v["context"]["properties"]["applicant"]["required"] = json!(["name"]);
+    assert!(has_error(&validate_value(v), "context_required_removed"));
+}
+
+#[test]
+fn context_field_no_effect_writes_is_error() {
+    let mut v = fixture_value();
+    // Hiçbir wfes_effects'in yazmadığı yeni bir alan — hiç dolmayacağı için reddedilir.
+    v["context"]["properties"]["hayalet_alan"] = json!({"type": "string"});
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "context_field_never_written"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn nested_context_leaf_no_effect_writes_is_error() {
+    let mut v = fixture_value();
+    // `applicant` bütün olarak yazılıyor ($action.input.applicant) — ata kapsaması
+    // geçerli olmalı; ama HİÇ yazılmayan bir kökün yaprağı yakalanmalı.
+    v["context"]["properties"]["ek_bilgi"] = json!({
+        "type": "object",
+        "properties": { "kanal": { "type": "string" } }
+    });
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "context_field_never_written" && e.message.contains("ek_bilgi.kanal")),
+        "yaprak yol raporlanmalı, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn whole_object_effect_covers_nested_leaves() {
+    // Golden'da `applicant` tek parça yazılıyor; name/tckid/income yaprakları
+    // ölü sayılmamalı.
+    let report = validate(&Wfd::from_json(FIXTURE).unwrap());
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|e| e.code == "context_field_never_written"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn declared_input_not_consumed_by_effects_is_error() {
+    let mut v = fixture_value();
+    // manager_decide'ın manager_decision yazımını sil — istekten gelen değer
+    // hiçbir yere yazılmıyor.
+    v["transitions"][1]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decision");
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "unused_action_input"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn optional_input_must_also_be_consumed() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("internal_notes");
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "unused_action_input" && e.message.contains("internal_notes")),
+        "opsiyonel input da tüketilmeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn ancestor_input_ref_covers_dotted_declaration() {
+    let mut v = fixture_value();
+    // analyst_approve `credit_info.amount_requested` istiyor; effect bütün objeyi
+    // yazarsa (ata referans) bu da tüketim sayılır.
+    v["transitions"][0]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("credit_info.amount_requested");
+    v["transitions"][0]["wfes_effects"]["set"]["credit_info"] = json!("$action.input.credit_info");
+    let report = validate_value(v);
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|e| e.code == "unused_action_input" && e.message.contains("credit_info")),
+        "ata referans tüketim saymalı, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn autoexec_effects_count_as_input_consumers() {
+    let mut v = fixture_value();
+    // manager_decision'ı transition effects'ten çıkar, tetiklenen autoexec'e taşı.
+    v["transitions"][1]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decision");
+    v["autoexec"]["audit_log"]["wfes_effects"] =
+        json!({ "set": { "manager_decision": "$action.input.manager_decision" } });
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "unused_action_input"),
+        "tetiklenen autoexec'in effects'i de tüketici sayılmalı, hatalar: {:#?}",
+        report.errors
+    );
+}

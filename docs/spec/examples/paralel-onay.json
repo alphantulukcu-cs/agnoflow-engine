@@ -22,11 +22,7 @@
           "description": {
             "type": "string"
           }
-        },
-        "required": [
-          "title",
-          "amount"
-        ]
+        }
       },
       "submitted_by": {
         "type": "object",
@@ -48,10 +44,7 @@
         "type": "string",
         "x-wf-readonly": true
       }
-    },
-    "required": [
-      "request"
-    ]
+    }
   },
   "nodes": {
     "self__requester": {
@@ -122,6 +115,9 @@
       "action": "submit_request",
       "wfes_effects": {
         "set": {
+          "request.title": "$action.input.request.title",
+          "request.amount": "$action.input.request.amount",
+          "request.description": "$action.input.request.description",
           "submitted_by": "$actor"
         }
       },

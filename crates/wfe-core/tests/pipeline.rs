@@ -217,7 +217,11 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
 }
 
 #[tokio::test]
-async fn start_rejects_missing_required_context_field() {
+async fn declared_input_alone_does_not_reach_ctx() {
+    // WOR-70: context'e tek yazma yolu wfes_effects'tir. Girdi bildirilmiş ve
+    // gönderilmiş olsa bile, onu yazan bir effect yoksa ctx'e GİRMEZ.
+    // (Validator böyle bir WFD'yi `unused_action_input` ile reddeder; bu test
+    // runtime davranışını yalıtarak doğrular.)
     let org = MockOrg {
         role_assigned: true,
     };
@@ -228,19 +232,80 @@ async fn start_rejects_missing_required_context_field() {
     };
     let actor = clerk(Uuid::new_v4());
 
-    let err = engine
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    v["start"][0]["wfes_effects"]["set"] = json!({ "initiated_by": "$actor" });
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let new = engine
         .start(
-            &golden(),
+            &wfd,
             &actor,
             Uuid::nil(),
             None,
-            &json!({"applicant": {}}),
+            &start_input(),
             Uuid::new_v4(),
             None,
         )
         .await
-        .unwrap_err();
-    assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
+        .expect("input sözleşmesi geçerli — start başarılı olmalı");
+    assert!(
+        new.initial_dynctx.get("applicant").is_none(),
+        "effect yazmadan input ctx'e sızmamalı: {:?}",
+        new.initial_dynctx
+    );
+    assert!(
+        new.initial_dynctx.get("credit_info").is_none(),
+        "effect yazmadan input ctx'e sızmamalı: {:?}",
+        new.initial_dynctx
+    );
+    assert_eq!(
+        new.initial_dynctx["initiated_by"]["role"],
+        json!("branchClerk"),
+        "effect ile yazılan alan yerinde olmalı"
+    );
+}
+
+#[tokio::test]
+async fn absent_optional_input_does_not_wipe_existing_ctx_value() {
+    // WOR-70 absent-input skip: `internal_notes` opsiyonel; gönderilmediğinde
+    // manager_decide'ın effect'i onu null'a çevirip escalation notunu SİLMEMELİ.
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let orgu = Uuid::new_v4();
+    let m = manager(orgu);
+    let wfes = wfes_at(
+        "self__branchManager",
+        Some(m.user_id),
+        json!({
+            "applicant": {"name": "Ayşe Yılmaz", "tckid": "12345678901", "income": 30000},
+            "credit_info": {"amount_requested": 5000},
+            "internal_notes": "SLA aşımı: analist 3 gün içinde işlem yapmadı, müdüre eskalasyon."
+        }),
+    );
+
+    let commit = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "reject"}),
+            None,
+        )
+        .await
+        .expect("aksiyon uygulanmalı");
+    assert_eq!(
+        commit.new_dynctx["internal_notes"],
+        json!("SLA aşımı: analist 3 gün içinde işlem yapmadı, müdüre eskalasyon."),
+        "gönderilmeyen opsiyonel input mevcut değeri ezmemeli"
+    );
+    assert_eq!(commit.new_dynctx["manager_decision"], json!("reject"));
 }
 
 #[tokio::test]

@@ -243,7 +243,12 @@ WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, 
   "from": ["self__branchManager", "parent__creditDeptManager"],
   "action": "manager_decide",
   "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
-  "wfes_effects": { "set": { "manager_reviewed_at": "$timestamp" } },
+  "wfes_effects": {
+    "set": {
+      "manager_decision": "$action.input.manager_decision",
+      "manager_reviewed_at": "$timestamp"
+    }
+  },
   "trigger": [{ "use": "audit_log", "required": false }],
   "wft": {
     "conditions": [
@@ -257,6 +262,11 @@ WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, 
 - `from`: kaynak node slug'ı (string/array). `when` sadece ek veri guard'ıdır.
 - `c_a` (opsiyonel, TEK kural): EK kısıt — owner ayrıca bu kurala da match etmelidir.
 - Aynı (node, action) için birden fazla transition: array sırasında `when`'i true olan İLK seçilir.
+- **WOR-70:** aksiyonun bildirdiği her input, bu kuralın `wfes_effects`'inde
+  `$action.input.<yol>` ile ctx'e yazılmak ZORUNDADIR — girdi kendiliğinden ctx'e
+  geçmez (`unused_action_input`). Yukarıdaki örnekte `manager_decide`'ın
+  `input.required = ["manager_decision"]` bildirimi bu yüzden bir `set` satırıyla
+  eşleşir.
 
 ---
 
@@ -355,6 +365,14 @@ olan Actor için de geçerlidir. Ayrıntı: **VISIBILITY / V** bölümü.
 
 > `x-wf-readonly`'nin eski `_step_<action>` injection discriminator rolü
 > v2.2'de GEÇERSİZDİR — `_step_*` kaldırılmıştır (bkz. DEPRECATED).
+
+**`required` KULLANILAMAZ (WOR-70).** Ne `context.required` ne de bir field'ın
+içindeki `required` listesi geçerlidir; ikisi de WFD'yi reddettirir
+(`context_required_removed`). Zorunluluk **tek yerde** bildirilir:
+`actions.<ad>.input.required`. Anlamı da tek: *"bu aksiyonu tetikleyen istekte şu
+isimde parametreler bulunmak zorunda."* Değerin ctx'e taşınması ayrı bir adımdır ve
+yalnız `wfes_effects` ile olur (runtime-semantics §7.5a); tutarlılığı
+`context_field_never_written` + `unused_action_input` kuralları korur (§6b).
 
 ---
 

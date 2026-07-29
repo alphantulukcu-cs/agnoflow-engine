@@ -22,12 +22,7 @@
           "income": {
             "type": "number"
           }
-        },
-        "required": [
-          "name",
-          "tckid",
-          "income"
-        ]
+        }
       },
       "credit_info": {
         "type": "object",
@@ -38,10 +33,7 @@
           "purpose": {
             "type": "string"
           }
-        },
-        "required": [
-          "amount_requested"
-        ]
+        }
       },
       "manager_decision": {
         "type": "string",
@@ -88,11 +80,7 @@
           ]
         }
       }
-    },
-    "required": [
-      "applicant",
-      "credit_info"
-    ]
+    }
   },
   "nodes": {
     "self__creditAnalyst": {
@@ -164,6 +152,8 @@
       "action": "create_application",
       "wfes_effects": {
         "set": {
+          "applicant": "$action.input.applicant",
+          "credit_info": "$action.input.credit_info",
           "initiated_by": "$actor"
         }
       },
@@ -266,7 +256,9 @@
       "action": "analyst_approve",
       "wfes_effects": {
         "set": {
-          "analyst_approved_at": "$timestamp"
+          "analyst_approved_at": "$timestamp",
+          "credit_info.amount_requested": "$action.input.credit_info.amount_requested",
+          "internal_notes": "$action.input.internal_notes"
         }
       },
       "trigger": [
@@ -329,6 +321,8 @@
       "action": "manager_decide",
       "wfes_effects": {
         "set": {
+          "internal_notes": "$action.input.internal_notes",
+          "manager_decision": "$action.input.manager_decision",
           "manager_reviewed_at": "$timestamp"
         }
       },

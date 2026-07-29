@@ -94,6 +94,11 @@ sidecar dokümandan bağımsız eşlenebilir.
 
 ## Start input = action input sözleşmesi (2026-07-14)
 
+> **Kısmen GEÇERSİZ (WOR-70, 2026-07-29):** bu maddede tarif edilen "başlangıç ctx'i
+> declared yollardan tohumlanır" ve "`context.required` FINAL ctx üzerinde denetlenir"
+> davranışları kaldırıldı. Input artık ctx'e hiç yazmaz; `context.required` yoktur.
+> Geçerli sözleşme: bu dokümanın sonundaki **WOR-70** maddesi.
+
 **Sorun:** Start, gelen input objesini olduğu gibi başlangıç ctx'i yapıyordu; start
 aksiyonunun `input.required/optional` bildirimi runtime'da hiç doğrulanmıyordu
 (yalnız `context.required` + top-level `x-wf-readonly` bakılıyordu). Sonuç: (a) portal,
@@ -757,3 +762,75 @@ mevcut WFD'ler upload/fetch'te reddedilir.
 (`wfe-core/src/validator.rs::check_sla` + `wft_form_name`, `docs/spec/schema.json`
 `escalationStep.wft → wftNode`, `agnoflow-frontend/src/utils/validation.ts::slaTargetProblem`,
 `src/hooks/useExport.ts`, `src/utils/wfdImport.ts`.)
+
+## WOR-70 (2026-07-29) — `context.required` kaldırıldı; context'e tek yazma yolu `wfes_effects`
+
+**Sorun:** Zorunluluk üç yerde bildiriliyordu ve ikisi ölüydü.
+
+1. `context.required` — start zinciri bittikten sonra FINAL ctx üzerinde bir kez
+   denetleniyordu. Üç fixture'ın hepsinde start aksiyonunun `input.required`'ının
+   birebir kopyasıydı; sıfır ek bilgi taşıyordu. Editör de onu doğrudan oradan
+   türetiyordu (`deriveFullContextSchema`), yani iki katmanın farkı hiç kullanılamıyordu.
+   Üstelik validator `context.required` yollarını HİÇ denetlemiyordu: `["applicantt"]`
+   gibi bir yazım hatası upload'dan geçip her `start` çağrısını patlatıyordu
+   (`input.required` yolları ise denetleniyordu — asimetri).
+2. `context.properties.<field>.required` — motor bunu hiç okumuyordu (JSON Schema
+   validator'ı yok; `validate_context_required` yalnız kökü okuyordu). Tamamen süstü.
+3. `actions.<ad>.input.required` — gerçek kapı. Anlamı net: *"bu aksiyonu tetikleyen
+   istekte şu isimde parametreler bulunmak zorunda."*
+
+Asıl boşluk başka yerdeydi: ctx'e **iki** yazma yolu vardı. `merge_action_input`
+declared input yollarını doğrudan ctx'e yazıyordu, `wfes_effects` de yazıyordu. Bir
+alanın değerinin nereden geldiği akışa bakılarak cevaplanamıyordu. Ve hiçbir kural
+"bu context alanını yazan var mı" diye sormuyordu — hiç dolmayacak ölü alanlar
+şemada durabiliyor, `when` ifadelerinde ve portal formlarında görünebiliyordu.
+
+**Karar:** Çalışma-anı doluluk denetimi bırakıldı, yerine tasarım-zamanı bütünlük
+kuralları kondu. Zorunluluk tek yerde bildirilir (`input.required`), ctx'e tek yol
+yazar (`wfes_effects`).
+
+- **`merge_action_input` → `validate_action_input`:** aksiyon girdisi ARTIK ctx'e
+  yazılmaz; yalnız sözleşme denetlenir (required mevcut mu, bildirilmemiş leaf var mı).
+  Girdiyi ctx'e taşımak akışın açık işidir:
+  `"set": { "applicant": "$action.input.applicant" }`.
+- **`validate_context_required` SİLİNDİ** — start sonrası ctx doluluk denetimi yok.
+- **`context.required` + iç içe `required` HARD REJECT** (`context_required_removed`).
+  Sessiz yoksayma reddedildi: eski dokümanlar elle temizlenmeli, çünkü sessiz
+  yoksayma "kural hâlâ işliyor" yanılgısını sürdürürdü. Şema düzeyinde de kapatıldı
+  (`contextSchemaNode.not.required`), böylece editör/istemci JSON Schema doğrulaması
+  da aynı cevabı verir.
+- **`context_field_never_written`:** her context yaprağı en az bir `wfes_effects.set`
+  hedefi tarafından kapsanmalı. Kapsama iki yönlü (ata yazımı torunu, torun yazımı
+  opak atayı kapsar). Taranan yazar siteleri: start/transition effects + trigger
+  catch + escalation + claim_timeout + terminal + autoexec.
+- **`unused_action_input`:** bir kuralın aksiyonunun bildirdiği her input yolu
+  (`required ∪ optional`) o kuralın effects'inde `$action.input.<yol>` ile tüketilmeli.
+  Tüketici olarak kuralın kendi effects'i, `trigger[].catch.wfes_effects`'i ve
+  tetiklediği `autoexec.<ad>.wfes_effects` sayılır — aksi halde autoexec'e yazdırılan
+  girdiler yanlış yere hata verirdi.
+- **Absent-input skip (zorunlu tamamlayıcı):** effect değeri TAM OLARAK
+  `"$action.input.<yol>"` ise ve o yol istekte YOKSA set atlanır, `null` yazılmaz.
+  Bu kural olmadan Yol A opsiyonel input'u ifade edemezdi: gönderilmeyen
+  `internal_notes`, golden fixture'da escalation'ın yazdığı SLA notunu silerdi.
+  "Yok" ile "açıkça null gönderildi" ayrıdır — ikincisi yazılır. Kural yalnız bu
+  tam-eşleşme formuna özgü; `$ctx.*` / `$exec.result.*` eskisi gibi `null` çözer.
+
+**Reddedilen alternatif (Yol B):** otomatik input→ctx yazımını korumak ve ölü-alan
+kuralını "input VEYA effects yazıyor mu" diye gevşetmek. Üç fixture'ı olduğu gibi
+geçirirdi ve geriye uyumluydu; ama iki yazma yolu belirsizliğini sürdürürdü. İzlenebilirlik
+tercih edildi (kullanıcı kararı, 2026-07-29).
+
+**Golden fixture DEĞİŞTİRİLDİ** — CLAUDE.md'nin "golden fixture değiştirilmez" kuralı bu
+karar için kullanıcı onayıyla askıya alındı. Değişiklik: `context.required` + iç içe
+`required` silindi; `create_application` / `analyst_approve` / `manager_decide`
+kurallarına girdilerini yazan `set` satırları eklendi. Aynı düzenleme `belge-onay.json`
+ve `paralel-onay.json`'a da uygulandı; `crates/wfe-core/tests/fixtures/` kopyaları
+senkron tutulur.
+
+**Tüketici etkisi:** work-pool-portal formları zaten `inputDef.required`'dan üretiliyordu
+(`WorkflowsPage` / `InstanceDetail`), `context.required`'ı okumuyordu — geride yalnız
+`DynamicForm.SchemaFields`'ta ölü bir `required` prop'u ve yanlış bir yorum kaldı,
+temizlendi. Editör tarafında `contextAuthoredRequired` alanı ve `deriveFullContextSchema`'nın
+`required` üretimi kaldırıldı; yerine yayın öncesi kullanıcıya dönük iki uyarı eklendi
+(tüketilmeyen input / yazılmayan context alanı) ve bunlar giderilmeden export/upload
+edilemez.

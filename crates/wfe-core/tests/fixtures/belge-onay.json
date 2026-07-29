@@ -19,11 +19,7 @@
           "tckid": {
             "type": "string"
           }
-        },
-        "required": [
-          "name",
-          "tckid"
-        ]
+        }
       },
       "credit_info": {
         "type": "object",
@@ -31,10 +27,7 @@
           "amount_requested": {
             "type": "number"
           }
-        },
-        "required": [
-          "amount_requested"
-        ]
+        }
       },
       "manager_decision": {
         "type": "string",
@@ -56,11 +49,7 @@
         "type": "string",
         "x-wf-readonly": true
       }
-    },
-    "required": [
-      "applicant",
-      "credit_info"
-    ]
+    }
   },
   "attachments": {
     "basvuru_belgeleri": {
@@ -164,6 +153,8 @@
       "action": "create_application",
       "wfes_effects": {
         "set": {
+          "applicant": "$action.input.applicant",
+          "credit_info": "$action.input.credit_info",
           "initiated_by": "$actor"
         }
       },
@@ -212,7 +203,8 @@
       "action": "analyst_approve",
       "wfes_effects": {
         "set": {
-          "analyst_approved_at": "$timestamp"
+          "analyst_approved_at": "$timestamp",
+          "credit_info.amount_requested": "$action.input.credit_info.amount_requested"
         }
       },
       "wft": {
@@ -225,6 +217,7 @@
       "action": "manager_decide",
       "wfes_effects": {
         "set": {
+          "manager_decision": "$action.input.manager_decision",
           "manager_reviewed_at": "$timestamp"
         }
       },

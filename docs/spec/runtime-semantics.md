@@ -79,6 +79,22 @@ v2.1 ile aynı: start'tan BFS reachability (escalation kenarları DAHİL), eriş
 
 v2.1 ile aynı: input path'leri, readonly yasağı, `wfes_effects.set` path+tip (catch ve escalation effects dahil), `$exec.response.*` = hata, ZEN parse + boolean sonuç, `WFD.ALL` tek başına ve son retrier'da, `catch.error_equals` default `["WFD.ALL"]`.
 
+### 6b. Context yazma sözleşmesi (WOR-70)
+
+`context.required` KALDIRILDI. Zorunluluk artık **tek yerde** bildirilir (`actions.<ad>.input.required`)
+ve doğruluğu üç **tasarım-zamanı** kuralıyla korunur — çalışma anında ayrı bir ctx doluluk
+denetimi YOKTUR:
+
+| Kod | Kural |
+|---|---|
+| `context_required_removed` | `context.required` ya da `context.properties.*` altında `required` varsa WFD REDDEDİLİR (kökte de, iç içe de). Şema düzeyinde de yasak: `contextSchemaNode.not.required`. |
+| `context_field_never_written` | Her context **yaprağı** en az bir `wfes_effects.set` hedefi tarafından kapsanmalı. Kapsama iki yönlüdür: `applicant` yazımı `applicant.name`'i kapsar, `initiated_by.role` yazımı opak `initiated_by` yaprağını kapsar. Hiç yazılmayan alan = hiç dolmayacak alan → hata. |
+| `unused_action_input` | Bir kuralın (`start[]` / `transitions[]`) aksiyonunun bildirdiği her input yolu (`required ∪ optional`), o kuralın effects'inde `$action.input.<yol>` ile tüketilmeli. Tüketici olarak kuralın kendi `wfes_effects`'i, `trigger[].catch.wfes_effects`'i ve tetiklediği `autoexec.<ad>.wfes_effects` sayılır. |
+
+Taranan effect siteleri (yazar kümesi): `start[].wfes_effects`, `start[].trigger[].catch`,
+`transitions[].wfes_effects`, `transitions[].trigger[].catch`, `nodes[].escalation[]`,
+`nodes[].claim_timeout`, `terminals[].wfes_effects`, `autoexec[].wfes_effects`.
+
 ## 6c. Attachment (ek-belge) Validation
 
 Root `attachments` katalogu + `nodes.<key>.attachments` referansları için custom validator (`check_attachments`):
@@ -96,7 +112,7 @@ Alan opsiyoneldir; katalog boş/yoksa hiçbir kural tetiklenmez. Dosyaların KEN
 2. transition.c_a varsa: owner bu EK kurala da match etmeli (§3).
 3. current_node ∈ transition.from? Degilse aday degildir.
 4. Adaylar array sirasiyla; when'i true olan ILK transition secilir.
-5. Action input validate edilir.
+5. Action input validate edilir (SADECE dogrulama — ctx'e YAZILMAZ, §7.5a).
 6. transition.wfes_effects STAGED.
 7. trigger[] sirayla: when -> execute (timeout_seconds) -> fail'de retry
    (bekleme = interval * backoff^attempt, max_delay ile kirpilir)
@@ -106,6 +122,32 @@ Alan opsiyoneldir; katalog boş/yoksa hiçbir kural tetiklenmez. Dosyaların KEN
 9. COMMIT (atomik): diff'ler + WFAH + node degisimi + assignment reset (yeni node'a UNASSIGNED).
 Unhandled fail'de hicbir sey commit edilmez.
 ```
+
+### 7.5a. Context'e TEK yazma yolu: wfes_effects (WOR-70)
+
+Aksiyon girdisi ctx'e **kendiliğinden yazılmaz**. Adım 5 yalnız sözleşmeyi doğrular
+(`input.required` mevcut mu, bildirilmemiş leaf var mı); ctx'e yazan tek mekanizma
+`wfes_effects.set`'tir. Girdiyi ctx'e taşımak için akış açıkça yazar:
+
+```json
+"wfes_effects": {
+  "set": {
+    "applicant": "$action.input.applicant",
+    "credit_info.amount_requested": "$action.input.credit_info.amount_requested"
+  }
+}
+```
+
+Gerekçe: bir ctx alanının değeri nereden geldiği akışa bakılarak cevaplanabilsin
+("iki yazma yolu" belirsizliği kalksın). Sözleşmenin bütünlüğü §6b'nin üç kuralıyla
+korunur: yazılmayan alan da, tüketilmeyen input da WFD'yi reddettirir.
+
+**Absent-input skip:** effect değeri TAM OLARAK `"$action.input.<yol>"` ise ve o yol
+gelen istekte YOKSA set ATLANIR — `null` yazılmaz. Bu kural olmadan opsiyonel input
+ifade edilemezdi: gönderilmeyen `internal_notes`, escalation'ın yazdığı notu silerdi.
+Ayrım "yok" ile "null gönderildi" arasındadır — açıkça `null` gönderilirse yazılır.
+Kural yalnız bu tam-eşleşme formuna özgüdür; `$ctx.*` ve `$exec.result.*` eskisi gibi
+davranır (yol yok → `null`).
 
 ## 8. Escalation / Timeout Runtime
 
@@ -194,4 +236,4 @@ kodlanacak; bu commit yalnızca model + validator + spec'i getirir.
 
 Lifecycle notu: transition'larda `node.c_a` WFE'yi o an elinde tutan owner'dır; bir start node'da `c_a` kimin *başlatabileceğidir*. Aynı eşleştirme mekaniği, farklı lifecycle anlamı (henüz WFE yok).
 
-**Start input doğrulaması (2026-07-14):** Start input'u, transition input'larıyla (§7.5) birebir aynı kurala tabidir — seçilen start rule'ın `action`'ına ait `input.required` yolları mevcut olmalı, `required ∪ optional` dışında kalan her leaf yol `WFD.InvalidInput` ile REDDEDİLİR (hard reject; sessiz düşürme yok). Başlangıç ctx'i input'un tamamından DEĞİL, yalnızca bildirilen (declared) yollardan + start rule `wfes_effects`'inden tohumlanır — serbest-form context enjeksiyonu kapalıdır. `x-wf-readonly` işaretli bir yol, bildirilmiş olsa bile start input'unda verilemez. `context.required` denetimi input üzerinde değil, start zinciri (input merge → effects → trigger → wft effects) tamamlandıktan sonra FINAL ctx üzerinde yapılır (noktalı yol destekli): zorunlu alanlar input'tan da effect'ten de yazılabilir, kaynak fark etmez.
+**Start input doğrulaması (2026-07-14, WOR-70 ile güncellendi):** Start input'u, transition input'larıyla (§7.5) birebir aynı kurala tabidir — seçilen start rule'ın `action`'ına ait `input.required` yolları mevcut olmalı, `required ∪ optional` dışında kalan her leaf yol `WFD.InvalidInput` ile REDDEDİLİR (hard reject; sessiz düşürme yok). `x-wf-readonly` işaretli bir yol, bildirilmiş olsa bile start input'unda verilemez. **Başlangıç ctx'i input'tan TOHUMLANMAZ** (WOR-70): input yalnız doğrulanır, ctx'e yalnız `wfes_effects` yazar — bkz. §7.5a. `context.required` KALDIRILDI; start sonrası ctx doluluk denetimi yoktur.

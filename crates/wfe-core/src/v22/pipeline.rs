@@ -26,7 +26,7 @@ use crate::types::wfd_v22::{
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
-use crate::v22::effects::{apply_effects, get_path, resolve_value, set_path, EffectEnv};
+use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
 use crate::v22::ports::{
@@ -156,7 +156,8 @@ impl<'a> Engine<'a> {
             ))
         })?;
         validate_readonly_paths(action_def, input, &wfd.context)?;
-        let mut staged = merge_action_input(&json!({}), action_def, input)?;
+        validate_action_input(action_def, input)?;
+        let mut staged = json!({});
 
         let now = Utc::now();
         let mut wfah_entries: Vec<WfahEntry> = Vec::new();
@@ -233,11 +234,10 @@ impl<'a> Engine<'a> {
             )
             .await?;
 
-        // context.required, start zinciri (input merge + effects + wft effects)
-        // tamamlandıktan SONRA denetlenir: alanlar input'tan değil effect'lerden de
-        // yazılabilir ($action.input.X → ctx).
-        validate_context_required(&final_ctx, &wfd.context)?;
-
+        // WOR-70: `context.required` KALDIRILDI. Zorunluluk artık iki tasarım-zamanı
+        // kuralıyla sağlanır (validator): (1) her declared input bir wfes_effects
+        // tarafından tüketilmek zorunda, (2) her context alanı en az bir wfes_effects
+        // tarafından yazılmak zorunda. Çalışma anında ayrı bir ctx doluluk denetimi yok.
         Ok(NewWfe {
             wfe_id,
             orgtnt_id,
@@ -340,12 +340,13 @@ impl<'a> Engine<'a> {
             }
         }
 
-        // §7.5 — input validation + declared path'lerin ctx'e yazımı
+        // §7.5 — input sözleşme denetimi (ctx'e yazım YOK — yalnız wfes_effects yazar)
         let action_def = wfd
             .actions
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
-        let mut staged = merge_action_input(&ctx, action_def, input)?;
+        validate_action_input(action_def, input)?;
+        let mut staged = ctx.clone();
 
         let now = Utc::now();
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
@@ -522,12 +523,13 @@ impl<'a> Engine<'a> {
             }
         }
 
-        // §7.5 — input validation + declared path'lerin ctx'e yazımı
+        // §7.5 — input sözleşme denetimi (ctx'e yazım YOK — yalnız wfes_effects yazar)
         let action_def = wfd
             .actions
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
-        let mut staged = merge_action_input(&ctx, action_def, input)?;
+        validate_action_input(action_def, input)?;
+        let mut staged = ctx.clone();
 
         let now = Utc::now();
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
@@ -2130,12 +2132,16 @@ fn parse_wfd_uuid(wfd: &Wfd) -> Result<Uuid, EngineError> {
     Ok(Uuid::parse_str(&wfd.id).unwrap_or(Uuid::nil()))
 }
 
-/// §7.5 — required path'ler mevcut, tüm leaf'ler declared, sonra declared path'ler ctx'e yazılır.
-fn merge_action_input(
-    ctx: &Value,
-    action: &ActionDef,
-    input: &Value,
-) -> Result<Value, EngineError> {
+/// §7.5 — aksiyon girdisi sözleşme denetimi: `input.required` yolları mevcut olmalı,
+/// `required ∪ optional` dışında kalan leaf yol reddedilir.
+///
+/// WOR-70: bu fonksiyon ctx'e ARTIK YAZMAZ. Girdinin ctx'e taşınması yalnız
+/// `wfes_effects.set` üzerinden `$action.input.<yol>` ile olur — context'e tek yazma
+/// yolu effects'tir. Böylece "bu değer ctx'e nereden geldi" sorusu akışa bakılarak
+/// cevaplanabilir; validator de her declared input'un tüketildiğini zorlar
+/// (`unused_action_input`) ve hiç yazılmayan context alanını reddeder
+/// (`context_field_never_written`).
+fn validate_action_input(action: &ActionDef, input: &Value) -> Result<(), EngineError> {
     let declared: Vec<&String> = action
         .input
         .required
@@ -2165,16 +2171,7 @@ fn merge_action_input(
         }
     }
 
-    let mut staged = match ctx {
-        Value::Object(m) => m.clone(),
-        _ => Map::new(),
-    };
-    for path in declared {
-        if let Some(value) = get_path(input, path) {
-            set_path(&mut staged, path, value.clone());
-        }
-    }
-    Ok(Value::Object(staged))
+    Ok(())
 }
 
 fn collect_leaf_paths(value: &Value, prefix: String, out: &mut Vec<String>) {
@@ -2199,7 +2196,7 @@ fn collect_leaf_paths(value: &Value, prefix: String, out: &mut Vec<String>) {
 
 /// Start input'unda dolu gelen, bildirimli (declared) bir yol context şemasında
 /// x-wf-readonly işaretliyse reddedilir — yol üzerindeki her segment denetlenir.
-/// Bildirimsiz yollar zaten `merge_action_input`'ta reddedildiği için burada yalnız
+/// Bildirimsiz yollar zaten `validate_action_input`'ta reddedildiği için burada yalnız
 /// action.input listesindeki yollara bakmak yeterlidir.
 fn validate_readonly_paths(
     action: &ActionDef,
@@ -2230,21 +2227,6 @@ fn validate_readonly_paths(
                 )));
             }
             schema = prop;
-        }
-    }
-    Ok(())
-}
-
-/// context.required alanları (noktalı yol olabilir) start zinciri bittiğinde
-/// final ctx'te mevcut olmalı — kaynak fark etmez (input merge veya effects).
-fn validate_context_required(ctx: &Value, context_schema: &Value) -> Result<(), EngineError> {
-    if let Some(required) = context_schema.get("required").and_then(Value::as_array) {
-        for field in required.iter().filter_map(Value::as_str) {
-            if get_path(ctx, field).is_none() {
-                return Err(EngineError::InvalidInput(format!(
-                    "context zorunlu alanı '{field}' start sonrasında eksik"
-                )));
-            }
         }
     }
     Ok(())

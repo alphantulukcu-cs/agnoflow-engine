@@ -53,6 +53,9 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_parallel(wfd, &mut report);
     check_expressions(wfd, &mut report);
     check_action_inputs(wfd, &mut report);
+    check_context_required_removed(wfd, &mut report);
+    check_context_field_writers(wfd, &mut report);
+    check_action_input_consumed(wfd, &mut report);
     check_attachments(wfd, &mut report);
     check_effect_paths(wfd, &mut report);
     check_retries(wfd, &mut report);
@@ -765,6 +768,227 @@ fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
                 ),
                 PathResolution::Found | PathResolution::Opaque => {}
             }
+        }
+    }
+}
+
+// ---- WOR-70: context yazma sözleşmesi ----
+//
+// Kural seti üç parçadır ve birlikte "context.required"ın yerini alır:
+//   1. `context.required` / `properties.*.required` YASAK  (context_required_removed)
+//   2. Her context alanı en az bir `wfes_effects.set` tarafından yazılmalı
+//      (context_field_never_written) — hiç dolmayacak alan tutulamaz.
+//   3. Bir aksiyonun bildirdiği her input, o aksiyonu kullanan kuralın effects'inde
+//      `$action.input.<yol>` ile tüketilmeli (unused_action_input) — istekten alınan
+//      değer sessizce düşmesin.
+// Çalışma anında ctx doluluk denetimi YOKTUR; her şey tasarım zamanında yakalanır.
+
+/// Kural 1 — kaldırılan `required` bildirimleri hard reject.
+fn check_context_required_removed(wfd: &Wfd, report: &mut ValidationReport) {
+    if wfd.context.get("required").is_some() {
+        report.error(
+            "context_required_removed",
+            "context.required".into(),
+            "`context.required` kaldırıldı (WOR-70) — zorunluluk artık aksiyonun \
+             `input.required` listesinde bildirilir. Bu listeyi context şemasından silin."
+                .into(),
+        );
+    }
+    check_nested_required(&wfd.context, "context", report);
+}
+
+fn check_nested_required(schema: &Value, path: &str, report: &mut ValidationReport) {
+    let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+        return;
+    };
+    for (name, node) in props {
+        let node_path = format!("{path}.properties.{name}");
+        if node.get("required").is_some() {
+            report.error(
+                "context_required_removed",
+                format!("{node_path}.required"),
+                format!(
+                    "'{name}' içindeki `required` listesi kaldırıldı (WOR-70) — motor bunu hiç \
+                     okumuyordu. Zorunluluk aksiyonun `input.required` listesinde bildirilir."
+                ),
+            );
+        }
+        check_nested_required(node, &node_path, report);
+    }
+}
+
+/// Bir yolun diğerini kapsayıp kapsamadığı: eşit, ata veya torun.
+/// (`credit_info` ↔ `credit_info.amount_requested` her iki yönde de kapsar.)
+fn paths_overlap(a: &str, b: &str) -> bool {
+    a == b || a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."))
+}
+
+/// WFD'deki TÜM `wfes_effects.set` hedef yollarını toplar.
+fn collect_effect_targets(wfd: &Wfd) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |effects: &WfesEffects| out.extend(effects.set.keys().cloned());
+
+    for s in &wfd.start {
+        if let Some(e) = &s.wfes_effects {
+            push(e);
+        }
+        for trig in &s.trigger {
+            if let Some(c) = &trig.catch {
+                push(&c.wfes_effects);
+            }
+        }
+    }
+    for t in &wfd.transitions {
+        if let Some(e) = &t.wfes_effects {
+            push(e);
+        }
+        for trig in &t.trigger {
+            if let Some(c) = &trig.catch {
+                push(&c.wfes_effects);
+            }
+        }
+    }
+    for node in wfd.nodes.values() {
+        for esc in &node.escalation {
+            if let Some(e) = &esc.wfes_effects {
+                push(e);
+            }
+        }
+        if let Some(ct) = &node.claim_timeout {
+            if let Some(e) = &ct.wfes_effects {
+                push(e);
+            }
+        }
+    }
+    for t in &wfd.terminals {
+        if let Some(e) = &t.wfes_effects {
+            push(e);
+        }
+    }
+    for ax in wfd.autoexec.values() {
+        if let Some(e) = &ax.wfes_effects {
+            push(e);
+        }
+    }
+    out
+}
+
+/// Context şemasının yazılabilir yaprak yolları. Yaprak = altında `properties` olmayan
+/// düğüm (`$ref` opaktır, yaprak sayılır).
+fn collect_context_leaves(schema: &Value, prefix: &str, out: &mut Vec<String>) {
+    let props = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .filter(|p| !p.is_empty());
+    let Some(props) = props else {
+        if !prefix.is_empty() {
+            out.push(prefix.to_string());
+        }
+        return;
+    };
+    if schema.get("$ref").is_some() && !prefix.is_empty() {
+        out.push(prefix.to_string());
+        return;
+    }
+    for (name, node) in props {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}.{name}")
+        };
+        collect_context_leaves(node, &path, out);
+    }
+}
+
+/// Kural 2 — hiçbir effect tarafından yazılmayan context alanı reddedilir.
+fn check_context_field_writers(wfd: &Wfd, report: &mut ValidationReport) {
+    let targets = collect_effect_targets(wfd);
+    let mut leaves = Vec::new();
+    collect_context_leaves(&wfd.context, "", &mut leaves);
+
+    for leaf in leaves {
+        if targets.iter().any(|t| paths_overlap(t, &leaf)) {
+            continue;
+        }
+        report.error(
+            "context_field_never_written",
+            format!("context.properties.{}", leaf.replace('.', ".properties.")),
+            format!(
+                "context alanı '{leaf}' hiçbir `wfes_effects` tarafından yazılmıyor — bu alan hiç \
+                 dolmayacak. Ya bu alanı yazan bir aksiyona \"{leaf}\": \"$action.input.{leaf}\" \
+                 effect'i ekleyin, ya da alanı context şemasından silin."
+            ),
+        );
+    }
+}
+
+/// Bir effect bloğundaki `$action.input.<yol>` referanslarını toplar (nested değerler dahil).
+fn collect_input_refs(effects: &WfesEffects, out: &mut Vec<String>) {
+    for raw in effects.set.values() {
+        walk_strings(raw, "", &mut |s, _| {
+            if let Some(path) = s.strip_prefix("$action.input.") {
+                out.push(path.to_string());
+            }
+        });
+    }
+}
+
+/// Kural 3 — kuralın aksiyonunun bildirdiği her input, o kuralın effects'inde tüketilmeli.
+fn check_action_input_consumed(wfd: &Wfd, report: &mut ValidationReport) {
+    // (kural yolu, aksiyon adı, kuralın kendi effects'i, tetiklediği trigger'lar)
+    let mut rules: Vec<(String, &String, Vec<String>)> = Vec::new();
+
+    let refs_for = |own: Option<&WfesEffects>, triggers: &[crate::types::wfd_v22::TriggerInvocation]| {
+        let mut refs = Vec::new();
+        if let Some(e) = own {
+            collect_input_refs(e, &mut refs);
+        }
+        for trig in triggers {
+            if let Some(c) = &trig.catch {
+                collect_input_refs(&c.wfes_effects, &mut refs);
+            }
+            // Tetiklenen autoexec'in kendi effects'i de aksiyon girdisini görebilir.
+            if let Some(ax) = wfd.autoexec.get(&trig.use_) {
+                if let Some(e) = &ax.wfes_effects {
+                    collect_input_refs(e, &mut refs);
+                }
+            }
+        }
+        refs
+    };
+
+    for s in &wfd.start {
+        rules.push((
+            format!("start[{}]", s.id),
+            &s.action,
+            refs_for(s.wfes_effects.as_ref(), &s.trigger),
+        ));
+    }
+    for t in &wfd.transitions {
+        rules.push((
+            format!("transitions[{}]", t.id),
+            &t.action,
+            refs_for(t.wfes_effects.as_ref(), &t.trigger),
+        ));
+    }
+
+    for (path, action_name, refs) in rules {
+        let Some(action) = wfd.actions.get(action_name) else {
+            continue; // tanımsız aksiyon check_cross_refs'in işi
+        };
+        for declared in action.input.required.iter().chain(&action.input.optional) {
+            if refs.iter().any(|r| paths_overlap(r, declared)) {
+                continue;
+            }
+            report.error(
+                "unused_action_input",
+                path.clone(),
+                format!(
+                    "'{action_name}' aksiyonu '{declared}' girdisini istiyor ama bu kuralın \
+                     `wfes_effects` bloğu onu hiçbir yere yazmıyor — istekten gelen değer \
+                     kayboluyor. Şunu ekleyin: \"{declared}\": \"$action.input.{declared}\"."
+                ),
+            );
         }
     }
 }

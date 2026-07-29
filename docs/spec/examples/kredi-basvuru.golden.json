@@ -44,32 +44,25 @@
         "description": "Müdürün nihai kararı; manager_decide aksiyonunun input'udur."
       },
       "initiated_by": {
-        "type": "object",
-        "x-wf-readonly": true
+        "type": "object"
       },
       "credit_score": {
-        "type": "number",
-        "x-wf-readonly": true
+        "type": "number"
       },
       "credit_grade": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "within_limit": {
-        "type": "boolean",
-        "x-wf-readonly": true
+        "type": "boolean"
       },
       "score_fetch_failed": {
-        "type": "boolean",
-        "x-wf-readonly": true
+        "type": "boolean"
       },
       "analyst_approved_at": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "manager_reviewed_at": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "internal_notes": {
         "type": "string",

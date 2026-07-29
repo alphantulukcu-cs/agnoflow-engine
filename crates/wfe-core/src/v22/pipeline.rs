@@ -155,7 +155,6 @@ impl<'a> Engine<'a> {
                 rule.action
             ))
         })?;
-        validate_readonly_paths(action_def, input, &wfd.context)?;
         validate_action_input(action_def, input)?;
         let mut staged = json!({});
 
@@ -2208,44 +2207,6 @@ fn collect_leaf_paths(value: &Value, prefix: String, out: &mut Vec<String>) {
             }
         }
     }
-}
-
-/// Start input'unda dolu gelen, bildirimli (declared) bir yol context şemasında
-/// x-wf-readonly işaretliyse reddedilir — yol üzerindeki her segment denetlenir.
-/// Bildirimsiz yollar zaten `validate_action_input`'ta reddedildiği için burada yalnız
-/// action.input listesindeki yollara bakmak yeterlidir.
-fn validate_readonly_paths(
-    action: &ActionDef,
-    input: &Value,
-    context_schema: &Value,
-) -> Result<(), EngineError> {
-    let declared = action
-        .input
-        .required
-        .iter()
-        .chain(action.input.optional.iter());
-    for path in declared {
-        if get_path(input, path).is_none() {
-            continue;
-        }
-        let mut schema = context_schema;
-        for seg in path.split('.') {
-            let Some(prop) = schema.get("properties").and_then(|p| p.get(seg)) else {
-                break;
-            };
-            if prop
-                .get("x-wf-readonly")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(EngineError::InvalidInput(format!(
-                    "'{path}' x-wf-readonly — start input'unda verilemez"
-                )));
-            }
-            schema = prop;
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

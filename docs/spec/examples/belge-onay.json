@@ -38,16 +38,13 @@
         "description": "Müdürün nihai kararı; manager_decide aksiyonunun input'udur."
       },
       "initiated_by": {
-        "type": "object",
-        "x-wf-readonly": true
+        "type": "object"
       },
       "analyst_approved_at": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "manager_reviewed_at": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       }
     }
   },

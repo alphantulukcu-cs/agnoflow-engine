@@ -408,9 +408,6 @@
         "if": true,
         "then": true,
         "else": true,
-        "x-wf-readonly": {
-          "type": "boolean"
-        },
         "x-visibility": {
           "$ref": "#/$defs/visibility"
         }

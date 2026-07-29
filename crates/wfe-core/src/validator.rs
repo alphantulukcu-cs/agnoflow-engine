@@ -762,11 +762,6 @@ fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
                     format!("actions[{name}].input"),
                     format!("input yolu '{path}' context şemasında yok"),
                 ),
-                PathResolution::Readonly => report.error(
-                    "readonly_input",
-                    format!("actions[{name}].input"),
-                    format!("input yolu '{path}' x-wf-readonly — kullanıcı yazamaz"),
-                ),
                 PathResolution::Found | PathResolution::Opaque => {}
             }
         }
@@ -1431,12 +1426,10 @@ enum PathResolution {
     Missing,
     /// Şema bu derinliği kısıtlamıyor (properties tanımsız, $ref, vs.)
     Opaque,
-    Readonly,
 }
 
 fn resolve_schema_path(context: &Value, dotted: &str) -> PathResolution {
     let mut current = context;
-    let mut readonly = false;
     for segment in dotted.split('.') {
         if current.get("$ref").is_some() {
             return PathResolution::Opaque;
@@ -1448,17 +1441,6 @@ fn resolve_schema_path(context: &Value, dotted: &str) -> PathResolution {
             return PathResolution::Missing;
         };
         current = next;
-        if current
-            .get("x-wf-readonly")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
-            readonly = true;
-        }
     }
-    if readonly {
-        PathResolution::Readonly
-    } else {
-        PathResolution::Found
-    }
+    PathResolution::Found
 }

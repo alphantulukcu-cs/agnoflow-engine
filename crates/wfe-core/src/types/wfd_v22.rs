@@ -34,7 +34,7 @@ pub struct Wfd {
     /// Root WFD timeout — ISO 8601 duration (örn. "P30D").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout: Option<String>,
-    /// JSON Schema 2020-12 + x-visibility / x-wf-readonly uzantıları.
+    /// JSON Schema 2020-12 + x-visibility uzantısı.
     pub context: Value,
     pub nodes: BTreeMap<String, NodeDef>,
     pub start: Vec<StartRule>,

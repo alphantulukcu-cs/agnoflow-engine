@@ -282,13 +282,6 @@ fn action_input_path_missing_from_context_is_error() {
 }
 
 #[test]
-fn action_input_targeting_readonly_field_is_error() {
-    let mut v = fixture_value();
-    v["actions"]["manager_decide"]["input"]["optional"] = json!(["credit_score"]);
-    assert!(has_error(&validate_value(v), "readonly_input"));
-}
-
-#[test]
 fn effects_set_path_missing_from_context_is_error() {
     let mut v = fixture_value();
     v["transitions"][0]["wfes_effects"]["set"]["ghost_field"] = json!("x");

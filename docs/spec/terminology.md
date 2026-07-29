@@ -352,19 +352,19 @@ Claim/owner/ACT semantiği öncekiyle aynıdır (unassigned: C_A görür+claim e
 ## SCHEMA ANNOTATION UZANTILARI
 
 `context` bir JSON Schema 2020-12 dokümanıdır; `context.properties` altındaki
-field'lar iki WFD'ye özel uzantı taşıyabilir.
-
-**`x-wf-readonly`** *(boolean)* — `true` ise field'ı yalnız engine yazar
-(`wfes_effects` üzerinden); kullanıcı ve editör doğrudan yazamaz. Golden
-fixture'larda kullanılır.
+field'lar WFD'ye özel bir uzantı taşıyabilir.
 
 **`x-visibility`** *(obje)* — field seviyesinde görünürlük kuralı; şekli C_A ile
 aynıdır (`c_orgu` / `c_r` / `c_u`). Kriterler **bağımsızdır ve aralarında OR
 vardır**; kural sağlanmazsa Actor field'ı DynCtx'te göremez. Listable erişimi
 olan Actor için de geçerlidir. Ayrıntı: **VISIBILITY / V** bölümü.
 
-> `x-wf-readonly`'nin eski `_step_<action>` injection discriminator rolü
-> v2.2'de GEÇERSİZDİR — `_step_*` kaldırılmıştır (bkz. DEPRECATED).
+> **`x-wf-readonly` KALDIRILDI (WOR-71).** "Bu alanı yalnız engine yazar" artık
+> ayrı bir flag ile değil, WFD'nin kendisinden okunur: alan hiçbir
+> `actions.<ad>.input`'ta bildirilmemişse yalnız `wfes_effects` doldurabilir
+> (WOR-70 — context'e tek yazma yolu effects'tir). Eski `_step_<action>`
+> injection discriminator rolü de v2.2'de zaten GEÇERSİZDİ (`_step_*`
+> kaldırıldı, bkz. DEPRECATED).
 
 **`required` KULLANILAMAZ (WOR-70).** Ne `context.required` ne de bir field'ın
 içindeki `required` listesi geçerlidir; ikisi de WFD'yi reddettirir

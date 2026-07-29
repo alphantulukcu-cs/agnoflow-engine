@@ -25,24 +25,19 @@
         }
       },
       "submitted_by": {
-        "type": "object",
-        "x-wf-readonly": true
+        "type": "object"
       },
       "finans_onay_zamani": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "hukuk_onay_zamani": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "ik_onay_zamani": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       },
       "sonuc_zamani": {
-        "type": "string",
-        "x-wf-readonly": true
+        "type": "string"
       }
     }
   },

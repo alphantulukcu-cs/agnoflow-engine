@@ -94,10 +94,12 @@ sidecar dokümandan bağımsız eşlenebilir.
 
 ## Start input = action input sözleşmesi (2026-07-14)
 
-> **Kısmen GEÇERSİZ (WOR-70, 2026-07-29):** bu maddede tarif edilen "başlangıç ctx'i
-> declared yollardan tohumlanır" ve "`context.required` FINAL ctx üzerinde denetlenir"
-> davranışları kaldırıldı. Input artık ctx'e hiç yazmaz; `context.required` yoktur.
-> Geçerli sözleşme: bu dokümanın sonundaki **WOR-70** maddesi.
+> **Kısmen GEÇERSİZ (WOR-70 + WOR-71, 2026-07-29):** bu maddede tarif edilen "başlangıç
+> ctx'i declared yollardan tohumlanır" ve "`context.required` FINAL ctx üzerinde
+> denetlenir" davranışları kaldırıldı (WOR-70); aşağıdaki `x-wf-readonly` denetimleri de
+> uzantıyla birlikte tamamen kaldırıldı (WOR-71). Input artık ctx'e hiç yazmaz;
+> `context.required` ve `x-wf-readonly` yoktur. Geçerli sözleşme: bu dokümanın sonundaki
+> **WOR-70** ve **WOR-71** maddeleri.
 
 **Sorun:** Start, gelen input objesini olduğu gibi başlangıç ctx'i yapıyordu; start
 aksiyonunun `input.required/optional` bildirimi runtime'da hiç doğrulanmıyordu
@@ -873,3 +875,79 @@ uyarıya izin vermez.
 **Reddedilen alternatif:** golden fixture'daki çakışmayı kaldırmak (internal_notes'u
 opsiyonel listelerden çıkarmak). Örneğin öğretici değeri korundu — kuralın gerçek bir
 akışta nasıl göründüğü fixture'da görünsün.
+
+
+## WOR-71 (2026-07-29) — `x-wf-readonly` KALDIRILDI
+
+WOR-70'in devamı; aynı gün, kullanıcı kararıyla.
+
+**Sorun:** WOR-70 sonrası context'e tek yazma yolu `wfes_effects` oldu ve her input
+`$action.input.<yol>` ile açıkça tüketilmek zorunda kaldı. Bu haliyle
+`x-wf-readonly` üç ayrı gerekçeden de düştü:
+
+1. **Runtime denetimi ölü koddu.** `pipeline::validate_readonly_paths` yalnız
+   *bildirilen* yollara bakıyordu; readonly bir yolu bildiren WFD ise zaten
+   validator'dan (`readonly_input`) geçemiyordu. Her giriş noktası (`/wfd` upload,
+   `/wfe/simulate`, `wfd` adapter fetch) run öncesi `validate()` çağırdığı için bu
+   fonksiyon hiç ateşlenemezdi.
+2. **Kalan tasarım-zamanı denetimi sızıntılıydı.** Effect'in readonly alan yazmasını
+   engelleyen bir kural YOKTU (olması da istenmezdi — flag'in amacı "engine yazar"dı).
+   Dolayısıyla `set: { credit_score: "$action.input.puan" }` ile kullanıcı değeri
+   readonly alana rahatça inebiliyordu. Flag bir güvenlik sınırı değil, isim lint'iydi.
+3. **Bilgi ikizlendi.** "Bu alanı yalnız engine yazar" WFD'den zaten türetilebiliyor:
+   alan hiçbir `actions.<ad>.input`'ta bildirilmemişse onu ancak `wfes_effects`
+   doldurabilir. Flag ile gerçek yazar listesi arasında sessiz çelişki riski vardı.
+
+**Karar:** uzantı tamamen kaldırıldı. Yerine geçen değişmezler WOR-70'ten gelir:
+`context_field_never_written` (her alanın en az bir yazarı var) + `unused_action_input`
+(her bildirilen girdi açıkça tüketiliyor). "Engine-only" alan = hiçbir action input'unda
+adı geçmeyen alan.
+
+**Reddedilen alternatif:** flag'i tutup boşluğu kapatmak — "readonly alan yazan effect
+`$action.input.*` kaynaklı olamaz" kuralını eklemek. Flag'i anlamlı yapardı ama zaten
+türetilebilir bir bilgiyi elle bildirmeye devam etmek + üçüncü bir çapraz denetim
+taşımak anlamına geliyordu.
+
+**Kaldırılanlar.** Backend: `validator::PathResolution::Readonly` + `readonly_input`
+kuralı, `pipeline::validate_readonly_paths`, `action_input_targeting_readonly_field_is_error`
+testi, `docs/spec/schema.json` `contextSchemaNode.x-wf-readonly`. Frontend:
+`ContextSchemaNode['x-wf-readonly']`, JsonSchemaEditorModal'daki `xWfReadonly` alanı +
+checkbox'ı, `wfdDiff` `CONTEXT_ATTR_KEYS` girdisi (`salt-okunur` etiketi), store seed
+şeması. Fixture'lar (golden dahil, CLAUDE.md'deki "fixture değişmez" kuralına spec
+değişikliği istisnası) ve `docs/spec/examples/*` temizlendi.
+
+**Yan etki — simülasyon start formu.** Frontend'de flag'in tek işlevsel kullanıcısı
+`SimInputFields.SchemaFields`'ti: başlangıç formunu `context.properties`'ten çizip
+readonly alanları filtreliyordu. Bu katman WOR-70'ten beri yanlıştı (engine bildirilmemiş
+yolu hard reject eder). Form `PathFields`'e geçirildi — alanlar artık start kuralının
+aksiyonunun `input.required/optional`'ından geliyor; zorunluluk denetimi de
+`context.required` (kaldırıldı) yerine o listeden yapılıyor. `SchemaFields`/
+`SchemaEntries`/`missingRequired` ölü kaldığı için silindi.
+
+**Yan etkinin devamı — çoklu start kuralı.** `start[]` bir dizidir ve engine aktörü
+yetkilendiren İLK kuralı seçer (`Engine::start`), dolayısıyla "hangi alanlar sorulacak"
+`start[0]`'a değil SEÇİLİ AKTÖRE bağlıdır. Çözüm saf yardımcılara ayrıldı
+(`src/utils/startRules.ts` + testleri):
+
+- `startPoolCas(rules)` — aktör listesindeki ✓ ve "Akışı kimler başlatabilir" satırı artık
+  TÜM start kurallarının c_a birleşimini kullanır (eskiden yalnız `start[0]`'ın c_a'sı;
+  ikinci kuralın aktörü ✓ almadığı için seçilemiyordu).
+- `resolveStartCandidates(rules, actor)` — seçili aktörün başlatabildiği kurallar, dizi
+  sırası korunarak; aynı `action`'ı taşıyan kurallar ada göre tekilleştirilir (input
+  listeleri zaten aynı olduğu için kullanıcıya anlamsız seçim sorulmaz).
+- Aday sayısı 0 → form yerine "bu atama akışı başlatamaz" uyarısı + Başlat kilitli
+  (eskiden sessizce `start[0]`'ın alanlarını soruyordu). 1 → doğrudan o kural.
+  >1 → start aksiyonu seçici, seçim değişince girilen değerler temizlenir.
+- Seçilen `action` start isteğinde AÇIKÇA gönderilir (M16 `SimStartBody.action`).
+  Gerekçe: frontend'in `matchesCa`'sı iyimserdir — `c_orgu` scope çözümü org resolver
+  ister, o yüzden UI aday kümesi engine'inkinden geniş olabilir. `action` gönderilmezse
+  engine sessizce başka bir kuralla başlayabilir ve form yanlış alanları sormuş olur;
+  gönderilince yetki yoksa net `StartNotEligible` döner.
+
+Bilinen sınır: `currentCa` `serializedRef.current`'tan türediği için (dosyada var olan
+`react-hooks/refs` ihlali) `activeCas` memoize edilmez; koşu-içi ve başlangıç başlıkları
+ayrı bloklara bölünerek ref okuma sayısı baseline'da tutuldu.
+
+**Geriye uyumluluk.** Migration GEREKMEZ: `contextSchemaNode` `additionalProperties: true`
+olduğu için eski WFD'lerdeki `x-wf-readonly` anahtarı hâlâ valid — yalnız artık hiçbir
+anlamı yok, yok sayılır.

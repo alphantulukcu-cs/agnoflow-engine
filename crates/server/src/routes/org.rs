@@ -22,6 +22,7 @@ pub fn router(pool: PgPool) -> OpenApiRouter {
         .routes(routes!(update_orgt))
         .routes(routes!(set_default_orgt))
         .routes(routes!(list_users_by_tenant, create_user))
+        .routes(routes!(update_user))
         .routes(routes!(list_roles_by_tenant, create_role))
         .routes(routes!(update_role))
         .routes(routes!(list_orgu_types, create_orgu_type))
@@ -250,6 +251,35 @@ async fn create_user(
     .await
     .map(Json)
     .map_err(Into::into)
+}
+
+#[derive(Deserialize, ToSchema)]
+#[schema(as = OrgUpdateUserBody)]
+struct UpdateUserBody {
+    full_name: String,
+}
+
+#[utoipa::path(patch,
+    operation_id = "org_update_user", path = "/users/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Kullanıcı id")), request_body = UpdateUserBody,
+    responses((status = 200, description = "Güncellenen kullanıcı", body = serde_json::Value)),
+    security(("x_admin_key" = [])))]
+async fn update_user(
+    State(pool): State<PgPool>,
+    Path(user_id): Path<Uuid>,
+    Json(body): Json<UpdateUserBody>,
+) -> Result<Json<wf_org::models::User>, AppError> {
+    let full_name = body.full_name.trim();
+    if full_name.is_empty() {
+        return Err(AppError(
+            "full_name boş olamaz".into(),
+            axum::http::StatusCode::BAD_REQUEST,
+        ));
+    }
+    repo::user_role::update_user(&pool, user_id, full_name)
+        .await
+        .map(Json)
+        .map_err(Into::into)
 }
 
 /// Yeni rol ekle veya aynı isimli pasif rolü yeniden aktifleştir.

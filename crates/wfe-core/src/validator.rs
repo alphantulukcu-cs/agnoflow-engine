@@ -2,7 +2,9 @@
 //! Spec: docs/spec/runtime-semantics.md §1, §2b, §5, §6.
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
-use crate::types::wfd_v22::{ParallelSpec, Wfd, WfesEffects, Wft, WftCondition, WftTarget};
+use crate::types::wfd_v22::{
+    CallMode, CallRef, ParallelSpec, StartAs, Wfd, WfesEffects, Wft, WftCondition, WftTarget,
+};
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -42,8 +44,32 @@ impl ValidationReport {
     }
 }
 
+/// Çağrılan WFD'leri çözebilen kaynak — WFC'nin cross-WFD kuralları (girdi kümesi,
+/// tip uyumu, `wfe_end_response` anahtarları, döngü) için gerekir.
+///
+/// Neden opsiyonel: `wfe-core` saf bir crate'tir, I/O yapmaz. Saf unit testler
+/// resolver vermez ve yalnız yerel kurallar koşar. Upload yolunda (`wfd` crate)
+/// resolver DAİMA verilir — yani üretimde tam kontrol vardır.
+pub trait WfdProvider {
+    /// `(wfd_id, version)` → çağrılan WFD. `version: None` = en son yayınlanmış.
+    /// `None` dönmek "bulunamadı / yayınlanmamış" demektir.
+    fn resolve(&self, wfd_id: &str, version: Option<&str>) -> Option<Wfd>;
+}
+
 pub fn validate(wfd: &Wfd) -> ValidationReport {
+    validate_with(wfd, None)
+}
+
+/// WFC cross-WFD kurallarını da koşan tam validasyon.
+pub fn validate_with(wfd: &Wfd, provider: Option<&dyn WfdProvider>) -> ValidationReport {
+    let mut report = validate_local(wfd);
+    check_calls_cross_wfd(wfd, provider, &mut report);
+    report
+}
+
+fn validate_local(wfd: &Wfd) -> ValidationReport {
     let mut report = ValidationReport::default();
+    check_calls(wfd, &mut report);
     check_uniqueness(wfd, &mut report);
     check_slugs(wfd, &mut report);
     check_cross_refs(wfd, &mut report);
@@ -63,6 +89,660 @@ pub fn validate(wfd: &Wfd) -> ValidationReport {
     check_string_namespaces(wfd, &mut report);
     check_sla(wfd, &mut report);
     report
+}
+
+// ---- WFC — İş Akışı Çağrısı: yerel kurallar ----
+//
+// Cross-WFD kurallar (girdi kümesi, tip uyumu, sonuç anahtarları, döngü)
+// `check_calls_cross_wfd`'de, `WfdProvider` varsa koşar.
+
+/// WFC-IN'de izin verilen namespace'ler. `$action.input.*` YASAK — iki gerekçe:
+/// (1) moddan bağımsızlık: `terminal` modunda ACT girdisi güvenilir biçimde mevcut
+/// değil (SLA-3 ile ulaşılan terminal'de hiç yok), (2) WOR-70 tutarlılığı: ctx'e tek
+/// yazma yolu effects'tir, böylece "çağrılana ne gitti" DynCtx'te denetlenebilir kalır.
+const CALL_INPUT_BANNED: &[&str] = &["$action.input.", "$exec.result.", "$call.", "$node"];
+
+/// Bir WFD'deki tüm WFC referanslarını yerleşimiyle birlikte gezer.
+fn call_sites(wfd: &Wfd) -> Vec<(String, &CallRef, bool)> {
+    let mut out: Vec<(String, &CallRef, bool)> = Vec::new();
+    for (key, node) in &wfd.nodes {
+        if let Some(call) = &node.call {
+            out.push((format!("nodes[{key}].call"), call, true));
+        }
+    }
+    for t in &wfd.terminals {
+        if let Some(call) = &t.call {
+            out.push((format!("terminals[{}].call", t.id), call, false));
+        }
+    }
+    out
+}
+
+fn check_calls(wfd: &Wfd, report: &mut ValidationReport) {
+    let sites = call_sites(wfd);
+
+    // Katalog referansları + moda göre yerleşim.
+    let mut used: HashSet<&str> = HashSet::new();
+    for (path, call, is_node_site) in &sites {
+        used.insert(call.use_.as_str());
+        if !wfd.calls.contains_key(&call.use_) {
+            report.error(
+                "call_unknown_use",
+                format!("{path}.use"),
+                format!("'{}' `calls` katalogunda tanımlı değil", call.use_),
+            );
+        }
+        if call.mode.is_node_site() != *is_node_site {
+            let (yer, dogru) = if *is_node_site {
+                ("bir node'da", "wait ya da detached")
+            } else {
+                ("bir terminal'de", "terminal")
+            };
+            report.error(
+                "call_mode_placement",
+                format!("{path}.mode"),
+                format!(
+                    "`mode: {}` {yer} kullanılamaz — bu yerleşimde geçerli mod: {dogru}. \
+                     (wait/detached çağıranı yaşatır ve node'da bekletir; terminal çağıranı bitirip \
+                     ardıl akışı başlatır.)",
+                    call.mode.as_str()
+                ),
+            );
+            continue; // mod yanlışsa moda özel kuralları koşmak gürültü üretir
+        }
+        if *is_node_site {
+            check_node_call(wfd, path, call, report);
+        } else {
+            check_next_call(wfd, path, call, report);
+        }
+    }
+
+    // Katalogda tanımlı ama hiç kullanılmayan kayıt (autoexec'in ikizi).
+    for key in wfd.calls.keys() {
+        if !used.contains(key.as_str()) {
+            report.warn(
+                "call_unused_catalog_entry",
+                format!("calls[{key}]"),
+                format!("'{key}' çağrı tanımı hiçbir node ya da terminal tarafından kullanılmıyor"),
+            );
+        }
+    }
+
+    // WFC-IN: namespace kısıtı + kaynak alanın çağıranın şemasında bildirilmiş olması.
+    for (key, def) in &wfd.calls {
+        if def.wfd_id == wfd.id {
+            // Kendi kendini çağırma: node yerleşiminde sonsuz yuvalanma, terminal
+            // yerleşiminde sonsuz zincir. İkincisi `max_next` ile açıkça istenebilir.
+            let self_via_terminal = sites
+                .iter()
+                .any(|(_, c, is_node)| c.use_ == *key && !is_node && c.max_next.is_some());
+            if !self_via_terminal {
+                report.error(
+                    "call_self_recursion",
+                    format!("calls[{key}].wfd_id"),
+                    format!(
+                        "'{key}' akışın kendisini ('{}') çağırıyor — sonsuz özyineleme. \
+                         Ardıl (terminal) modunda bilinçli bir döngü isteniyorsa `max_next` ile üst sınır verin",
+                        wfd.id
+                    ),
+                );
+            }
+        }
+        for (input_key, raw) in &def.input {
+            let path = format!("calls[{key}].input.{input_key}");
+            walk_strings(raw, &path, &mut |s, p| {
+                for bad in CALL_INPUT_BANNED {
+                    if s.contains(bad) {
+                        report.error(
+                            "call_input_namespace",
+                            p.to_string(),
+                            format!(
+                                "çağrı girdisinde '{bad}*' kullanılamaz: '{s}'. Çağrı girdisi yalnız \
+                                 `$ctx.*`, `$actor`, `$timestamp`, `$wfe_id` ve sabit değerler görür — \
+                                 aksiyon girdisini geçirmek için önce `wfes_effects` ile ctx'e yazın"
+                            ),
+                        );
+                    }
+                }
+                // WFC-IN kaynağı çağıranın context şemasında bildirilmiş olmalı:
+                // "çağrılan akışın girdileri çağıranın context'inde de bulunmalı" kuralı.
+                if let Some(token) = s.strip_prefix("$ctx.") {
+                    let token: String = token
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.')
+                        .collect();
+                    let token = token.trim_end_matches('.');
+                    if !token.is_empty() {
+                        if let PathResolution::Missing = resolve_schema_path(&wfd.context, token) {
+                            report.error(
+                                "call_input_source_undeclared",
+                                p.to_string(),
+                                format!(
+                                    "'$ctx.{token}' bu akışın context şemasında yok — çağrılan akışın \
+                                     '{input_key}' girdisi buradan beslenemez. Ya var olan bir alana \
+                                     eşleyin ya da alanı context'e ekleyip bir `wfes_effects` ile doldurun"
+                                ),
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// `mode: wait | detached` — node yerleşimine özel kurallar.
+fn check_node_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut ValidationReport) {
+    let node_key = path
+        .strip_prefix("nodes[")
+        .and_then(|s| s.split(']').next())
+        .unwrap_or_default();
+
+    if call.wft.is_none() {
+        report.error(
+            "call_wft_required",
+            path.to_string(),
+            "alt akış çağrısı bir hedef (`wft`) içermelidir — çağrılan bittiğinde akışın \
+             nereye gideceği belirsiz kalamaz"
+                .into(),
+        );
+    }
+    for (field, present) in [
+        ("start_as", call.start_as.is_some()),
+        ("max_next", call.max_next.is_some()),
+    ] {
+        if present {
+            report.error(
+                "call_node_forbidden_field",
+                format!("{path}.{field}"),
+                format!("`{field}` yalnız ardıl (terminal) çağrısında geçerlidir"),
+            );
+        }
+    }
+    if let Some(t) = &call.timeout {
+        if call.mode == CallMode::Detached {
+            report.error(
+                "call_node_forbidden_field",
+                format!("{path}.timeout"),
+                "`timeout` yalnız `wait` modunda anlamlıdır — `detached` çağrının sonucunu \
+                 hiç beklemez"
+                    .into(),
+            );
+        } else if let Err(e) = parse_iso8601_duration(t) {
+            report.error("duration_format", format!("{path}.timeout"), e.to_string());
+        }
+    }
+    // `detached` sonucu hiç görmez — `$call.result.*` daima null olurdu.
+    if call.mode == CallMode::Detached {
+        if let Some(effects) = &call.wfes_effects {
+            for (target, raw) in &effects.set {
+                walk_strings(
+                    raw,
+                    &format!("{path}.wfes_effects.set[{target}]"),
+                    &mut |s, p| {
+                        if s.starts_with("$call.result.") {
+                            report.error(
+                            "call_result_in_detached",
+                            p.to_string(),
+                            format!(
+                                "`detached` modda '{s}' daima null'dur — çağrılanın sonucu beklenmiyor. \
+                                 Sonuca göre karar verilecekse modu `wait` yapın"
+                            ),
+                        );
+                        }
+                    },
+                );
+            }
+        }
+    }
+    // WFC node'u insan ACT'i almaz: bekleme bir durumdur, havuz değildir.
+    for t in &wfd.transitions {
+        if t.from.contains(node_key) {
+            report.error(
+                "call_node_has_action",
+                format!("transitions[{}].from", t.id),
+                format!(
+                    "'{node_key}' bir alt akış çağrısı node'u — buradan aksiyon alınamaz. \
+                     Akış çağrılan bittiğinde `call.wft` ile kendi ilerler"
+                ),
+            );
+        }
+    }
+    if let Some(node) = wfd.nodes.get(node_key) {
+        let forbidden = [
+            ("escalation", !node.escalation.is_empty()),
+            ("claim_timeout", node.claim_timeout.is_some()),
+            ("attachments", !node.attachments.is_empty()),
+            ("reassign", node.reassign.is_some()),
+        ];
+        for (field, present) in forbidden {
+            if present {
+                report.error(
+                    "call_node_forbidden_field",
+                    format!("nodes[{node_key}].{field}"),
+                    format!(
+                        "alt akış çağrısı node'unda `{field}` kullanılamaz — çağrılanı terkedip \
+                         başka bir node'a taşımak sahipsiz bir WFE bırakır. Üst sınır için \
+                         `call.timeout` ya da akışın kök `timeout`'unu kullanın"
+                    ),
+                );
+            }
+        }
+    }
+    if wfd.start.iter().any(|s| s.from == node_key) {
+        report.error(
+            "call_node_is_start",
+            format!("nodes[{node_key}]"),
+            format!(
+                "'{node_key}' hem start node'u hem alt akış çağrısı — akış henüz başlamadan \
+                 çağrı yapılamaz"
+            ),
+        );
+    }
+    if let Some(effects) = &call.wfes_effects {
+        for (target, raw) in &effects.set {
+            walk_strings(
+                raw,
+                &format!("{path}.wfes_effects.set[{target}]"),
+                &mut |s, p| {
+                    if s.contains("$action.input.") {
+                        report.error(
+                        "call_effect_namespace",
+                        p.to_string(),
+                        format!(
+                            "çağrı dönüşü effects'inde '$action.input.*' kullanılamaz (dönüşü system \
+                             tetikler, aksiyon girdisi yok): '{s}'"
+                        ),
+                    );
+                    }
+                },
+            );
+        }
+    }
+}
+
+/// `mode: terminal` — ardıl yerleşimine özel kurallar.
+fn check_next_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut ValidationReport) {
+    let terminal_id = path
+        .strip_prefix("terminals[")
+        .and_then(|s| s.split(']').next())
+        .unwrap_or_default();
+
+    // Dönüş olmadığı için dönüşe ait alanların hepsi anlamsızdır.
+    for (field, present) in [
+        ("wfes_effects", call.wfes_effects.is_some()),
+        ("wft", call.wft.is_some()),
+        ("timeout", call.timeout.is_some()),
+    ] {
+        if present {
+            report.error(
+                "call_next_forbidden_field",
+                format!("{path}.{field}"),
+                format!(
+                    "ardıl çağrıda `{field}` kullanılamaz — akış bu terminal'de biter, dönecek bir \
+                     yer yoktur. Ardıla taşınacak veriyi terminal'in kendi `wfes_effects`'i ile \
+                     ctx'e yazıp çağrı girdisinde `$ctx.*` olarak eşleyin"
+                ),
+            );
+        }
+    }
+    // Ardılda WFC-OUT yoktur (çağıran zaten bitti, çağrılan henüz başlamadı).
+    if let Some(t) = wfd.terminals.iter().find(|t| t.id == terminal_id) {
+        if let Some(effects) = &t.wfes_effects {
+            for (target, raw) in &effects.set {
+                walk_strings(
+                    raw,
+                    &format!("terminals[{terminal_id}].wfes_effects.set[{target}]"),
+                    &mut |s, p| {
+                        if s.contains("$call.") {
+                            report.error(
+                                "call_next_result_ref",
+                                p.to_string(),
+                                format!(
+                                    "'{s}' burada çözülemez — ardıl çağrının sonucu yoktur (akış bu \
+                                     terminal'de biter, ardıl bağımsız koşar)"
+                                ),
+                            );
+                        }
+                    },
+                );
+            }
+        }
+    }
+    // `start_as: actor` yalnız bir ACT ile ulaşılan terminal'de güvenlidir. SLA-3
+    // (kök timeout) ya da bir SLA ihlali bu terminal'e getirebiliyorsa aktör yoktur.
+    // Kök `timeout` varsa HER terminal SLA yoluyla ulaşılabilir sayılır.
+    let start_as = call.start_as.unwrap_or_default();
+    if start_as == StartAs::Actor && wfd.timeout.is_some() {
+        report.warn(
+            "call_next_start_actor",
+            format!("{path}.start_as"),
+            format!(
+                "bu akışın kök `timeout`'u var — '{terminal_id}' terminal'ine zaman aşımıyla da \
+                 ulaşılabilir ve o yolda başlatacak bir aktör yoktur. Ardıl o durumda başlamaz; \
+                 `start_as: \"system\"` kullanın"
+            ),
+        );
+    }
+    if let Some(0) = call.max_next {
+        report.error(
+            "call_next_max",
+            format!("{path}.max_next"),
+            "`max_next: 0` ardılı hiç başlatmaz — çağrıyı kaldırın".into(),
+        );
+    }
+}
+
+// ---- WFC: cross-WFD kuralları (WfdProvider gerektirir) ----
+
+/// Çağrılanın start ACT'inin bildirdiği girdiler + o girdilerin ctx'teki tipleri.
+struct CalleeInputs {
+    /// input adı → zorunlu mu
+    declared: Vec<(String, bool)>,
+    /// input adı → çağrılanın ctx şemasındaki hedef alanın tipi (biliniyorsa)
+    types: HashMap<String, String>,
+}
+
+/// Çağrılanın start kuralını ve girdi sözleşmesini çıkarır.
+/// Girdi kümesi WOR-70 zinciriyle okunur: `start[]` → ACT → `input.required/optional`.
+/// Tip ise start ACT'inin `wfes_effects`'i üzerinden `$action.input.<x>` → `ctx.<y>`
+/// izlenerek çağrılanın kendi şemasından alınır.
+fn callee_inputs(callee: &Wfd, start_id: Option<&str>) -> Option<CalleeInputs> {
+    let rule = match start_id {
+        Some(id) => callee.start.iter().find(|s| s.id == id)?,
+        None => callee.start.first()?,
+    };
+    let action = callee.actions.get(&rule.action)?;
+    let declared: Vec<(String, bool)> = action
+        .input
+        .required
+        .iter()
+        .map(|p| (p.clone(), true))
+        .chain(action.input.optional.iter().map(|p| (p.clone(), false)))
+        .collect();
+
+    let mut types = HashMap::new();
+    if let Some(effects) = &rule.wfes_effects {
+        for (ctx_path, raw) in &effects.set {
+            if let Some(input_path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) {
+                if let Some(ty) = schema_type_at(&callee.context, ctx_path) {
+                    types.insert(input_path.to_string(), ty);
+                }
+            }
+        }
+    }
+    Some(CalleeInputs { declared, types })
+}
+
+/// Bir context şeması yolundaki `type` değeri (biliniyorsa).
+fn schema_type_at(context: &Value, dotted: &str) -> Option<String> {
+    let mut current = context;
+    for segment in dotted.split('.') {
+        current = current.get("properties")?.get(segment)?;
+    }
+    current
+        .get("type")
+        .and_then(Value::as_str)
+        .map(String::from)
+}
+
+fn check_calls_cross_wfd(
+    wfd: &Wfd,
+    provider: Option<&dyn WfdProvider>,
+    report: &mut ValidationReport,
+) {
+    let Some(provider) = provider else {
+        // Resolver yok (saf çekirdek testi) — cross-WFD kuralları atlanır.
+        // Upload yolunda resolver DAİMA verilir, bkz. `validate_with` dokümantasyonu.
+        return;
+    };
+    let sites = call_sites(wfd);
+
+    for (key, def) in &wfd.calls {
+        let path = format!("calls[{key}]");
+        let Some(callee) = provider.resolve(&def.wfd_id, def.version.as_deref()) else {
+            report.error(
+                "call_version_not_published",
+                format!("{path}.wfd_id"),
+                match &def.version {
+                    Some(v) => format!(
+                        "çağrılan akış '{}' sürüm '{v}' bulunamadı ya da yayınlanmamış",
+                        def.wfd_id
+                    ),
+                    None => format!(
+                        "çağrılan akış '{}' bulunamadı ya da yayınlanmış bir sürümü yok",
+                        def.wfd_id
+                    ),
+                },
+            );
+            continue;
+        };
+
+        // Start kuralı seçimi: ≥2 start varsa `start` zorunlu.
+        if def.start.is_none() && callee.start.len() > 1 {
+            report.error(
+                "call_start_ambiguous",
+                format!("{path}.start"),
+                format!(
+                    "'{}' akışının {} başlatma kuralı var — hangisiyle başlatılacağını `start` ile belirtin",
+                    def.wfd_id,
+                    callee.start.len()
+                ),
+            );
+        }
+        if let Some(id) = &def.start {
+            if !callee.start.iter().any(|s| s.id == *id) {
+                report.error(
+                    "call_start_ambiguous",
+                    format!("{path}.start"),
+                    format!(
+                        "'{}' akışında '{id}' adlı bir başlatma kuralı yok",
+                        def.wfd_id
+                    ),
+                );
+            }
+        }
+
+        let Some(inputs) = callee_inputs(&callee, def.start.as_deref()) else {
+            continue; // çağrılanın kendi validasyonunun işi
+        };
+
+        // Zorunlu girdi eksik / bilinmeyen girdi verilmiş.
+        for (name, required) in &inputs.declared {
+            if *required && !def.input.contains_key(name) {
+                report.error(
+                    "call_input_missing",
+                    format!("{path}.input"),
+                    format!(
+                        "'{}' akışı '{name}' girdisini zorunlu istiyor ama çağrıda verilmemiş — \
+                         bir `$ctx.*` alanına eşleyin ya da sabit bir değer verin",
+                        def.wfd_id
+                    ),
+                );
+            }
+        }
+        for name in def.input.keys() {
+            if !inputs.declared.iter().any(|(d, _)| d == name) {
+                report.error(
+                    "call_input_unknown",
+                    format!("{path}.input.{name}"),
+                    format!("'{}' akışı '{name}' adlı bir girdi bildirmiyor", def.wfd_id),
+                );
+            }
+        }
+
+        // Tip uyumu: kaynak (çağıranın şeması) ↔ hedef (çağrılanın şeması).
+        for (name, raw) in &def.input {
+            let Some(want) = inputs.types.get(name) else {
+                continue;
+            };
+            let got = match raw.as_str().and_then(|s| s.strip_prefix("$ctx.")) {
+                Some(src) => schema_type_at(&wfd.context, src),
+                None => json_literal_type(raw),
+            };
+            let Some(got) = got else { continue };
+            if !types_compatible(&got, want) {
+                report.error(
+                    "call_input_type_mismatch",
+                    format!("{path}.input.{name}"),
+                    format!(
+                        "'{name}' girdisi '{}' akışında `{want}` bekliyor ama verilen kaynak `{got}` — \
+                         tipleri eşitleyin",
+                        def.wfd_id
+                    ),
+                );
+            }
+        }
+
+        // `$call.result.<k>` çağrılanın hiçbir terminal'inin yanıtında yoksa daima null.
+        let result_keys: HashSet<&str> = callee
+            .terminals
+            .iter()
+            .flat_map(|t| t.wfe_end_response.keys().map(String::as_str))
+            .collect();
+        for (site_path, call, is_node) in sites.iter().filter(|(_, c, _)| c.use_ == *key) {
+            if !is_node || call.mode != CallMode::Wait {
+                continue;
+            }
+            let Some(effects) = &call.wfes_effects else {
+                continue;
+            };
+            for (target, raw) in &effects.set {
+                walk_strings(
+                    raw,
+                    &format!("{site_path}.wfes_effects.set[{target}]"),
+                    &mut |s, p| {
+                        let Some(field) = s.strip_prefix("$call.result.") else {
+                            return;
+                        };
+                        let head = field.split('.').next().unwrap_or(field);
+                        if !result_keys.contains(head) {
+                            report.error(
+                                "call_result_unknown",
+                                p.to_string(),
+                                format!(
+                                    "'{}' akışının hiçbir bitişi '{head}' alanını döndürmüyor — \
+                                     '{s}' daima null olur. Çağrılanın bitiş yanıtına bu alanı ekleyin",
+                                    def.wfd_id
+                                ),
+                            );
+                        }
+                    },
+                );
+            }
+        }
+    }
+
+    check_call_cycles(wfd, provider, &sites, report);
+}
+
+fn json_literal_type(v: &Value) -> Option<String> {
+    Some(
+        match v {
+            Value::String(_) => "string",
+            Value::Bool(_) => "boolean",
+            Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+            Value::Number(_) => "number",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+            Value::Null => return None,
+        }
+        .into(),
+    )
+}
+
+/// `integer` bir `number` yerine geçebilir; gerisi tam eşleşme ister.
+fn types_compatible(got: &str, want: &str) -> bool {
+    got == want || (got == "integer" && want == "number")
+}
+
+/// Yuvalanma döngüsü (`wait`/`detached`) ve ardıl döngüsü (`terminal`) ayrı ayrı
+/// aranır — biri sonsuz yuvalanma, diğeri sonsuz WFE üretimi demektir.
+/// Ardıl döngüsü `max_next` ile AÇIKÇA istenebilir; yuvalanma döngüsü istenemez.
+fn check_call_cycles(
+    root: &Wfd,
+    provider: &dyn WfdProvider,
+    sites: &[(String, &CallRef, bool)],
+    report: &mut ValidationReport,
+) {
+    // (kod, hata mı, yalnız bu modları izle)
+    for (node_site, code) in [(true, "call_cycle"), (false, "call_next_cycle")] {
+        // Ardıl döngüsüne `max_next` ile açıkça izin verilmiş mi? (Yuvalanma
+        // döngüsünün böyle bir kaçışı yoktur.)
+        if !node_site
+            && sites
+                .iter()
+                .any(|(_, c, is_node)| !*is_node && c.max_next.is_some())
+        {
+            continue;
+        }
+        let mut visiting: Vec<String> = Vec::new();
+        let mut done: HashSet<String> = HashSet::new();
+        if let Some(chain) = find_cycle(root, provider, node_site, &mut visiting, &mut done) {
+            let noun = if node_site {
+                "alt akış çağrısı"
+            } else {
+                "ardıl akış"
+            };
+            let hint = if node_site {
+                "Döngüyü kırın — yuvalanma döngüsüne izin verilemez"
+            } else {
+                "Bilinçli bir tekrar isteniyorsa terminal çağrısında `max_next` ile üst sınır verin"
+            };
+            report.error(
+                code,
+                "calls".into(),
+                format!("{noun} döngüsü: {}. {hint}", chain.join(" → ")),
+            );
+        }
+    }
+}
+
+/// DFS ile döngü arar; bulursa döngü zincirini (wfd_id listesi) döner.
+///
+/// Döngü **kenar üzerinde** tespit edilir (hedefe inmeden önce): kökün kendisi
+/// `WfdProvider`'dan çözülemeyebilir (henüz yayınlanmamış bir taslak olabilir), o yüzden
+/// "hedefe git, orada kendini gör" yaklaşımı döngüyü kaçırırdı.
+fn find_cycle(
+    wfd: &Wfd,
+    provider: &dyn WfdProvider,
+    node_site: bool,
+    visiting: &mut Vec<String>,
+    done: &mut HashSet<String>,
+) -> Option<Vec<String>> {
+    if done.contains(&wfd.id) {
+        return None;
+    }
+    visiting.push(wfd.id.clone());
+
+    // Yalnız ilgili yerleşimden referanslanan katalog kayıtlarını izle.
+    let used: HashSet<&str> = call_sites(wfd)
+        .into_iter()
+        .filter(|(_, _, is_node)| *is_node == node_site)
+        .map(|(_, c, _)| c.use_.as_str())
+        .collect();
+
+    for (key, def) in &wfd.calls {
+        if !used.contains(key.as_str()) {
+            continue;
+        }
+        // Kenar, halihazırda DFS yığınında olan bir WFD'ye mi gidiyor?
+        if let Some(pos) = visiting.iter().position(|id| id == &def.wfd_id) {
+            let mut chain = visiting[pos..].to_vec();
+            chain.push(def.wfd_id.clone());
+            visiting.pop();
+            return Some(chain);
+        }
+        if let Some(callee) = provider.resolve(&def.wfd_id, def.version.as_deref()) {
+            if let Some(chain) = find_cycle(&callee, provider, node_site, visiting, done) {
+                visiting.pop();
+                return Some(chain);
+            }
+        }
+    }
+    visiting.pop();
+    done.insert(wfd.id.clone());
+    None
 }
 
 // ---- §1: uniqueness ----
@@ -217,6 +897,12 @@ fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
                 );
             }
         }
+        // WFC node'unun çıkışı `call.wft`'dir — normal bir wft kenarı gibi doğrulanır.
+        if let Some(call) = &node.call {
+            if let Some(wft) = &call.wft {
+                check_wft_refs(wfd, wft, &format!("nodes[{key}].call.wft"), report);
+            }
+        }
     }
 }
 
@@ -352,6 +1038,11 @@ fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
                 visit(wft, format!("nodes[{key}].escalation[{j}].wft"), report);
             }
         }
+        if let Some(call) = &node.call {
+            if let Some(wft) = &call.wft {
+                visit(wft, format!("nodes[{key}].call.wft"), report);
+            }
+        }
     }
 }
 
@@ -433,6 +1124,17 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
                     );
                 }
             }
+            // WFC-RETURN de bir çıkıştır (BFS'e girmezse hedefi "unreachable" görünür).
+            if let Some(call) = &node.call {
+                if let Some(wft) = &call.wft {
+                    absorb(
+                        wft_targets(wft),
+                        &mut reached_nodes,
+                        &mut reached_terminals,
+                        &mut queue,
+                    );
+                }
+            }
             // SLA-1: claim_timeout.wft de bir çıkıştır (node/terminal hedefi
             // BFS'e dahil edilmezse hedef yanlışlıkla "unreachable" görünür).
             if let Some(ct) = &node.claim_timeout {
@@ -480,6 +1182,11 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
     let start_from: HashSet<&str> = wfd.start.iter().map(|s| s.from.as_str()).collect();
     for (key, node) in &wfd.nodes {
         if start_from.contains(key.as_str()) {
+            continue;
+        }
+        // WFC node'unun çıkışı `call.wft`'dir — insan ACT'i almadığı için transition
+        // aramak yanlış olur (aksine `call_node_has_action` bunu yasaklar).
+        if node.call.is_some() {
             continue;
         }
         let has_transition = wfd.transitions.iter().any(|t| t.from.contains(key));
@@ -740,6 +1447,11 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
                 visit_wft(wft, &format!("nodes[{key}].escalation[{j}].wft"), report);
             }
         }
+        if let Some(call) = &node.call {
+            if let Some(wft) = &call.wft {
+                visit_wft(wft, &format!("nodes[{key}].call.wft"), report);
+            }
+        }
     }
     for (i, l) in wfd.listable.iter().enumerate() {
         if let Some(when) = &l.when {
@@ -855,6 +1567,13 @@ fn collect_effect_targets(wfd: &Wfd) -> Vec<String> {
                 push(e);
             }
         }
+        // WFC-RETURN effects de bir yazardır — yoksa yalnız çağrı sonucundan dolan
+        // alan `context_field_never_written` ile yanlışlıkla reddedilirdi.
+        if let Some(call) = &node.call {
+            if let Some(e) = &call.wfes_effects {
+                push(e);
+            }
+        }
     }
     for t in &wfd.terminals {
         if let Some(e) = &t.wfes_effects {
@@ -934,7 +1653,8 @@ fn check_action_input_consumed(wfd: &Wfd, report: &mut ValidationReport) {
     // (kural yolu, aksiyon adı, kuralın kendi effects'i, tetiklediği trigger'lar)
     let mut rules: Vec<(String, &String, Vec<String>)> = Vec::new();
 
-    let refs_for = |own: Option<&WfesEffects>, triggers: &[crate::types::wfd_v22::TriggerInvocation]| {
+    let refs_for = |own: Option<&WfesEffects>,
+                    triggers: &[crate::types::wfd_v22::TriggerInvocation]| {
         let mut refs = Vec::new();
         if let Some(e) = own {
             collect_input_refs(e, &mut refs);
@@ -994,17 +1714,44 @@ fn check_action_input_consumed(wfd: &Wfd, report: &mut ValidationReport) {
 /// görmeli: `optional` bir girdiyle yazılan alanı BAŞKA bir yazar da yazıyorsa
 /// (escalation/autoexec/terminal ya da başka bir kural), girdi gönderilmediğinde o
 /// değer kaybolur (bkz. effects::apply_effects).
-fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
-    // (hedef yol, site açıklaması, opsiyonel-girdi kaynaklı mı)
-    let mut writers: Vec<(String, String, bool)> = Vec::new();
+/// Bir effect yazarı.
+///
+/// `excl`: **karşılıklı dışlama grubu** — aynı (node, action) için birden fazla
+/// transition varsa runtime İLK-MATCH uygular, yani bu kurallardan yalnız BİRİ koşar.
+/// Birbirlerinin değerini ezmeleri imkansızdır; bu yüzden aynı gruptaki yazarlar
+/// karşılaştırmadan muaftır (aksi halde "X yazıyor — aynı alanı X da yazıyor" gibi
+/// kendi kendini gösteren bir yanlış pozitif üretilirdi).
+struct EffectWriter {
+    path: String,
+    site: String,
+    optional_sourced: bool,
+    excl: Option<(String, Vec<String>)>,
+}
 
-    let mut push_rule = |path: &str,
-                         action_name: &str,
-                         effects: &WfesEffects,
-                         site: String,
-                         writers: &mut Vec<(String, String, bool)>| {
+/// İki yazar ilk-match kardeşi mi? Aynı aksiyon adı VE kesişen `from` kümesi →
+/// runtime yalnız birini seçer, ikisi birlikte koşmaz.
+fn mutually_exclusive(
+    a: Option<&(String, Vec<String>)>,
+    b: Option<&(String, Vec<String>)>,
+) -> bool {
+    let (Some((a_action, a_from)), Some((b_action, b_from))) = (a, b) else {
+        return false;
+    };
+    a_action == b_action && a_from.iter().any(|n| b_from.contains(n))
+}
+
+fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
+    let mut writers: Vec<EffectWriter> = Vec::new();
+
+    let push_rule = |path: &str,
+                     action_name: &str,
+                     effects: &WfesEffects,
+                     site: String,
+                     excl: Option<(String, Vec<String>)>,
+                     writers: &mut Vec<EffectWriter>| {
         let optional_sourced = effects.set.get(path).is_some_and(|raw| {
-            let Some(input_path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) else {
+            let Some(input_path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input."))
+            else {
                 return false;
             };
             let Some(action) = wfd.actions.get(action_name) else {
@@ -1023,20 +1770,38 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
                     .iter()
                     .any(|r| paths_overlap(r, input_path))
         });
-        writers.push((path.to_string(), site, optional_sourced));
+        writers.push(EffectWriter {
+            path: path.to_string(),
+            site,
+            optional_sourced,
+            excl,
+        });
     };
 
     for s in &wfd.start {
         if let Some(e) = &s.wfes_effects {
             for path in e.set.keys() {
                 let site = format!("start[{}]", s.id);
-                push_rule(path, &s.action, e, site, &mut writers);
+                // Start kuralları da (from, action) üzerinden ilk-match'tir.
+                push_rule(
+                    path,
+                    &s.action,
+                    e,
+                    site,
+                    Some((s.action.clone(), vec![s.from.clone()])),
+                    &mut writers,
+                );
             }
         }
         for trig in &s.trigger {
             if let Some(c) = &trig.catch {
                 for path in c.wfes_effects.set.keys() {
-                    writers.push((path.clone(), format!("start[{}] catch", s.id), false));
+                    writers.push(EffectWriter {
+                        path: path.clone(),
+                        site: format!("start[{}] catch", s.id),
+                        optional_sourced: false,
+                        excl: None,
+                    });
                 }
             }
         }
@@ -1044,14 +1809,30 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
     for t in &wfd.transitions {
         if let Some(e) = &t.wfes_effects {
             for path in e.set.keys() {
-                let site = format!("'{}' aksiyonu", t.action);
-                push_rule(path, &t.action, e, site, &mut writers);
+                // Site etiketi node'u da taşır: aynı aksiyonun iki kuralı varsa
+                // "X — aynı alanı X da yazıyor" okunmaz bir mesaj üretiyordu.
+                let mut froms: Vec<String> = t.from.iter().into_iter().map(String::from).collect();
+                froms.sort();
+                let site = format!("'{}' aksiyonu ({})", t.action, froms.join(", "));
+                push_rule(
+                    path,
+                    &t.action,
+                    e,
+                    site,
+                    Some((t.action.clone(), froms)),
+                    &mut writers,
+                );
             }
         }
         for trig in &t.trigger {
             if let Some(c) = &trig.catch {
                 for path in c.wfes_effects.set.keys() {
-                    writers.push((path.clone(), format!("transitions[{}] catch", t.id), false));
+                    writers.push(EffectWriter {
+                        path: path.clone(),
+                        site: format!("transitions[{}] catch", t.id),
+                        optional_sourced: false,
+                        excl: None,
+                    });
                 }
             }
         }
@@ -1060,14 +1841,24 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
         for esc in &node.escalation {
             if let Some(e) = &esc.wfes_effects {
                 for path in e.set.keys() {
-                    writers.push((path.clone(), format!("'{key}' escalation'ı"), false));
+                    writers.push(EffectWriter {
+                        path: path.clone(),
+                        site: format!("'{key}' escalation'ı"),
+                        optional_sourced: false,
+                        excl: None,
+                    });
                 }
             }
         }
         if let Some(ct) = &node.claim_timeout {
             if let Some(e) = &ct.wfes_effects {
                 for path in e.set.keys() {
-                    writers.push((path.clone(), format!("'{key}' claim süresi"), false));
+                    writers.push(EffectWriter {
+                        path: path.clone(),
+                        site: format!("'{key}' claim süresi"),
+                        optional_sourced: false,
+                        excl: None,
+                    });
                 }
             }
         }
@@ -1075,37 +1866,57 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
     for t in &wfd.terminals {
         if let Some(e) = &t.wfes_effects {
             for path in e.set.keys() {
-                writers.push((path.clone(), format!("'{}' terminali", t.id), false));
+                writers.push(EffectWriter {
+                    path: path.clone(),
+                    site: format!("'{}' terminali", t.id),
+                    optional_sourced: false,
+                    excl: None,
+                });
             }
         }
     }
     for (name, ax) in &wfd.autoexec {
         if let Some(e) = &ax.wfes_effects {
             for path in e.set.keys() {
-                writers.push((path.clone(), format!("'{name}' otomasyonu"), false));
+                writers.push(EffectWriter {
+                    path: path.clone(),
+                    site: format!("'{name}' otomasyonu"),
+                    optional_sourced: false,
+                    excl: None,
+                });
             }
         }
     }
 
     let mut reported: HashSet<String> = HashSet::new();
-    for (path, site, optional_sourced) in &writers {
-        if !optional_sourced || !reported.insert(path.clone()) {
+    for w in &writers {
+        if !w.optional_sourced || !reported.insert(w.path.clone()) {
             continue;
         }
         let others: Vec<&str> = writers
             .iter()
-            .filter(|(p, s, _)| s != site && paths_overlap(p, path))
-            .map(|(_, s, _)| s.as_str())
+            .filter(|o| o.site != w.site && paths_overlap(&o.path, &w.path))
+            // İLK-MATCH kardeşleri muaf: aynı (node, action) için yalnız BİRİ koşar,
+            // dolayısıyla birbirinin değerini ezemezler.
+            .filter(|o| !mutually_exclusive(o.excl.as_ref(), w.excl.as_ref()))
+            .map(|o| o.site.as_str())
             .collect();
+        // Aynı etiket birden fazla kez listelenmesin: ilk-match kardeşleri aynı
+        // (aksiyon, node) etiketini taşır, ham liste "X, X, Y" gibi okunurdu.
+        let mut others = others;
+        others.dedup();
+        others.sort();
+        others.dedup();
         if others.is_empty() {
             continue;
         }
         report.warn(
             "optional_input_nulls_other_writer",
-            site.clone(),
+            w.site.clone(),
             format!(
-                "'{path}' alanını opsiyonel bir girdi yazıyor; aynı alanı {} da yazıyor. \
+                "'{}' alanını opsiyonel bir girdi yazıyor; aynı alanı {} da yazıyor. \
                  Girdi gönderilmezse bu alan null olur ve diğer yazarın değeri kaybolur.",
+                w.path,
                 others.join(", ")
             ),
         );
@@ -1123,7 +1934,10 @@ fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
                 report.error(
                     "attachment_item_dup",
                     format!("attachments[{group}].items"),
-                    format!("attachment item id '{}' grup içinde birden fazla tanımlı", item.id),
+                    format!(
+                        "attachment item id '{}' grup içinde birden fazla tanımlı",
+                        item.id
+                    ),
                 );
             }
         }
@@ -1199,6 +2013,9 @@ fn check_effect_paths(wfd: &Wfd, report: &mut ValidationReport) {
                 &format!("nodes[{key}].escalation[{j}]"),
                 report,
             );
+        }
+        if let Some(call) = &node.call {
+            check_effects(&call.wfes_effects, &format!("nodes[{key}].call"), report);
         }
     }
     for t in &wfd.terminals {
@@ -1408,8 +2225,11 @@ fn walk_strings<'a>(v: &'a Value, path: &str, f: &mut impl FnMut(&'a str, &str))
         }
         Value::Object(map) => {
             for (k, item) in map {
-                // context şeması serbest metin içerebilir (description vb.) — atla
-                if path == "$" && k == "context" {
+                // context şeması serbest metin içerebilir (description vb.) — atla.
+                // `calls` de atlanır: WFC-IN'in kendi kuralları (`call_input_namespace`,
+                // `call_input_source_undeclared`) daha iyi mesaj verir; generic ctx_ref
+                // burada koşarsa aynı hata iki kez raporlanır.
+                if path == "$" && (k == "context" || k == "calls") {
                     continue;
                 }
                 walk_strings(item, &format!("{path}.{k}"), f);

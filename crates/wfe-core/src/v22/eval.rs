@@ -1,6 +1,6 @@
 //! v2.2 ZEN expression context'i (WOR-40, M7).
 //! Namespace seti: $ctx, $wfah, $node, $actor, $timestamp, $wfe_id,
-//! $action.input.*, $exec.result.*
+//! $action.input.*, $exec.result.*, $call.* (WFC-RETURN bağlamı)
 
 use crate::error::EngineError;
 use crate::types::{actor::Actor, wfah::Wfah};
@@ -17,6 +17,30 @@ pub struct EvalEnv {
     pub wfe_id: Option<Uuid>,
     pub action_input: Option<Value>,
     pub exec_result: Option<Value>,
+    /// WFC-OUT — yalnız WFC-RETURN bağlamında bağlanır (`$call.*`).
+    pub call: Option<CallOutcome>,
+}
+
+/// Çağrılan WFE'nin sonucu — `$call.result.*` / `$call.status` / `$call.wfe_id`.
+/// `$exec.result.*` ile BİRLEŞTİRİLMEZ: autoexec bir sistem çağrısıdır, WFC bir WFE
+/// örneğidir; ayrı kavramlar ayrı namespace taşır.
+#[derive(Debug, Clone)]
+pub struct CallOutcome {
+    /// Çağrılanın `wfe_end_response`'u. `detached` modda daima `Value::Null`.
+    pub result: Value,
+    /// "completed" | "failed" | "terminated" | "timeout" | "started"
+    pub status: String,
+    pub wfe_id: Option<Uuid>,
+}
+
+impl CallOutcome {
+    fn to_json(&self) -> Value {
+        json!({
+            "result": self.result.clone(),
+            "status": self.status.clone(),
+            "wfe_id": self.wfe_id.map(|id| Value::from(id.to_string())).unwrap_or(Value::Null),
+        })
+    }
 }
 
 impl EvalEnv {
@@ -67,6 +91,12 @@ impl EvalEnv {
         self
     }
 
+    /// WFC-RETURN bağlamı — `$call.*` bu çağrıyla görünür olur.
+    pub fn with_call(mut self, call: CallOutcome) -> Self {
+        self.call = Some(call);
+        self
+    }
+
     fn zen_context(&self) -> Value {
         let mut map = Map::new();
         map.insert("$ctx".into(), self.ctx.clone());
@@ -95,6 +125,14 @@ impl EvalEnv {
         map.insert(
             "$exec".into(),
             json!({ "result": self.exec_result.clone().unwrap_or(Value::Null) }),
+        );
+        // WFC-RETURN dışındaki bağlamlarda `$call` boş bir kabuktur — `$call.status`
+        // null döner, ifade patlamaz (eksik ctx alanının null olması gibi).
+        map.insert(
+            "$call".into(),
+            self.call.as_ref().map(CallOutcome::to_json).unwrap_or_else(
+                || json!({ "result": Value::Null, "status": Value::Null, "wfe_id": Value::Null }),
+            ),
         );
         map.insert(
             "$timestamp".into(),

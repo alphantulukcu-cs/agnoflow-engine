@@ -34,4 +34,10 @@ pub struct WfdMeta {
     pub review_note: Option<String>,
     /// Onaya gönderen kullanıcı (e-posta) — pending satırda dolu.
     pub submitted_by: Option<String>,
+    /// WFC: dokümanın kendi `id` alanı. `calls.<key>.wfd_id` BUNA atıfta bulunur
+    /// (DB uuid'sine değil) — editörün akış seçici dropdown'ı bu değeri yazar.
+    /// Migration öncesi satırlarda NULL; yeniden yayınlanınca dolar.
+    pub doc_id: Option<String>,
+    /// WFC: dokümanın semver `version`'ı — `calls.<key>.version` pinlemesi için.
+    pub doc_version: Option<String>,
 }

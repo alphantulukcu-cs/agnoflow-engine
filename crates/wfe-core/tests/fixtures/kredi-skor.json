@@ -1,0 +1,134 @@
+{
+  "wfd_version": "2.2",
+  "expression_language": "zen@1",
+  "id": "kredi-skor",
+  "name": "Kredi Skor Sorgusu",
+  "version": "1.0.0",
+  "description": "WFC örnek fixture'ı — ÇAĞRILAN akış. Bir risk analisti müşteri skorunu girer, akış skora göre biter. Bitiş yanıtı (`wfe_end_response`) çağıran akışa `$call.result.*` olarak döner; bu yüzden `skor` ve `karar` her iki terminal'de de döndürülür — çağıran hangi terminal'den dönüldüğüne bakmadan aynı alanları okuyabilsin.",
+  "context": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "musteri_no": {
+        "type": "string",
+        "description": "Skoru sorgulanacak müşteri. Çağıran akış bunu WFC-IN ile besler."
+      },
+      "talep_tutari": {
+        "type": "number",
+        "description": "Talep edilen kredi tutarı — skor değerlendirmesinin girdisi."
+      },
+      "skor": {
+        "type": "integer",
+        "description": "Risk analistinin girdiği skor."
+      },
+      "karar": {
+        "type": "string",
+        "description": "Skora göre türetilen sonuç; terminal effects'i yazar."
+      },
+      "initiated_by": {
+        "type": "object"
+      }
+    }
+  },
+  "nodes": {
+    "type_branch__branchClerk": {
+      "label": "Şube Memuru",
+      "description": "Skor sorgusunu başlatan havuz. Çağıran akış bu akışı başlatırken aktörü buraya taşır.",
+      "c_a": {
+        "c_orgu": "*:[type:branch]",
+        "c_r": ["branchClerk"]
+      }
+    },
+    "self__riskAnalyst": {
+      "label": "Risk Analisti Havuzu",
+      "description": "Skorun girilmesi bekleniyor.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": ["riskAnalyst"]
+      }
+    }
+  },
+  "start": [
+    {
+      "id": "start__type_branch__branchClerk",
+      "from": "type_branch__branchClerk",
+      "action": "skor_talebi_olustur",
+      "wfes_effects": {
+        "set": {
+          "musteri_no": "$action.input.musteri_no",
+          "talep_tutari": "$action.input.talep_tutari",
+          "initiated_by": "$actor"
+        }
+      },
+      "wft": {
+        "node": "self__riskAnalyst"
+      }
+    }
+  ],
+  "actions": {
+    "skor_talebi_olustur": {
+      "label": "Skor Talebi Oluştur",
+      "description": "Akışı başlatan aksiyon. Bildirdiği girdiler, çağıran akışın WFC-IN ile beslemek zorunda olduğu alanlardır (`call_input_missing`).",
+      "input": {
+        "required": ["musteri_no", "talep_tutari"],
+        "optional": []
+      }
+    },
+    "skor_gir": {
+      "label": "Skoru Gir",
+      "input": {
+        "required": ["skor"],
+        "optional": []
+      }
+    }
+  },
+  "transitions": [
+    {
+      "id": "t_skor_gir",
+      "from": "self__riskAnalyst",
+      "action": "skor_gir",
+      "wfes_effects": {
+        "set": {
+          "skor": "$action.input.skor"
+        }
+      },
+      "wft": {
+        "conditions": [
+          {
+            "when": "$action.input.skor >= 700",
+            "terminal": "terminal_skor_uygun"
+          }
+        ],
+        "default": {
+          "terminal": "terminal_skor_dusuk"
+        }
+      }
+    }
+  ],
+  "terminals": [
+    {
+      "id": "terminal_skor_uygun",
+      "wfes_effects": {
+        "set": {
+          "karar": "uygun"
+        }
+      },
+      "wfe_end_response": {
+        "skor": "$ctx.skor",
+        "karar": "$ctx.karar"
+      }
+    },
+    {
+      "id": "terminal_skor_dusuk",
+      "wfes_effects": {
+        "set": {
+          "karar": "uygun_degil"
+        }
+      },
+      "wfe_end_response": {
+        "skor": "$ctx.skor",
+        "karar": "$ctx.karar"
+      }
+    }
+  ]
+}

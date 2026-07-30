@@ -13,7 +13,7 @@ use wfe_core::types::{
     wfe::WfeStatus,
 };
 use wfe_core::v22::ports::{
-    BranchState, BranchStatus, CommitOutcome, NewWfe, TransitionCommit, Wfes,
+    BranchState, BranchStatus, CommitOutcome, NewWfe, StagedCall, TransitionCommit, Wfes,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +33,51 @@ pub struct SimState {
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod.
     #[serde(default)]
     pub join_target: Option<WftTarget>,
+    /// WFC: bu adımda yapılacak iş akışı çağrıları.
+    ///
+    /// Simülasyonda GERÇEK bir WFE yaratılmaz — çağrılan akışı koşturmak simülasyonun
+    /// kapsamı değildir (kendi aktörleri, kendi SLA'sı, kendi org çözümü olurdu).
+    /// Onun yerine çağrı burada "bekliyor" olarak durur ve kullanıcı sonucu ELLE girer
+    /// (`/simulate/call-return`). Editör bu listeyi görüp "burada şu akış çağrılacak"
+    /// diyebilir; `wait` modunda akış bu çağrı çözülene kadar ilerlemez.
+    ///
+    /// `#[serde(default)]` — WFC öncesi üretilmiş sim_state blob'ları bu alan olmadan
+    /// da parse edilir.
+    #[serde(default)]
+    pub pending_calls: Vec<SimCall>,
+}
+
+/// Simülasyonda bekleyen bir WFC çağrısı — `wf.wfe_call`'ın kullanıcıya görünen özeti.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimCall {
+    /// Root `calls` katalog key'i.
+    pub call_key: String,
+    /// wait | detached | terminal
+    pub mode: String,
+    /// 'node' (alt akış) | 'terminal' (ardıl akış)
+    pub site_kind: String,
+    /// Çağrı node'unun slug'ı ya da terminal id'si.
+    pub site_key: String,
+    /// WFC-IN — çağıranın ctx'inden ÇÖZÜLMÜŞ girdi. Editör bunu göstererek
+    /// "çağrılana şu değerler gidecek" diyebilir.
+    pub input: serde_json::Value,
+    /// `wait` dışındaki modlarda çağrı beklenmez: satır bilgi amaçlıdır ve
+    /// akışı bloklamaz (`detached` hemen devam eder, `terminal`'de akış bitmiştir).
+    pub awaited: bool,
+}
+
+impl SimCall {
+    fn from_staged(c: &StagedCall) -> Self {
+        let awaited = c.mode == wfe_core::types::wfd_v22::CallMode::Wait;
+        Self {
+            call_key: c.call_key.clone(),
+            mode: c.mode.as_str().into(),
+            site_kind: c.site.kind().into(),
+            site_key: c.site.key().into(),
+            input: c.input.clone(),
+            awaited,
+        }
+    }
 }
 
 impl SimState {
@@ -50,6 +95,7 @@ impl SimState {
             end_response,
             branches: vec![],
             join_target: None,
+            pending_calls: new.staged_calls.iter().map(SimCall::from_staged).collect(),
         }
     }
 
@@ -110,6 +156,28 @@ impl SimState {
         if end_response.is_some() {
             self.end_response = end_response;
         }
+        // WFC: yeni çağrılar eklenir. Öncekiler KORUNUR — `wait` modunda akış zaten
+        // çağrı çözülmeden ilerleyemez; `detached`/`terminal` satırları ise geçmişin
+        // parçasıdır ve editörde "şu adımda şu akış başlatıldı" olarak kalır.
+        self.pending_calls
+            .extend(commit.staged_calls.iter().map(SimCall::from_staged));
+    }
+
+    /// WFC: bu adımda çözülmesi BEKLENEN çağrı (yalnız `mode: wait`).
+    ///
+    /// `Some` ise akış bu node'da duruyor ve ilerlemesi için çağrı sonucunun elle
+    /// girilmesi gerekir — editör "sonucu gir" formunu bu bilgiyle açar.
+    pub fn awaited_call(&self) -> Option<&SimCall> {
+        let node = self.current_node.as_deref()?;
+        self.pending_calls
+            .iter()
+            .find(|c| c.awaited && c.site_kind == "node" && c.site_key == node)
+    }
+
+    /// Çağrı çözüldükten sonra satırı bekleyen listeden düşürür (dönüş bir kez işlenir).
+    pub fn clear_awaited_call(&mut self, site_key: &str) {
+        self.pending_calls
+            .retain(|c| !(c.awaited && c.site_kind == "node" && c.site_key == site_key));
     }
 
     /// WOR-31 T4: `branches`/`join_target` yan etkileri — DB adapter'ının commit

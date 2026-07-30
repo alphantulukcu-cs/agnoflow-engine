@@ -66,7 +66,12 @@ impl WfdAdapter {
         let wfd = Wfd::from_value(wfd_json.clone())
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
 
-        let report = validator::validate(&wfd);
+        // WFC cross-WFD kuralları (girdi kümesi, tip uyumu, `$call.result.*` anahtarları,
+        // döngü) çağrılan WFD'leri okumayı gerektirir. Validator SAF ve SENKRONdur, bu
+        // yüzden gerekli dokümanlar önce async olarak toplanır, sonra bellekteki bir
+        // katalog sync provider olarak verilir.
+        let callees = self.prefetch_callees(orgtnt_id, &wfd).await;
+        let report = validator::validate_with(&wfd, Some(&callees));
         if !report.is_valid() {
             return Err(Self::validation_error(&report));
         }
@@ -102,9 +107,56 @@ impl WfdAdapter {
             &[],
             "admin",
             None,
+            // WFC: bu WFD'nin başka akışlar tarafından çağrılabilmesi için doküman
+            // kimliği indekslenir (bkz. repo::resolve_doc).
+            Some(wfd.id.as_str()),
+            Some(wfd.version.as_str()),
         )
         .await?;
         Ok((wfd_id, version))
+    }
+
+    /// WFC: `calls` katalogundan başlayıp geçişli olarak çağrılan WFD'leri toplar.
+    ///
+    /// Geçişli olması ZORUNLU: döngü tespiti (`call_cycle` / `call_next_cycle`) yalnız
+    /// çağrılanın kendi çağrılarını da görebilirse çalışır. Derinlik `MAX_PREFETCH` ile
+    /// sınırlıdır — bozuk/çok derin bir graf upload'ı kilitlemesin; sınır aşılırsa
+    /// döngü statik olarak kaçabilir ama runtime derinlik freni yine devreye girer.
+    async fn prefetch_callees(&self, orgtnt_id: Uuid, root: &Wfd) -> CalleeCatalog {
+        const MAX_PREFETCH: usize = 64;
+        let mut out: Vec<Wfd> = Vec::new();
+        let mut queue: Vec<(String, Option<String>)> = root
+            .calls
+            .values()
+            .map(|d| (d.wfd_id.clone(), d.version.clone()))
+            .collect();
+        let mut seen: std::collections::HashSet<(String, Option<String>)> =
+            queue.iter().cloned().collect();
+
+        while let Some((doc_id, doc_version)) = queue.pop() {
+            if out.len() >= MAX_PREFETCH {
+                tracing::warn!(
+                    "WFC ön-yükleme sınırı ({MAX_PREFETCH}) aşıldı — döngü tespiti eksik olabilir"
+                );
+                break;
+            }
+            let Ok(Some((id, version))) =
+                repo::resolve_doc(&self.pool, orgtnt_id, &doc_id, doc_version.as_deref()).await
+            else {
+                continue; // çözülemeyen çağrı `call_version_not_published` ile raporlanır
+            };
+            let Ok(callee) = WfdStore::fetch(self, id, version).await else {
+                continue;
+            };
+            for def in callee.calls.values() {
+                let key = (def.wfd_id.clone(), def.version.clone());
+                if seen.insert(key.clone()) {
+                    queue.push(key);
+                }
+            }
+            out.push(callee);
+        }
+        CalleeCatalog(out)
     }
 
     /// slug: isimden basit, güvenli bir id üretir (draft iskeleti için).
@@ -149,6 +201,9 @@ impl WfdAdapter {
             "transitions": [],
         });
         let doc = wfd_json.unwrap_or(&skeleton);
+        // WFC: doküman kimliği draft'ta da saklanır (yayınlanınca çağrılabilir olsun).
+        let doc_id = doc.get("id").and_then(Value::as_str);
+        let doc_version = doc.get("version").and_then(Value::as_str);
         let bytes = serde_json::to_vec(doc)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.storage
@@ -170,6 +225,10 @@ impl WfdAdapter {
             tags,
             "admin",
             source_template_id,
+            // Draft satır da doküman kimliğini taşır; `resolve_doc` yalnız
+            // `status='published'` satırları döndürdüğü için draft çağrılamaz.
+            doc_id,
+            doc_version,
         )
         .await?;
         Ok((wfd_id, version))
@@ -226,6 +285,43 @@ impl WfdAdapter {
         Ok(())
     }
 
+    /// Draft/pending bir WFD'yi **upload ile AYNI kapıdan** doğrular.
+    ///
+    /// Neden ayrı bir yardımcı: `publish`/`submit`/`approve` yolları resolver'sız
+    /// `validate()` çağırıyordu, yani WFC'nin cross-WFD kuralları (çağrılanın var
+    /// olması, girdi sözleşmesi, tip uyumu, döngü) BU YOLLARDA HİÇ KOŞMUYORDU.
+    /// Sonuç: çağıran akış, çağrılan henüz yayınlanmamışken sessizce publish
+    /// edilebiliyordu ve hata ancak ÇALIŞMA ANINDA `WFD.CallNotFound` olarak
+    /// ortaya çıkıyordu — `wait` modunda WFE o node'da sonsuza kadar bekler.
+    async fn validate_for_release(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        wfd: &Wfd,
+    ) -> Result<(), crate::error::WfdError> {
+        // Versiyon ZORUNLU: `get_meta_any` (wfd_id, version) ile arar. Sabit 0
+        // geçilirse satır bulunamaz, tenant None olur ve cross-WFD kuralları
+        // sessizce atlanır — yani kapı hiç kapanmaz.
+        let orgtnt_id = repo::get_meta_any(&self.pool, wfd_id, version)
+            .await
+            .map(|m| m.orgtnt_id)
+            .ok();
+        let report = match orgtnt_id {
+            Some(tid) => {
+                let callees = self.prefetch_callees(tid, wfd).await;
+                validator::validate_with(wfd, Some(&callees))
+            }
+            // Tenant çözülemezse cross-WFD kurallarını atlamak yerine yerel
+            // doğrulama ile devam et — sessizce geçirmekten iyidir, ama bu yol
+            // pratikte oluşmaz (satır zaten okundu).
+            None => validator::validate(wfd),
+        };
+        if !report.is_valid() {
+            return Err(Self::validation_error(&report));
+        }
+        Ok(())
+    }
+
     /// Draft'ı yayınlar: tam v2.2 validator, geçerse status='published'.
     /// Geçmezse InvalidJson(validator özeti) döner, draft kalır.
     pub async fn publish_draft(
@@ -236,10 +332,7 @@ impl WfdAdapter {
         let json = self.fetch_draft_json(wfd_id, version).await?;
         let wfd = Wfd::from_value(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        let report = validator::validate(&wfd);
-        if !report.is_valid() {
-            return Err(Self::validation_error(&report));
-        }
+        self.validate_for_release(wfd_id, version, &wfd).await?;
         repo::set_published(&self.pool, wfd_id, version).await?;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
@@ -256,10 +349,7 @@ impl WfdAdapter {
         let json = self.fetch_draft_json(wfd_id, version).await?;
         let wfd = Wfd::from_value(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        let report = validator::validate(&wfd);
-        if !report.is_valid() {
-            return Err(Self::validation_error(&report));
-        }
+        self.validate_for_release(wfd_id, version, &wfd).await?;
         repo::set_pending(&self.pool, wfd_id, version, submitted_by).await
     }
 
@@ -287,10 +377,9 @@ impl WfdAdapter {
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         let wfd = Wfd::from_value(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        let report = validator::validate(&wfd);
-        if !report.is_valid() {
-            return Err(Self::validation_error(&report));
-        }
+        // Onay yolu da aynı kapıdan geçer: pending JSON immutable olsa bile
+        // ÇAĞRILAN akışlar bu arada değişmiş/silinmiş olabilir.
+        self.validate_for_release(wfd_id, version, &wfd).await?;
         repo::set_published_from_pending(&self.pool, wfd_id, version).await?;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
@@ -415,6 +504,18 @@ impl WfdAdapter {
 
 #[async_trait]
 impl WfdStore for WfdAdapter {
+    /// WFC: doküman kimliğinden yayınlanmış satırı çözer (`wfd_meta.doc_id` indeksi).
+    async fn resolve_doc(
+        &self,
+        orgtnt_id: Uuid,
+        doc_id: &str,
+        doc_version: Option<&str>,
+    ) -> Result<Option<(Uuid, i32)>, EngineError> {
+        repo::resolve_doc(&self.pool, orgtnt_id, doc_id, doc_version)
+            .await
+            .map_err(|e| EngineError::WfdPort(e.to_string()))
+    }
+
     async fn fetch(&self, wfd_id: Uuid, version: i32) -> Result<Wfd, EngineError> {
         if let Some(cached) = self.cache.read().await.get(&(wfd_id, version)) {
             return Ok(cached.clone());
@@ -453,5 +554,20 @@ mod tests {
         assert_eq!(WfdAdapter::slug("Kredi Başvuru!"), "kredi_ba_vuru");
         assert_eq!(WfdAdapter::slug("  "), "wfd");
         assert_eq!(WfdAdapter::slug("A-B_C"), "a_b_c");
+    }
+}
+
+/// Ön-yüklenmiş çağrılan WFD'ler — validator'ın SENKRON `WfdProvider`'ı.
+///
+/// `version: None` = "en son yayınlanmış": burada katalogdaki tek sürüm o sürümdür
+/// (ön-yükleme `resolve_doc` ile zaten en sonu seçti).
+struct CalleeCatalog(Vec<Wfd>);
+
+impl validator::WfdProvider for CalleeCatalog {
+    fn resolve(&self, wfd_id: &str, version: Option<&str>) -> Option<Wfd> {
+        self.0
+            .iter()
+            .find(|w| w.id == wfd_id && version.map_or(true, |v| w.version == v))
+            .cloned()
     }
 }

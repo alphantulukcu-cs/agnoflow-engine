@@ -8,12 +8,13 @@ use std::sync::Arc;
 use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
 use wfe_core::types::wfah::WfahEntry;
-use wfe_core::types::wfd_v22::{Wfd, WftTarget};
+use wfe_core::types::wfd_v22::{CallMode, StartAs, Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
-    AutoexecRunner, BranchState, BranchStatus, CommitOutcome, WfdStore, WfeStore, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CallView, CommitOutcome, PendingCall, WfdStore,
+    WfeStore, Wfes,
 };
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
 use wfe_core::{ConflictKind, EngineError, OrgPort};
@@ -199,6 +200,12 @@ pub struct WfeView {
     /// durum değişmişse 409 `conflict.stale_revision` alır. WFE-seviyesidir —
     /// paralel modda TÜM kollar için aynı değerdir.
     pub rev: u32,
+    /// WFC: bu WFE'nin YAPTIĞI iş akışı çağrıları (alt akışlar + ardıl).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub calls: Vec<CallView>,
+    /// WFC: bu WFE'yi başlatan çağrı — "bu iş şu akıştan geldi". Kök WFE'de `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller: Option<CallView>,
 }
 
 /// GET /wfe/:id kol görünümü: kalıcı `BranchState` alanları (`#[serde(flatten)]` ile
@@ -386,7 +393,15 @@ impl WfeExecutor {
                 .await?;
             match self.wfe.commit(&commit).await {
                 Ok(()) => {
-                    self.nudge_timers(); // node değişimi escalation dwell'ini ve claim sayacını sıfırlar
+                    // WFC: bu WFE sonlandıysa onu bekleyen çağrıyı `returned`'e çek ve
+                    // kendi alt akışlarını iptal et. **nudge'dan ÖNCE** olmak zorunda:
+                    // ters sırada sweeper uyanıp satırı henüz `running` görüyor, hiçbir
+                    // şey bulmadan tekrar uykuya dalıyor ve çağıranın dönüşü 60 sn'lik
+                    // güvenlik ağına kadar gecikiyordu.
+                    self.after_wfe_settled(wfe_id, &commit.outcome).await?;
+                    // node değişimi escalation dwell'ini ve claim sayacını sıfırlar;
+                    // ayrıca yukarıda yazılan çağrı dönüşünü sweeper'a duyurur.
+                    self.nudge_timers();
                     let (terminal, current_node, end_response) = outcome_view(&commit.outcome);
                     return Ok(WfeApplyResult {
                         wfe_id,
@@ -587,7 +602,14 @@ impl WfeExecutor {
             let active = b.status == BranchStatus::Active;
             let c_a = if active {
                 engine
-                    .resolve_node_c_a(&wfd, &b.branch_node, ctx, &wfes.wfah, viewer, wfes.orgtnt_id)
+                    .resolve_node_c_a(
+                        &wfd,
+                        &b.branch_node,
+                        ctx,
+                        &wfes.wfah,
+                        viewer,
+                        wfes.orgtnt_id,
+                    )
                     .await?
             } else {
                 Vec::new()
@@ -620,6 +642,11 @@ impl WfeExecutor {
             None
         };
 
+        // WFC: bu WFE'nin çağrıları + onu başlatan çağrı. Store bunları desteklemiyorsa
+        // (WFC'siz kurulum / test store) boş küme döner — görünüm alanları hiç yazılmaz.
+        let calls = self.wfe.calls_of_caller(wfe_id).await?;
+        let caller = self.wfe.caller_of(wfe_id).await?;
+
         Ok(WfeView {
             wfe_id,
             status: wfes.status,
@@ -636,6 +663,8 @@ impl WfeExecutor {
             branches: branch_views,
             join_target: wfes.join_target,
             claim_as,
+            calls,
+            caller,
         })
     }
 
@@ -659,6 +688,296 @@ impl WfeExecutor {
     /// 2. claim timeout (SLA-1), 3. escalation (SLA-2 — yalnız node devri).
     /// Bir şey ateşlendiyse true döner
     /// (M5/M6 — WOR-46/47).
+
+    // ================================================================ WFC
+    //
+    // İş akışı çağrısı (WFC) — üç mod: `wait` / `detached` (alt akış, node yerleşimi)
+    // ve `terminal` (ardıl akış). Plan: docs/plans/workflow-call.md.
+    //
+    // Çalışma modeli OUTBOX'tır: çağrı niyeti çağıranın commit'i ile AYNI tx'te
+    // `wf.wfe_call`'a `queued` olarak yazılır (bkz. `WfeAdapter::commit`), gerçek start
+    // burada AYRI bir tx'te koşar. Böylece çağıranın atomikliği başka bir WFE'nin tüm
+    // start pipeline'ına bağlanmaz ve başlatma yeniden denenebilir olur.
+
+    /// Alt akış yuvalanma sınırı. `call_cycle` statik olarak kaçarsa (pin'siz sürüm →
+    /// "en son"a göre en iyi çaba) runtime freni budur.
+    const MAX_CALL_DEPTH: i32 = 8;
+    /// Ardıl zinciri sınırı. Ardıl döngüsü (A bitince B, B bitince A) sonsuz WFE
+    /// üretir — sitedeki `max_next` ile birlikte iki katmanlı frenin ikinci katmanı.
+    const MAX_NEXT_DEPTH: i32 = 16;
+
+    /// Kuyruktaki çağrıları başlatır. Dönen sayı başlatılan çağrı adedidir.
+    ///
+    /// Bir çağrının başlatılamaması çağıranı ETKİLEMEZ (Handoff Isolation): satır
+    /// `failed`/`skipped` olur, çağıranın durumu neyse öyle kalır.
+    pub async fn run_pending_calls(&self, limit: i64) -> Result<usize, EngineError> {
+        let pending = self.wfe.pending_call_starts(limit).await?;
+        let mut started = 0usize;
+        for call in pending {
+            match self.start_one_call(&call).await {
+                Ok(true) => started += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    // Çağıranı bozmadan kaydet ve devam et — bir çağrının patlaması
+                    // diğerlerini engellemesin.
+                    tracing::warn!(
+                        "WFC start başarısız (call_row={}, caller={}, key={}): {e}",
+                        call.id,
+                        call.caller_wfe_id,
+                        call.call_key
+                    );
+                    let _ = self.wfe.set_call_status(call.id, "failed", None).await;
+                }
+            }
+        }
+        Ok(started)
+    }
+
+    /// Tek bir çağrıyı başlatır. `Ok(false)` = derinlik sınırı ya da eskimiş satır
+    /// yüzünden bilinçli olarak başlatılmadı.
+    async fn start_one_call(&self, call: &PendingCall) -> Result<bool, EngineError> {
+        // Derinlik frenleri. Aşılırsa çağrılan HİÇ başlatılmaz; çağıran `completed`
+        // (ya da bulunduğu durumda) kalır ve satır `skipped` olur.
+        let is_next = matches!(call.mode, CallMode::Terminal);
+        let over_depth = if is_next {
+            let cap = call
+                .max_next
+                .map(|m| m as i32)
+                .unwrap_or(Self::MAX_NEXT_DEPTH)
+                .min(Self::MAX_NEXT_DEPTH);
+            call.next_depth > cap
+        } else {
+            call.depth > Self::MAX_CALL_DEPTH
+        };
+        if over_depth {
+            tracing::warn!(
+                "WFC derinlik sınırı aşıldı (call_row={}, mode={}, depth={}, next_depth={}) — başlatılmadı",
+                call.id,
+                call.mode.as_str(),
+                call.depth,
+                call.next_depth
+            );
+            self.wfe.set_call_status(call.id, "skipped", None).await?;
+            return Ok(false);
+        }
+
+        let caller = self.wfe.load(call.caller_wfe_id).await?;
+        let caller_wfd = self.wfd.fetch(caller.wfd_id, caller.wfd_version).await?;
+        let def = caller_wfd.calls.get(&call.call_key).ok_or_else(|| {
+            EngineError::CallNotFound(format!(
+                "'{}' çağıranın calls katalogunda yok",
+                call.call_key
+            ))
+        })?;
+
+        // Doküman kimliği → yayınlanmış (uuid, version).
+        let (callee_wfd_id, callee_version) = self
+            .wfd
+            .resolve_doc(caller.orgtnt_id, &def.wfd_id, def.version.as_deref())
+            .await?
+            .ok_or_else(|| {
+                EngineError::CallNotFound(format!(
+                    "çağrılan akış bulunamadı: '{}'{}",
+                    def.wfd_id,
+                    def.version
+                        .as_deref()
+                        .map(|v| format!(" @{v}"))
+                        .unwrap_or_default()
+                ))
+            })?;
+
+        // Çağrılanı hangi aktör başlatır (plan §9.1):
+        //   actor  → çağıranı bu noktaya getiren ACT'in aktörü (WFAH'ın SON kaydı)
+        //   system → akışı BAŞLATAN aktör (WFAH'ın İLK kaydı)
+        //
+        // "system" için nil bir sistem aktörü kullanılmaz: hiçbir `c_a` ile eşleşmez,
+        // yani ardıl asla başlayamazdı. Akışın başlatıcısı hem gerçek bir kullanıcıdır
+        // hem denetim izini anlamlı tutar. Eşleşmezse `WFD.CallUnauthorized` — çağıranın
+        // sonucu DEĞİŞMEZ, hata yalnız çağrı satırında görünür.
+        let entries = caller.wfah.entries();
+        let actor = match (call.start_as, entries.first(), entries.last()) {
+            (StartAs::System, Some(first), _) => first.actor.clone(),
+            (_, _, Some(last)) => last.actor.clone(),
+            (_, Some(first), None) => first.actor.clone(),
+            _ => {
+                return Err(EngineError::CallUnauthorized(
+                    "çağıranın WFAH'ı boş — başlatacak aktör yok".into(),
+                ))
+            }
+        };
+
+        // `queued` → `running` ÖNCE yazılır: start başarısız olsa bile satır bir daha
+        // kuyruktan okunmaz (yeniden denenmesi gerekiyorsa hata yolu `failed` yazar).
+        self.wfe.set_call_status(call.id, "running", None).await?;
+
+        // `CallDef.start` bir startRule **id**'sidir; `Engine::start` ise kuralı ACTION
+        // adıyla seçer (birden fazla start kuralı olabilir). Bu yüzden çağrılanın WFD'si
+        // okunup id → action eşlemesi yapılır. Verilmemişse `None` = ilk uygun kural.
+        let start_action = match &def.start {
+            Some(rule_id) => {
+                let callee_wfd = self.wfd.fetch(callee_wfd_id, callee_version).await?;
+                match callee_wfd.start.iter().find(|r| r.id == *rule_id) {
+                    Some(rule) => Some(rule.action.clone()),
+                    None => {
+                        self.wfe.set_call_status(call.id, "failed", None).await?;
+                        return Err(EngineError::CallNotFound(format!(
+                            "çağrılan '{}' akışında '{rule_id}' başlatma kuralı yok",
+                            def.wfd_id
+                        )));
+                    }
+                }
+            }
+            None => None,
+        };
+
+        let started = self
+            .start(
+                callee_wfd_id,
+                callee_version,
+                &actor,
+                start_action.as_deref(),
+                &call.input,
+                None,
+            )
+            .await;
+
+        match started {
+            Ok(res) => {
+                self.wfe
+                    .set_call_status(call.id, "running", Some(res.wfe_id))
+                    .await?;
+                // Çağrılan ANINDA bitmiş olabilir (tam otomatik akış) — dönüşü
+                // beklemeye bırakmayıp hemen işaretle. `wait` kadar hızlı olmasının
+                // sırrı bu: `sync` moduna gerek kalmaz.
+                if res.terminal {
+                    self.wfe
+                        .mark_callee_finished(res.wfe_id, "completed", res.end_response.as_ref())
+                        .await?;
+                }
+                Ok(true)
+            }
+            Err(e) => {
+                self.wfe.set_call_status(call.id, "failed", None).await?;
+                Err(e)
+            }
+        }
+    }
+
+    /// Dönüşü bekleyen (`returned`) çağrıları çağırana işler — WFC-RETURN.
+    pub async fn run_call_returns(&self, limit: i64) -> Result<usize, EngineError> {
+        let pending = self.wfe.pending_call_returns(limit).await?;
+        let mut applied = 0usize;
+        for call in pending {
+            match self.apply_one_return(&call).await {
+                Ok(true) => applied += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "WFC dönüşü uygulanamadı (call_row={}, caller={}): {e}",
+                        call.id,
+                        call.caller_wfe_id
+                    );
+                }
+            }
+        }
+        Ok(applied)
+    }
+
+    async fn apply_one_return(&self, call: &PendingCall) -> Result<bool, EngineError> {
+        let caller = self.wfe.load(call.caller_wfe_id).await?;
+        // Çağıran artık o node'da beklemiyorsa (SLA devri, iptal, elle müdahale)
+        // dönüş uygulanamaz — satır kapatılır, sessiz yanlış transition yapılmaz.
+        let still_waiting = caller.status == WfeStatus::Active
+            && caller.current_node.as_deref() == Some(call.site.key());
+        if !still_waiting {
+            self.wfe.set_call_status(call.id, "consumed", None).await?;
+            return Ok(false);
+        }
+        let wfd = self.wfd.fetch(caller.wfd_id, caller.wfd_version).await?;
+        let commit = self
+            .engine()
+            .fire_call_return(
+                &wfd,
+                &caller,
+                call.call_status.as_deref().unwrap_or("completed"),
+                call.callee_wfe_id,
+                call.end_response.as_ref(),
+                chrono::Utc::now(),
+            )
+            .await?;
+        self.wfe.commit(&commit).await?;
+        self.wfe.set_call_status(call.id, "consumed", None).await?;
+        self.after_wfe_settled(caller.wfe_id, &commit.outcome)
+            .await?;
+        self.nudge_timers();
+        Ok(true)
+    }
+
+    /// Süre sınırı geçmiş `wait` çağrıları — `$call.status = "timeout"` ile döner.
+    pub async fn expire_overdue_calls(&self, limit: i64) -> Result<usize, EngineError> {
+        let overdue = self.wfe.overdue_calls(chrono::Utc::now(), limit).await?;
+        let mut n = 0usize;
+        for call in overdue {
+            // Çağrılan hâlâ koşuyorsa sonlandırılır; sonra çağıran "timeout" ile ilerler.
+            if let Some(callee) = call.callee_wfe_id {
+                if let Ok(callee_wfes) = self.wfe.load(callee).await {
+                    if callee_wfes.status == WfeStatus::Active {
+                        let commit = self
+                            .engine()
+                            .fire_deadline_timeout(&callee_wfes, chrono::Utc::now());
+                        let _ = self.wfe.commit(&commit).await;
+                    }
+                }
+            }
+            let timed_out = PendingCall {
+                call_status: Some("timeout".into()),
+                end_response: None,
+                ..call.clone()
+            };
+            if self.apply_one_return(&timed_out).await.is_ok() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// Bir WFE sonlandığında yapılacaklar: onu bekleyen çağrı satırını ilerlet ve
+    /// kendi ALT AKIŞLARINI iptal et (WFC-CASCADE).
+    ///
+    /// **Ardıl KAPSAM DIŞI** — ardıl, astın aksine çağıranın ömrüne bağlı değildir;
+    /// zaten çağıran bittikten sonra başlar (bkz. decisions.md → WFC).
+    async fn after_wfe_settled(
+        &self,
+        wfe_id: Uuid,
+        outcome: &CommitOutcome,
+    ) -> Result<(), EngineError> {
+        let (status, end_response) = match outcome {
+            CommitOutcome::Terminal { end_response } => ("completed", Some(end_response)),
+            CommitOutcome::Failed { end_response } => ("failed", Some(end_response)),
+            CommitOutcome::Terminated { end_response } => ("terminated", Some(end_response)),
+            CommitOutcome::JoinComplete { next, .. } => match next.as_ref() {
+                CommitOutcome::Terminal { end_response } => ("completed", Some(end_response)),
+                _ => return Ok(()),
+            },
+            _ => return Ok(()),
+        };
+        self.wfe
+            .mark_callee_finished(wfe_id, status, end_response)
+            .await?;
+        // WFC-CASCADE: koşan alt akışları düşür.
+        for callee in self.wfe.cancel_subcalls_of(wfe_id).await? {
+            if let Ok(sub) = self.wfe.load(callee).await {
+                if sub.status == WfeStatus::Active {
+                    let commit = self
+                        .engine()
+                        .fire_deadline_timeout(&sub, chrono::Utc::now());
+                    let _ = self.wfe.commit(&commit).await;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub async fn tick_timers(&self, wfe_id: Uuid) -> Result<bool, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
         if wfes.status != WfeStatus::Active {
@@ -672,6 +991,10 @@ impl WfeExecutor {
         if engine.deadline_due(&wfes, now) {
             let commit = engine.fire_deadline_timeout(&wfes, now);
             self.wfe.commit(&commit).await?;
+            // SLA-3 ile sonlanma da bir sonlanmadır: bekleyen çağrı `terminated`
+            // olarak döner (çağıran karar verir), alt akışlar iptal edilir.
+            // Ardıl TETİKLENMEZ — bu başarılı bir bitiş değil (bkz. stage_calls).
+            self.after_wfe_settled(wfe_id, &commit.outcome).await?;
             return Ok(true);
         }
         // WOR-31: paralel modda claim_timeout/escalation KOL-bazlıdır — aktif
@@ -686,7 +1009,10 @@ impl WfeExecutor {
             let b = branch.as_deref();
             if engine.claim_timeout_due(&wfd, &wfes, now, b)? {
                 match engine.fire_claim_timeout(&wfd, &wfes, now, b).await? {
-                    ClaimTimeoutOutcome::Move(commit) => self.wfe.commit(&commit).await?,
+                    ClaimTimeoutOutcome::Move(commit) => {
+                        self.wfe.commit(&commit).await?;
+                        self.after_wfe_settled(wfe_id, &commit.outcome).await?;
+                    }
                     ClaimTimeoutOutcome::Release(release) => {
                         self.wfe
                             .release_claim(
@@ -704,6 +1030,7 @@ impl WfeExecutor {
             if let Some(idx) = engine.due_escalation(&wfd, &wfes, now, b)? {
                 let commit = engine.fire_escalation(&wfd, &wfes, idx, now, b).await?;
                 self.wfe.commit(&commit).await?;
+                self.after_wfe_settled(wfe_id, &commit.outcome).await?;
                 return Ok(true);
             }
         }

@@ -109,6 +109,16 @@
         "$ref": "#/$defs/autoexecDef"
       }
     },
+    "calls": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "#/$defs/idName"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/callDef"
+      },
+      "description": "WFC katalogu - baska bir WFD'yi cagirma sozlesmeleri. Katalog NE cagrilacagini ve hangi girdiyle cagrilacagini tutar; NASIL cagrildigi referans yerindedir (nodes.<k>.call ya da terminals[].call). autoexec <-> trigger ayriminin aynisi. Ayni kayit uc modda da kullanilabilir."
+    },
     "transitions": {
       "type": "array",
       "minItems": 1,
@@ -819,6 +829,10 @@
             "$ref": "#/$defs/idName"
           },
           "description": "Root 'attachments' katalogundaki grup key'lerine referans. WFE bu node'da beklerken, listelenen gruplarin 'required' dosyalari yuklenmeden bu node'dan HICBIR aksiyon submit edilemez (portal katmani opendal exists ile dogrular; engine core dosya I/O yapmaz - yalniz metadata tasir). Ayni grup birden fazla node'dan referanslanabilir; dosyalar wfe_id+grup+item ile saklandigindan tekrar yuklenmesi gerekmez."
+        },
+        "call": {
+          "$ref": "#/$defs/callRef",
+          "description": "WFC - alt akis cagrisi (mode: wait | detached). Bu blogu tasiyan node bir WFC node'udur: insan ACT'i ALINAMAZ (transitions[].from icinde yer alamaz), cikisi call.wft'dir, escalation/claim_timeout/attachments/reassign tasiyamaz. Bekleme bir DURUMdur (current_node), transition adimi degil - bu yuzden cagri node'da durur. c_a hala zorunludur ama anlami daralir: alt akis surerken bu WFE'yi kim gorur."
         }
       },
       "description": "Node key = c_a'dan turetilen canonical slug (validator yeniden hesaplayip karsilastirir). Ayni canonical c_a ikinci bir node'da BULUNAMAZ."
@@ -1131,8 +1145,95 @@
           "additionalProperties": {
             "$ref": "#/$defs/responseValue"
           }
+        },
+        "call": {
+          "$ref": "#/$defs/callRef",
+          "description": "WFC - ardil akis cagrisi (mode: terminal). 'Bir is akisinin bitisi baska bir is akisinin baslangici.' WFE bu terminal'de NORMAL bicimde sonlanir (completed), ardindan ardil WFE baslar. Donus YOKTUR: wfes_effects/wft/timeout bu baglamda yasaktir. Sira kesin: terminal effects -> wfe_end_response -> caller completed commit -> ardil start. Yalniz basarili Terminal sonucunda calisir (Failed/Terminated ardil tetiklemez). Ardil cagri, cagiranin sonucunu ASLA degistirmez."
         }
       }
+    },
+    "callDef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "wfd_id"
+      ],
+      "properties": {
+        "wfd_id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cagrilacak WFD'nin id'si. Ayni ORGTNT olmak zorundadir (cross-tenant cagri yasak)."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Verilmezse cagri anindaki EN SON yayinlanmis surum; verilirse o surume pinlenir. Yaratilan WFE her halde start aninda bir surume sabitlenir - yani pin'siz cagrida yeni surum yayinlamak KOSAN WFE'leri etkilemez."
+        },
+        "description": {
+          "type": "string"
+        },
+        "start": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Cagrilanin start[] kuralinin id'si. Cagrilanin >=2 start kurali varsa ZORUNLU; tek start varsa opsiyonel."
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/responseValue"
+          },
+          "description": "WFC-IN - cagrilanin start ACT girdisi -> cagiran baglamindaki kaynak. Izin verilen: $ctx.<yol>, $actor, $timestamp, $wfe_id ve sabit degerler. $action.input.* YASAKTIR: (1) moddan bagimsizlik - terminal modunda ACT girdisi guvenilir bicimde mevcut degil, (2) WOR-70 tutarliligi - ctx'e tek yazma yolu effects'tir, boylece 'cagrilana ne gitti' DynCtx'te denetlenebilir kalir. Cagrilanin zorunlu her girdisi burada bulunmak zorundadir; kaynak $ctx yolu da cagiranin context semasinda BILDIRILMIS olmalidir."
+        }
+      },
+      "description": "Root 'calls' katalogundaki bir kayit. Moddan BAGIMSIZDIR."
+    },
+    "callRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "use"
+      ],
+      "properties": {
+        "use": {
+          "$ref": "#/$defs/idName",
+          "description": "Root 'calls' katalogundaki key."
+        },
+        "mode": {
+          "enum": [
+            "wait",
+            "detached",
+            "terminal"
+          ],
+          "default": "wait",
+          "description": "WFC modu - cagrinin TEK belirleyici ekseni. wait: cagiran node'da BEKLER, cagrilan bitince WFC-RETURN isler ($call.* gorunur). detached: cagrilan baslatilir, cagiran HEMEN devam eder ($call.result.* daima bos). terminal: cagiran BITER, ardil akis baslar (donus yok). Yerlesim de moda baglidir: wait/detached yalniz nodes.<k>.call, terminal yalniz terminals[].call (validator call_mode_placement). Terminal yerlesiminde yazilmasi ZORUNLUDUR - yerlesimden cikarilabilir olsa da acikca yazilir ki JSON kendi kendini anlatsin."
+        },
+        "timeout": {
+          "$ref": "#/$defs/duration",
+          "description": "Yalniz mode: wait. Asilirsa cagrilan iptal edilir ve WFC-RETURN $call.status == 'timeout' ile isler."
+        },
+        "wfes_effects": {
+          "$ref": "#/$defs/wfesEffects",
+          "description": "WFC-RETURN effects - yalniz node yerlesimi. $call.result.<yol> / $call.status / $call.wfe_id burada cozulur. $action.input.* YOKTUR (donusu system tetikler)."
+        },
+        "wft": {
+          "$ref": "#/$defs/wft",
+          "description": "WFC-RETURN hedefi - node yerlesiminde ZORUNLU. Node veya terminal olabilir; SLA'nin 'terminal hedef yasak' kisiti burada GECERLI DEGIL, cunku bu bir zamanlayici degil cagrilanin sonucuna dayanan bir karardir."
+        },
+        "start_as": {
+          "enum": [
+            "actor",
+            "system"
+          ],
+          "default": "actor",
+          "description": "Yalniz mode: terminal. actor: terminal'e getiren ACT'in aktoru ile baslat. system: sistem aktoru. Kok timeout (SLA-3) ya da bir SLA ihlali de bu terminal'e getirebiliyorsa o yolda AKTOR YOKTUR - orada 'system' sarttir."
+        },
+        "max_next": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Yalniz mode: terminal. Ardil dongusune ACIK izin + ust sinir. Verilmezse dongu validator tarafindan reddedilir (call_next_cycle) ve global ardil derinligi siniri gecerlidir. Ardil dongusu (A bitince B, B bitince A) sonsuz WFE uretir - iki katmanli fren: statik dongu tespiti + runtime derinlik siniri."
+        }
+      },
+      "description": "Bir katalog kaydina yapilan referans. Node ve terminal yerlesimleri AYNI sekli kullanir; yanlis yere yazilmis alan validator tarafindan anlasilir bicimde reddedilir."
     },
     "responseValue": {
       "oneOf": [

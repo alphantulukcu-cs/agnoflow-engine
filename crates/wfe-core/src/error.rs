@@ -123,4 +123,15 @@ pub enum EngineError {
     EffectValue(String),
     #[error("autoexec error: {0}")]
     Autoexec(String),
+    /// WFC: çağrılan WFD bulunamadı / pinlenen versiyon yayınlanmamış.
+    #[error("WFD.CallNotFound: {0}")]
+    CallNotFound(String),
+    /// WFC: çağrılanı başlatan aktör, çağrılanın start node c_a'sıyla eşleşmiyor.
+    /// Statik doğrulanamaz (org resolve runtime'dır) — bu yüzden runtime hatasıdır.
+    #[error("WFD.CallUnauthorized: {0}")]
+    CallUnauthorized(String),
+    #[error("WFD.CallFailed: {0}")]
+    CallFailed(String),
+    #[error("WFD.CallTimeout: {0}")]
+    CallTimeout(String),
 }

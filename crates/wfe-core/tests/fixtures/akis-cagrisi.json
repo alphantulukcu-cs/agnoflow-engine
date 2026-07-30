@@ -1,0 +1,197 @@
+{
+  "wfd_version": "2.2",
+  "expression_language": "zen@1",
+  "id": "akis-cagrisi",
+  "name": "Kredi Başvuru (Akış Çağrılı)",
+  "version": "1.0.0",
+  "description": "WFC örnek fixture'ı — ÇAĞIRAN akış. İki çağrı türünü birlikte gösterir: (1) `self__creditAnalyst` bir ALT AKIŞ çağrısı node'udur (`mode: wait`) — akış orada durur, `kredi-skor` akışı biter, sonucu `$call.result.*` ile ctx'e yazılır ve `call.wft` skora göre yönlendirir. (2) `terminal_approved` bir ARDIL çağrı taşır (`mode: terminal`) — bu akış NORMAL biçimde tamamlanır, ardından `kredi-kullandirim` akışı başlar; dönüş yoktur.",
+  "timeout": "P30D",
+  "context": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "basvuru": {
+        "type": "object",
+        "properties": {
+          "musteri_no": {
+            "type": "string"
+          },
+          "tutar": {
+            "type": "number"
+          }
+        }
+      },
+      "skor": {
+        "type": "integer",
+        "description": "Alt akıştan dönen skor. Bu alanı YALNIZ WFC-RETURN effects'i yazar — hiçbir aksiyonun girdisi değildir."
+      },
+      "skor_durumu": {
+        "type": "string",
+        "description": "Alt akışın kararı ('uygun' / 'uygun_degil')."
+      },
+      "kullandirim_tutari": {
+        "type": "number",
+        "description": "Müdürün onayladığı tutar. Ardıl akışa WFC-IN ile taşınır."
+      },
+      "onay_tarihi": {
+        "type": "string"
+      },
+      "initiated_by": {
+        "type": "object"
+      }
+    }
+  },
+  "calls": {
+    "kredi_skor_sorgusu": {
+      "wfd_id": "kredi-skor",
+      "version": "1.0.0",
+      "description": "Skor akışını çalıştırır ve sonucunu bekler.",
+      "start": "start__type_branch__branchClerk",
+      "input": {
+        "musteri_no": "$ctx.basvuru.musteri_no",
+        "talep_tutari": "$ctx.basvuru.tutar"
+      }
+    },
+    "kredi_kullandirim": {
+      "wfd_id": "kredi-kullandirim",
+      "description": "Başvuru onayla bittiğinde başlayan ardıl akış. `version` verilmedi — çağrı anındaki en son yayınlanmış sürüm kullanılır.",
+      "start": "start__type_branch__branchClerk",
+      "input": {
+        "musteri_no": "$ctx.basvuru.musteri_no",
+        "tutar": "$ctx.kullandirim_tutari"
+      }
+    }
+  },
+  "nodes": {
+    "type_branch__branchClerk": {
+      "label": "Şube Memuru",
+      "description": "Başvuruyu başlatan havuz.",
+      "c_a": {
+        "c_orgu": "*:[type:branch]",
+        "c_r": ["branchClerk"]
+      }
+    },
+    "self__creditAnalyst": {
+      "label": "Skor Bekleniyor",
+      "description": "ALT AKIŞ ÇAĞRISI node'u. Buradan aksiyon ALINMAZ — akış `kredi-skor` bitince kendi ilerler. `c_a`'nın anlamı burada daralır: alt akış sürerken bu WFE'yi kim görür.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": ["creditAnalyst"]
+      },
+      "call": {
+        "use": "kredi_skor_sorgusu",
+        "mode": "wait",
+        "timeout": "P2D",
+        "wfes_effects": {
+          "set": {
+            "skor": "$call.result.skor",
+            "skor_durumu": "$call.result.karar"
+          }
+        },
+        "wft": {
+          "conditions": [
+            {
+              "when": "$call.status != 'completed'",
+              "terminal": "terminal_rejected"
+            },
+            {
+              "when": "$call.result.skor >= 700",
+              "node": "self__branchManager"
+            }
+          ],
+          "default": {
+            "terminal": "terminal_rejected"
+          }
+        }
+      }
+    },
+    "self__branchManager": {
+      "label": "Şube Müdürü Havuzu",
+      "description": "Skor uygunsa nihai karar burada verilir.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": ["branchManager"]
+      }
+    }
+  },
+  "start": [
+    {
+      "id": "start__type_branch__branchClerk",
+      "from": "type_branch__branchClerk",
+      "action": "basvuru_olustur",
+      "wfes_effects": {
+        "set": {
+          "basvuru": "$action.input.basvuru",
+          "initiated_by": "$actor"
+        }
+      },
+      "wft": {
+        "node": "self__creditAnalyst"
+      }
+    }
+  ],
+  "actions": {
+    "basvuru_olustur": {
+      "label": "Başvuru Oluştur",
+      "input": {
+        "required": ["basvuru"],
+        "optional": []
+      }
+    },
+    "manager_decide": {
+      "label": "Müdür Kararı",
+      "input": {
+        "required": ["kullandirim_tutari"],
+        "optional": []
+      }
+    }
+  },
+  "transitions": [
+    {
+      "id": "t__self__branchManager__manager_decide",
+      "from": "self__branchManager",
+      "action": "manager_decide",
+      "wfes_effects": {
+        "set": {
+          "kullandirim_tutari": "$action.input.kullandirim_tutari"
+        }
+      },
+      "wft": {
+        "conditions": [
+          {
+            "when": "$action.input.kullandirim_tutari > 0",
+            "terminal": "terminal_approved"
+          }
+        ],
+        "default": {
+          "terminal": "terminal_rejected"
+        }
+      }
+    }
+  ],
+  "terminals": [
+    {
+      "id": "terminal_approved",
+      "wfes_effects": {
+        "set": {
+          "onay_tarihi": "$timestamp"
+        }
+      },
+      "wfe_end_response": {
+        "status": "approved",
+        "kullandirim_tutari": "$ctx.kullandirim_tutari"
+      },
+      "call": {
+        "use": "kredi_kullandirim",
+        "mode": "terminal",
+        "start_as": "system"
+      }
+    },
+    {
+      "id": "terminal_rejected",
+      "wfe_end_response": {
+        "status": "rejected"
+      }
+    }
+  ]
+}

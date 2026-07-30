@@ -3,9 +3,11 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const COLS: &str = "wfd_id, orgtnt_id, project_id, name, version, s3_key, is_active, created_at, \
-                    status, description, tags, owner, updated_at, source_template_id, review_note, submitted_by";
+                    status, description, tags, owner, updated_at, source_template_id, review_note, \
+                    submitted_by, doc_id, doc_version";
 const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.project_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
-                      m.status, m.description, m.tags, m.owner, m.updated_at, m.source_template_id, m.review_note, m.submitted_by";
+                      m.status, m.description, m.tags, m.owner, m.updated_at, m.source_template_id, m.review_note, \
+                      m.submitted_by, m.doc_id, m.doc_version";
 
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
 #[allow(clippy::too_many_arguments)]
@@ -22,14 +24,19 @@ pub async fn insert(
     tags: &[String],
     owner: &str,
     source_template_id: Option<Uuid>,
+    // WFC: dokümanın kendi `id`/`version` alanları. Bunlar olmadan bir çağrı
+    // (`calls.<key>.wfd_id`) çözülemez — bkz. `resolve_doc`.
+    doc_id: Option<&str>,
+    doc_version: Option<&str>,
 ) -> Result<Uuid, WfdError> {
     let id = sqlx::query_scalar::<_, Uuid>(
         "INSERT INTO wf.wfd_meta \
-         (wfd_id, orgtnt_id, project_id, name, version, s3_key, status, description, tags, owner, source_template_id) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING wfd_id"
+         (wfd_id, orgtnt_id, project_id, name, version, s3_key, status, description, tags, owner, source_template_id, doc_id, doc_version) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING wfd_id"
     )
     .bind(wfd_id).bind(orgtnt_id).bind(project_id).bind(name).bind(version).bind(s3_key)
     .bind(status).bind(description).bind(tags).bind(owner).bind(source_template_id)
+    .bind(doc_id).bind(doc_version)
     .fetch_one(pool)
     .await
     .map_err(|e| match e.as_database_error().and_then(|d| d.constraint()) {
@@ -276,4 +283,34 @@ pub async fn delete_draft(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(
         return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
     }
     Ok(())
+}
+
+/// WFC: dokümanın `id` (+ opsiyonel semver) alanından yayınlanmış satırı çözer.
+///
+/// `doc_version` verilmezse **en son yayınlanmış** satır seçilir (`version DESC`) —
+/// `calls.<key>.version` boş bırakıldığında beklenen davranış budur. Yaratılan WFE
+/// yine tek bir (wfd_id, version) çiftine sabitlenir; yani yeni sürüm yayınlamak
+/// KOŞAN WFE'leri etkilemez.
+pub async fn resolve_doc(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    doc_id: &str,
+    doc_version: Option<&str>,
+) -> Result<Option<(Uuid, i32)>, WfdError> {
+    let row = sqlx::query_as::<_, (Uuid, i32)>(
+        "SELECT wfd_id, version FROM wf.wfd_meta
+          WHERE orgtnt_id = $1
+            AND doc_id = $2
+            AND ($3::text IS NULL OR doc_version = $3)
+            AND status = 'published'
+            AND is_active = true
+          ORDER BY version DESC
+          LIMIT 1",
+    )
+    .bind(orgtnt_id)
+    .bind(doc_id)
+    .bind(doc_version)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }

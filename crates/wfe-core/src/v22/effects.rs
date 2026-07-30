@@ -2,11 +2,12 @@
 //! v2.2'de {ref}/{ctx} obje formları ve `_step_` injection KALDIRILDI;
 //! effect değerleri düz JSON'dur, $-önekli string'ler çözülür:
 //! `$actor`, `$timestamp`, `$wfe_id`, `$node`, `$ctx.<path>`,
-//! `$action.input.<path>`, `$exec.result.<path>`.
+//! `$action.input.<path>`, `$exec.result.<path>`, `$call.*` (WFC-RETURN).
 
 use crate::error::EngineError;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::WfesEffects;
+use crate::v22::eval::CallOutcome;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -18,6 +19,10 @@ pub struct EffectEnv<'a> {
     pub node: Option<&'a str>,
     pub action_input: Option<&'a Value>,
     pub exec_result: Option<&'a Value>,
+    /// WFC-OUT — yalnız WFC-RETURN bağlamında `Some`. Diğer bağlamlarda `$call.*`
+    /// çözülmez ve `null` yazar (validator `call_result_in_detached` /
+    /// `call_next_result_ref` bu durumu tasarım anında yakalar).
+    pub call: Option<&'a CallOutcome>,
     pub now: DateTime<Utc>,
 }
 
@@ -91,6 +96,23 @@ fn resolve_dollar_string(s: &str, ctx: &Value, env: &EffectEnv<'_>) -> Result<Va
                 let result = env.exec_result.unwrap_or(&Value::Null);
                 return Ok(get_path(result, path).cloned().unwrap_or(Value::Null));
             }
+            if let Some(path) = s.strip_prefix("$call.result.") {
+                let result = env.call.map(|c| &c.result).unwrap_or(&Value::Null);
+                return Ok(get_path(result, path).cloned().unwrap_or(Value::Null));
+            }
+            if s == "$call.status" {
+                return Ok(env
+                    .call
+                    .map(|c| Value::from(c.status.clone()))
+                    .unwrap_or(Value::Null));
+            }
+            if s == "$call.wfe_id" {
+                return Ok(env
+                    .call
+                    .and_then(|c| c.wfe_id)
+                    .map(|id| Value::from(id.to_string()))
+                    .unwrap_or(Value::Null));
+            }
             if s.starts_with("$exec.response.") {
                 return Err(EngineError::EffectValue(
                     "'$exec.response.*' kaldırıldı (M7) — '$exec.result.*' kullanın".into(),
@@ -151,6 +173,7 @@ mod tests {
             node: Some("self__creditAnalyst"),
             action_input: input,
             exec_result: exec,
+            call: None,
             now: Utc::now(),
         }
     }

@@ -257,3 +257,190 @@ kodlanacak; bu commit yalnızca model + validator + spec'i getirir.
 Lifecycle notu: transition'larda `node.c_a` WFE'yi o an elinde tutan owner'dır; bir start node'da `c_a` kimin *başlatabileceğidir*. Aynı eşleştirme mekaniği, farklı lifecycle anlamı (henüz WFE yok).
 
 **Start input doğrulaması (2026-07-14, WOR-70 ile güncellendi):** Start input'u, transition input'larıyla (§7.5) birebir aynı kurala tabidir — seçilen start rule'ın `action`'ına ait `input.required` yolları mevcut olmalı, `required ∪ optional` dışında kalan her leaf yol `WFD.InvalidInput` ile REDDEDİLİR (hard reject; sessiz düşürme yok). **Başlangıç ctx'i input'tan TOHUMLANMAZ** (WOR-70): input yalnız doğrulanır, ctx'e yalnız `wfes_effects` yazar — bkz. §7.5a. `context.required` KALDIRILDI; start sonrası ctx doluluk denetimi yoktur.
+
+## 10. WFC — İş Akışı Çağrısı Runtime (2026-07-30)
+
+Bir WFE'nin başka bir WFD'yi çalıştırması. Kanonik terimler: `terminology.md` → WFC;
+tasarım gerekçeleri: `decisions.md` → WFC. Referans implementasyon:
+`wfe-core/src/v22/pipeline.rs::stage_calls` / `fire_call_return`,
+`wfe/src/executor.rs` (tarama döngüleri), `wfe/src/repo/call.rs` (`wf.wfe_call`).
+
+**Katalog ↔ referans.** Root `calls` NE çağrılacağını + hangi girdiyle söyler
+(`wfd_id`, `version?`, `start?`, `input`); referans NASIL çağrıldığını (`mode`).
+`autoexec` ↔ `trigger` ayrımının aynısıdır — aynı katalog kaydı üç modda da kullanılabilir.
+
+**Mod ↔ yerleşim.** Zorunlu eşleme (validator `call_mode_placement`):
+
+```text
+mode: wait      -> yalniz nodes.<k>.call    cagiran o node'da BEKLER, sonuc $call.* ile doner
+mode: detached  -> yalniz nodes.<k>.call    cagrilan baslar, cagiran HEMEN devam eder
+mode: terminal  -> yalniz terminals[].call  cagiran BITER, ardil akis baslar (donus yok)
+```
+
+### 10a. Outbox — çağrı niyeti commit ile atomiktir
+
+Çağrılan WFE, çağıranın commit transaction'ı **içinde yaratılmaz**. Bunun yerine niyet
+aynı tx'te `wf.wfe_call`'a `queued` olarak yazılır; gerçek start ayrı bir tx'te koşar.
+
+Gerekçe: çağrılanı içeride yaratmak, çağıranın atomik transaction'ını başka bir WFE'nin
+tüm start pipeline'ına (org resolve, trigger'lar, kendi commit'i) bağlardı. Outbox ile
+çağıranın atomikliği korunur ve başlatma yeniden denenebilir olur.
+
+```text
+1. resolve_wft "nereye varildi"yi da doner (Option<CallSite>) — CommitOutcome::Terminal
+   terminal id'sini TASIMAZ, ardil cagriyi bulmak icin o id gerekir.
+2. stage_calls: varilan sitedeki `call` blogu okunur, WFC-IN cozulur, `wait` icin
+   `timeout` MUTLAK zamana cevrilir (her tick'te ISO parse etmemek icin — SLA-3 ile ayni).
+3. COMMIT: cagiranin durumu + WFAH + outbox satiri TEK tx.
+4. Sweeper (SLA tick'lerinden ONCE): queued'lari baslat -> suresi gecenleri kapat ->
+   donusleri isle.
+```
+
+**Çift start koruması:** `UNIQUE (caller_wfe_id, site_kind, site_key)` +
+`ON CONFLICT DO NOTHING`. Executor'ın conflict retry döngüsü (WOR-62) aynı transition'ı
+ikinci kez koşarsa çağrı İKİ KEZ başlatılmaz.
+
+**Gecikme:** çağrılan terminal'e ulaştığında `mark_callee_finished` satırı `returned`'e
+çeker ve `nudge_timers` sweeper'ı hemen uyandırır — dönüş pratikte anlıktır, 60 sn'lik
+güvenlik ağı beklenmez. Tam otomatik çağrılan zaten `Engine::start` içinde biter ve
+aynı istekte işaretlenir. **Bu yüzden bloklayan bir `sync` moduna gerek yoktur** (bkz.
+`decisions.md` → WFC).
+
+### 10b. WFC node'u bir bekleme HAVUZU değildir
+
+Bekleme bir **durum**tur, transition adımı değil: `WFES = current_node + assignment +
+DynCtx + WFAH` değişmezi korunur, beklemenin kalıcı yeri `current_node`'dur.
+
+- `c_a` HÂLÂ ZORUNLUDUR — "node key = slug(c_a)" ve "aynı canonical c_a ikinci node'da
+  olamaz" değişmezlerine dokunulmadı. Anlamı daralır: *alt akış sürerken bu WFE'yi kim
+  görür ve kim iptal edebilir*. ACT/claim VERMEZ.
+- Node'da `kind` alanı YOKTUR; node'u WFC node'u yapan şey `call` bloğunun varlığıdır
+  (start node'un "referans ile türetilmiş kimlik" deseninin aynısı).
+- Yasak: `transitions[].from` içinde yer almak, `escalation`, `claim_timeout`,
+  `attachments`, `reassign`, `start[].from` olmak. Çıkışı `call.wft`'dir (zorunlu).
+- Graf kuralları: `call.wft` normal bir wft kenarıdır (cross_ref + BFS reachability
+  onu izler) ve WFC node'u `no_exit` kuralından muaftır — transition aramak yanlış olur.
+
+### 10c. WFC-RETURN — insan ACT'i olmayan kenar
+
+`fire_escalation` / `fire_claim_timeout` ile AYNI sınıftır: system aktörü tetikler,
+WFAH'a `call:<key>` marker'ı düşer, tek transaction'dır. Tek farkı bağlamda `$call.*`
+namespace'inin bağlı olmasıdır.
+
+```text
+$call.result.*   cagrilanin wfe_end_response'u  (detached'da daima null)
+$call.status     completed | failed | terminated | timeout | started
+$call.wfe_id     cagrilanin id'si
+```
+
+- `$exec.result.*` ile **birleştirilmez**: autoexec bir sistem çağrısıdır, WFC bir WFE
+  örneğidir. WFC-RETURN dışındaki bağlamlarda `$call` boş bir kabuktur (null döner,
+  ifade patlamaz — eksik ctx alanının null olması gibi).
+- Bağlamda `$action.input.*` **YOKTUR** (validator `call_effect_namespace`) — SLA
+  effects'teki `sla_effect_namespace` kuralının ikizi.
+- `call.wft` hedefi node **veya** terminal olabilir. SLA'nın "terminal hedef yasak"
+  kısıtı burada GEÇERLİ DEĞİLDİR: bu bir zamanlayıcının değil, çağrılanın sonucuna
+  dayanan bir karardır.
+- **Hata da bir dönüştür:** `failed` / `terminated` / `timeout` akışı çökertmez; WFC-RETURN
+  normal işler ve akış `$call.status`'a bakarak karar verir. Sonuç yoksa effects hedefleri
+  `null` yazar (sessizce eski değer KALMAZ).
+- Çağıran o node'da artık beklemiyorsa (SLA devri, iptal, elle müdahale) dönüş
+  UYGULANMAZ: satır `consumed` yapılıp geçilir — sessiz yanlış transition üretilmez.
+
+### 10d. Ardıl akış (`mode: terminal`) — üç sert kural
+
+*"Bir iş akışının bitişi başka bir iş akışının başlangıcı."* Alt akış DEĞİLDİR:
+yuvalanma yok, dönüş yok, sahiplik yok. Sıradaki akış.
+
+**Sıralama kesindir:** terminal `wfes_effects` → `wfe_end_response` üretimi → çağıran
+`completed` olarak **commit** → *ondan sonra* ardıl start. Yani WFC-IN, terminal effects
+uygulandıktan SONRAKİ ctx'e göre çözülür; ardıla taşınacak veri önce terminal effects'i
+ile ctx'e yazılır (WOR-70 ile tam tutarlı).
+
+1. **Handoff Isolation** — ardıl çağrı, çağıranın sonucunu ASLA değiştirmez. Ardıl
+   başlatılamasa bile çağıran `completed` kalır; hata yalnız WFAH marker'ı
+   (`call:next_failed`) + çağrı satırında görünür.
+2. **WFC-CASCADE ardılı KAPSAMAZ.** Çağıran sonlandığında koşan alt akışlar
+   (`wait`/`detached`) `cancelled` edilir; ardıl edilmez — ardıl, astın aksine çağıranın
+   ömrüne bağlı değildir ve zaten çağıran bittikten sonra başlar.
+3. **Yalnız başarılı `Terminal` tetikler.** `Failed` / `Terminated` (SLA-3 ihlali, engine
+   hatası) ardıl TETİKLEMEZ — bunlar başarılı bitiş değildir.
+
+**`start_as`** — ardılı hangi aktör başlatır:
+
+| Değer | Aktör | Neden |
+|---|---|---|
+| `actor` (default) | Çağıranı bu noktaya getiren ACT'in aktörü (WFAH'ın SON kaydı) | Denetim izi doğal |
+| `system` | Akışı BAŞLATAN aktör (WFAH'ın İLK kaydı) | Nil bir sistem aktörü hiçbir `c_a` ile eşleşmez, yani ardıl asla başlayamazdı; akışın başlatıcısı gerçek bir kullanıcıdır |
+
+Kök `timeout` varsa terminal'e zaman aşımıyla da ulaşılabilir; o yolda aktör YOKTUR →
+`start_as: "system"` şarttır (validator uyarısı `call_next_start_actor`).
+
+Aktör çağrılanın start node c_a'sıyla eşleşmezse `WFD.CallUnauthorized`. Bu **statik
+doğrulanamaz** (org resolve runtime'dır) — hata çağrı satırına yazılır, çağıran etkilenmez.
+
+### 10e. Döngü frenleri — iki ayrı sayaç
+
+Ardıl döngüsü (A bitince B, B bitince A) **sonsuz WFE üretir**; autoexec'te karşılığı
+olmayan yeni bir başarısızlık sınıfıdır. Yuvalanma döngüsü ise sonsuz derinlik üretir.
+Frenleri ayrıdır, sayaçları da:
+
+| Sayaç | Neyi sayar | Statik fren | Runtime fren | Kaçış |
+|---|---|---|---|---|
+| `depth` | Alt akış yuvalanması (`wait`/`detached`) | `call_cycle` (reddet) | cap **8** | YOK |
+| `next_depth` | Ardıl zinciri (`terminal`) | `call_next_cycle` (reddet) | cap **16** ya da `max_next` (küçük olan) | terminal'de `max_next: N` ile AÇIK izin |
+
+Sınır aşılırsa çağrılan **hiç başlatılmaz**: satır `skipped` olur, çağıran bulunduğu
+durumda kalır (Handoff Isolation).
+
+**Statik döngü tespiti kenar üzerinde yapılır.** Kökün kendisi `WfdProvider`'dan
+çözülemeyebilir (yayınlanmamış taslak); "hedefe git, orada kendini gör" yaklaşımı
+A→B→A'yı kaçırırdı. Bu yüzden DFS yığınına giden bir kenar görüldüğünde döngü bildirilir.
+
+### 10f. WFC-IN — girdi sözleşmesi
+
+Çağrılanın girdi kümesi WOR-70 zinciriyle okunur: `start[]` → ACT →
+`input.required`/`optional`. Tipler çağrılanın kendi `context` şemasından, start ACT'inin
+`wfes_effects`'i (`$action.input.<x>` → `ctx.<y>`) izlenerek alınır.
+
+İzinli kaynaklar: `$ctx.<yol>`, `$actor`, `$timestamp`, `$wfe_id`, literal.
+**`$action.input.*` YASAKTIR** (`call_input_namespace`) — iki gerekçe:
+
+1. **Moddan bağımsızlık:** `terminal` modunda ACT girdisi güvenilir biçimde mevcut değil
+   (SLA-3 ile ulaşılan terminal'de hiç yok). Yasak olunca aynı katalog kaydı üç modda da
+   aynı anlamı taşır.
+2. **WOR-70 tutarlılığı:** ctx'e tek yazma yolu `wfes_effects`'tir. Bir ACT girdisini
+   çağrılana geçirmek isteyen onu önce effects ile ctx'e yazar — böylece "çağrılana ne
+   gitti" DynCtx'te **denetlenebilir** kalır, uçucu bir ara değer olmaz.
+
+`$ctx.*` kaynağı çağıranın `context.properties`'inde **bildirilmiş** olmalıdır
+(`call_input_source_undeclared`) — "çağrılanın girdileri çağıranın context'inde de
+bulunmalı" kuralı budur ve resolver GEREKTİRMEZ, yereldir.
+
+**WFC-RETURN effects bir context YAZARIDIR:** yalnız çağrı sonucundan dolan alan aksi
+halde `context_field_never_written` ile yanlışlıkla reddedilirdi (§6b).
+
+### 10g. Versiyon çözümü
+
+`calls.<key>.wfd_id` bir DB uuid'si DEĞİL, çağrılan WFD'nin **doküman `id`**'sidir;
+`version` ise doküman semver'i. Çözüm `wf.wfd_meta.doc_id`/`doc_version` indeksinden
+yapılır (`WfdStore::resolve_doc`) ve yalnız `status='published'` + `is_active` satırları
+döner — draft çağrılamaz.
+
+- `version` verilmezse **en son yayınlanmış** sürüm (`version DESC`).
+- Yaratılan WFE her hâlde start anında bir (wfd_id, version) çiftine sabitlenir → pin'siz
+  çağrıda yeni sürüm yayınlamak **KOŞAN** WFE'leri etkilemez.
+- `doc_id`'si NULL olan eski satırlar (migration öncesi) yeniden yayınlanana kadar
+  çağrılamaz — sessiz yanlış eşleşmeye yeğ tutulur.
+
+### 10h. Validator iki katmanlıdır
+
+`validate()` yalnız YEREL kuralları koşar (saf `wfe-core`, I/O yok).
+`validate_with(wfd, Some(&provider))` cross-WFD kurallarını da koşar: girdi kümesi
+(`call_input_missing`/`unknown`), tip uyumu (`call_input_type_mismatch`),
+`$call.result.*` anahtarları (`call_result_unknown`), döngü, versiyon.
+
+Upload yolunda resolver DAİMA verilir: `wfd` crate çağrılanları **geçişli** olarak
+ön-yükler (döngü tespiti çağrılanın kendi çağrılarını da görmeyi gerektirir), üst sınır
+`MAX_PREFETCH = 64` — bozuk/çok derin bir graf upload'ı kilitlemesin. Sınır aşılırsa
+uyarı loglanır ve runtime derinlik freni devreye girer.

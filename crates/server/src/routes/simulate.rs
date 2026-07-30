@@ -5,13 +5,13 @@
 //! her possible-actions/apply'da denetlenir — aksi halde sim'de herkes her şeyi
 //! yapabilir ve sim gerçek davranışı yanlış gösterir.
 
-use utoipa_axum::router::OpenApiRouter;
 use crate::{error::AppError, state::AppState};
 use axum::{extract::State, http::StatusCode, Json};
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
 use utoipa::ToSchema;
+use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfe::{
@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(sim_start))
         .routes(routes!(sim_apply))
+        .routes(routes!(sim_call_return))
         .routes(routes!(sim_possible_actions))
         .with_state(state)
 }
@@ -268,6 +269,99 @@ async fn sim_apply(
         sim_state,
         terminal,
         possible_actions,
+    }))
+}
+
+// ── /call-return ─────────────────────────────────────────────────────────────
+//
+// WFC: simülasyonda çağrılan akış GERÇEKTEN koşturulmaz — kendi aktörleri, kendi
+// SLA'sı ve kendi org çözümü olurdu, bu simülasyonun kapsamı değil. Onun yerine
+// kullanıcı çağrının sonucunu ELLE girer ve akış oradan devam eder. `mode: wait`
+// çağrıları bu endpoint çağrılmadan ilerlemez (çıkmaz sokak değil, bilinçli bir durak).
+
+#[derive(Deserialize, ToSchema)]
+struct SimCallReturnBody {
+    wfd: Value,
+    #[schema(value_type = Object)]
+    sim_state: SimState,
+    /// completed | failed | terminated | timeout. `completed` dışındaki değerlerde
+    /// `result` yok sayılır (akış `$call.status` ile karar verir).
+    #[serde(default = "default_call_status")]
+    status: String,
+    /// Çağrılanın `wfe_end_response`'u — `$call.result.*` buradan çözülür.
+    #[serde(default)]
+    result: Option<Value>,
+}
+
+fn default_call_status() -> String {
+    "completed".into()
+}
+
+#[derive(serde::Serialize, ToSchema)]
+struct SimCallReturnResponse {
+    #[schema(value_type = Object)]
+    sim_state: SimState,
+    terminal: bool,
+    end_response: Option<Value>,
+    #[schema(value_type = Vec<Object>)]
+    possible_actions: Vec<PossibleAction>,
+}
+
+#[utoipa::path(post, path = "/call-return", tag = "simulate",
+    request_body = SimCallReturnBody,
+    responses(
+        (status = 200, description = "Çağrı dönüşü sonrası sim durumu", body = SimCallReturnResponse),
+        (status = 409, description = "Bu adımda çözülmeyi bekleyen bir çağrı yok")))]
+async fn sim_call_return(
+    State(s): State<AppState>,
+    Json(body): Json<SimCallReturnBody>,
+) -> Result<Json<SimCallReturnResponse>, AppError> {
+    let wfd = parse_and_validate(body.wfd)?;
+    let org = Arc::new(OrgAdapter::new(s.pool.clone()));
+    let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
+    let engine = Engine {
+        org: &*org,
+        exec: &runner,
+    };
+
+    let mut sim_state = body.sim_state;
+    let awaited = sim_state.awaited_call().cloned().ok_or_else(|| {
+        AppError(
+            "bu adımda çözülmeyi bekleyen bir iş akışı çağrısı yok".into(),
+            StatusCode::CONFLICT,
+        )
+    })?;
+
+    // WFC-RETURN'ü system tetikler; simülasyonda claim bypass'ı gibi aktör de
+    // engine tarafından üretilir (fire_call_return kendi system aktörünü kurar).
+    let wfes = sim_state.to_wfes(None);
+    let commit = engine
+        .fire_call_return(
+            &wfd,
+            &wfes,
+            &body.status,
+            None, // simülasyonda gerçek bir çağrılan WFE yoktur
+            body.result.as_ref(),
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(AppError::from)?;
+
+    sim_state.apply_commit(&commit);
+    sim_state.clear_awaited_call(&awaited.site_key);
+
+    let terminal = matches!(
+        sim_state.status,
+        wfe_core::types::wfe::WfeStatus::Terminal | wfe_core::types::wfe::WfeStatus::Terminated
+    );
+    // Dönüşten sonra sıradaki aksiyonlar SORULAMAZ: WFC-RETURN'ü bir aktör tetiklemez,
+    // dolayısıyla "hangi aktörün gözünden" sorusunun cevabı yok. Editör bir sonraki
+    // /possible-actions çağrısında kendi seçtiği aktörle sorar.
+    Ok(Json(SimCallReturnResponse {
+        end_response: sim_state.end_response.clone(),
+        sim_state,
+        terminal,
+        possible_actions: vec![],
     }))
 }
 

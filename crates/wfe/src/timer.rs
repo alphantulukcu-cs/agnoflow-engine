@@ -65,6 +65,27 @@ pub async fn run_timer_service(executor: Arc<WfeExecutor>, source: Arc<dyn Activ
 /// Tek süpürme turu — eski 60 sn'lik döngünün gövdesiyle birebir aynı:
 /// tüm aktif WFE'lerde `tick_timers` (deadline → claim_timeout → escalation).
 pub async fn sweep_once(executor: &WfeExecutor, source: &dyn ActiveWfeSource) {
+    // WFC (iş akışı çağrısı) taramaları — SLA tick'lerinden ÖNCE koşar.
+    //
+    // Sıra bilinçli: (1) bekleyen çağrıları başlat, (2) süresi geçenleri kapat,
+    // (3) dönüşleri işle. Dönüş bir transition'dır ve SLA sayaçlarını sıfırlayan yeni
+    // bir node'a taşıyabilir; SLA tick'i ondan SONRA koşarsa taze duruma bakar.
+    //
+    // Ayrıca çağrılanın terminal commit'inde `mark_callee_finished` zaten çağrılıyor
+    // (bkz. `WfeExecutor::after_wfe_settled`) ve `nudge_timers` bu döngüyü hemen
+    // uyandırıyor — yani dönüş pratikte anlık, 60 sn'lik güvenlik ağını beklemez.
+    // `sync` moduna gerek kalmamasının nedeni budur.
+    const WFC_BATCH: i64 = 64;
+    if let Err(e) = executor.run_pending_calls(WFC_BATCH).await {
+        tracing::warn!("WFC start taraması: {e}");
+    }
+    if let Err(e) = executor.expire_overdue_calls(WFC_BATCH).await {
+        tracing::warn!("WFC süre aşımı taraması: {e}");
+    }
+    if let Err(e) = executor.run_call_returns(WFC_BATCH).await {
+        tracing::warn!("WFC dönüş taraması: {e}");
+    }
+
     let ids = match source.active_ids().await {
         Ok(ids) => ids,
         Err(e) => {

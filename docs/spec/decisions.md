@@ -951,3 +951,84 @@ ayrı bloklara bölünerek ref okuma sayısı baseline'da tutuldu.
 **Geriye uyumluluk.** Migration GEREKMEZ: `contextSchemaNode` `additionalProperties: true`
 olduğu için eski WFD'lerdeki `x-wf-readonly` anahtarı hâlâ valid — yalnız artık hiçbir
 anlamı yok, yok sayılır.
+
+## WFC (2026-07-30) — İş Akışı Çağrısı: alt akış node'u + ardıl akış
+
+**Karar.** Bir WFE başka bir WFD'yi çalıştırabilir. Tek katalog (`calls`), tek belirleyici
+eksen (`mode`), üç mod:
+
+| `mode` | Yerleşim | Davranış | Sonuç |
+|---|---|---|---|
+| `wait` | `nodes.<k>.call` | Çağıran o node'da **bekler** | `$call.*` ile döner |
+| `detached` | `nodes.<k>.call` | Çağrılan başlatılır, çağıran hemen devam eder | yok |
+| `terminal` | `terminals[].call` | Çağıran **biter**, ardıl akış başlar | yok |
+
+Plan ve tam gerekçe: `docs/plans/workflow-call.md`.
+
+**Katalog ↔ referans ayrımı `autoexec` ↔ `trigger`'ın aynısıdır.** Katalog NE çağrılacağını
+ve hangi girdiyle çağrılacağını tutar; referans NASIL çağrıldığını. Böylece aynı katalog
+kaydı üç modda da kullanılabilir.
+
+**Bekleme node'da durur, transition'da değil.** Çağrılan günler sürebilir; bekleme bir
+*durum*tur. `WFES = current_node + assignment + DynCtx + WFAH` değişmezi korunur —
+beklemenin kalıcı yeri `current_node`'dur. Bu yüzden çağrı `nodes.<k>.call`'dadır.
+
+**WFC node'unda `c_a` hâlâ zorunludur.** "Node key = slug(c_a)" ve "aynı canonical c_a
+ikinci node'da olamaz" değişmezlerine dokunulmadı. Anlamı daralır: *alt akış sürerken bu
+WFE'yi kim görür ve kim iptal edebilir* — ACT/claim vermez. Node'da `kind` alanı YOKTUR;
+node'u WFC node'u yapan şey `call` bloğunun varlığıdır (start node'un "referans ile
+türetilmiş kimlik" deseninin aynısı).
+
+**`sync` (trigger gibi bloklayan) modu değerlendirildi ve ELENDİ.** Yeni yetenek
+getirmiyordu: çağrılan tam otomatik ise `wait` zaten saniyeler içinde döner (çağrılanın
+terminal commit'inde opportunistic nudge). İçinde bir insan havuzu varsa daima
+`WFD.CallTimeout` olurdu ve validator "bu WFD insansız mı" diye statik karar veremez —
+sessiz üretim tuzağı. `mode` bir enum olduğu için ileride kırıcı olmadan eklenebilir.
+
+**`$call.*` ayrı bir namespace'tir, `$exec.result.*` ile birleştirilmedi.** Autoexec bir
+sistem çağrısıdır, WFC bir WFE örneğidir. WFC-RETURN dışındaki bağlamlarda `$call` boş bir
+kabuktur (null döner, ifade patlamaz).
+
+**WFC-IN'de `$action.input.*` YASAK.** İki gerekçe: (1) moddan bağımsızlık — `terminal`
+modunda ACT girdisi güvenilir biçimde mevcut değil (SLA-3 ile ulaşılan terminal'de hiç
+yok), (2) WOR-70 tutarlılığı — ctx'e tek yazma yolu `wfes_effects`'tir, böylece "çağrılana
+ne gitti" DynCtx'te denetlenebilir kalır. Bir ACT girdisini çağrılana geçirmek isteyen onu
+önce effects ile ctx'e yazar.
+
+**Ardılın üç sert kuralı.**
+1. **Chain Isolation:** ardıl çağrı, çağıranın sonucunu ASLA değiştirmez. Ardıl
+   başlatılamasa bile çağıran `completed` kalır; hata yalnız WFAH marker'ı + çağrı
+   satırında görünür.
+2. **Cascade ardılı kapsamaz.** Çağıran sonlandığında koşan alt akışlar (`wait`/
+   `detached`) `cancelled` edilir; ardıl edilmez — ardıl, astın aksine çağıranın ömrüne
+   bağlı değildir.
+3. **Yalnız başarılı `Terminal` tetikler.** `Failed`/`Terminated` (SLA ihlali, engine
+   hatası) ardıl tetiklemez.
+
+**Ardıl döngüsü, autoexec'te karşılığı olmayan yeni bir başarısızlık sınıfıdır.** A bitince
+B, B bitince A → sonsuz WFE üretimi. İki katmanlı fren: statik `call_next_cycle` (reddet) +
+runtime ardıl derinliği sınırı. Meşru döngü isteyen terminal'de `max_next: N` ile AÇIKÇA
+izin verir. Yuvalanma döngüsünün (`call_cycle`) böyle bir kaçışı YOKTUR.
+
+**Döngü tespiti kenar üzerinde yapılır.** Kökün kendisi `WfdProvider`'dan çözülemeyebilir
+(yayınlanmamış taslak). "Hedefe git, orada kendini gör" yaklaşımı döngüyü kaçırırdı;
+bu yüzden DFS yığınına giden bir kenar görüldüğünde döngü bildirilir.
+
+**Versiyon:** `version` verilmezse çağrı anındaki en son yayınlanmış sürüm; verilirse
+pinlenir. Yaratılan WFE her hâlde start anında bir sürüme sabitlenir — yani pin'siz
+çağrıda yeni sürüm yayınlamak KOŞAN WFE'leri etkilemez.
+
+**Validator iki katmanlıdır.** `validate()` yalnız yerel kuralları koşar (saf `wfe-core`,
+I/O yok). `validate_with(wfd, Some(&provider))` cross-WFD kurallarını da koşar (girdi
+kümesi, tip uyumu, `$call.result.*` anahtarları, döngü). Upload yolunda resolver DAİMA
+verilir. Kritik olan kural — *"çağrılanın girdileri çağıranın context'inde bulunmalı"* —
+YEREL'dir (`call_input_source_undeclared`): çağıranın kendi şemasına bakar, resolver
+gerektirmez.
+
+**Bilinen boşluk (Faz 2 girdisi): `wf.wfd_meta` doküman kimliğini indekslemiyor.** Tablo
+WFD'yi `(orgtnt_id, name, integer version)` ile saklar; `CallDef.wfd_id` ise dokümanın
+`id` alanına, `CallDef.version` ise dokümanın semver `version`'ına atıfta bulunur. DB
+üzerinden çözüm için `wf.wfd_meta`'ya indeksli bir `doc_id` (ve semver) kolonu eklenmesi
+gerekir — aksi halde her upload'da tenant'ın tüm WFD JSON'larını okumak gerekirdi. Bu
+yüzden DB-destekli `WfdProvider` Faz 2'ye (migration fazı) bırakıldı; Faz 1'de resolver
+trait'i ve tüm kurallar hazır, sahte katalogla test edilmiş durumdadır.

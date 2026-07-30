@@ -41,6 +41,11 @@ pub struct Wfd {
     pub actions: BTreeMap<String, ActionDef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub autoexec: BTreeMap<String, AutoexecDef>,
+    /// WFC katalogu — başka bir WFD'yi çağırma sözleşmeleri. **Ne** çağrılacağını ve
+    /// hangi girdiyle çağrılacağını tutar; **nasıl** çağrıldığı referans yerindedir
+    /// (`nodes.<k>.call` veya `terminals[].call`). `autoexec` ↔ `trigger` ayrımının aynısı.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub calls: BTreeMap<String, CallDef>,
     pub transitions: Vec<Transition>,
     pub terminals: Vec<Terminal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -101,6 +106,11 @@ pub struct NodeDef {
     /// I/O yapmaz, yalnız referansı taşır ve validator ile katalogda var olduğunu doğrular).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<String>,
+    /// WFC — alt akış çağrısı (`mode: wait | detached`). Bu bloğu taşıyan node bir
+    /// **WFC node**'udur: insan ACT'i alınamaz, çıkışı `call.wft`'dir. Bekleme bir
+    /// DURUMdur; bu yüzden çağrı transition'da değil node'da durur.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<CallRef>,
 }
 
 /// SLA-1 — claim timeout (havuz node'u üzerinde). `wft` yoksa aynı havuza döner
@@ -337,6 +347,113 @@ pub struct WfesEffects {
     pub set: BTreeMap<String, Value>,
 }
 
+// ---- WFC — İş Akışı Çağrısı (Workflow Call) ----
+//
+// Katalog (`Wfd.calls`) = NE çağrılır + hangi girdiyle. Referans (`NodeDef.call` /
+// `Terminal.call`) = NASIL çağrılır. Tek belirleyici eksen `mode`'dur; yerleşimi de
+// mod belirler (validator `call_mode_placement`).
+
+/// Root `calls` kataloğundaki bir kayıt. Moddan BAĞIMSIZdır — aynı kayıt hem alt akış
+/// hem ardıl olarak kullanılabilir. Bunu mümkün kılan şey `input`'ta
+/// `$action.input.*` yasağıdır (validator `call_input_namespace`): ACT girdisi terminal
+/// bağlamında güvenilir biçimde mevcut değildir.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallDef {
+    /// Çağrılacak WFD'nin id'si. Aynı ORGTNT olmak zorundadır (`call_cross_tenant`).
+    pub wfd_id: String,
+    /// Verilmezse çağrı anındaki EN SON yayınlanmış versiyon; verilirse o versiyona
+    /// pinlenir. Yaratılan WFE her hâlde start anında bir versiyona sabitlenir — yani
+    /// pin'siz çağrıda yeni versiyon yayınlamak koşan WFE'leri etkilemez.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Çağrılanın `start[]` kuralı ≥2 ise zorunlu (`startRule.id`); tek start varsa
+    /// opsiyonel (`call_start_ambiguous`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    /// WFC-IN — çağrılanın start ACT girdisi → çağıran bağlamındaki kaynak.
+    /// Değer: `$ctx.<yol>` / `$wfe_id` / `$actor` / `$timestamp` / literal.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub input: BTreeMap<String, Value>,
+}
+
+/// Bir katalog kaydına yapılan referans. Node ve terminal yerleşimleri AYNI tipi
+/// kullanır — böylece yanlış yere yazılmış alan serde parse hatası yerine anlaşılır
+/// bir validasyon mesajı üretir (`call_next_forbidden_field` / `call_wft_required`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallRef {
+    /// Root `calls` kataloğundaki key.
+    #[serde(rename = "use")]
+    pub use_: String,
+    /// Yerleşimden çıkarılabilir olsa da AÇIKÇA yazılır: JSON kendi kendini anlatır,
+    /// editör/validator tek alan okur, ileride yeni mod eklenirse şema kırılmaz.
+    #[serde(default)]
+    pub mode: CallMode,
+    /// ISO 8601 duration — yalnız `wait`. Aşılırsa çağrılan iptal edilir ve WFC-RETURN
+    /// `$call.status == "timeout"` ile işler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// WFC-RETURN effects — yalnız node yerleşimi. `$call.*` burada görünür.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+    /// WFC-RETURN hedefi — node yerleşiminde ZORUNLU. Node veya terminal olabilir;
+    /// SLA'nın "terminal hedef yasak" kısıtı burada GEÇERLİ DEĞİL (bu bir zamanlayıcı
+    /// değil, çağrılanın sonucuna dayanan bir karardır). `Option` kalır ki eksikliği
+    /// parse hatası yerine `call_wft_required` üretsin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wft: Option<Wft>,
+    /// Yalnız `terminal`: ardılı kimin başlattığı.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_as: Option<StartAs>,
+    /// Yalnız `terminal`: ardıl döngüsüne AÇIK izin + üst sınır. Verilmezse döngü
+    /// `call_next_cycle` ile reddedilir ve global ardıl derinliği sınırı geçerlidir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_next: Option<u32>,
+}
+
+/// WFC modu — çağrının TEK belirleyici ekseni.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CallMode {
+    /// Çağıran node'da BEKLER; çağrılan bitince WFC-RETURN işler. Sonuç `$call.*`.
+    #[default]
+    Wait,
+    /// Çağrılan başlatılır, çağıran HEMEN devam eder. `$call.result.*` daima boş.
+    Detached,
+    /// Çağıran BİTER; ardıl akış onun bittiği yerden başlar. Dönüş yok.
+    Terminal,
+}
+
+impl CallMode {
+    /// Node yerleşiminde geçerli mi (aksi halde terminal yerleşimi).
+    pub fn is_node_site(&self) -> bool {
+        matches!(self, CallMode::Wait | CallMode::Detached)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CallMode::Wait => "wait",
+            CallMode::Detached => "detached",
+            CallMode::Terminal => "terminal",
+        }
+    }
+}
+
+/// Ardılı hangi aktör başlatır. SLA-3/`Failed`/`Terminated` yoluyla da ulaşılabilen
+/// bir terminal'de aktör YOKTUR — orada `System` şarttır (`call_next_start_actor`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StartAs {
+    /// Terminal'e getiren ACT'in aktörü ile başlat (default).
+    #[default]
+    Actor,
+    /// Sistem aktörü ile başlat.
+    System,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TriggerInvocation {
@@ -513,6 +630,12 @@ pub struct Terminal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
     pub wfe_end_response: BTreeMap<String, Value>,
+    /// WFC — ardıl akış çağrısı (`mode: terminal`). "Bir iş akışının bitişi başka bir
+    /// iş akışının başlangıcı." WFE bu terminal'de NORMAL biçimde sonlanır (`completed`),
+    /// ardından ardıl WFE başlar. Dönüş YOKTUR; `wfes_effects`/`wft`/`timeout` bu
+    /// bağlamda yasaktır (validator `call_next_forbidden_field`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<CallRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

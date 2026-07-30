@@ -21,17 +21,17 @@ use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{
-    ActionDef, AutoexecDef, CandidateActor, EscalationStep, Transition, TriggerInvocation, Wfd,
-    Wft, WftTarget,
+    ActionDef, AutoexecDef, CallMode, CandidateActor, EscalationStep, StartAs, Transition,
+    TriggerInvocation, Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
-use crate::v22::eval::{evaluate_bool, EvalEnv};
+use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv};
 use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
 use crate::v22::ports::{
-    AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, NewWfe,
-    TransitionCommit, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CallSite, CommitOutcome, ExecEnv, ExecFailure,
+    NewWfe, StagedCall, TransitionCommit, Wfes,
 };
 use crate::v22::resolver::resolve_c_orgu;
 use chrono::{DateTime, Utc};
@@ -182,6 +182,7 @@ impl<'a> Engine<'a> {
 
         if let Some(effects) = &rule.wfes_effects {
             let env = EffectEnv {
+                call: None,
                 actor,
                 wfe_id,
                 node: None,
@@ -219,7 +220,7 @@ impl<'a> Engine<'a> {
         )
         .await?;
 
-        let (outcome, resolved_c_a, final_ctx) = self
+        let (outcome, resolved_c_a, final_ctx, landed) = self
             .resolve_wft(
                 &rule.wft,
                 wfd,
@@ -228,6 +229,7 @@ impl<'a> Engine<'a> {
                 actor,
                 wfe_id,
                 Some(input),
+                None,
                 orgtnt_id,
                 WftMode::Start,
             )
@@ -237,6 +239,9 @@ impl<'a> Engine<'a> {
         // kuralıyla sağlanır (validator): (1) her declared input bir wfes_effects
         // tarafından tüketilmek zorunda, (2) her context alanı en az bir wfes_effects
         // tarafından yazılmak zorunda. Çalışma anında ayrı bir ctx doluluk denetimi yok.
+        let staged_calls =
+            self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfe_id, now)?;
+
         Ok(NewWfe {
             wfe_id,
             orgtnt_id,
@@ -247,6 +252,10 @@ impl<'a> Engine<'a> {
             outcome,
             resolved_c_a,
             deadline: resolved_deadline,
+            staged_calls,
+            // Çağıran bağı store/executor katmanında doldurulur: `Engine::start` saf bir
+            // hesaptır ve `wf.wfe_call` satırının id'sini bilmez.
+            caller: None,
         })
     }
 
@@ -354,6 +363,7 @@ impl<'a> Engine<'a> {
         // §7.6 — transition effects STAGED
         if let Some(effects) = &transition.wfes_effects {
             let env = EffectEnv {
+                call: None,
                 actor,
                 wfe_id: wfes.wfe_id,
                 node: Some(current_node),
@@ -390,7 +400,7 @@ impl<'a> Engine<'a> {
         .await?;
 
         // §7.8 — wft staged ctx üzerinden
-        let (outcome, resolved_c_a, final_ctx) = self
+        let (outcome, resolved_c_a, final_ctx, landed) = self
             .resolve_wft(
                 &transition.wft,
                 wfd,
@@ -399,6 +409,7 @@ impl<'a> Engine<'a> {
                 actor,
                 wfes.wfe_id,
                 Some(input),
+                None,
                 wfes.orgtnt_id,
                 WftMode::Single,
             )
@@ -418,6 +429,10 @@ impl<'a> Engine<'a> {
             now,
         );
 
+        // WFC: varılan site bir çağrı taşıyorsa outbox satırı AYNI tx'te stage edilir.
+        let staged_calls =
+            self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
+
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
@@ -425,6 +440,7 @@ impl<'a> Engine<'a> {
             wfah_entries,
             outcome,
             resolved_c_a,
+            staged_calls,
         })
     }
 
@@ -537,6 +553,7 @@ impl<'a> Engine<'a> {
         // §7.6 — transition effects STAGED
         if let Some(effects) = &transition.wfes_effects {
             let env = EffectEnv {
+                call: None,
                 actor,
                 wfe_id: wfes.wfe_id,
                 node: Some(branch_node),
@@ -573,7 +590,7 @@ impl<'a> Engine<'a> {
         .await?;
 
         // §7.8 — wft, kol bağlamıyla (varış / kol hareketi / WFE-terminal ayrımı)
-        let (outcome, resolved_c_a, final_ctx) = self
+        let (outcome, resolved_c_a, final_ctx, landed) = self
             .resolve_wft(
                 &transition.wft,
                 wfd,
@@ -582,6 +599,7 @@ impl<'a> Engine<'a> {
                 actor,
                 wfes.wfe_id,
                 Some(input),
+                None,
                 wfes.orgtnt_id,
                 WftMode::Branch {
                     join,
@@ -605,6 +623,10 @@ impl<'a> Engine<'a> {
             now,
         );
 
+        // WFC: varılan site bir çağrı taşıyorsa outbox satırı AYNI tx'te stage edilir.
+        let staged_calls =
+            self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
+
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
@@ -612,6 +634,7 @@ impl<'a> Engine<'a> {
             wfah_entries,
             outcome,
             resolved_c_a,
+            staged_calls,
         })
     }
 
@@ -726,9 +749,10 @@ impl<'a> Engine<'a> {
         viewer: &Actor,
         orgtnt_id: Uuid,
     ) -> Result<Vec<ResolvedCandidate>, EngineError> {
-        let node = wfd.nodes.get(node_key).ok_or_else(|| {
-            EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'"))
-        })?;
+        let node = wfd
+            .nodes
+            .get(node_key)
+            .ok_or_else(|| EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'")))?;
         self.resolve_candidates(&node.c_a, ctx, wfah, viewer, orgtnt_id)
             .await
     }
@@ -1023,6 +1047,7 @@ impl<'a> Engine<'a> {
         let mut staged = wfes.dynctx.as_value().clone();
         if let Some(effects) = &step.wfes_effects {
             let env = EffectEnv {
+                call: None,
                 actor: &system,
                 wfe_id: wfes.wfe_id,
                 node: Some(node_key),
@@ -1067,7 +1092,7 @@ impl<'a> Engine<'a> {
             }
             (None, _) => WftMode::Single,
         };
-        let (outcome, resolved_c_a, final_ctx) = self
+        let (outcome, resolved_c_a, final_ctx, landed) = self
             .resolve_wft(
                 wft,
                 wfd,
@@ -1075,6 +1100,7 @@ impl<'a> Engine<'a> {
                 &wfes.wfah,
                 &system,
                 wfes.wfe_id,
+                None,
                 None,
                 wfes.orgtnt_id,
                 mode,
@@ -1094,6 +1120,9 @@ impl<'a> Engine<'a> {
             now,
         );
 
+        let staged_calls =
+            self.stage_calls(wfd, landed.as_ref(), &final_ctx, &system, wfes.wfe_id, now)?;
+
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
@@ -1101,6 +1130,7 @@ impl<'a> Engine<'a> {
             wfah_entries,
             outcome,
             resolved_c_a,
+            staged_calls,
         })
     }
 
@@ -1152,6 +1182,9 @@ impl<'a> Engine<'a> {
             wfah_entries,
             outcome,
             resolved_c_a: vec![],
+            // SLA-3 sonlanması `Terminated`'dır — BAŞARILI bitiş değildir, bu yüzden
+            // ardıl akış TETİKLENMEZ (bkz. decisions.md → WFC, "ardılın üç sert kuralı").
+            staged_calls: vec![],
         }
     }
 
@@ -1242,6 +1275,7 @@ impl<'a> Engine<'a> {
         let has_effects = ct.wfes_effects.is_some();
         if let Some(effects) = &ct.wfes_effects {
             let env = EffectEnv {
+                call: None,
                 actor: &system,
                 wfe_id: wfes.wfe_id,
                 node: Some(node_key),
@@ -1293,7 +1327,7 @@ impl<'a> Engine<'a> {
                     }
                     (None, _) => WftMode::Single,
                 };
-                let (outcome, resolved_c_a, final_ctx) = self
+                let (outcome, resolved_c_a, final_ctx, landed) = self
                     .resolve_wft(
                         &wft,
                         wfd,
@@ -1301,6 +1335,7 @@ impl<'a> Engine<'a> {
                         &wfes.wfah,
                         &system,
                         wfes.wfe_id,
+                        None,
                         None,
                         wfes.orgtnt_id,
                         mode,
@@ -1318,6 +1353,8 @@ impl<'a> Engine<'a> {
                     &mut seq,
                     now,
                 );
+                let staged_calls =
+                    self.stage_calls(wfd, landed.as_ref(), &final_ctx, &system, wfes.wfe_id, now)?;
                 Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
                     wfe_id: wfes.wfe_id,
                     orgtnt_id: wfes.orgtnt_id,
@@ -1325,6 +1362,7 @@ impl<'a> Engine<'a> {
                     wfah_entries,
                     outcome,
                     resolved_c_a,
+                    staged_calls,
                 }))
             }
         }
@@ -1381,6 +1419,7 @@ impl<'a> Engine<'a> {
                 Ok(result) => {
                     if let Some(effects) = &def.wfes_effects {
                         let env = EffectEnv {
+                            call: None,
                             actor: &system,
                             wfe_id,
                             node,
@@ -1408,6 +1447,7 @@ impl<'a> Engine<'a> {
                     });
                     if let Some(catch) = caught {
                         let env = EffectEnv {
+                            call: None,
                             actor: &system,
                             wfe_id,
                             node,
@@ -1513,10 +1553,234 @@ impl<'a> Engine<'a> {
         }
     }
 
+    // ------------------------------------------------------------ WFC-RETURN
+
+    /// WFC-RETURN: çağrılan WFE bitti, çağıran o node'daki `call.wft`'ye göre ilerler.
+    ///
+    /// `fire_escalation` / `fire_claim_timeout` ile AYNI sınıftır: system aktörü, insan
+    /// ACT'i olmayan bir kenar. Farkı, bağlamda `$call.*` namespace'inin bağlı olması.
+    ///
+    /// `outcome`: çağrılanın nasıl bittiği — "completed" | "failed" | "terminated" |
+    /// "timeout". `end_response` yalnız `completed`'da doludur.
+    pub async fn fire_call_return(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        call_status: &str,
+        callee_wfe_id: Option<Uuid>,
+        end_response: Option<&Value>,
+        now: DateTime<Utc>,
+    ) -> Result<TransitionCommit, EngineError> {
+        let node_key = wfes
+            .current_node
+            .as_deref()
+            .ok_or_else(|| EngineError::InvalidWfd("çağrı dönüşü için current_node yok".into()))?;
+        let call_ref = wfd
+            .nodes
+            .get(node_key)
+            .and_then(|n| n.call.as_ref())
+            .ok_or_else(|| {
+                EngineError::InvalidWfd(format!("'{node_key}' bir çağrı node'u değil"))
+            })?;
+
+        let call = CallOutcome {
+            result: end_response.cloned().unwrap_or(Value::Null),
+            status: call_status.to_string(),
+            wfe_id: callee_wfe_id,
+        };
+        let system = system_actor();
+
+        let mut staged = wfes.dynctx.as_value().clone();
+        if let Some(effects) = &call_ref.wfes_effects {
+            let env = EffectEnv {
+                actor: &system,
+                wfe_id: wfes.wfe_id,
+                node: Some(node_key),
+                // WFC-RETURN'ü system tetikler: aksiyon girdisi ve autoexec sonucu
+                // YOKTUR (validator `call_effect_namespace`). Görünen tek yeni
+                // namespace `$call.*`.
+                action_input: None,
+                exec_result: None,
+                call: Some(&call),
+                now,
+            };
+            staged = apply_effects(&staged, effects, &env)?;
+        }
+
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let marker = format!("call:{}", call_ref.use_);
+        let mut wfah_entries = vec![WfahEntry {
+            seq,
+            action: marker.clone(),
+            actor: system.clone(),
+            input: Some(json!({
+                "status": call_status,
+                "callee_wfe_id": callee_wfe_id,
+            })),
+            applied_at: now,
+        }];
+        seq += 1;
+
+        let wft = call_ref.wft.as_ref().ok_or_else(|| {
+            EngineError::InvalidWfd(format!("'{node_key}' çağrı node'u wft içermeli"))
+        })?;
+
+        // WFC node'u paralel modda olamaz (validator: kol giriş node'u olarak çağrı
+        // node'u Faz 2 kapsamı dışı) — tekil mod yeterlidir.
+        // Hedef node'un `c_orgu`'su `self`-çapalı olabilir; saf sistem aktörünün nil
+        // orgu'su ile çözülemez (bkz. `system_actor_anchored`). WFAH marker'ı ve
+        // çağrı effects'i YUKARIDA saf `system` ile yazıldı — audit izi değişmez.
+        let anchored = system_actor_anchored(wfes);
+        let (outcome, resolved_c_a, final_ctx, landed) = self
+            .resolve_wft(
+                wft,
+                wfd,
+                staged,
+                &wfes.wfah,
+                &anchored,
+                wfes.wfe_id,
+                None,
+                Some(&call),
+                wfes.orgtnt_id,
+                WftMode::Single,
+            )
+            .await?;
+
+        stage_parallel_markers(
+            wfes,
+            &Trigger {
+                branch: None,
+                action: Some(&marker),
+                actor: &system,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
+
+        let staged_calls = self.stage_calls(
+            wfd,
+            landed.as_ref(),
+            &final_ctx,
+            &anchored,
+            wfes.wfe_id,
+            now,
+        )?;
+
+        Ok(TransitionCommit {
+            wfe_id: wfes.wfe_id,
+            orgtnt_id: wfes.orgtnt_id,
+            new_dynctx: final_ctx,
+            wfah_entries,
+            outcome,
+            resolved_c_a,
+            staged_calls,
+        })
+    }
+
+    // ---------------------------------------------------------------- WFC outbox
+
+    /// Varılan siteye bakıp bu commit ile aynı tx'te kuyruğa alınacak WFC çağrılarını
+    /// üretir (§WFC). Boş vektör = burada çağrı yok.
+    ///
+    /// Neden commit'in İÇİNDE değil de outbox: çağrılan WFE'yi burada yaratmak,
+    /// çağıranın atomik transaction'ını başka bir WFE'nin tüm start pipeline'ına
+    /// bağlardı. Niyet aynı tx'te kalıcı olur, gerçek start ayrı tx'te koşar.
+    fn stage_calls(
+        &self,
+        wfd: &Wfd,
+        landed: Option<&CallSite>,
+        ctx: &Value,
+        actor: &Actor,
+        wfe_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<StagedCall>, EngineError> {
+        let Some(site) = landed else {
+            return Ok(Vec::new());
+        };
+        // Site → referans. Node yerleşimi `wait`/`detached`, terminal yerleşimi
+        // `terminal` taşır (validator `call_mode_placement` bunu garanti eder; runtime
+        // yine de kontrol eder ki bozuk bir WFD sessizce yanlış davranmasın).
+        let call_ref = match site {
+            CallSite::Node(key) => wfd.nodes.get(key).and_then(|n| n.call.as_ref()),
+            CallSite::Terminal(id) => wfd
+                .terminals
+                .iter()
+                .find(|t| t.id == *id)
+                .and_then(|t| t.call.as_ref()),
+        };
+        let Some(call_ref) = call_ref else {
+            return Ok(Vec::new());
+        };
+        let placement_ok = match site {
+            CallSite::Node(_) => call_ref.mode.is_node_site(),
+            CallSite::Terminal(_) => !call_ref.mode.is_node_site(),
+        };
+        if !placement_ok {
+            return Err(EngineError::InvalidWfd(format!(
+                "WFC modu '{}' bu yerleşimde geçerli değil ({} '{}')",
+                call_ref.mode.as_str(),
+                site.kind(),
+                site.key()
+            )));
+        }
+
+        let def = wfd.calls.get(&call_ref.use_).ok_or_else(|| {
+            EngineError::CallNotFound(format!("'{}' calls katalogunda yok", call_ref.use_))
+        })?;
+
+        // WFC-IN çözümü: `$ctx.*` / `$actor` / `$timestamp` / `$wfe_id` / literal.
+        // `action_input`/`exec_result`/`call` BİLİNÇLİ olarak `None` — bu namespace'ler
+        // çağrı girdisinde yasaktır (validator `call_input_namespace`); burada `None`
+        // olması onları sessizce `null` yapar, yani bozuk bir WFD veri uydurmaz.
+        let env = EffectEnv {
+            actor,
+            wfe_id,
+            node: match site {
+                CallSite::Node(key) => Some(key.as_str()),
+                CallSite::Terminal(_) => None,
+            },
+            action_input: None,
+            exec_result: None,
+            call: None,
+            now,
+        };
+        let mut input = Map::new();
+        for (key, raw) in &def.input {
+            input.insert(key.clone(), resolve_value(raw, ctx, &env)?);
+        }
+
+        // `wait` süre sınırı mutlak zamana çevrilir — her tick'te ISO parse etmemek
+        // için (SLA-3 deadline'ıyla aynı gerekçe).
+        //
+        // YALNIZ `wait`: `detached` çağrılanın sonucunu hiç beklemez, `terminal`'de ise
+        // dönüş yoktur — ikisinde de bir süre sınırı uygulanacak bekleme YOK. (Validator
+        // bunu `call_node_forbidden_field` ile zaten reddediyor; runtime da uydurmuyor.)
+        let deadline = match (&call_ref.timeout, call_ref.mode) {
+            (Some(iso), CallMode::Wait) => Some(now + parse_iso8601_duration(iso)?),
+            _ => None,
+        };
+
+        Ok(vec![StagedCall {
+            call_key: call_ref.use_.clone(),
+            mode: call_ref.mode,
+            site: site.clone(),
+            input: Value::Object(input),
+            deadline,
+            start_as: call_ref.start_as.unwrap_or(StartAs::Actor),
+            max_next: call_ref.max_next,
+        }])
+    }
+
     /// §7.8 — WFT çözümü. Terminal'de terminal.wfes_effects uygulanır ve
     /// wfe_end_response $-string'leri FINAL staged ctx ile çözülür (M9/WOR-42).
     /// `mode`: WOR-31 — Parallel hedefin ve paralel kol bağlamının sınıflaması
     /// (bkz. `WftMode`).
+    ///
+    /// Dördüncü dönüş değeri "nereye varıldı" (`CallSite`): `CommitOutcome::Terminal`
+    /// terminal id'sini TAŞIMAZ, ama WFC outbox'ı ardıl çağrıyı bulmak için ona ihtiyaç
+    /// duyar — bu yüzden ayrıca döner.
     #[allow(clippy::too_many_arguments)]
     async fn resolve_wft(
         &self,
@@ -1527,9 +1791,20 @@ impl<'a> Engine<'a> {
         actor: &Actor,
         wfe_id: Uuid,
         action_input: Option<&Value>,
+        // WFC-RETURN bağlamı — `wft.conditions` ve terminal `wfe_end_response` içinde
+        // `$call.*` görünür olsun. Diğer yollarda `None`.
+        call: Option<&CallOutcome>,
         orgtnt_id: Uuid,
         mode: WftMode<'_>,
-    ) -> Result<(CommitOutcome, Vec<ResolvedCandidate>, Value), EngineError> {
+    ) -> Result<
+        (
+            CommitOutcome,
+            Vec<ResolvedCandidate>,
+            Value,
+            Option<CallSite>,
+        ),
+        EngineError,
+    > {
         // WOR-56: collapse — yalnız kol bağlamında. Kardeşleri düşürüp WFE'yi
         // hedefe götürür. Terminal hedef = mevcut Terminal yolu (paralel modda
         // stage_parallel_markers zaten kardeşleri iptal eder). Node hedef =
@@ -1545,9 +1820,21 @@ impl<'a> Engine<'a> {
             };
             return match collapse {
                 WftTarget::Terminal { terminal } => {
-                    let (end_response, final_ctx) =
-                        self.terminal_outcome(terminal, wfd, staged, actor, wfe_id, action_input)?;
-                    Ok((CommitOutcome::Terminal { end_response }, vec![], final_ctx))
+                    let (end_response, final_ctx) = self.terminal_outcome(
+                        terminal,
+                        wfd,
+                        staged,
+                        actor,
+                        wfe_id,
+                        action_input,
+                        call,
+                    )?;
+                    Ok((
+                        CommitOutcome::Terminal { end_response },
+                        vec![],
+                        final_ctx,
+                        Some(CallSite::Terminal(terminal.clone())),
+                    ))
                 }
                 WftTarget::Node { node } => {
                     let resolved = self
@@ -1560,6 +1847,7 @@ impl<'a> Engine<'a> {
                         },
                         resolved,
                         staged,
+                        Some(CallSite::Node(node.clone())),
                     ))
                 }
             };
@@ -1606,6 +1894,10 @@ impl<'a> Engine<'a> {
                             },
                             resolved,
                             staged,
+                            // Fork BİRDEN FAZLA node'a girer; WFC outbox tek site
+                            // taşır. Bir kol giriş node'unun çağrı node'u olması
+                            // Faz 2 kapsamı dışıdır (validator ileride yasaklar).
+                            None,
                         ))
                     }
                 };
@@ -1622,6 +1914,9 @@ impl<'a> Engine<'a> {
                         .with_wfe_id(wfe_id);
                     if let Some(input) = action_input {
                         env = env.with_action_input(input);
+                    }
+                    if let Some(c) = call {
+                        env = env.with_call(c.clone());
                     }
                     if evaluate_bool(&cond.when, &env)? {
                         chosen = Some(match (&cond.node, &cond.terminal) {
@@ -1674,6 +1969,7 @@ impl<'a> Engine<'a> {
                         },
                         vec![],
                         staged,
+                        None,
                     ));
                 }
                 // Son varış: paralel mod biter, join hedefine promotion.
@@ -1689,6 +1985,7 @@ impl<'a> Engine<'a> {
                             },
                             resolved,
                             staged,
+                            Some(CallSite::Node(node.clone())),
                         ))
                     }
                     WftTarget::Terminal { terminal } => {
@@ -1699,6 +1996,7 @@ impl<'a> Engine<'a> {
                             actor,
                             wfe_id,
                             action_input,
+                            call,
                         )?;
                         Ok((
                             CommitOutcome::JoinComplete {
@@ -1707,6 +2005,7 @@ impl<'a> Engine<'a> {
                             },
                             vec![],
                             final_ctx,
+                            Some(CallSite::Terminal(terminal.clone())),
                         ))
                     }
                 };
@@ -1724,6 +2023,7 @@ impl<'a> Engine<'a> {
                     },
                     resolved,
                     staged,
+                    Some(CallSite::Node(node_key.clone())),
                 ));
             }
         }
@@ -1733,12 +2033,30 @@ impl<'a> Engine<'a> {
                 let resolved = self
                     .node_candidates(&node_key, wfd, &staged, wfah, actor, orgtnt_id)
                     .await?;
-                Ok((CommitOutcome::MoveTo { node: node_key }, resolved, staged))
+                let site = CallSite::Node(node_key.clone());
+                Ok((
+                    CommitOutcome::MoveTo { node: node_key },
+                    resolved,
+                    staged,
+                    Some(site),
+                ))
             }
             Target::Terminal(terminal_id) => {
-                let (end_response, final_ctx) =
-                    self.terminal_outcome(&terminal_id, wfd, staged, actor, wfe_id, action_input)?;
-                Ok((CommitOutcome::Terminal { end_response }, vec![], final_ctx))
+                let (end_response, final_ctx) = self.terminal_outcome(
+                    &terminal_id,
+                    wfd,
+                    staged,
+                    actor,
+                    wfe_id,
+                    action_input,
+                    call,
+                )?;
+                Ok((
+                    CommitOutcome::Terminal { end_response },
+                    vec![],
+                    final_ctx,
+                    Some(CallSite::Terminal(terminal_id)),
+                ))
             }
         }
     }
@@ -1780,6 +2098,8 @@ impl<'a> Engine<'a> {
         actor: &Actor,
         wfe_id: Uuid,
         action_input: Option<&Value>,
+        // WFC-RETURN'den gelen terminal `wfe_end_response` içinde `$call.*` kullanabilir.
+        call: Option<&CallOutcome>,
     ) -> Result<(Value, Value), EngineError> {
         let terminal = wfd
             .terminals
@@ -1790,6 +2110,7 @@ impl<'a> Engine<'a> {
             })?;
         let now = Utc::now();
         let env = EffectEnv {
+            call,
             actor,
             wfe_id,
             node: None,
@@ -2115,6 +2436,34 @@ fn branch_approval(wfah: &Wfah, node: &str) -> (Value, Value) {
 
 fn escalation_marker(node_key: &str, idx: usize) -> String {
     format!("escalate:{node_key}:{idx}")
+}
+
+/// Engine-tetiklemeli kenarlar (WFC-RETURN, SLA) için **çapa aktörü**.
+///
+/// `c_orgu` çözümü DAİMA `actor.orgu_id`'ye çapalanır (`resolve_c_orgu`). Saf sistem
+/// aktörünün orgu'su `nil` olduğundan, hedef node'un kuralı `self`-çapalıysa çözüm
+/// "orgu 00000000-...-0000 bulunamadı" ile patlar — yani akış o kenardan geçemez.
+///
+/// Çapa olarak WFAH'taki SON GERÇEK aktörün orgu'su kullanılır: `self` "bu işin
+/// yaşadığı birim" demektir ve o birim, işi oraya getiren aktörün birimidir.
+/// Rol `system` kalır — audit izinde tetikleyicinin insan olmadığı görünmeye devam eder.
+///
+/// Gerçek aktör yoksa (WFAH boş) nil orgu'ya düşer; o durumda `self`-çapalı hedef
+/// zaten çözülemez ve hata anlaşılır biçimde yüzeye çıkar.
+fn system_actor_anchored(wfes: &Wfes) -> Actor {
+    let anchor = wfes
+        .wfah
+        .entries()
+        .iter()
+        .rev()
+        .map(|e| e.actor.orgu_id)
+        .find(|id| !id.is_nil())
+        .unwrap_or_else(Uuid::nil);
+    Actor {
+        orgu_id: anchor,
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    }
 }
 
 fn system_actor() -> Actor {

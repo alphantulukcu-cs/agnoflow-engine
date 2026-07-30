@@ -6,7 +6,7 @@ use crate::error::EngineError;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::dynctx::DynCtx;
 use crate::types::wfah::{Wfah, WfahEntry};
-use crate::types::wfd_v22::{AutoexecDef, Wfd, WftTarget};
+use crate::types::wfd_v22::{AutoexecDef, CallMode, StartAs, Wfd, WftTarget};
 use crate::types::wfe::WfeStatus;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -149,6 +149,52 @@ pub enum CommitOutcome {
     },
 }
 
+/// WFC çağrısının yapıldığı yer. Mod ile birlikte "nasıl çağrıldı"yı tamamlar.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallSite {
+    /// Alt akış çağrısı — çağrı node'unun slug'ı (`mode: wait | detached`).
+    Node(String),
+    /// Ardıl akış — terminal id'si (`mode: terminal`).
+    Terminal(String),
+}
+
+impl CallSite {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            CallSite::Node(_) => "node",
+            CallSite::Terminal(_) => "terminal",
+        }
+    }
+    pub fn key(&self) -> &str {
+        match self {
+            CallSite::Node(k) | CallSite::Terminal(k) => k,
+        }
+    }
+}
+
+/// Commit ile AYNI transaction'da kuyruğa alınacak WFC çağrısı (outbox satırı).
+///
+/// Neden outbox: çağrılan WFE'yi commit'in İÇİNDE yaratmak, çağıranın atomik
+/// transaction'ını başka bir WFE'nin tüm start pipeline'ına (org resolve, trigger'lar,
+/// kendi commit'i) bağlardı. Bunun yerine niyet aynı tx'te kalıcı hale getirilir,
+/// gerçek start ayrı bir tx'te koşar — böylece çağıranın atomikliği bozulmaz ve
+/// başlatma yeniden denenebilir olur.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StagedCall {
+    /// Root `calls` katalogundaki key.
+    pub call_key: String,
+    pub mode: CallMode,
+    pub site: CallSite,
+    /// WFC-IN — çağıranın ctx'ine göre ÇÖZÜLMÜŞ girdi (çağrılanın start ACT input'u).
+    pub input: Value,
+    /// `wait` için mutlak son tarih (`call.timeout` çözümü). Yok = sınırsız.
+    pub deadline: Option<DateTime<Utc>>,
+    /// Yalnız `terminal`: ardılı kim başlatır.
+    pub start_as: StartAs,
+    /// Yalnız `terminal`: ardıl döngüsü için yerel üst sınır.
+    pub max_next: Option<u32>,
+}
+
 /// Tek transaction'da persist edilecek transition sonucu (M8).
 /// Unhandled fail durumunda hiçbir parçası yazılmaz.
 #[derive(Debug, Clone)]
@@ -160,6 +206,8 @@ pub struct TransitionCommit {
     pub outcome: CommitOutcome,
     /// Yeni node'un resolve edilmiş aday listesi — pool sorguları için denormalize cache.
     pub resolved_c_a: Vec<ResolvedCandidate>,
+    /// WFC outbox — bu commit ile aynı tx'te `queued` olarak yazılır.
+    pub staged_calls: Vec<StagedCall>,
 }
 
 /// Yeni WFE oluşturma isteği — wfe_id ENGINE tarafından üretilir ve effects
@@ -176,12 +224,92 @@ pub struct NewWfe {
     pub resolved_c_a: Vec<ResolvedCandidate>,
     /// SLA-3: start'ta çözülen mutlak deadline (bkz. `Engine::start`); NULL = yok.
     pub deadline: Option<DateTime<Utc>>,
+    /// WFC outbox — start pipeline'ında stage edilen çağrılar (start kuralının wft'si
+    /// doğrudan bir çağrı node'una gidebilir).
+    pub staged_calls: Vec<StagedCall>,
+    /// Bu WFE bir WFC ile yaratıldıysa çağıran bağlantısı; kök WFE'de `None`.
+    pub caller: Option<CallLink>,
+}
+
+/// Çağıran ↔ çağrılan bağı. `depth`/`next_depth` çağıranın satırından +1 taşınır —
+/// yuvalanma ve ardıl zinciri AYRI sayılır çünkü frenleri de ayrıdır.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallLink {
+    /// `wf.wfe_call` satırının id'si — start başarılıysa `running`'e çekilir.
+    pub call_row_id: Uuid,
+    pub caller_wfe_id: Uuid,
+    pub site: CallSite,
+    pub call_key: String,
+    pub mode: CallMode,
+    /// Alt akış yuvalanma derinliği (`wait`/`detached` ile artar).
+    pub depth: i32,
+    /// Ardıl zinciri uzunluğu (`terminal` ile artar).
+    pub next_depth: i32,
+}
+
+/// Bir WFC satırının API görünümü. `PendingCall`'dan ayrıdır: burada yalnız
+/// istemcinin göreceği alanlar var (girdi/derinlik gibi iç detaylar YOK).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CallView {
+    /// 'node' (alt akış) | 'terminal' (ardıl akış).
+    pub site_kind: String,
+    /// Çağrı node'unun slug'ı ya da terminal id'si.
+    pub site_key: String,
+    pub call_key: String,
+    /// wait | detached | terminal
+    pub mode: String,
+    /// queued | running | returned | consumed | failed | cancelled | skipped
+    pub status: String,
+    /// `caller_of` görünümünde çağıranın id'si; `calls_of_caller`'da çağrılanın id'si.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wfe_id: Option<Uuid>,
+    /// completed | failed | terminated | timeout — çağrılan bittiyse.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_status: Option<String>,
+}
+
+/// Bekleyen bir WFC satırı — executor'ın outbox/dönüş taramaları bunu okur.
+#[derive(Debug, Clone)]
+pub struct PendingCall {
+    pub id: Uuid,
+    pub orgtnt_id: Uuid,
+    pub caller_wfe_id: Uuid,
+    pub site: CallSite,
+    pub call_key: String,
+    pub mode: CallMode,
+    pub input: Value,
+    pub deadline: Option<DateTime<Utc>>,
+    pub start_as: StartAs,
+    pub max_next: Option<u32>,
+    pub depth: i32,
+    pub next_depth: i32,
+    /// Dönüş taramasında dolu: çağrılanın kimliği + sonucu.
+    pub callee_wfe_id: Option<Uuid>,
+    pub end_response: Option<Value>,
+    /// "completed" | "failed" | "terminated" | "timeout"
+    pub call_status: Option<String>,
 }
 
 #[async_trait]
 pub trait WfdStore: Send + Sync {
     /// v2.2 yükleme kapısından geçmiş WFD döner (M14).
     async fn fetch(&self, wfd_id: Uuid, version: i32) -> Result<Wfd, EngineError>;
+
+    /// WFC: dokümanın `id` alanından (ve opsiyonel semver'inden) yayınlanmış satırı çözer.
+    ///
+    /// `calls.<key>.wfd_id` bir DB uuid'si değil, çağrılan WFD'nin doküman kimliğidir —
+    /// bu yüzden ayrı bir çözüm adımı gerekir. `doc_version: None` = en son yayınlanmış.
+    /// Varsayılan `None` döner: WFC'yi desteklemeyen store'larda çağrı başlatma
+    /// `WFD.CallNotFound` ile başarısız olur (sessizce yanlış WFD çalıştırmaktansa).
+    async fn resolve_doc(
+        &self,
+        orgtnt_id: Uuid,
+        doc_id: &str,
+        doc_version: Option<&str>,
+    ) -> Result<Option<(Uuid, i32)>, EngineError> {
+        let (_, _, _) = (orgtnt_id, doc_id, doc_version);
+        Ok(None)
+    }
 }
 
 #[async_trait]
@@ -234,6 +362,80 @@ pub trait WfeStore: Send + Sync {
         wfah_entry: &WfahEntry,
         branch: Option<&str>,
     ) -> Result<(), EngineError>;
+
+    // ---- WFC (iş akışı çağrısı) ----
+    //
+    // Varsayılan implementasyonlar WFC'yi DESTEKLEMEYEN store'lar için "hiç çağrı yok"
+    // davranışı verir: mevcut test store'ları (ve WFC kullanmayan kurulumlar) değişmeden
+    // derlenir, executor'ın tarama döngüleri de boş küme görüp hiçbir şey yapmaz.
+
+    /// Başlatılmayı bekleyen (`queued`) çağrılar.
+    async fn pending_call_starts(&self, limit: i64) -> Result<Vec<PendingCall>, EngineError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
+    /// Çağrılan bitmiş, çağıranın işlemesi bekleniyor (`returned`). Yalnız `wait`.
+    async fn pending_call_returns(&self, limit: i64) -> Result<Vec<PendingCall>, EngineError> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+
+    /// Süre sınırı geçmiş `running` `wait` çağrıları — `$call.status = "timeout"`.
+    async fn overdue_calls(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<PendingCall>, EngineError> {
+        let (_, _) = (now, limit);
+        Ok(Vec::new())
+    }
+
+    /// Çağrı satırının durumunu değiştirir. `callee` verilirse satıra yazılır.
+    /// Terminal durumlar: `consumed` (dönüş işlendi), `failed`, `cancelled`, `skipped`.
+    async fn set_call_status(
+        &self,
+        call_row_id: Uuid,
+        status: &str,
+        callee_wfe_id: Option<Uuid>,
+    ) -> Result<(), EngineError> {
+        let (_, _, _) = (call_row_id, status, callee_wfe_id);
+        Ok(())
+    }
+
+    /// WFC-CASCADE: çağıran sonlandığında koşan ALT AKIŞLARI iptal eder.
+    /// **Ardılı KAPSAMAZ** — ardıl, astın aksine çağıranın ömrüne bağlı değildir.
+    /// Döndürülen id'ler iptal edilecek çağrılan WFE'lerdir (executor sonlandırır).
+    async fn cancel_subcalls_of(&self, caller_wfe_id: Uuid) -> Result<Vec<Uuid>, EngineError> {
+        let _ = caller_wfe_id;
+        Ok(Vec::new())
+    }
+
+    /// Bir WFE'nin YAPTIĞI çağrılar — API görünümü (`GET /wfe/:id` → `calls`).
+    async fn calls_of_caller(&self, caller_wfe_id: Uuid) -> Result<Vec<CallView>, EngineError> {
+        let _ = caller_wfe_id;
+        Ok(Vec::new())
+    }
+
+    /// Bu WFE'yi ÇAĞIRAN kayıt (varsa) — `GET /wfe/:id` → `caller`.
+    /// Portal "bu iş şu akıştan geldi" / "ardıl akış" kartlarını buradan kurar.
+    async fn caller_of(&self, callee_wfe_id: Uuid) -> Result<Option<CallView>, EngineError> {
+        let _ = callee_wfe_id;
+        Ok(None)
+    }
+
+    /// Bir WFE terminal'e ulaştığında, onu bekleyen çağrı satırını `returned`'e çeker
+    /// (`wait`) ya da doğrudan `consumed` yapar (`detached`/`terminal`). Bekleyen yoksa
+    /// hiçbir şey yapmaz. `status`: "completed" | "failed" | "terminated".
+    async fn mark_callee_finished(
+        &self,
+        callee_wfe_id: Uuid,
+        status: &str,
+        end_response: Option<&Value>,
+    ) -> Result<(), EngineError> {
+        let (_, _, _) = (callee_wfe_id, status, end_response);
+        Ok(())
+    }
 }
 
 /// Autoexec çalıştırma hatası — WFD.* hata taksonomisi (M9).

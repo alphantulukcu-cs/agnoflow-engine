@@ -44,7 +44,10 @@ fn golden_fixture_is_valid() {
         .iter()
         .filter(|w| w.code != "optional_input_nulls_other_writer")
         .collect();
-    assert!(unexpected.is_empty(), "beklenmeyen uyarılar: {unexpected:#?}");
+    assert!(
+        unexpected.is_empty(),
+        "beklenmeyen uyarılar: {unexpected:#?}"
+    );
     assert_eq!(
         report.warnings.len(),
         1,
@@ -785,10 +788,9 @@ fn nested_context_leaf_no_effect_writes_is_error() {
     });
     let report = validate_value(v);
     assert!(
-        report
-            .errors
-            .iter()
-            .any(|e| e.code == "context_field_never_written" && e.message.contains("ek_bilgi.kanal")),
+        report.errors.iter().any(
+            |e| e.code == "context_field_never_written" && e.message.contains("ek_bilgi.kanal")
+        ),
         "yaprak yol raporlanmalı, hatalar: {:#?}",
         report.errors
     );
@@ -924,6 +926,83 @@ fn required_sourced_input_does_not_trigger_the_warning() {
             .any(|w| w.code == "optional_input_nulls_other_writer"
                 && w.message.contains("manager_decision")),
         "zorunlu girdi kaynaklı yazar uyarı üretmemeli: {:#?}",
+        report.warnings
+    );
+}
+
+// ---- İLK-MATCH kardeşleri: opsiyonel-girdi uyarısı yanlış pozitif vermez ----
+
+/// Aynı (node, action) için iki `when`'li transition runtime'da İLK-MATCH ile
+/// seçilir — yalnız BİRİ koşar. Aynı alanı yazsalar bile birbirinin değerini
+/// ezemezler; `optional_input_nulls_other_writer` bunları eşleştirmemeli.
+///
+/// Regresyon: eşleştiriyordu ve iki site aynı aksiyon adını taşıdığı için mesaj
+/// "'X' aksiyonu yazıyor — aynı alanı 'X' aksiyonu da yazıyor" gibi kendi kendini
+/// gösteren bir cümleye dönüşüyordu.
+#[test]
+fn first_match_siblings_do_not_warn_about_each_other() {
+    let mut v = fixture_value();
+    let tx = v["transitions"].as_array_mut().unwrap();
+    // Golden'daki müdür transition'ını kopyalayıp `when`siz bir kardeş ekle.
+    let manager = tx
+        .iter()
+        .find(|t| t["action"] == "manager_decide")
+        .expect("golden'da manager_decide var")
+        .clone();
+    let mut sibling = manager.clone();
+    sibling["id"] = json!("t_manager_decide_sibling");
+    sibling.as_object_mut().unwrap().remove("when");
+    tx.push(sibling);
+
+    let report = validate_value(v);
+    for w in report
+        .warnings
+        .iter()
+        .filter(|w| w.code == "optional_input_nulls_other_writer")
+    {
+        // 1. Yazar KENDİSİNİ "diğer yazar" olarak listelemez. `path` yazarın
+        //    etiketidir; mesajın "aynı alanı ..." kısmında geçmemeli.
+        let others = w
+            .message
+            .split_once("aynı alanı ")
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+        assert!(
+            !others.contains(&w.path),
+            "yazar kendisini diğer yazar olarak listeliyor:\n  yazar: {}\n  mesaj: {}",
+            w.path,
+            w.message
+        );
+        // 2. Aynı etiket iki kez listelenmez (ilk-match kardeşleri aynı etiketi taşır).
+        let labels: Vec<&str> = others
+            .split(" da yazıyor")
+            .next()
+            .unwrap_or("")
+            .split("', '")
+            .collect();
+        let mut uniq = labels.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(
+            labels.len(),
+            uniq.len(),
+            "diğer-yazar listesi tekrar içeriyor: {}",
+            w.message
+        );
+    }
+}
+
+/// Muafiyet fazla geniş olmamalı: FARKLI aksiyonlar aynı alanı yazıyorsa uyarı
+/// hâlâ çıkar (golden fixture bu uyarıyı beklenen tek uyarı olarak taşır).
+#[test]
+fn different_writers_still_warn() {
+    let report = validate_value(fixture_value());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == "optional_input_nulls_other_writer"),
+        "gerçek çoklu-yazar durumu hâlâ uyarı üretmeli, uyarılar: {:#?}",
         report.warnings
     );
 }

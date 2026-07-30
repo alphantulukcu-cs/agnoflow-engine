@@ -171,8 +171,11 @@ tanımlanabilir.
 nodes       = isimli bekleme havuzu katalogu; key = slug(c_a), label = display
 actions     = human ACT katalogu
 autoexec    = reusable sistem executable katalogu
+calls       = reusable WFD cagrisi katalogu (WFC: ne + hangi girdi)
 transitions = (from node + ACT) -> effects + trigger + WFT kenari
 trigger     = autoexec invocation listesi (retry/catch destekli)
+nodes.<k>.call    = alt akis cagrisi   (mode: wait | detached; donuslu)
+terminals[].call  = ardil akis cagrisi (mode: terminal; bitis = ardilin baslangici)
 wft         = tek routing authority; hedef node id veya terminal id
 ```
 
@@ -306,9 +309,13 @@ v2.1 ile aynıdır:
 
 ```text
 $ctx  $wfah  $node  $actor  $timestamp  $wfe_id  $action.input.*  $exec.result.*
+$call.result.*  $call.status  $call.wfe_id      (yalniz WFC-RETURN baglami)
 ```
 
 Geçersiz: `$status` gibi top-level DynCtx, `$exec.response.*`, `$ctx.status` ile state guard'ı.
+
+`$call.*` `$exec.result.*` ile **birleştirilmez** — autoexec bir sistem çağrısıdır, WFC bir
+WFE örneğidir. WFC-RETURN dışındaki bağlamlarda `$call` boş bir kabuktur (null döner).
 
 ---
 
@@ -424,3 +431,45 @@ terminal:true, {ctx:...}, {ref:...}, _step_<action>, c_a[].from          (v1/v2'
 | **Attachment format kuralı** | `formats[]` içindeki bir kayıt: `{accept: string[], max_size_mb?}`. Bir MIME grubu + o gruba ÖZEL boyut sınırı. Farklı formatlar farklı MB (örn. pdf/jpg→4MB, xml/zip→20MB). `formats` boş/yoksa: her tip, sınırsız. |
 | **Node attachment referansı** | `nodes.<key>.attachments` — grup key'leri dizisi. WFE bu node'da beklerken referanslı grupların `required` dosyaları yüklenmeden aksiyon submit edilemez. |
 | **AttachmentStore** | Server portal katmanının opendal store'u. Storage anahtarı `attachments/{wfe_id}/{grup}/{item}`. Engine core buna DEĞMEZ; dosya varlığı/yükleme yalnız edge'dedir. |
+
+## WFC — İŞ AKIŞI ÇAĞRISI (Workflow Call)
+
+Bir WFE'nin başka bir WFD'yi örneklemesi. **Tek katalog (`calls`), tek eksen (`mode`),
+üç mod.** Tam tasarım: `docs/plans/workflow-call.md`; kararlar: `decisions.md` → WFC.
+
+| Terim | Kısaltma | Tanım |
+|---|---|---|
+| **Workflow Call** | **WFC** | Root `calls` kataloğundaki kayıt: **ne** çağrılacak (`wfd_id`, `version?`, `start?`) ve **hangi girdiyle** (`input`). *Nasıl* çağrıldığını `mode` söyler. Katalog↔referans ayrımı `autoexec`↔`trigger`'ın aynısıdır. |
+| **Call Mode** | — | `wait` / `detached` / `terminal`. Çağrının TEK belirleyici eksenidir; yerleşimi de mod belirler. |
+| **Caller** | **WFE-P** | Çağıran WFE. |
+| **Sub Callee** | **WFE-C** | `wait`/`detached` ile yaratılan **alt** WFE. Çağıran yaşamaya devam eder. |
+| **Successor Callee** | **WFE-N** | `terminal` ile yaratılan **ardıl** WFE. Çağıran zaten bitmiştir. **Ast değildir, ardıldır** — hiyerarşi değil sıra. |
+| **Call Node** | **WFC node** | `nodes.<k>.call` taşıyan node. Bekleme *havuzu* DEĞİLDİR: insan ACT'i alınamaz. |
+| **Handoff Terminal** | **WFC terminal** | `terminals[].call` taşıyan terminal. WFE-P burada NORMAL sonlanır (`completed`), ardından WFE-N başlar. |
+| **Call Input Map** | **WFC-IN** | `calls.<k>.input`. Moddan bağımsızdır ( `$action.input.*` yasağı sayesinde). |
+| **Projected Field** | **WFC-PROJ** | Eşlenmemiş bir girdi için çağıranın `context.properties`'ine editörün ürettiği alan. |
+| **Call Result** | **WFC-OUT** | Çağrılanın `wfe_end_response`'unun çağırana taşınması (`$call.*`). **Yalnız `wait`.** |
+| **Return Edge** | **WFC-RETURN** | `call.wfes_effects` + `call.wft`. Çağrılan bitince işleyen, insan ACT'i olmayan kenar — `escalation`/`claim_timeout` kenarlarıyla aynı sınıf. |
+| **Cascade** | **WFC-CASCADE** | Çağıran sonlandığında koşan **WFE-C**'lerin `cancelled` edilmesi. **WFE-N'ye UYGULANMAZ.** |
+| **Handoff Isolation** | — | Ardıl çağrı, çağıranın sonucunu ASLA değiştirmez. |
+
+Üç mod, üç davranış:
+
+```text
+wait      cagiran node'da BEKLER  -> cagrilan bitince WFC-RETURN isler, $call.* gorunur
+detached  cagrilan baslar, cagiran HEMEN devam eder ($call.result.* daima bos)
+terminal  cagiran BITER (completed) -> ardil akis baslar; donus, bekleme, cascade YOK
+```
+
+Mod ↔ yerleşim eşlemesi zorunludur: `wait`/`detached` yalnız `nodes.<k>.call`,
+`terminal` yalnız `terminals[].call`.
+
+**WFC node'unda `c_a` hâlâ zorunludur** (slug/uniqueness değişmezleri korunur); anlamı
+daralır: *alt akış sürerken bu WFE'yi kim görür ve kim iptal edebilir*. WFC node'u
+`transitions[].from` içinde yer alamaz, `escalation`/`claim_timeout`/`attachments`/
+`reassign` taşıyamaz, `start[].from` olamaz; çıkışı `call.wft`'dir (zorunlu).
+
+**Ardıl sıralaması kesindir:** terminal `wfes_effects` → `wfe_end_response` →
+çağıran `completed` commit → *ondan sonra* ardıl start. Yalnız başarılı `Terminal`
+tetikler; `Failed`/`Terminated` tetiklemez. Ardıl döngüsü (`max_next` ile açıkça
+istenmedikçe) reddedilir.

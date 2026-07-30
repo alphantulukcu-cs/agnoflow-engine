@@ -1,0 +1,100 @@
+{
+  "wfd_version": "2.2",
+  "expression_language": "zen@1",
+  "id": "kredi-kullandirim",
+  "name": "Kredi Kullandırım",
+  "version": "1.0.0",
+  "description": "WFC örnek fixture'ı — ARDIL akış (`mode: terminal`). Başvuru akışı onayla bittiğinde bu akış başlar: iki akış ayrı ömürlerdir, aralarında dönüş yoktur. Çağıranın verisi yalnız WFC-IN ile alan alan taşınır.",
+  "context": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "properties": {
+      "musteri_no": {
+        "type": "string"
+      },
+      "tutar": {
+        "type": "number"
+      },
+      "initiated_by": {
+        "type": "object"
+      },
+      "kullandirildi_at": {
+        "type": "string"
+      }
+    }
+  },
+  "nodes": {
+    "type_branch__branchClerk": {
+      "label": "Şube Memuru",
+      "c_a": {
+        "c_orgu": "*:[type:branch]",
+        "c_r": ["branchClerk"]
+      }
+    },
+    "self__operationsOfficer": {
+      "label": "Operasyon Havuzu",
+      "description": "Kullandırımın yapılması bekleniyor.",
+      "c_a": {
+        "c_orgu": "self",
+        "c_r": ["operationsOfficer"]
+      }
+    }
+  },
+  "start": [
+    {
+      "id": "start__type_branch__branchClerk",
+      "from": "type_branch__branchClerk",
+      "action": "kullandirim_talebi",
+      "wfes_effects": {
+        "set": {
+          "musteri_no": "$action.input.musteri_no",
+          "tutar": "$action.input.tutar",
+          "initiated_by": "$actor"
+        }
+      },
+      "wft": {
+        "node": "self__operationsOfficer"
+      }
+    }
+  ],
+  "actions": {
+    "kullandirim_talebi": {
+      "label": "Kullandırım Talebi",
+      "input": {
+        "required": ["musteri_no", "tutar"],
+        "optional": []
+      }
+    },
+    "kullandir": {
+      "label": "Kullandır",
+      "input": {
+        "required": [],
+        "optional": []
+      }
+    }
+  },
+  "transitions": [
+    {
+      "id": "t_kullandir",
+      "from": "self__operationsOfficer",
+      "action": "kullandir",
+      "wfes_effects": {
+        "set": {
+          "kullandirildi_at": "$timestamp"
+        }
+      },
+      "wft": {
+        "terminal": "terminal_kullandirildi"
+      }
+    }
+  ],
+  "terminals": [
+    {
+      "id": "terminal_kullandirildi",
+      "wfe_end_response": {
+        "status": "kullandirildi",
+        "musteri_no": "$ctx.musteri_no"
+      }
+    }
+  ]
+}

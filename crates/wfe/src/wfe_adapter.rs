@@ -2,6 +2,7 @@
 //! transaction'ında uygulanır (M8 / WOR-43; WOR-7 fix).
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -13,7 +14,8 @@ use wfe_core::types::{
     wfe::WfeStatus,
 };
 use wfe_core::v22::ports::{
-    BranchState, BranchStatus, CommitOutcome, NewWfe, TransitionCommit, WfeStore, Wfes,
+    BranchState, BranchStatus, CallView, CommitOutcome, NewWfe, PendingCall, TransitionCommit,
+    WfeStore, Wfes,
 };
 use wfe_core::{ConflictKind, EngineError};
 
@@ -330,6 +332,21 @@ impl WfeStore for WfeAdapter {
 
         insert_wfah_entries(&mut tx, new.wfe_id, &new.wfah_entries).await?;
 
+        // WFC outbox — start pipeline'ında stage edilen çağrılar AYNI tx'te yazılır:
+        // "çağrı yapılacak" niyeti, çağıranın durumu ile atomik olur.
+        if !new.staged_calls.is_empty() {
+            repo::call::stage(
+                &mut tx,
+                new.orgtnt_id,
+                new.wfe_id,
+                &new.staged_calls,
+                new.caller.as_ref().map(|c| c.depth).unwrap_or(0),
+                new.caller.as_ref().map(|c| c.next_depth).unwrap_or(0),
+            )
+            .await
+            .map_err(db_err)?;
+        }
+
         tx.commit().await.map_err(db_err)
     }
 
@@ -615,7 +632,111 @@ impl WfeStore for WfeAdapter {
             }
         }
 
+        // WFC outbox — bu transition ile varılan sitedeki çağrı(lar) AYNI tx'te
+        // `queued` yazılır. Çift start koruması `ON CONFLICT DO NOTHING` +
+        // `UNIQUE (caller_wfe_id, site_kind, site_key)` ile: executor'ın conflict
+        // retry döngüsü aynı transition'ı ikinci kez koşarsa çağrı tekrar başlamaz.
+        if !commit.staged_calls.is_empty() {
+            let (depth, next_depth) = caller_depths(&mut tx, commit.wfe_id).await?;
+            repo::call::stage(
+                &mut tx,
+                commit.orgtnt_id,
+                commit.wfe_id,
+                &commit.staged_calls,
+                depth,
+                next_depth,
+            )
+            .await
+            .map_err(db_err)?;
+        }
+
         tx.commit().await.map_err(db_err)
+    }
+
+    // ---- WFC (iş akışı çağrısı) ----
+
+    async fn pending_call_starts(&self, limit: i64) -> Result<Vec<PendingCall>, EngineError> {
+        repo::call::pending_starts(&self.pool, limit)
+            .await
+            .map_err(db_err)
+    }
+
+    async fn pending_call_returns(&self, limit: i64) -> Result<Vec<PendingCall>, EngineError> {
+        repo::call::pending_returns(&self.pool, limit)
+            .await
+            .map_err(db_err)
+    }
+
+    async fn overdue_calls(
+        &self,
+        now: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<PendingCall>, EngineError> {
+        repo::call::overdue(&self.pool, now, limit)
+            .await
+            .map_err(db_err)
+    }
+
+    async fn set_call_status(
+        &self,
+        call_row_id: Uuid,
+        status: &str,
+        callee_wfe_id: Option<Uuid>,
+    ) -> Result<(), EngineError> {
+        repo::call::set_status(&self.pool, call_row_id, status, callee_wfe_id)
+            .await
+            .map_err(db_err)
+    }
+
+    async fn cancel_subcalls_of(&self, caller_wfe_id: Uuid) -> Result<Vec<Uuid>, EngineError> {
+        repo::call::cancel_subcalls_of(&self.pool, caller_wfe_id)
+            .await
+            .map_err(db_err)
+    }
+
+    async fn calls_of_caller(&self, caller_wfe_id: Uuid) -> Result<Vec<CallView>, EngineError> {
+        let rows = repo::call::list_of_caller(&self.pool, caller_wfe_id)
+            .await
+            .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| CallView {
+                site_kind: r.site_kind,
+                site_key: r.site_key,
+                call_key: r.call_key,
+                mode: r.mode,
+                status: r.status,
+                wfe_id: r.callee_wfe_id,
+                call_status: r.call_status,
+            })
+            .collect())
+    }
+
+    async fn caller_of(&self, callee_wfe_id: Uuid) -> Result<Option<CallView>, EngineError> {
+        let row = repo::call::caller_of(&self.pool, callee_wfe_id)
+            .await
+            .map_err(db_err)?;
+        Ok(row.map(|(caller_wfe_id, r)| CallView {
+            site_kind: r.site_kind,
+            site_key: r.site_key,
+            call_key: r.call_key,
+            mode: r.mode,
+            status: r.status,
+            // Çağıran görünümünde ilgi duyulan id ÇAĞIRANdır (çağrılan zaten biz'iz).
+            wfe_id: Some(caller_wfe_id),
+            call_status: r.call_status,
+        }))
+    }
+
+    async fn mark_callee_finished(
+        &self,
+        callee_wfe_id: Uuid,
+        status: &str,
+        end_response: Option<&Value>,
+    ) -> Result<(), EngineError> {
+        repo::call::mark_callee_finished(&self.pool, callee_wfe_id, status, end_response)
+            .await
+            .map_err(db_err)
     }
 
     async fn claim(
@@ -791,4 +912,28 @@ impl WfeStore for WfeAdapter {
 
         tx.commit().await.map_err(db_err)
     }
+}
+
+/// Bu WFE'nin kendisi bir çağrı ile yaratıldıysa taşınacak derinlik sayaçları.
+///
+/// Kök WFE'de (0, 0). Zincir uzadıkça `stage` bunları +1'ler — hangisini artıracağını
+/// çağrının MODU belirler (`terminal` → `next_depth`, diğerleri → `depth`).
+async fn caller_depths(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    wfe_id: Uuid,
+) -> Result<(i32, i32), EngineError> {
+    let row =
+        sqlx::query("SELECT depth, next_depth FROM wf.wfe_call WHERE callee_wfe_id = $1 LIMIT 1")
+            .bind(wfe_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(db_err)?;
+    Ok(row
+        .map(|r| {
+            (
+                sqlx::Row::get::<i32, _>(&r, "depth"),
+                sqlx::Row::get::<i32, _>(&r, "next_depth"),
+            )
+        })
+        .unwrap_or((0, 0)))
 }

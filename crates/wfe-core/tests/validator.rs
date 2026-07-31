@@ -1006,3 +1006,77 @@ fn different_writers_still_warn() {
         report.warnings
     );
 }
+
+// ---- wft_dead_condition: koşulsuz dal sonrası her şey ölü ----
+
+/// Editörde "aynı adımdan birden fazla ok" çizilirse export bunları `when: "true"`
+/// koşullarına derler; motor ilk-match uyguladığı için ikinci ve sonraki hedefler
+/// ASLA çalışmaz. Sessiz bırakılırsa akış yazarı iki hedef tanımladığını sanır.
+#[test]
+fn unconditional_branch_before_others_is_rejected() {
+    let mut v = fixture_value();
+    let tx = v["transitions"].as_array_mut().unwrap();
+    let t = tx
+        .iter_mut()
+        .find(|t| t["action"] == "manager_decide")
+        .unwrap();
+    t["wft"] = json!({
+        "conditions": [
+            { "when": "true", "terminal": "terminal_approved" },
+            { "when": "$action.input.manager_decision == 'reject'", "terminal": "terminal_rejected" }
+        ],
+        "default": { "terminal": "terminal_rejected" }
+    });
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "wft_dead_condition"),
+        "koşulsuz dal sonrası ölü koşullar raporlanmalı: {:#?}",
+        report.errors
+    );
+}
+
+/// Koşulsuz dal SON ve `default` yoksa sorun yok — `default` yerine geçer.
+#[test]
+fn trailing_unconditional_branch_is_allowed() {
+    let mut v = fixture_value();
+    let tx = v["transitions"].as_array_mut().unwrap();
+    let t = tx
+        .iter_mut()
+        .find(|t| t["action"] == "manager_decide")
+        .unwrap();
+    t["wft"] = json!({
+        "conditions": [
+            { "when": "$action.input.manager_decision == 'approve'", "terminal": "terminal_approved" },
+            { "when": "true", "terminal": "terminal_rejected" }
+        ]
+    });
+    assert!(!has_error(&validate_value(v), "wft_dead_condition"));
+}
+
+/// Koşulsuz dal SON ama `default` VAR → default asla çalışmaz, bu da ölü.
+#[test]
+fn trailing_unconditional_branch_with_default_is_rejected() {
+    let mut v = fixture_value();
+    let tx = v["transitions"].as_array_mut().unwrap();
+    let t = tx
+        .iter_mut()
+        .find(|t| t["action"] == "manager_decide")
+        .unwrap();
+    t["wft"] = json!({
+        "conditions": [
+            { "when": "$action.input.manager_decision == 'approve'", "terminal": "terminal_approved" },
+            { "when": "true", "terminal": "terminal_rejected" }
+        ],
+        "default": { "terminal": "terminal_approved" }
+    });
+    assert!(has_error(&validate_value(v), "wft_dead_condition"));
+}
+
+/// Golden fixture bu kurala TAKILMAZ — gerçek koşullar kullanıyor.
+#[test]
+fn golden_fixture_has_no_dead_conditions() {
+    assert!(!has_error(
+        &validate_value(fixture_value()),
+        "wft_dead_condition"
+    ));
+}

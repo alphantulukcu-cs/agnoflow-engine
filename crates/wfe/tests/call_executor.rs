@@ -931,6 +931,8 @@ async fn simulated_call_node_is_a_resolvable_stop_not_a_dead_end() {
             "completed",
             None,
             Some(&json!({ "skor": 900, "karar": "uygun" })),
+            // Simülasyonda gerçek bir çağrılan WFE yok — işlenecek geçmiş de yok.
+            &[],
             Utc::now(),
         )
         .await

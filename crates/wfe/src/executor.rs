@@ -455,6 +455,8 @@ impl WfeExecutor {
                 ClaimCheck::Terminal => (false, Some("terminal".into())),
                 ClaimCheck::Expired => (false, Some("expired".into())),
                 ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
+                // WFC: alt akış sürüyor — iş görünür ama claim edilemez.
+                ClaimCheck::CallInProgress => (false, Some("call_in_progress".into())),
             },
         )
     }
@@ -918,6 +920,18 @@ impl WfeExecutor {
             return Ok(false);
         }
         let wfd = self.wfd.fetch(caller.wfd_id, caller.wfd_version).await?;
+        // Çağrılanın geçmişi çağıranın WFAH'ına işlenir — okuyan kişi "alt akışta ne
+        // oldu"yu tek yerde görsün. Çağrılan yüklenemezse (silinmiş/iptal) dönüş yine
+        // uygulanır: geçmiş eksik kalır ama akış tıkanmaz.
+        let callee_wfah = match call.callee_wfe_id {
+            Some(id) => self
+                .wfe
+                .load(id)
+                .await
+                .map(|w| w.wfah.entries().to_vec())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         let commit = self
             .engine()
             .fire_call_return(
@@ -926,6 +940,7 @@ impl WfeExecutor {
                 call.call_status.as_deref().unwrap_or("completed"),
                 call.callee_wfe_id,
                 call.end_response.as_ref(),
+                &callee_wfah,
                 chrono::Utc::now(),
             )
             .await?;

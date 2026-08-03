@@ -1026,6 +1026,7 @@ fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
                 check_condition_target(c, &format!("{path}.conditions[{i}]"), report);
             }
         }
+        check_dead_conditions(wft, &path, report);
     };
     for t in &wfd.transitions {
         visit(&t.wft, format!("transitions[{}].wft", t.id), report);
@@ -1045,6 +1046,51 @@ fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
             }
         }
     }
+}
+
+/// Koşulsuz (`true`) bir koşuldan SONRA gelen hiçbir koşul — ve `default` — asla
+/// değerlendirilmez: `wft.conditions` İLK-MATCH'tir.
+///
+/// Bu, editörde "aynı adımdan birden fazla ok" çizildiğinde üretilen şeklin motor
+/// tarafındaki karşılığıdır: çoklu ham kenar `when: "true"` koşullarına derlenir ve
+/// yalnız ilki erişilebilir olur. Sessiz bırakılırsa akış yazarı iki hedef tanımladığını
+/// sanır, biri hiç çalışmaz.
+fn check_dead_conditions(wft: &Wft, path: &str, report: &mut ValidationReport) {
+    let Wft::Conditional {
+        conditions,
+        default,
+    } = wft
+    else {
+        return;
+    };
+    let Some(idx) = conditions.iter().position(|c| is_unconditional(&c.when)) else {
+        return;
+    };
+    let dead_after = conditions.len() - idx - 1;
+    if dead_after == 0 && default.is_none() {
+        return; // koşulsuz koşul SON ve default yok → `default` yerine geçer, sorun değil
+    }
+    report.error(
+        "wft_dead_condition",
+        format!("{path}.conditions[{idx}]"),
+        format!(
+            "koşulsuz (her zaman doğru) bir dal {}. sırada; kendisinden sonraki {} koşul{}              asla değerlendirilmez (wft ilk-match'tir). Aynı adımdan birden fazla hedef              çıkarmak istiyorsanız her dala GERÇEK bir koşul verin ya da son dalı `default`              yapın.",
+            idx + 1,
+            dead_after,
+            if default.is_some() {
+                " ve `default`"
+            } else {
+                ""
+            }
+        ),
+    );
+}
+
+/// `when` her zaman doğru mu? Yalnız apaçık biçimleri sayar — genel bir teorem
+/// kanıtlayıcı DEĞİL. Amaç, editörün çoklu-kenar için ürettiği `"true"`yu ve elle
+/// yazılmış apaçık eşdeğerlerini yakalamak.
+fn is_unconditional(when: &str) -> bool {
+    matches!(when.trim(), "true" | "1 == 1" | "true == true")
 }
 
 fn check_condition_target(c: &WftCondition, path: &str, report: &mut ValidationReport) {

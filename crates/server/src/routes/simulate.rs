@@ -342,6 +342,8 @@ async fn sim_call_return(
             &body.status,
             None, // simülasyonda gerçek bir çağrılan WFE yoktur
             body.result.as_ref(),
+            // Simülasyonda gerçek bir çağrılan WFE yok — işlenecek geçmiş de yok.
+            &[],
             chrono::Utc::now(),
         )
         .await

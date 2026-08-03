@@ -52,6 +52,11 @@ pub enum ClaimCheck {
     Expired,
     AlreadyClaimed,
     NotEligible,
+    /// WFC: WFE bir ÇAĞRI NODE'unda bekliyor. Buradan insan aksiyonu alınamaz
+    /// (`call_node_has_action`), dolayısıyla claim de anlamsızdır: iş kimseye
+    /// atanamaz, çağrılan bitince akış kendi ilerler. Node'un `c_a`'sı yalnız
+    /// GÖRÜNÜRLÜK verir (bkz. runtime-semantics §10b).
+    CallInProgress,
 }
 
 /// Node'un ilk ateşlenmemiş escalation adımı için giriş/vade bilgisi.
@@ -694,6 +699,13 @@ impl<'a> Engine<'a> {
         let Some(node) = wfd.nodes.get(node_key) else {
             return Ok(ClaimCheck::NotEligible);
         };
+        // WFC: çağrı node'unda claim YOK. `c_a` burada yalnız "kim görür"dür; iş
+        // kimseye atanmaz çünkü alınacak bir aksiyon yoktur. Bu kapı olmadan node'un
+        // c_a'sına uyan biri işi claim edip havuzdan çekiyor ama hiçbir şey
+        // yapamıyordu — üstelik dönüş commit'i assignment'ı zaten sıfırlıyor.
+        if node.call.is_some() {
+            return Ok(ClaimCheck::CallInProgress);
+        }
         let ctx = wfes.dynctx.as_value();
         let env = MatchEnv {
             ctx,
@@ -732,6 +744,12 @@ impl<'a> Engine<'a> {
         let Some(node) = wfd.nodes.get(node_key) else {
             return Ok(AuthDecision::Denied);
         };
+        // WFC: çağrı node'unda claim yoktur (bkz. `can_claim`). Bu kapı `claim_as`
+        // görünümünü de kapatır — aksi halde portal "Claim et" düğmesini gösterir,
+        // kullanıcı tıklar ve `can_claim` reddeder. İki yol AYNI kuralı uygulamalı.
+        if node.call.is_some() {
+            return Ok(AuthDecision::Denied);
+        }
         let ctx = wfes.dynctx.as_value();
         let env = MatchEnv {
             ctx,
@@ -1590,6 +1608,9 @@ impl<'a> Engine<'a> {
         call_status: &str,
         callee_wfe_id: Option<Uuid>,
         end_response: Option<&Value>,
+        // Çağrılanın kendi WFAH'ı — çağıranın geçmişine SATIR SATIR işlenir (aşağıya bkz.).
+        // Simülasyonda gerçek bir çağrılan yoktur; orada boş dilim geçilir.
+        callee_wfah: &[WfahEntry],
         now: DateTime<Utc>,
     ) -> Result<TransitionCommit, EngineError> {
         let node_key = wfes
@@ -1630,7 +1651,60 @@ impl<'a> Engine<'a> {
 
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let marker = format!("call:{}", call_ref.use_);
-        let mut wfah_entries = vec![WfahEntry {
+        let mut wfah_entries: Vec<WfahEntry> = Vec::new();
+
+        // --- Çağrılanın geçmişi çağıranın geçmişine işlenir ---
+        //
+        // Neden burada ve neden kapanış marker'ından ÖNCE: çağıran, çağrı node'una
+        // girdiği andan dönüşe kadar WFAH'ına HİÇBİR kayıt yazamaz — çağrı node'undan
+        // insan aksiyonu alınamaz (`call_node_has_action`) ve escalation/claim_timeout/
+        // reassign o node'da yasaktır (`call_node_forbidden_field`). Dolayısıyla
+        // çağrılanın tüm satırları, zaman olarak tam bu aralığa düşer. Onları burada
+        // sırayla eklemek `seq` artışını `applied_at` artışıyla UYUMLU tutar; sona
+        // eklemek ise kapanış marker'ından sonra daha ESKİ zaman damgaları üretir,
+        // yani tarihsel akışı bozardı.
+        //
+        // Korunanlar: özgün `actor` (işi kim yaptı — denetimin asıl değeri) ve özgün
+        // `applied_at`. Değişen tek şey `action` adı: `call:<anahtar>/<aksiyon>` olarak
+        // ad-alanına alınır. Ham adla eklemek, çağıranın `$wfah` ifadelerinde
+        // (`some($wfah, #.action == '...')`) KAZARA eşleşmelere yol açardı — alt akışın
+        // aksiyonu çağıranınkiyle aynı ada sahip olabilir.
+        let inlined = callee_wfah.len().min(MAX_INLINED_CALL_ENTRIES);
+        for entry in &callee_wfah[..inlined] {
+            wfah_entries.push(WfahEntry {
+                seq,
+                action: format!("{marker}/{}", entry.action),
+                actor: entry.actor.clone(),
+                input: Some(json!({
+                    "callee_wfe_id": callee_wfe_id,
+                    "callee_seq": entry.seq,
+                    "action": entry.action,
+                    "input": entry.input,
+                })),
+                applied_at: entry.applied_at,
+            });
+            seq += 1;
+        }
+        // Kırpma SESSİZ olmaz: kaç satırın atlandığı ve tam geçmişin hangi WFE'de
+        // olduğu kayda geçer. Sınır, çağıranın WFAH'ının (her `load`'da tümüyle
+        // okunur) uzun alt akışlarla şişmesini engeller.
+        if callee_wfah.len() > inlined {
+            wfah_entries.push(WfahEntry {
+                seq,
+                action: format!("{marker}/…"),
+                actor: system.clone(),
+                input: Some(json!({
+                    "callee_wfe_id": callee_wfe_id,
+                    "omitted": callee_wfah.len() - inlined,
+                    "reason": "call_history_truncated",
+                })),
+                applied_at: callee_wfah[inlined.saturating_sub(1)].applied_at,
+            });
+            seq += 1;
+        }
+
+        // Kapanış marker'ı — dönüşün İŞLENDİĞİ an.
+        wfah_entries.push(WfahEntry {
             seq,
             action: marker.clone(),
             actor: system.clone(),
@@ -1639,7 +1713,7 @@ impl<'a> Engine<'a> {
                 "callee_wfe_id": callee_wfe_id,
             })),
             applied_at: now,
-        }];
+        });
         seq += 1;
 
         let wft = call_ref.wft.as_ref().ok_or_else(|| {
@@ -2623,6 +2697,11 @@ fn escalation_marker(node_key: &str, idx: usize) -> String {
 ///
 /// Gerçek aktör yoksa (WFAH boş) nil orgu'ya düşer; o durumda `self`-çapalı hedef
 /// zaten çözülemez ve hata anlaşılır biçimde yüzeye çıkar.
+/// Çağıranın WFAH'ına satır satır işlenecek azami alt akış kaydı. Aşılırsa kalanı
+/// kırpılır ve bir `call:<anahtar>/…` satırı kaç kaydın atlandığını + tam geçmişin
+/// hangi WFE'de olduğunu söyler. Sınırın nedeni: WFAH her `load`'da TÜMÜYLE okunur.
+const MAX_INLINED_CALL_ENTRIES: usize = 100;
+
 fn system_actor_anchored(wfes: &Wfes) -> Actor {
     let anchor = wfes
         .wfah

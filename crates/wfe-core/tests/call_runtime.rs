@@ -10,7 +10,7 @@
 //! tarafındadır — burada engine'in ürettiği outbox satırının doğruluğu sınanır.
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use uuid::Uuid;
 use wfe_core::error::EngineError;
@@ -223,6 +223,7 @@ async fn successful_return_writes_result_and_routes_on_it() {
             "completed",
             Some(callee),
             Some(&json!({ "skor": 780, "karar": "uygun" })),
+            &[],
             Utc::now(),
         )
         .await
@@ -257,6 +258,7 @@ async fn low_score_return_routes_to_default_target() {
             "completed",
             Some(Uuid::new_v4()),
             Some(&json!({ "skor": 400, "karar": "uygun_degil" })),
+            &[],
             Utc::now(),
         )
         .await
@@ -284,6 +286,7 @@ async fn timeout_return_is_a_normal_decision_not_a_crash() {
                 status,
                 None,
                 None,
+                &[],
                 Utc::now(),
             )
             .await
@@ -311,6 +314,7 @@ async fn return_on_a_non_call_node_is_rejected() {
             "completed",
             None,
             None,
+            &[],
             Utc::now(),
         )
         .await
@@ -439,6 +443,7 @@ async fn call_return_resolves_self_anchored_target() {
             "completed",
             Some(Uuid::new_v4()),
             Some(&json!({ "skor": 800, "karar": "uygun" })),
+            &[],
             Utc::now(),
         )
         .await
@@ -476,9 +481,317 @@ async fn call_return_without_any_real_actor_fails_loudly() {
             "completed",
             None,
             Some(&json!({ "skor": 800, "karar": "uygun" })),
+            &[],
             Utc::now(),
         )
         .await
         .expect_err("çapa yoksa hata dönmeli");
     assert!(matches!(err, EngineError::OrgPort(_)), "hata: {err}");
+}
+
+// ====================================== alt akış geçmişinin çağırana işlenmesi
+
+/// Çağrılanın WFAH'ı — gerçekte çağrı node'una girildikten SONRA, dönüş işlenmeden
+/// ÖNCE oluşur. Zaman damgaları bu aralığa yerleştirilir.
+fn callee_history(base: DateTime<Utc>) -> Vec<wfe_core::types::wfah::WfahEntry> {
+    use wfe_core::types::wfah::WfahEntry;
+    let uzman = actor("riskAnalyst");
+    vec![
+        WfahEntry {
+            seq: 1,
+            action: "skor_talebi_olustur".into(),
+            actor: actor("branchClerk"),
+            input: Some(json!({ "musteri_no": "M-1" })),
+            applied_at: base + chrono::Duration::minutes(5),
+        },
+        WfahEntry {
+            seq: 2,
+            action: "skor_gir".into(),
+            actor: uzman,
+            input: Some(json!({ "skor": 780 })),
+            applied_at: base + chrono::Duration::minutes(40),
+        },
+    ]
+}
+
+/// Çekirdek gereksinim: alt akışın geçmişi çağıranın geçmişine işlenir ve
+/// **tarihsel akış bozulmaz** — `seq` artışı `applied_at` artışıyla uyumlu kalır.
+#[tokio::test]
+async fn callee_history_is_inlined_in_chronological_order() {
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
+    let base = wfes.wfah.entries()[0].applied_at;
+    let history = callee_history(base);
+    let callee = Uuid::new_v4();
+
+    let commit = engine
+        .fire_call_return(
+            &caller_wfd(),
+            &wfes,
+            "completed",
+            Some(callee),
+            Some(&json!({ "skor": 780, "karar": "uygun" })),
+            &history,
+            base + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+    // Çağıranın TAM geçmişi: mevcut kayıtlar + bu commit'in stage ettikleri.
+    let mut full = wfes.wfah.entries().to_vec();
+    full.extend(commit.wfah_entries.iter().cloned());
+
+    // 1. `seq` kesintisiz ve artan.
+    for pair in full.windows(2) {
+        assert_eq!(
+            pair[1].seq,
+            pair[0].seq + 1,
+            "seq kesintisiz artmalı: {:?}",
+            full.iter().map(|e| (e.seq, &e.action)).collect::<Vec<_>>()
+        );
+    }
+    // 2. ZAMAN da artan — asıl gereksinim. Alt akış satırları sona eklenseydi
+    //    kapanış marker'ından sonra daha ESKİ damgalar gelirdi.
+    for pair in full.windows(2) {
+        assert!(
+            pair[1].applied_at >= pair[0].applied_at,
+            "tarihsel akış bozuldu: '{}' ({}) sonra '{}' ({})",
+            pair[0].action,
+            pair[0].applied_at,
+            pair[1].action,
+            pair[1].applied_at
+        );
+    }
+    // 3. Sıra: alt akış satırları kapanış marker'ından ÖNCE.
+    let actions: Vec<&str> = commit
+        .wfah_entries
+        .iter()
+        .map(|e| e.action.as_str())
+        .collect();
+    assert_eq!(
+        actions,
+        vec![
+            "call:kredi_skor_sorgusu/skor_talebi_olustur",
+            "call:kredi_skor_sorgusu/skor_gir",
+            "call:kredi_skor_sorgusu",
+        ]
+    );
+}
+
+/// Denetimin asıl değeri: işi KİMİN yaptığı ve NE ZAMAN yaptığı korunur.
+#[tokio::test]
+async fn inlined_entries_keep_original_actor_and_timestamp() {
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
+    let base = wfes.wfah.entries()[0].applied_at;
+    let history = callee_history(base);
+
+    let commit = engine
+        .fire_call_return(
+            &caller_wfd(),
+            &wfes,
+            "completed",
+            Some(Uuid::new_v4()),
+            Some(&json!({ "skor": 780, "karar": "uygun" })),
+            &history,
+            base + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+    let skor_gir = &commit.wfah_entries[1];
+    assert_eq!(skor_gir.actor.role, "riskAnalyst", "özgün aktör korunmalı");
+    assert_eq!(skor_gir.actor.user_id, history[1].actor.user_id);
+    assert_eq!(
+        skor_gir.applied_at, history[1].applied_at,
+        "özgün zaman korunmalı"
+    );
+    // Provenance: hangi WFE'nin kaçıncı kaydı olduğu ve özgün girdi.
+    let input = skor_gir.input.as_ref().unwrap();
+    assert_eq!(input["callee_seq"], json!(2));
+    assert_eq!(input["action"], json!("skor_gir"));
+    assert_eq!(input["input"]["skor"], json!(780));
+}
+
+/// Ad-alanı: alt akışın aksiyonu çağıranın `$wfah` ifadelerinde KAZARA eşleşmemeli.
+#[tokio::test]
+async fn inlined_actions_are_namespaced_to_avoid_wfah_collisions() {
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
+    let base = wfes.wfah.entries()[0].applied_at;
+    // Çağrılanın aksiyonu, çağıranın kendi aksiyonuyla AYNI ada sahip.
+    let clash = vec![wfe_core::types::wfah::WfahEntry {
+        seq: 1,
+        action: "manager_decide".into(),
+        actor: actor("branchManager"),
+        input: None,
+        applied_at: base + chrono::Duration::minutes(5),
+    }];
+
+    let commit = engine
+        .fire_call_return(
+            &caller_wfd(),
+            &wfes,
+            "completed",
+            Some(Uuid::new_v4()),
+            Some(&json!({ "skor": 780, "karar": "uygun" })),
+            &clash,
+            base + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        !commit
+            .wfah_entries
+            .iter()
+            .any(|e| e.action == "manager_decide"),
+        "alt akış aksiyonu ham adla eklenmemeli — çağıranın wfah sorgularını kirletir"
+    );
+    assert_eq!(
+        commit.wfah_entries[0].action,
+        "call:kredi_skor_sorgusu/manager_decide"
+    );
+}
+
+/// Uzun alt akışlar çağıranın WFAH'ını şişirmemeli, ama kırpma SESSİZ olmamalı.
+#[tokio::test]
+async fn long_callee_history_is_truncated_with_an_explicit_marker() {
+    use wfe_core::types::wfah::WfahEntry;
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
+    let base = wfes.wfah.entries()[0].applied_at;
+    let history: Vec<WfahEntry> = (1..=250)
+        .map(|i| WfahEntry {
+            seq: i,
+            action: format!("adim_{i}"),
+            actor: actor("riskAnalyst"),
+            input: None,
+            applied_at: base + chrono::Duration::seconds(i as i64),
+        })
+        .collect();
+
+    let commit = engine
+        .fire_call_return(
+            &caller_wfd(),
+            &wfes,
+            "completed",
+            Some(Uuid::new_v4()),
+            Some(&json!({ "skor": 780, "karar": "uygun" })),
+            &history,
+            base + chrono::Duration::hours(1),
+        )
+        .await
+        .unwrap();
+
+    // 100 satır + kırpma marker'ı + kapanış marker'ı
+    assert_eq!(commit.wfah_entries.len(), 102);
+    let trunc = &commit.wfah_entries[100];
+    assert_eq!(trunc.action, "call:kredi_skor_sorgusu/…");
+    assert_eq!(trunc.input.as_ref().unwrap()["omitted"], json!(150));
+    // Kırpılmış hâlde bile zaman sırası korunur.
+    for pair in commit.wfah_entries.windows(2) {
+        assert!(pair[1].applied_at >= pair[0].applied_at);
+    }
+}
+
+/// Çağrılan yüklenemediyse (silinmiş/iptal) dönüş yine uygulanır — geçmiş eksik
+/// kalır ama akış TIKANMAZ.
+#[tokio::test]
+async fn empty_callee_history_still_applies_the_return() {
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let commit = engine
+        .fire_call_return(
+            &caller_wfd(),
+            &wfes_at("self__creditAnalyst", ctx_with_basvuru()),
+            "completed",
+            Some(Uuid::new_v4()),
+            Some(&json!({ "skor": 780, "karar": "uygun" })),
+            &[],
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(commit.wfah_entries.len(), 1);
+    assert_eq!(commit.wfah_entries[0].action, "call:kredi_skor_sorgusu");
+}
+
+// ====================================== çağrı node'unda claim yoktur
+
+/// WFC node'u bir bekleme HAVUZU değildir: buradan aksiyon alınamaz, dolayısıyla
+/// claim de anlamsızdır. `c_a` burada yalnız GÖRÜNÜRLÜK verir.
+///
+/// Regresyon: node'un c_a'sına uyan biri işi claim edip havuzdan çekebiliyordu ama
+/// hiçbir şey yapamıyordu — üstelik dönüş commit'i assignment'ı zaten sıfırlıyor.
+#[tokio::test]
+async fn claim_is_refused_on_a_call_node() {
+    use wfe_core::v22::pipeline::ClaimCheck;
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let wfd = caller_wfd();
+    let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
+    // Node'un c_a'sına TAM uyan aktör — yine de claim edemez.
+    let check = engine
+        .can_claim(&wfd, &wfes, &actor("creditAnalyst"), None)
+        .await
+        .unwrap();
+    assert_eq!(check, ClaimCheck::CallInProgress);
+}
+
+/// Görünürlük kapısı da AYNI kuralı uygular — aksi halde portal "Claim et"
+/// düğmesini gösterir, kullanıcı tıklar ve claim reddedilir.
+#[tokio::test]
+async fn claim_button_is_hidden_on_a_call_node() {
+    use wfe_core::v22::matcher::AuthDecision;
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let decision = engine
+        .claim_decision(
+            &caller_wfd(),
+            &wfes_at("self__creditAnalyst", ctx_with_basvuru()),
+            &actor("creditAnalyst"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(decision, AuthDecision::Denied);
+}
+
+/// Muafiyet çağrı node'una ÖZGÜ: normal havuzlarda claim davranışı değişmedi.
+#[tokio::test]
+async fn claim_still_works_on_a_normal_pool_node() {
+    use wfe_core::v22::pipeline::ClaimCheck;
+    let engine = Engine {
+        org: &MockOrg,
+        exec: &NoRunner,
+    };
+    let check = engine
+        .can_claim(
+            &caller_wfd(),
+            &wfes_at("self__branchManager", ctx_with_basvuru()),
+            &actor("branchManager"),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(check, ClaimCheck::Ok);
 }

@@ -65,6 +65,32 @@ pub(crate) fn sqlx_uri(cfg: &DbConfig, scheme: &str, default_port: i32) -> Strin
     format!("{scheme}://{user}:{pass}@{host}:{port}/{db}")
 }
 
+/// MySQL protokolü konuşan bazı engine'ler (örn. Doris), sqlx'in varsayılan
+/// `SET sql_mode=(SELECT CONCAT(...))` session init sorgusunu kabul etmiyor.
+/// SQL mode mutasyonlarını kapatıp geri kalan bağlantı ayarlarını koruruz.
+pub(crate) fn mysql_connect_options(
+    cfg: &DbConfig,
+) -> Result<sqlx::mysql::MySqlConnectOptions, DbError> {
+    let options = if cfg.mode == "uri" {
+        sqlx_uri(cfg, "mysql", 3306)
+            .parse::<sqlx::mysql::MySqlConnectOptions>()
+            .map_err(|e| DbError(e.to_string()))?
+    } else {
+        let mut options = sqlx::mysql::MySqlConnectOptions::new()
+            .host(cfg.host.as_deref().unwrap_or("localhost"))
+            .port(cfg.port.unwrap_or(3306) as u16)
+            .username(cfg.username.as_deref().unwrap_or(""));
+        if let Some(secret) = cfg.secret.as_deref() {
+            options = options.password(secret);
+        }
+        if let Some(database) = cfg.database.as_deref() {
+            options = options.database(database);
+        }
+        options
+    };
+    Ok(options.pipes_as_concat(false).no_engine_subsitution(false))
+}
+
 /// SQLite bağlantı dizesi: fields modunda `database` dosya yoludur.
 pub(crate) fn sqlite_uri(cfg: &DbConfig) -> String {
     if cfg.mode == "uri" {

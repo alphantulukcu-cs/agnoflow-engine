@@ -1,6 +1,6 @@
 //! Sürücü-özel bağlantı testi. fields modu bileşenlerden URI kurar; uri modu
 //! secret'ı doğrudan bağlantı dizesi olarak kullanır.
-use super::{sqlite_uri, sqlx_uri, DbConfig, DbDriver, DbError};
+use super::{mysql_connect_options, sqlite_uri, sqlx_uri, DbConfig, DbDriver, DbError};
 
 fn field<'a>(o: &'a serde_json::Value, k: &str) -> Option<&'a str> {
     o.get(k).and_then(|v| v.as_str())
@@ -51,11 +51,11 @@ async fn test_sqlx_pg(cfg: &DbConfig) -> Result<(), DbError> {
 
 async fn test_sqlx_my(cfg: &DbConfig) -> Result<(), DbError> {
     use sqlx::mysql::MySqlPoolOptions;
-    let uri = sqlx_uri(cfg, "mysql", 3306);
+    let options = mysql_connect_options(cfg)?;
     let pool = MySqlPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(std::time::Duration::from_secs(8))
-        .connect(&uri)
+        .connect_with(options)
         .await
         .map_err(|e| DbError(e.to_string()))?;
     sqlx::query("SELECT 1")

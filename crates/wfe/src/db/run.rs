@@ -1,6 +1,8 @@
 //! Seçilen bağlantıya karşı sorgu çalıştırma (Faz 2). Postgres/MySQL/SQLite sqlx,
 //! MSSQL tiberius. Param `:name` → sürücüye özel işaret; satırlar JSON'a map edilir.
-use super::{bind_params, sqlite_uri, sqlx_uri, DbConfig, DbDriver, DbError};
+use super::{
+    bind_params, mysql_connect_options, sqlite_uri, sqlx_uri, DbConfig, DbDriver, DbError,
+};
 use rust_decimal::prelude::ToPrimitive;
 use serde_json::{json, Map, Number, Value};
 use sqlx::{Column, Row, TypeInfo};
@@ -27,7 +29,7 @@ pub async fn connect(cfg: &DbConfig) -> Result<RunHandle, DbError> {
             let pool = sqlx::mysql::MySqlPoolOptions::new()
                 .max_connections(2)
                 .acquire_timeout(std::time::Duration::from_secs(8))
-                .connect(&sqlx_uri(cfg, "mysql", 3306))
+                .connect_with(mysql_connect_options(cfg)?)
                 .await
                 .map_err(|e| DbError(e.to_string()))?;
             Ok(RunHandle::My(pool))

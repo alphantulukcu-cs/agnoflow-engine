@@ -95,8 +95,18 @@ Ortak kurallar:
 }
 ```
 
-- zen-expression sözdizimi; `$ctx.* $wfah $node $actor $timestamp $wfe_id` namespace'leri.
-- Not: `count()` yok, `len()` var.
+- zen-expression sözdizimi. Bağlı namespace'ler:
+  `$ctx.* $wfah $prev $first $node $actor $timestamp $wfe_id $action.input.*`.
+- `$wfah` kapsamı, aynı trigger'ın `when` guard'ıyla AYNIdır: **bu aksiyondan ÖNCEKİ**
+  geçmiş. Tetikleyen aksiyonun kendi girdisi `$action.input.*` ile okunur.
+- `$prev` = geçmişin SON girdisi, `$first` = ilk girdi; alanları
+  `{seq, action, actor, input, at}`. Geçmiş boşsa hepsi `null` — ifade patlamaz.
+- `$exec.result.*` calc içinde bağlı DEĞİLDİR (aynı zincirdeki önceki autoexec'in
+  sonucu okunamaz; ara değeri `wfes_effects` ile ctx'e yaz, `$ctx` üzerinden oku).
+- Fonksiyonlar: `count`/`some`/`all`/`none`/`one`/`filter`/`map`/`flatMap` **2
+  argümanlıdır** — `count($wfah, #.action == "x")`. Tek argümanlı `count(filter(...))`
+  parse HATASI verir. `every` diye bir fonksiyon YOKTUR, karşılığı `all`'dır.
+- Negatif indeks (`$wfah[-1]`) parse edilir ama runtime'da patlar — `$prev` kullan.
 - Her anahtar sonucu `$exec.result.<anahtar>` olarak okunur.
 
 ## Editörde (WFD-EDITOR)

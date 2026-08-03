@@ -325,9 +325,9 @@ Join koşulu namespace'i bu kimlikle çalışır:
 | `$branches.<entry_node>` | o kol join'e vardı mı (DEĞERLENDİRİLEN varış dahil) — hiç varmamış kol `false` |
 | `$arrived` | varmış kol kimliklerinin dizisi → `len($arrived) >= 2`, `'x' in $arrived` |
 
-`$ctx`/`$wfah`/`$actor`/`$action.input.*` da açıktır ("tutar 1M üstündeyse GM de
-onaylasın"). Join bağlamı DIŞINDA `$branches` boş obje, `$arrived` boş dizidir —
-ifade patlamaz (`$call` ile aynı gerekçe).
+`$ctx`/`$wfah`/`$prev`/`$first`/`$actor`/`$action.input.*` da açıktır ("tutar 1M
+üstündeyse GM de onaylasın"). Join bağlamı DIŞINDA `$branches` boş obje, `$arrived` boş
+dizidir — ifade patlamaz (`$call` ile aynı gerekçe).
 
 **Tatmin edilemeyen join (WOR-73).** `and` ve `quorum` bitişi garanti eder; ZEN
 koşulu etmez. SON aktif kol da varıp ifade hâlâ `false` ise WFE paralel modda

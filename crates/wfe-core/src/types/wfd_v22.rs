@@ -55,7 +55,14 @@ pub struct Wfd {
     /// portal katmanındadır (bkz. server/routes/portal/attachments.rs).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attachments: BTreeMap<String, AttachmentGroup>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// **DEPRECATED (WOR-84) — motorda DEĞERLENDİRİLMEZ.** v1'den kalmıştır: o modelde
+    /// her aksiyondan sonra koşan global bir "akış bitti mi" guard'ıydı. v2.2'de terminal
+    /// `wft: {terminal}` ile açıkça verilir, dolayısıyla bu alan ikinci ve çelişebilen bir
+    /// terminal-belirleme yolu olurdu. Eski dosyalar parse hatası almasın diye kabul
+    /// edilmeye devam eder; validator `terminal_when_ignored` uyarısı basar ve yeniden
+    /// serileştirmede alan DÜŞER (`skip_serializing`) — dosya bir kez açılıp kaydedilince
+    /// kendiliğinden temizlenir.
+    #[serde(default, skip_serializing)]
     pub terminal_when: Option<String>,
 }
 

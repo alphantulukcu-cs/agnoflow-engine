@@ -151,7 +151,9 @@
       "description": "Opsiyonel ek-belge katalogu. Adlandirilmis gruplar; her grup bir veya daha fazla dosya slotu (item) icerir. Node'lar (nodeDef.attachments) bu gruplari ADIYLA referanslar - ayni belge kumesi tekrar tekrar yazilmaz. Dosyalarin kendisi engine'de DEGIL, dis UI'in (work-pool-portal) opendal storage'inda tutulur; engine yalniz katalogu ve referanslari tasir, varlik kontrolu portal katmanindadir."
     },
     "terminal_when": {
-      "$ref": "#/$defs/expression"
+      "$ref": "#/$defs/expression",
+      "deprecated": true,
+      "description": "DEPRECATED (WOR-84) - motorda DEGERLENDIRILMEZ. v1 kalintisi: o modelde her aksiyondan sonra kosan global bir 'akis bitti mi' guard'iydi. v2.2'de terminal wft: {terminal} ile acikca verilir; bu alan ikinci ve celisebilen bir terminal-belirleme yolu olurdu. Eski dosyalar reddedilmesin diye kabul edilir, validator terminal_when_ignored uyarisi basar, yeniden serilestirmede DUSER. Yeni WFD'de KULLANMA."
     }
   },
   "$defs": {
@@ -251,7 +253,7 @@
     "expression": {
       "type": "string",
       "minLength": 1,
-      "description": "GoRules Zen Expression. Namespace'ler: $ctx, $wfah, $node (current node id), $actor, $timestamp, $wfe_id, $action.input.*, $exec.result.*. $exec.response.* gecersizdir."
+      "description": "GoRules Zen Expression. Namespace'ler: $ctx, $wfah, $prev, $first, $node (current node id), $actor, $timestamp, $wfe_id, $action.input.*, $exec.result.*. $exec.response.* gecersizdir. $wfah girdisi {seq, action, actor, input, at} tasir. $prev = gecmisin SON girdisi, $first = ilk girdi; gecmis bossa alanlari null (ifade patlamaz). $wfah'i DOGRUDAN indeksleme ($wfah[len($wfah)-1]) - gecmis kisaysa runtime'da patlar, validator wfah_index_unguarded uyarisi basar; negatif indeks ($wfah[-1]) parse edilir ama runtime'da patlar, validator zen_negative_index HATASI verir. Dizi fonksiyonlari (count, some, all, none, one, filter, map, flatMap) IKI argumanlidir: count($wfah, #.action == 'x'). Tek argumanli count(filter(...)) parse hatasidir; 'every' diye bir fonksiyon YOKTUR, karsiligi 'all'dir."
     },
     "contextPath": {
       "type": "string",

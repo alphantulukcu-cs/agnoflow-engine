@@ -1517,7 +1517,7 @@ impl<'a> Engine<'a> {
                 ..actor.clone()
             };
             match self
-                .execute_with_retry(def, trig, staged, wfe_id, node, &system)
+                .execute_with_retry(def, trig, staged, wfe_id, node, &system, wfah, action_input)
                 .await
             {
                 Ok(result) => {
@@ -1610,12 +1610,18 @@ impl<'a> Engine<'a> {
         wfe_id: Uuid,
         node: Option<&str>,
         system: &Actor,
+        wfah: &Wfah,
+        action_input: Option<&Value>,
     ) -> Result<Value, ExecFailure> {
         let env = ExecEnv {
             wfe_id,
             ctx: staged.clone(),
             node: node.map(String::from),
             actor: system.clone(),
+            // WOR-84: `calc` ifadeleri geçmişi ve ACT girdisini görür. Kapsam trigger'ın
+            // `when` guard'ıyla aynı — bkz. ExecEnv::wfah.
+            wfah: wfah.clone(),
+            action_input: action_input.cloned(),
         };
         let mut attempts_per_retrier: Vec<u32> = vec![0; trig.retry.len()];
 

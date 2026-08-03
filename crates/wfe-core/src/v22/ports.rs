@@ -515,6 +515,14 @@ pub struct ExecEnv {
     pub ctx: Value,
     pub node: Option<String>,
     pub actor: Actor,
+    /// WOR-84: geçmiş — `calc` ifadelerinde `$wfah`/`$prev`/`$first` bunu okur.
+    /// Kapsam, aynı trigger'ın `when` guard'ıyla AYNIdır: **bu aksiyondan ÖNCEKİ**
+    /// geçmiş. Aksiyonun kendi girdisi `$action.input.*` ile okunur, `$prev` ile DEĞİL
+    /// — iki namespace'in aynı anı göstermesi guard ile ifadenin ayrışmasını önler.
+    pub wfah: Wfah,
+    /// WOR-84: tetikleyen ACT'in girdisi — `calc` ifadelerinde `$action.input.*`.
+    /// Terminal/escalation kaynaklı çalıştırmalarda `None`.
+    pub action_input: Option<Value>,
 }
 
 #[async_trait]

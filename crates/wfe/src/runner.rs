@@ -254,10 +254,17 @@ fn run_calc(def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure> {
         .and_then(Value::as_object)
         .ok_or_else(|| ExecFailure::failed("calc config'te expressions yok"))?;
 
-    let eval_env = EvalEnv::new(&env.ctx)
+    // WOR-84: `$wfah`/`$prev`/`$first` ve `$action.input.*` BAĞLANIR. Öncesinde yalnız
+    // ctx/node/actor/wfe_id bağlıydı; `$wfah` kullanan calc ifadesi sessizce null okuyup
+    // yanlış hesaplıyordu (`len($wfah)` ise patlıyordu).
+    let mut eval_env = EvalEnv::new(&env.ctx)
+        .with_wfah(&env.wfah)
         .with_node(env.node.as_deref())
         .with_actor(&env.actor)
         .with_wfe_id(env.wfe_id);
+    if let Some(input) = &env.action_input {
+        eval_env = eval_env.with_action_input(input);
+    }
 
     let mut result = Map::new();
     for (name, expr) in expressions {
@@ -362,6 +369,7 @@ mod tests {
     use super::*;
     use uuid::Uuid;
     use wfe_core::types::actor::Actor;
+    use wfe_core::types::wfah::Wfah;
 
     fn env(ctx: Value) -> ExecEnv {
         ExecEnv {
@@ -373,7 +381,70 @@ mod tests {
                 user_id: Uuid::nil(),
                 role: "system".into(),
             },
+            wfah: Wfah::empty(),
+            action_input: None,
         }
+    }
+
+    fn actor_of(role: &str) -> Actor {
+        Actor {
+            orgu_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            role: role.into(),
+        }
+    }
+
+    /// WOR-84: calc ifadeleri geçmişi görür. Öncesinde `$wfah` bağlı değildi —
+    /// `len($wfah)` patlıyor, `$prev.action` null okuyordu.
+    #[tokio::test]
+    async fn calc_sees_wfah_prev_and_action_input() {
+        let mut e = env(serde_json::json!({"limit": 1000}));
+        e.wfah = Wfah::empty()
+            .push("basvuru".into(), actor_of("clerk"), None)
+            .push(
+                "skor_gir".into(),
+                actor_of("analyst"),
+                Some(serde_json::json!({"skor": 720})),
+            );
+        e.action_input = Some(serde_json::json!({"tutar": 400}));
+
+        let def: AutoexecDef = serde_json::from_value(serde_json::json!({
+            "type": "calc",
+            "config": { "expressions": {
+                "adim_sayisi": "len($wfah)",
+                "onceki_aksiyon": "$prev.action",
+                "onceki_skor": "$prev.input.skor",
+                "ilk_aksiyon": "$first.action",
+                "onaylandi": "some($wfah, #.actor.role == 'analyst')",
+                "limit_ici": "$action.input.tutar <= $ctx.limit",
+            }}
+        }))
+        .unwrap();
+
+        let out = LiveAutoexecRunner::new(None).run(&def, &e).await.unwrap();
+        assert_eq!(out["adim_sayisi"], 2);
+        assert_eq!(out["onceki_aksiyon"], "skor_gir");
+        assert_eq!(out["onceki_skor"], 720);
+        assert_eq!(out["ilk_aksiyon"], "basvuru");
+        assert_eq!(out["onaylandi"], true);
+        assert_eq!(out["limit_ici"], true);
+    }
+
+    /// Boş geçmişte calc PATLAMAZ — `$prev.*` null kabuğu okur.
+    #[tokio::test]
+    async fn calc_prev_is_null_on_empty_history() {
+        let e = env(serde_json::json!({}));
+        let def: AutoexecDef = serde_json::from_value(serde_json::json!({
+            "type": "calc",
+            "config": { "expressions": {
+                "adim_sayisi": "len($wfah)",
+                "ilk_mi": "$prev.action == null",
+            }}
+        }))
+        .unwrap();
+        let out = LiveAutoexecRunner::new(None).run(&def, &e).await.unwrap();
+        assert_eq!(out["adim_sayisi"], 0);
+        assert_eq!(out["ilk_mi"], true);
     }
 
     #[tokio::test]

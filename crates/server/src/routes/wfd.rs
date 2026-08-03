@@ -18,6 +18,7 @@ pub fn router(state: AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(upload_wfd, list_wfd))
         .routes(routes!(validate_wfd))
+        .routes(routes!(validate_expression))
         .routes(routes!(usage_summary))
         .routes(routes!(execution_stats))
         .routes(routes!(unit_workload))
@@ -194,6 +195,136 @@ async fn validate_wfd(Json(wfd_json): Json<Value>) -> Result<Json<Value>, AppErr
         "errors": report.errors.iter().map(issue).collect::<Vec<_>>(),
         "warnings": report.warnings.iter().map(issue).collect::<Vec<_>>(),
     })))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct ValidateExpressionRequest {
+    /// Doğrulanacak ZEN ifadeleri. Sıra korunur; yanıt aynı indekslerle döner.
+    expressions: Vec<String>,
+}
+
+/// Koşul kurucusu için: TEK TEK ZEN ifadelerini motorun kendi parser'ıyla doğrula.
+///
+/// Neden gerekli: editör ifadeleri JS'te değerlendirir, yani zen grameriyle ayrışabilir
+/// (WOR-84: `every(...)` ve `count(filter(...))` aylarca editörde YEŞİL göründü, motorda
+/// parse hatasıydı). Bu rota `validator::expression_issues` ile WFD validator'ıyla
+/// **aynı** verdiği döner — kurucu artık yayınlamayı beklemeden gerçek cevabı görür.
+///
+/// Boş/whitespace ifade `ok: true` döner: "boş satır" kuralı editörün kendi işidir
+/// (orada `true` üretir), burada parse hatası saymak mesajı ikiye bölerdi.
+#[utoipa::path(post, path = "/validate-expression", tag = "wfd",
+    request_body = ValidateExpressionRequest,
+    responses((status = 200, description = "İfade başına hata/uyarı listesi", body = serde_json::Value)))]
+async fn validate_expression(
+    Json(req): Json<ValidateExpressionRequest>,
+) -> Result<Json<Value>, AppError> {
+    // Kötüye kullanım/kazara dev payload koruması — kurucuda en fazla birkaç ifade olur.
+    if req.expressions.len() > MAX_VALIDATED_EXPRESSIONS {
+        return Err(AppError(
+            format!("en fazla {MAX_VALIDATED_EXPRESSIONS} ifade doğrulanabilir"),
+            StatusCode::BAD_REQUEST,
+        ));
+    }
+    Ok(Json(expression_report(&req.expressions)))
+}
+
+const MAX_VALIDATED_EXPRESSIONS: usize = 64;
+
+/// Rotanın saf gövdesi — DB'siz test edilebilsin diye ayrı (handler yalnız sınır kontrolü
+/// yapar). Yanıt sırası girdi sırasıyla birebir hizalıdır; editör indeksle eşler.
+fn expression_report(expressions: &[String]) -> Value {
+    let results: Vec<Value> = expressions
+        .iter()
+        .map(|expr| {
+            // Boş ifade `ok` döner: "boş satır" kuralı editörün kendi işidir (orada
+            // `true` üretir), burada parse hatası saymak mesajı ikiye bölerdi.
+            if expr.trim().is_empty() {
+                return serde_json::json!({ "ok": true, "errors": [], "warnings": [] });
+            }
+            let issues = wfe_core::validator::expression_issues(expr);
+            let pick = |want_error: bool| -> Vec<Value> {
+                issues
+                    .iter()
+                    .filter(|(_, is_error, _)| *is_error == want_error)
+                    .map(|(code, _, message)| serde_json::json!({"code": code, "message": message}))
+                    .collect()
+            };
+            let errors = pick(true);
+            serde_json::json!({
+                "ok": errors.is_empty(),
+                "errors": errors,
+                "warnings": pick(false),
+            })
+        })
+        .collect();
+    serde_json::json!({ "results": results })
+}
+
+#[cfg(test)]
+mod validate_expression_tests {
+    use super::*;
+
+    fn report(exprs: &[&str]) -> Vec<Value> {
+        let owned: Vec<String> = exprs.iter().map(|s| s.to_string()).collect();
+        expression_report(&owned)["results"]
+            .as_array()
+            .unwrap()
+            .clone()
+    }
+
+    /// EDİTÖR SÖZLEŞMESİ: sıra korunur, `ok` yalnız HATA yokluğunu anlatır.
+    #[test]
+    fn report_is_index_aligned_and_ok_ignores_warnings() {
+        let out = report(&[
+            r#"count($wfah, #.action == "x") >= 1"#, // 0: temiz
+            r#"every($wfah, #.action == "x")"#,      // 1: parse hatası
+            r#"$wfah[len($wfah) - 1].action == "x""#, // 2: yalnız UYARI
+            "",                                      // 3: boş → ok
+            r#"$wfah[-1].action == "x""#,            // 4: negatif indeks hatası
+        ]);
+        assert_eq!(out.len(), 5);
+
+        assert_eq!(out[0]["ok"], true);
+        assert!(out[0]["errors"].as_array().unwrap().is_empty());
+
+        assert_eq!(out[1]["ok"], false);
+        assert_eq!(out[1]["errors"][0]["code"], "zen_parse");
+
+        // Uyarı `ok`'u BOZMAZ — Kaydet kapısı yalnız hatalara bakar.
+        assert_eq!(out[2]["ok"], true);
+        assert_eq!(out[2]["warnings"][0]["code"], "wfah_index_unguarded");
+
+        assert_eq!(out[3]["ok"], true);
+
+        assert_eq!(out[4]["ok"], false);
+        assert_eq!(out[4]["errors"][0]["code"], "zen_negative_index");
+    }
+
+    /// Editörün ürettiği tüm WFAH biçimleri bu rotadan temiz geçer
+    /// (`wfe-core/tests/editor_zen_contract.rs` ile aynı küme).
+    #[test]
+    fn editor_generated_forms_pass_the_route() {
+        for expr in [
+            r#"count($wfah, #.action == "x") >= 2"#,
+            r#"count($wfah, #.action == "x") == 1"#,
+            r#"some($wfah, #.action == "x")"#,
+            r#"all($wfah, #.actor.role != "x")"#,
+            r#"none($wfah, #.action == "x")"#,
+            r#"one($wfah, #.action == "x")"#,
+            r#"$prev.action == "x""#,
+            r#"$first.actor.role != "x""#,
+            r#"contains(#.action, "inc")"#,
+            r#"some($wfah, #.action in ["a", "b"])"#,
+        ] {
+            let out = report(&[expr]);
+            assert_eq!(out[0]["ok"], true, "{expr}: {:?}", out[0]["errors"]);
+        }
+    }
+
+    #[test]
+    fn empty_request_is_empty_report() {
+        assert!(report(&[]).is_empty());
+    }
 }
 
 #[utoipa::path(get, path = "/{id}/{version}", tag = "wfd",

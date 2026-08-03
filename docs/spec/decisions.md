@@ -241,9 +241,9 @@ o node paralel-dışıyken bu aksiyon **alınamamalı** (paralel yokken "paralel
 bitir" anlamsız) → bir `when` gate şarttır.
 
 - **Independent** interior aksiyon (WOR-31, mevcut): paralel bağlamdayken
-  **gizle** → `$wfah[len($wfah) - 1].action != "<entry>"`.
+  **gizle** → `$prev.action != "<entry>"`.
 - **Collapse** aksiyonu (WOR-56): yalnızca paralel bağlamdayken **göster** →
-  `$wfah[len($wfah) - 1].action == "<entry>"`. Tam ters operatör, **aynı**
+  `$prev.action == "<entry>"`. Tam ters operatör, **aynı**
   entry-action hesabı (interior BFS: direkt dal node'unda entry=fork; derin
   node'da entry=oraya götüren dal aksiyonu; birden çok entry → OR:
   `==e1 or ==e2`).
@@ -253,7 +253,9 @@ bitir" anlamsız) → bir `when` gate şarttır.
   DynCtx + WFAH görür → "paralel içindeyim" ancak "önceki aksiyon == entry"
   ile türetilir. Independent bunun `!=`'ini, collapse `==`'ini kullanır.
 - Import round-trip: sentinel regex (`wfdImport.ts`) `!=` VE `==` varyantlarını
-  yakalamalı; strip mantığı aynı (her clause ayrı top-level terim).
+  yakalamalı; strip mantığı aynı (her clause ayrı top-level terim). **WOR-84**: sentinel
+  `$wfah[len($wfah) - 1].action`'dan `$prev.action`'a taşındı (eski form boş geçmişte
+  VM'i patlatıyordu) — regex İKİ formu da tanır, export yalnız `$prev` yazar.
 
 **Durum (LANDED, uçtan uca):** editör (bayrak + görsel + export/import + validator)
 VE engine (`Wft::Collapse` + `CommitOutcome::CollapseTo` runtime: cancel_active_branches
@@ -1218,3 +1220,177 @@ editör: `types/wfd.types.ts` (`ClaimTimeoutMeta`/`EscalationMeta.collapsesParal
 `components/shared/ClaimTimeoutModal.tsx` + `EscalationModal.tsx`,
 `components/graph/PropertiesPanel.tsx`, `schema/wfd.schema.json`,
 `src/tests/sla.collapse.test.ts`.)
+
+## WOR-84 — WFAH ifade yüzeyi: `$prev`/`$first`, tam izdüşüm, iki-argümanlı gerçek (2026-08-03)
+
+Editörün WFAH koşul kurucusu beş fonksiyon sunuyordu; **üçü çalışmıyordu**. Sebep:
+zen-expression 0.55'te `count/some/all/none/one/filter/map/flatMap` **closure**
+fonksiyonlarıdır ve **iki argüman** alırlar (dizi + closure), `every` diye bir fonksiyon
+ise hiç yoktur.
+
+| üretilen | sonuç |
+|---|---|
+| `count(filter($wfah, P)) >= n` | `ParserError` — tek argümanlı `count` grammar'da yok |
+| `every($wfah, P)` | `ParserError` — fonksiyon adı `all` |
+| `some/none($wfah, P)` | çalışır |
+
+Hata yalnız **upload'ta** görünüyordu (`zen_parse`); editörün kendi önizlemesi ve
+simülatörü bu fonksiyonları JS'te ayrıca hesaplayıp **yeşil** gösteriyordu. Yani
+tasarımcı yayınlamaya çalışana kadar bozuk olduğunu öğrenemiyordu. Doğru form
+`count($wfah, P) >= n` / `all($wfah, P)`; editör artık bunu üretir, ters ayrıştırıcı
+eski iki formu da tanır (dosya bir kez açılıp kaydedilince kendiliğinden düzelir).
+Yayınlanmış WFD'lerde eski metin OLAMAZ — upload kapısı zaten reddediyordu; yani
+migration ve koşan WFE riski yoktur.
+
+**`$prev` / `$first` — uç girdi namespace'leri.** "Bir önceki aksiyon şuydu" koşulu
+elle `$wfah[len($wfah) - 1].action` yazmayı gerektiriyordu ve bu ifade **boş geçmişte
+VM'i patlatıyor** (`Fetch: Failed to convert to usize`); parse aşaması yakalamıyor.
+`$prev` (son girdi) ve `$first` (ilk girdi) bağlandı; boş geçmişte alanları `null`
+döner, ifade patlamaz — `$call`/`$branches`'te kurulan "boş kabuk" deseninin aynısı.
+WOR-31/WOR-56'nın paralel auto-when sentinel'i de `$wfah[len($wfah) - 1].action`'dan
+`$prev.action`'a taşındı; import her iki formu tanır.
+
+Yan karar: `$wfah`'ı doğrudan indeksleyen ifade artık `wfah_index_unguarded` **uyarısı**,
+negatif indeks (`$wfah[-1]`, parse edilir/runtime'da patlar) `zen_negative_index`
+**hatası** alır. Parse kapısının tek başına yetmediği kanıtlanmış durumlar bunlar.
+
+**Tam izdüşüm.** `$wfah` girdisi yalnız `{action, actor, at}` taşıyordu; `WfahEntry`'nin
+`seq` ve `input` alanları ZEN'e hiç açılmıyordu → `#.input.tutar` sessizce `null`
+okuyordu ("önceki onayda girilen tutar" koşulu yazılamıyordu). İzdüşüm
+`{seq, action, actor, input, at}` oldu. Not: zen'de sıralama operatörleri `null` ile
+**hata** verir, bu yüzden `#.input.*` üzerinde sayısal karşılaştırma aksiyona
+kapılanmalıdır (`#.action == "x" and #.input.tutar > 1000`).
+
+**`calc` autoexec'te `$wfah` bağlı değildi.** `run_calc` yalnız ctx/node/actor/wfe_id
+bağlıyordu; `$wfah` kullanan calc ifadesi sessizce yanlış hesaplıyor, `len($wfah)` ise
+patlıyordu — oysa `AUTOEXEC_GUIDE` namespace'i mevcut ilan ediyordu. `ExecEnv`'e `wfah`
+ve `action_input` eklendi; kapsam trigger'ın `when` guard'ıyla **aynı**: bu aksiyondan
+ÖNCEKİ geçmiş (aksiyonun kendi girdisi `$action.input.*`). İki namespace'in aynı anı
+göstermesi, guard ile ifadenin ayrışmasını önler. `$exec.result.*` calc içinde bilinçli
+olarak bağlı DEĞİL — aynı zincirdeki ara değer `wfes_effects` ile ctx'e yazılıp `$ctx`
+üzerinden okunur.
+
+Ayrıca `calc` ifadeleri **artık upload kapısından geçiyor** (`config` şemasız `Value`
+olduğu için `check_expressions` buraya hiç bakmıyordu → bozuk ifade yayınlanıp akış
+koşarken `ExecFailure` veriyordu).
+
+**Yan temizlik — `incoming_action_gates` KALDIRILDI.** Editörde geçiş panelinde "Ön Koşul:
+Gelen Aksiyonlar" diye bir checkbox bloğu ve altında `Üretilen: some($wfah, …)` önizlemesi
+vardı. İki kat ölüydü:
+
+1. **Hiç render edilmiyordu.** Blok `needsGates`'e bağlıydı; o da bir ACTION adımına *gelen*
+   akış arıyordu (`resolveIncomingActions(flow.from)`). Editör modelinde akışların hedefi
+   daima CaGroup/switch/parallel/terminal'dir — bir action adımına giden akış hiç kurulmaz,
+   dolayısıyla liste daima boş, koşul daima false.
+2. **Export'a hiç girmiyordu.** `useExport` bu alanı okumuyordu; yani blok görünse bile
+   gösterdiği ZEN motora ulaşmayacaktı.
+
+Alan (`StepFlow.incoming_action_gates`), panel bloğu, `resolveFlowPath`'in bu alan üzerinden
+"ön koşul zinciri" izleyen dalı (daima düz push'a düşüyordu) ve `wfahGateHelp` /
+`selectAtLeastOne` sözlük anahtarları kaldırıldı. Geçmişte bir aksiyonu arama isteğinin
+gerçek yolu `when` alanındaki WFAH satırıdır — bu turda ergonomisi düzeltilen yer.
+
+**`terminal_when` DEPRECATED.** Modelde duruyor, validator ZEN'ini kontrol ediyordu,
+**motor hiç okumuyordu** — v1 kalıntısı (o modelde her aksiyondan sonra koşan global bir
+"akış bitti mi" guard'ıydı). v2.2'de terminal `wft: {terminal}` ile açıkça verilir;
+ikinci bir terminal-belirleme yolu tek-kural ilkesine aykırı olurdu. Alan parse edilmeye
+devam eder (eski dosya reddedilmesin), `terminal_when_ignored` uyarısı basar ve yeniden
+serileştirmede DÜŞER — dosya bir kez kaydedilince kendiliğinden temizlenir.
+
+(`wfe-core/src/v22/eval.rs` (`project_entry`, `empty_entry_shell`, `$prev`/`$first`),
+`v22/ports.rs::ExecEnv`, `v22/pipeline.rs::execute_with_retry`, `wfe/src/runner.rs::run_calc`,
+`validator.rs` (`has_negative_index`, `indexes_wfah_directly`, calc yürüyüşü,
+`terminal_when_ignored`), `types/wfd_v22.rs::Wfd::terminal_when`,
+`server/routes/autoexec.rs` (test rotasına örnek `wfah`/`action_input`),
+`docs/spec/schema.json` + `terminology.md` + `README.md` + `AUTOEXEC_GUIDE.md`;
+editör: `utils/zenUtils.ts`, `utils/zenReverseParser.ts`, `utils/zenEval.ts`,
+`utils/zenHumanize.ts`, `types/wfd.types.ts`, `components/zen/*`, `hooks/useExport.ts`,
+`utils/wfdImport.ts`.)
+
+### WOR-84 (2. tur) — koşul kurucusu motorun bilmediği hiçbir şeyi kaydettirmez (2026-08-03)
+
+Birinci tur editörün ÜRETTİĞİ metni düzeltti; elle yazılabilen yerler açık kaldı. Üç
+delik vardı ve üçü de aynı sınıftı: **yayınlanabilen ama çalışmayan koşul.**
+
+| delik | eski davranış | şimdi |
+|---|---|---|
+| WFAH alan hücresi serbest metin | `#.actor.name` motorda sessizce `null` → koşul hep-false; yayın kapısı da geçirir (geçerli ZEN) | alan motorun izdüşüm kümesinde değilse **hata**, Kaydet kapalı |
+| WFAH/koşul değeri boş | `== ""` üretilir; eksik ctx alanı `null` okuduğu için neredeyse hep false | boş değer **hata** |
+| serbest ZEN kutusu | yalnız parantez dengesi + dangling operatör bakılıyordu; `every(...)` yazılabiliyordu | bilinmeyen fonksiyon / closure arity / negatif indeks **hata**; ayrıca motorun kendi parser'ı sorulur |
+| `#.input.*` üzerinde sıralama operatörü | motor RUNTIME'da patlıyordu (`Compare: Unsupported type` → HTTP 500), parse geçtiği için validator da göremiyordu | aksiyon kapısı yoksa **hata** (tablo satırı) / **uyarı** (serbest ZEN) |
+
+**Alan kümesi motorun izdüşümünden gelir, şemadan değil.** `$wfah` tasarım-zamanı bir
+nesne DEĞİL: motor her aksiyonda `WfahEntry {seq, action, actor, input, applied_at}`
+yazar, ZEN'e `{seq, action, actor, input, at}` olarak açılır. Tasarımcı bunu hiçbir yere
+yazmadığı için "geçerli alan" listesi de koddan gelmek zorunda —
+`types/wfd.types.ts::WFAH_FIELDS` tek kaynak, `whenFields.ts::wfahFieldVerdict` onu
+uygular. `actor` ve `input` çıplak hâlde de geçerlidir (`#.input == null` anlamlı bir
+koşul); `input.<yol>` ise **dokümandaki tüm aksiyonların input yollarının birleşimiyle**
+doğrulanır — bir WFAH satırı tek aksiyona bağlı olmadığı için "bu when'in aksiyonu"
+yeterli değildir. Aynı küme serbest ZEN'deki `#.x` / `$prev.x` / `$first.x` için de
+kullanılır: üçü de aynı izdüşüme baktığı için ayrı kural tutmak ayrışma üretirdi.
+
+**Boş değer kuralı bilinçli olarak sıkı.** Yeni bir yordam/koşul satırı `value: ''` ile
+açılır, yani boş değer "yarım satır" demektir. `0` ve `false` GEÇERLİ değerlerdir (boş
+sayılmaz). Gerçekten boş metinle karşılaştırmak isteyen serbest ZEN satırını kullanır —
+bu kaçış kapısı bilinçlidir, kural onu kapatmaz.
+
+**Serbest ZEN: yerel sezgisel + motor onayı.** Yalnız JS ile doğrulamak WOR-84'ün ilk
+turunu doğuran ayrışmayı geri getirirdi (zen grameri JS'te taklit edilemez); yalnız
+motorla doğrulamak offline çalışmayı kırardı. İkisi birlikte:
+
+1. **Yerel, anında** (`zenParser.ts`): bilinmeyen fonksiyon adı (+ `every`→`all` gibi
+   öneri), closure fonksiyonlarının iki-argüman kuralı, literal negatif indeks (hata),
+   korumasız `$wfah[...]` (uyarı). Fonksiyon adları artık `utils/zenFunctions.ts`'te —
+   autocomplete ile doğrulama AYNI kümeye bakar; ilk turda `every` tam olarak iki ayrı
+   liste tutulduğu için sızmıştı.
+2. **Motor, 400ms debounce** (`POST /wfd/validate-expression`): `validator::expression_issues`
+   — WFD validator'ının kullandığı fonksiyonun ta kendisi, yani rota ile yayın kapısı
+   ayrışamaz. Cevap beklenirken Kaydet KAPALIDIR (o pencerede basılan Kaydet kapıyı
+   anlamsız kılardı). Motora ulaşılamazsa harita boş kalır → yalnız yerel kontroller
+   geçerli, Kaydet kilitlenmez ve durum footer'da söylenir.
+
+Uyarı ile hata ayrımı korunur: `wfah_index_unguarded` Kaydet'i kapatmaz (çalışır ama
+riskli), `zen_parse` / `zen_negative_index` kapatır.
+
+**`#.input.*` sıralama kapısı.** Zen'de `null` ile sıralama `Compare: Unsupported type`
+hatasıdır ve girdisi olmayan geçmiş satırı DAİMA vardır (start aksiyonu, sistem
+marker'ları, gönderilmeyen optional girdi — WOR-70'te `null` yazılır). Kapısız
+`some($wfah, #.input.tutar > 1000)` bu yüzden yayınlanabiliyor ama akış koşarken
+`EngineError::ZenEvaluation` → **HTTP 500** veriyordu; parse geçtiği için validator da
+göremez. Kuralın üç dayanağı motorda ölçülüp
+`editor_zen_contract.rs::ordering_on_wfah_input_requires_a_preceding_and_gate` ile
+sabitlendi:
+
+1. kapı `and` ile ve karşılaştırmadan **ÖNCE** olmalı (zen soldan sağa kısa devre yapar
+   — kapı sonra gelirse HÂLÂ patlar),
+2. **`or` kapı DEĞİLDİR**,
+3. dış `and`'deki kapı iç gruba geçer.
+
+Kapı sayılan: `action == "x"` ve `action in [...]`. `action != "x"` girdinin varlığını
+garanti etmediği için sayılmaz. `$prev`/`$first` kapsamı da bağışık değildir (o tek
+girdinin input'u null olabilir, boş geçmişte kabuk null döner).
+
+Tablo satırında kural **hata**dır: ağaç yapısı kesin bilinir, `whenFields.ts::wfahIssues`
+`and` zincirini soldan sağa yürüyüp devralınan kapıyı iç gruplara taşır. Serbest ZEN
+kutusunda **uyarı**dır: elde yalnız token'lar var, `and` sırası güvenilir çıkarılamaz ve
+yanlış pozitif Kaydet'i kilitlerdi — kesin olunan yerde blokla, sezgisel olunan yerde
+uyar. Kalan risk: kapılı biçim de optional bir girdi hiç gönderilmemişse patlayabilir;
+kapı yaygın durumu (başka aksiyonların satırları + boş geçmiş) kaldırır, hepsini değil.
+
+Yaprak mesajları artık KÖKTEN hesaplanır (`wfahLeafIssueMap`): kapı kuralı yaprağın
+ağaçtaki KONUMUNA bağlı olduğu için tek yaprağa bakarak karar verilemez; bileşenler
+nesne kimliğiyle sorgular (`issueOf`). Hata yalnız karşılaştırma yaprağına yazılır,
+kapıya değil.
+
+(`wfe-core/src/validator.rs::expression_issues` (public, tek kaynak),
+`server/routes/wfd.rs` (`validate_expression` + `expression_report`),
+`wfe-core/tests/validator.rs::expression_issues_matches_wfd_validator_verdicts`,
+`wfe-core/tests/editor_zen_contract.rs::ordering_on_wfah_input_requires_a_preceding_and_gate`;
+editör: `utils/zenFunctions.ts` (yeni), `utils/zenParser.ts` (`extractZenCalls`,
+`hasNegativeIndex`, `indexesWfahDirectly`, `hasUngatedInputOrdering`, `zenSyntaxWarnings`,
+`ZenRefs.wfahFieldRefs`), `utils/whenFields.ts` (`wfahFieldVerdict`, `wfahLeafIssues`,
+`wfahLeafIssueMap`, `collectAllActionInputPaths`, `zenConditionIssues` artık tek bağlam
+nesnesi alır), `hooks/useEngineExpressionVerdicts.ts` (yeni),
+`api/engineApi.ts::validateExpressionsOnEngine`, `components/zen/*`,
+`components/shared/WhenModal.tsx`.)

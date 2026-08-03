@@ -1,11 +1,40 @@
 //! v2.2 ZEN expression context'i (WOR-40, M7).
-//! Namespace seti: $ctx, $wfah, $node, $actor, $timestamp, $wfe_id,
+//! Namespace seti: $ctx, $wfah, $prev, $first, $node, $actor, $timestamp, $wfe_id,
 //! $action.input.*, $exec.result.*, $call.* (WFC-RETURN bağlamı)
 
 use crate::error::EngineError;
-use crate::types::{actor::Actor, wfah::Wfah};
+use crate::types::{
+    actor::Actor,
+    wfah::{Wfah, WfahEntry},
+};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
+
+/// Bir WFAH girdisinin ZEN'e açılan izdüşümü. `seq` ve `input` DE açıktır (WOR-84):
+/// "önceki onayda girilen tutar" gibi koşullar aksi hâlde sessizce `null` okuyordu.
+/// `input` ham `$action.input` ağacıdır (girdi ctx'e yazılmamış olsa da geçmişte durur).
+fn project_entry(e: &WfahEntry) -> Value {
+    json!({
+        "seq": e.seq,
+        "action": e.action,
+        "actor": e.actor,
+        "input": e.input.clone().unwrap_or(Value::Null),
+        "at": e.applied_at.to_rfc3339(),
+    })
+}
+
+/// `$prev`/`$first` boş geçmişte bu kabuğu döner. Neden `Value::Null` DEĞİL: null'ın
+/// alanına erişmek ifadeyi patlatır; kabuk sayesinde `$prev.action == "x"` false okur
+/// ($call ve $branches ile aynı gerekçe).
+fn empty_entry_shell() -> Value {
+    json!({
+        "seq": Value::Null,
+        "action": Value::Null,
+        "actor": Value::Null,
+        "input": Value::Null,
+        "at": Value::Null,
+    })
+}
 
 /// Bir expression değerlendirmesinin görebileceği tüm adlar.
 #[derive(Debug, Clone, Default)]
@@ -82,17 +111,7 @@ impl EvalEnv {
     }
 
     pub fn with_wfah(mut self, wfah: &Wfah) -> Self {
-        self.wfah = wfah
-            .entries()
-            .iter()
-            .map(|e| {
-                json!({
-                    "action": e.action,
-                    "actor": e.actor,
-                    "at": e.applied_at.to_rfc3339(),
-                })
-            })
-            .collect();
+        self.wfah = wfah.entries().iter().map(project_entry).collect();
         self
     }
 
@@ -137,6 +156,17 @@ impl EvalEnv {
         let mut map = Map::new();
         map.insert("$ctx".into(), self.ctx.clone());
         map.insert("$wfah".into(), Value::Array(self.wfah.clone()));
+        // WOR-84: geçmişin uç girdilerine kısayol. `$wfah[len($wfah) - 1]` ifadesi BOŞ
+        // geçmişte indeks -1'e düşüp VM'i patlatıyordu (parse aşaması yakalamaz); tasarımcı
+        // her seferinde `len($wfah) > 0 and ...` guard'ı yazmak zorunda kalıyordu.
+        map.insert(
+            "$prev".into(),
+            self.wfah.last().cloned().unwrap_or_else(empty_entry_shell),
+        );
+        map.insert(
+            "$first".into(),
+            self.wfah.first().cloned().unwrap_or_else(empty_entry_shell),
+        );
         map.insert(
             "$node".into(),
             self.node.as_deref().map(Value::from).unwrap_or(Value::Null),
@@ -291,6 +321,68 @@ mod tests {
         )
         .unwrap());
         assert!(evaluate_bool("some($wfah, #.action == 'start')", &env).unwrap());
+    }
+
+    /// WOR-84: `seq` ve `input` de izdüşümde — aksi hâlde `#.input.tutar` sessizce null.
+    #[test]
+    fn wfah_projection_exposes_seq_and_input() {
+        let wfah = Wfah::empty()
+            .push("start".into(), actor(), None)
+            .push("skor_gir".into(), actor(), Some(json!({"tutar": 1500})));
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$wfah[1].seq == 2", &env).unwrap());
+        assert!(evaluate_bool("$wfah[1].input.tutar == 1500", &env).unwrap());
+        // Sayısal karşılaştırma AKSİYONA KAPILANMALIDIR: yordam tüm geçmişte koşar ve
+        // girdisi olmayan satırda `null > 1000` zen'de "Unsupported type" hatasıdır
+        // (null'a `==` sorun değil, sıralama operatörleri sorun). Bu zen davranışıdır,
+        // izdüşümün eksiği değil — `#.input` artık dolu geliyor.
+        assert!(evaluate_bool(
+            "some($wfah, #.action == 'skor_gir' and #.input.tutar > 1000)",
+            &env
+        )
+        .unwrap());
+        assert!(!evaluate_bool(
+            "some($wfah, #.action == 'skor_gir' and #.input.tutar > 5000)",
+            &env
+        )
+        .unwrap());
+        assert!(evaluate_bool("some($wfah, #.input.tutar > 1000)", &env).is_err());
+    }
+
+    /// WOR-84: `$prev` = son giriş, `$first` = ilk giriş.
+    #[test]
+    fn prev_and_first_namespaces() {
+        let wfah = Wfah::empty()
+            .push("basvuru".into(), actor(), None)
+            .push("analyst_approve".into(), actor(), Some(json!({"not": "ok"})));
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$prev.action == 'analyst_approve'", &env).unwrap());
+        assert!(evaluate_bool("$prev.seq == 2", &env).unwrap());
+        assert!(evaluate_bool("$prev.input.not == 'ok'", &env).unwrap());
+        assert!(evaluate_bool("$prev.actor.role == 'creditAnalyst'", &env).unwrap());
+        assert!(evaluate_bool("$first.action == 'basvuru'", &env).unwrap());
+        assert!(evaluate_bool("$first.seq == 1", &env).unwrap());
+    }
+
+    /// Tek girişli geçmişte `$prev` ve `$first` AYNI girdiyi gösterir.
+    #[test]
+    fn prev_equals_first_for_single_entry() {
+        let wfah = Wfah::empty().push("basvuru".into(), actor(), None);
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$prev.action == $first.action", &env).unwrap());
+    }
+
+    /// KRİTİK (WOR-84): boş geçmişte `$prev.*` PATLAMAZ, null okur. Elle yazılan
+    /// `$wfah[len($wfah) - 1].action` burada VMError veriyordu.
+    #[test]
+    fn prev_is_null_shell_on_empty_history() {
+        let env = EvalEnv::new(&json!({}));
+        assert!(!evaluate_bool("$prev.action == 'x'", &env).unwrap());
+        assert!(evaluate_bool("$prev.action != 'x'", &env).unwrap());
+        assert!(evaluate_bool("$prev.action == null", &env).unwrap());
+        assert!(!evaluate_bool("$first.action == 'x'", &env).unwrap());
+        // Karşılaştırma: elle indeksleme aynı bağlamda hata döner.
+        assert!(evaluate_bool("$wfah[len($wfah) - 1].action == 'x'", &env).is_err());
     }
 
     #[test]

@@ -34,7 +34,10 @@ pub struct Wfd {
     pub listable: Vec<ListableRule>,
     #[serde(default)]
     pub attachments: BTreeMap<String, AttachmentGroup>, // opsiyonel ek-belge katalogu
-    #[serde(default)]
+    // WOR-84: DEPRECATED — motor HIC okumaz (v1 kalintisi). Terminal wft: {terminal} ile
+    // verilir. Parse edilmeye devam eder ama validator terminal_when_ignored uyarisi basar
+    // ve yeniden serilestirmede DUSER (skip_serializing).
+    #[serde(default, skip_serializing)]
     pub terminal_when: Option<String>,
 }
 
@@ -317,7 +320,7 @@ pub struct ParallelSpec {
     pub join_threshold: Option<u32>,
     // WOR-73: ZEN join kosulu. Yalniz join_mode: expr ile verilebilir ve o modda
     // ZORUNLUDUR. Namespace: $branches.<kolGirisNodeKey> (bool), $arrived (dizi);
-    // $ctx/$wfah/$actor da acik. Referanslar bu forkun kollari olmali.
+    // $ctx/$wfah/$prev/$first/$actor da acik. Referanslar bu forkun kollari olmali.
     #[serde(default)]
     pub join_when: Option<String>,
 }

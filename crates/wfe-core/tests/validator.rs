@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 use wfe_core::types::wfd_v22::Wfd;
-use wfe_core::validator::{validate, ValidationReport};
+use wfe_core::validator::{expression_issues, validate, ValidationReport};
 
 const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
 const PARALLEL_FIXTURE: &str = include_str!("fixtures/paralel-onay.json");
@@ -275,6 +275,162 @@ fn invalid_zen_expression_is_error() {
     let mut v = fixture_value();
     v["transitions"][0]["wft"]["conditions"][0]["when"] = json!("((broken ==");
     assert!(has_error(&validate_value(v), "zen_parse"));
+}
+
+/// EDİTÖR SÖZLEŞMESİ: `POST /wfd/validate-expression` bu fonksiyonu doğrudan sunar.
+/// Kurucunun serbest ZEN kutusu buradan cevap alır — WFD validator'ıyla aynı liste.
+#[test]
+fn expression_issues_matches_wfd_validator_verdicts() {
+    // Geçerli formlar temiz.
+    for ok in [
+        r#"count($wfah, #.action == "x") >= 1"#,
+        r#"all($wfah, #.actor.role != "x")"#,
+        r#"$prev.action == "x""#,
+        "$ctx.tutar > 1000",
+    ] {
+        assert!(expression_issues(ok).is_empty(), "temiz olmalı: {ok}");
+    }
+
+    // Parse hatası TEK hata döner (diğer kontroller anlamsız).
+    for broken in [
+        r#"every($wfah, #.action == "x")"#,
+        r#"count(filter($wfah, #.action == "x")) >= 1"#,
+        "((bozuk ==",
+    ] {
+        let issues = expression_issues(broken);
+        assert_eq!(issues.len(), 1, "{broken}: {issues:?}");
+        assert_eq!(issues[0].0, "zen_parse");
+        assert!(issues[0].1, "parse hatası HATA olmalı");
+    }
+
+    // Negatif indeks: parse geçer, ayrı HATA.
+    let neg = expression_issues(r#"$wfah[-1].action == "x""#);
+    assert!(neg.iter().any(|(c, e, _)| *c == "zen_negative_index" && *e));
+
+    // Korumasız indeksleme: UYARI (yayını engellemez).
+    let unguarded = expression_issues(r#"$wfah[len($wfah) - 1].action == "x""#);
+    assert!(unguarded
+        .iter()
+        .any(|(c, e, _)| *c == "wfah_index_unguarded" && !*e));
+    assert!(
+        !unguarded.iter().any(|(_, e, _)| *e),
+        "korumasız indeksleme tek başına HATA değil: {unguarded:?}"
+    );
+}
+
+/// WOR-84: negatif indeks parse edilir ama runtime'da patlar → parse kapısı yetmez.
+#[test]
+fn negative_index_is_error() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wft"]["conditions"][0]["when"] = json!("$wfah[-1].action == \"x\"");
+    let report = validate_value(v);
+    assert!(!has_error(&report, "zen_parse"), "sözdizimi geçerli");
+    assert!(has_error(&report, "zen_negative_index"));
+}
+
+/// WOR-84: `$wfah` doğrudan indekslemek uyarı alır — `$prev`/`$first` patlamaz.
+#[test]
+fn direct_wfah_indexing_is_warned() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wft"]["conditions"][0]["when"] =
+        json!("$wfah[len($wfah) - 1].action == \"x\"");
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hata DEĞİL: {:#?}", report.errors);
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.code == "wfah_index_unguarded"));
+}
+
+/// `$prev` kullanan aynı koşul TEMİZ geçer — önerilen yol uyarı üretmemeli.
+#[test]
+fn prev_namespace_produces_no_warning() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wft"]["conditions"][0]["when"] = json!("$prev.action == \"x\"");
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+    assert!(!report
+        .warnings
+        .iter()
+        .any(|w| w.code == "wfah_index_unguarded"));
+}
+
+/// WOR-84: calc ifadeleri artık upload kapısından geçiyor. `count(filter(...))` ve
+/// `every(...)` zen'de YOK — eskiden yayınlanıp runtime'da patlıyorlardı.
+#[test]
+fn broken_calc_expression_is_error() {
+    for broken in [
+        "count(filter($wfah, #.action == \"x\")) >= 1",
+        "every($wfah, #.action == \"x\")",
+        "((broken ==",
+    ] {
+        let mut v = fixture_value();
+        v["autoexec"]["kredi_skoru_getir"] = json!({
+            "type": "calc",
+            "config": { "expressions": { "bozuk": broken } }
+        });
+        assert!(
+            has_error(&validate_value(v), "zen_parse"),
+            "yakalanmalı: {broken}"
+        );
+    }
+}
+
+/// Doğru 2-argümanlı formlar temiz geçer.
+#[test]
+fn valid_calc_expressions_pass() {
+    let mut v = fixture_value();
+    v["autoexec"]["kredi_skoru_getir"] = json!({
+        "type": "calc",
+        "config": { "expressions": {
+            "sayi": "count($wfah, #.action == \"x\") >= 1",
+            "hepsi": "all($wfah, #.actor.role != \"x\")",
+            "tam_bir": "one($wfah, #.action == \"x\")",
+            "onceki": "$prev.action",
+            "uzunluk": "len(filter($wfah, #.action == \"x\"))",
+        }}
+    });
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "zen_parse"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn calc_without_expressions_is_error() {
+    let mut v = fixture_value();
+    v["autoexec"]["kredi_skoru_getir"] = json!({ "type": "calc", "config": { "url": "x" } });
+    assert!(has_error(&validate_value(v), "calc_expressions_missing"));
+}
+
+/// WOR-84: `terminal_when` motorda değerlendirilmiyor — sessizce yutmak yerine uyar.
+#[test]
+fn terminal_when_is_warned_as_ignored() {
+    let mut v = fixture_value();
+    v["terminal_when"] = json!("$ctx.credit_score >= 700");
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "eski dosya REDDEDİLMEZ, hatalar: {:#?}",
+        report.errors
+    );
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.code == "terminal_when_ignored"));
+}
+
+/// Alan yeniden serileştirmede DÜŞER — dosya bir kez kaydedilince kendiliğinden temizlenir.
+#[test]
+fn terminal_when_is_dropped_on_reserialize() {
+    let mut v = fixture_value();
+    v["terminal_when"] = json!("true");
+    let wfd = Wfd::from_value(v).unwrap();
+    assert_eq!(wfd.terminal_when.as_deref(), Some("true"));
+    let out = serde_json::to_value(&wfd).unwrap();
+    assert!(out.get("terminal_when").is_none());
 }
 
 #[test]

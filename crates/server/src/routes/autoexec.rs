@@ -11,6 +11,7 @@ use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_wfe::LiveAutoexecRunner;
 use wfe_core::types::actor::Actor;
+use wfe_core::types::wfah::Wfah;
 use wfe_core::types::wfd_v22::AutoexecDef;
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv};
 
@@ -26,6 +27,14 @@ pub struct TestAutoexecBody {
     autoexec: Value,
     #[serde(default)]
     dynctx: Value,
+    /// WOR-84: `calc` ifadelerinde `$wfah`/`$prev`/`$first` için örnek geçmiş.
+    /// Verilmezse boş — `$prev.*` null okur (patlamaz).
+    #[serde(default)]
+    #[schema(value_type = Vec<serde_json::Value>)]
+    wfah: Wfah,
+    /// WOR-84: `$action.input.*` için örnek ACT girdisi.
+    #[serde(default)]
+    action_input: Option<Value>,
 }
 
 #[derive(serde::Serialize, ToSchema)]
@@ -61,6 +70,8 @@ async fn test_autoexec(
             user_id: Uuid::nil(),
             role: "system".into(),
         },
+        wfah: body.wfah,
+        action_input: body.action_input,
     };
 
     let request_info = Some(wf_wfe::runner::resolved_config(&def, &env));

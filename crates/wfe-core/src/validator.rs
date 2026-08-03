@@ -3,8 +3,8 @@
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
 use crate::types::wfd_v22::{
-    CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft, WftCondition,
-    WftTarget,
+    AutoexecType, CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft,
+    WftCondition, WftTarget,
 };
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
@@ -1565,14 +1565,94 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
 
 // ---- §6: ZEN parse ----
 
+/// WOR-84: `[` ... `]` içinde LİTERAL negatif indeks var mı (`$wfah[-1]`).
+/// Neden ayrı bir tarama: `validate_expression` bunu KABUL eder (sözdizimi geçerli),
+/// runtime'da `Fetch: Failed to convert to usize` ile patlar — yani parse kapısı
+/// çalışan/çalışmayan ayrımını yapamıyor. Zen'de negatif indeks YOK; karşılığı
+/// `$prev` / `$first` namespace'leri ya da `[len(x) - n]`.
+fn has_negative_index(expr: &str) -> bool {
+    let b = expr.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        // `-` hemen ardından rakam → dilim/indeks konumunda negatif sabit.
+        if j < b.len() && b[j] == b'-' && b.get(j + 1).is_some_and(u8::is_ascii_digit) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// WOR-84: `$wfah` doğrudan indeksleniyor mu (`$wfah[...]`). Geçmiş yeterince uzun
+/// değilse VM patlar — `$prev`/`$first` boş geçmişte null döner, patlamaz.
+fn indexes_wfah_directly(expr: &str) -> bool {
+    let mut rest = expr;
+    while let Some(pos) = rest.find("$wfah") {
+        rest = &rest[pos + "$wfah".len()..];
+        if rest.trim_start().starts_with('[') {
+            return true;
+        }
+    }
+    false
+}
+
+/// TEK bir ZEN ifadesinin yüzey kontrolleri — `(kod, hata_mı, mesaj)` üçlüleri.
+///
+/// Neden ayrı ve **public**: editörün koşul kurucusu aynı verdiği almak zorundadır.
+/// JS tarafında zen grameri taklit edilirse "editörde yeşil, motorda parse hatası"
+/// sınıfı (WOR-84'ün ta kendisi) geri döner. Editör bu fonksiyonu
+/// `POST /wfd/validate-expression` üzerinden çağırır; WFD validator'ı da aynı
+/// listeyi kullanır — iki yol ayrışamaz.
+///
+/// `is_error = false` olan girdiler uyarıdır (yayını engellemez).
+pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
+    if let Err(e) = zen_expression::validate::validate_expression(expr) {
+        // Parse edilemeyen ifadede diğer kontroller anlamsız — tek hata döner.
+        return vec![(
+            "zen_parse",
+            true,
+            format!("ZEN ifadesi parse edilemedi: {e}"),
+        )];
+    }
+    let mut out = Vec::new();
+    if has_negative_index(expr) {
+        out.push((
+            "zen_negative_index",
+            true,
+            "negatif indeks zen'de desteklenmez — parse edilir ama runtime'da patlar. \
+             Son/ilk girdi için $prev / $first kullan."
+                .to_string(),
+        ));
+    }
+    if indexes_wfah_directly(expr) {
+        out.push((
+            "wfah_index_unguarded",
+            false,
+            "$wfah doğrudan indeksleniyor — geçmiş o kadar uzun değilse ifade \
+             runtime'da patlar (boş geçmişte kesin patlar). $prev (son girdi) / \
+             $first (ilk girdi) bu durumda null döner."
+                .to_string(),
+        ));
+    }
+    out
+}
+
 fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     let check = |expr: &str, path: String, report: &mut ValidationReport| {
-        if let Err(e) = zen_expression::validate::validate_expression(expr) {
-            report.error(
-                "zen_parse",
-                path,
-                format!("ZEN ifadesi parse edilemedi: {e}"),
-            );
+        for (code, is_error, message) in expression_issues(expr) {
+            if is_error {
+                report.error(code, path.clone(), message);
+            } else {
+                report.warn(code, path.clone(), message);
+            }
         }
     };
 
@@ -1622,8 +1702,46 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
             check(when, format!("listable[{i}].when"), report);
         }
     }
-    if let Some(tw) = &wfd.terminal_when {
-        check(tw, "terminal_when".into(), report);
+    // WOR-84: `calc` autoexec ifadeleri. `config` şemasız `Value` olduğu için upload
+    // kapısı buraya HİÇ bakmıyordu — bozuk ifade yayınlanıp akış koşarken patlıyordu
+    // (`ExecFailure`), yani tasarımcı hatayı üretimde öğreniyordu.
+    for (key, def) in &wfd.autoexec {
+        if def.kind != AutoexecType::Calc {
+            continue;
+        }
+        let Some(exprs) = def.config.get("expressions").and_then(Value::as_object) else {
+            report.error(
+                "calc_expressions_missing",
+                format!("autoexec[{key}].config"),
+                "calc autoexec'te config.expressions nesnesi zorunlu".into(),
+            );
+            continue;
+        };
+        for (name, expr) in exprs {
+            let path = format!("autoexec[{key}].config.expressions.{name}");
+            match expr.as_str() {
+                Some(s) => check(s, path, report),
+                None => report.error(
+                    "calc_expression_not_string",
+                    path,
+                    "calc ifadesi string olmalı".into(),
+                ),
+            }
+        }
+    }
+    // WOR-84: `terminal_when` v1 kalıntısıdır ve MOTORDA HİÇ DEĞERLENDİRİLMEZ.
+    // v2.2'de terminal `wft: {terminal}` ile açıkça verilir; ikinci bir global
+    // "bittiyse bitir" guard'ı tek-kural ilkesine aykırı olurdu. Alan parse edilmeye
+    // devam eder (eski dosyalar reddedilmesin) ama sessizce yok sayıldığı SÖYLENİR —
+    // "yazdım ama çalışmıyor" en pahalı hata sınıfıdır.
+    if wfd.terminal_when.is_some() {
+        report.warn(
+            "terminal_when_ignored",
+            "terminal_when".into(),
+            "terminal_when motorda değerlendirilmez (v1 kalıntısı) — terminal'i \
+             wft: {terminal} ile ver, bu alanı kaldır."
+                .into(),
+        );
     }
 }
 

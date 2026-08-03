@@ -308,11 +308,49 @@ v2.1 ile aynıdır:
 ## EXPRESSION NAMESPACE
 
 ```text
-$ctx  $wfah  $node  $actor  $timestamp  $wfe_id  $action.input.*  $exec.result.*
+$ctx  $wfah  $prev  $first  $node  $actor  $timestamp  $wfe_id
+$action.input.*  $exec.result.*
 $call.result.*  $call.status  $call.wfe_id      (yalniz WFC-RETURN baglami)
+$branches.*  $arrived                           (yalniz join_when baglami)
 ```
 
 Geçersiz: `$status` gibi top-level DynCtx, `$exec.response.*`, `$ctx.status` ile state guard'ı.
+
+### `$wfah` ve uç girdi kısayolları (WOR-84)
+
+`$wfah` append-only aksiyon geçmişidir; her girdi şu alanları taşır:
+
+| alan | anlam |
+|---|---|
+| `seq` | WFE başına monotonik sıra (1'den başlar) |
+| `action` | aksiyon adı |
+| `actor` | `{orgu_id, user_id, role}` |
+| `input` | aksiyonun ham girdisi — ctx'e yazılmamış olsa da geçmişte durur |
+| `at` | RFC3339 zaman damgası (`d(#.at)` ile tarihe çevrilir) |
+
+`$prev` = geçmişin **son** girdisi, `$first` = **ilk** girdi; aynı alan kümesini taşırlar.
+Geçmiş boşsa her alan `null` döner ve ifade **patlamaz** (`$call` ile aynı kabuk gerekçesi).
+
+**`$wfah`'ı doğrudan indekslemeyin.** `$wfah[len($wfah) - 1].action` geçmiş boşken
+indeks `-1`'e düşer ve VM patlar (`Fetch: Failed to convert to usize`); parse aşaması
+bunu yakalamaz. Validator `wfah_index_unguarded` uyarısı basar. Negatif indeks
+(`$wfah[-1]`) zen'de yoktur — parse edilir, runtime'da patlar; validator
+`zen_negative_index` **hatası** verir.
+
+**Dizi fonksiyonları İKİ argümanlıdır** (dizi + closure):
+`count` `some` `all` `none` `one` `filter` `map` `flatMap`.
+
+```text
+count($wfah, #.action == "onay") >= 2     ✅
+len(filter($wfah, #.action == "onay")) >= 2 ✅
+count(filter($wfah, #.action == "onay")) >= 2  ❌ parse hatası (tek argümanlı count)
+every($wfah, ...)                          ❌ böyle bir fonksiyon yok → `all`
+```
+
+Sıralama operatörleri (`>` `<` `>=` `<=`) `null` ile **hata** verir (`==`/`!=` vermez).
+Bu yüzden `#.input.*` üzerinde sayısal karşılaştırma aksiyona kapılanmalıdır:
+`some($wfah, #.action == "skor_gir" and #.input.tutar > 1000)` — kapısız hâli, girdisi
+olmayan bir geçmiş satırında `null > 1000`'e düşer ve patlar.
 
 `$call.*` `$exec.result.*` ile **birleştirilmez** — autoexec bir sistem çağrısıdır, WFC bir
 WFE örneğidir. WFC-RETURN dışındaki bağlamlarda `$call` boş bir kabuktur (null döner).

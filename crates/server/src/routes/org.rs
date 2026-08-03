@@ -1,4 +1,3 @@
-use utoipa_axum::router::OpenApiRouter;
 use crate::error::AppError;
 use axum::{
     extract::{Path, Query, State},
@@ -7,6 +6,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use utoipa::{IntoParams, ToSchema};
+use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use uuid::Uuid;
 use wf_org::{
@@ -18,6 +18,7 @@ pub fn router(pool: PgPool) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(list_orgtnt))
         .routes(routes!(get_orgtnt))
+        .routes(routes!(update_orgtnt))
         .routes(routes!(list_orgt_by_tenant, create_orgt))
         .routes(routes!(update_orgt))
         .routes(routes!(set_default_orgt))
@@ -71,6 +72,84 @@ async fn get_orgtnt(
     Path(id): Path<Uuid>,
 ) -> Result<Json<wf_org::models::Orgtnt>, AppError> {
     repo::orgtnt::get(&pool, id)
+        .await
+        .map(Json)
+        .map_err(Into::into)
+}
+
+/// Tenant kimlik + kurumsal metadata yaması.
+///
+/// Semantik: **alan gönderilmezse değişmez, boş string gönderilirse temizlenir**
+/// (NULL). `name`/`code`/`timezone`/`locale`/`currency` zorunludur — boş string
+/// gönderilirse 400. Marka varlıkları (logo/favicon) bu gövdeyle DEĞİL,
+/// `/orgtnt/{id}/logo/{slot}` rotalarıyla yönetilir.
+#[derive(Deserialize, ToSchema)]
+struct OrgtntBody {
+    name: Option<String>,
+    code: Option<String>,
+    display_name: Option<String>,
+    /// `#RRGGBB`.
+    brand_color: Option<String>,
+    legal_name: Option<String>,
+    tax_no: Option<String>,
+    tax_office: Option<String>,
+    contact_email: Option<String>,
+    contact_phone: Option<String>,
+    website: Option<String>,
+    address: Option<String>,
+    city: Option<String>,
+    /// ISO 3166-1 alpha-2.
+    country: Option<String>,
+    /// IANA saat dilimi.
+    timezone: Option<String>,
+    locale: Option<String>,
+    /// ISO 4217.
+    currency: Option<String>,
+    external_id: Option<String>,
+    #[schema(value_type = Option<Object>)]
+    settings: Option<serde_json::Value>,
+    is_active: Option<bool>,
+}
+
+impl From<OrgtntBody> for repo::orgtnt::OrgtntPatch {
+    fn from(b: OrgtntBody) -> Self {
+        Self {
+            name: b.name,
+            code: b.code,
+            display_name: b.display_name,
+            brand_color: b.brand_color,
+            legal_name: b.legal_name,
+            tax_no: b.tax_no,
+            tax_office: b.tax_office,
+            contact_email: b.contact_email,
+            contact_phone: b.contact_phone,
+            website: b.website,
+            address: b.address,
+            city: b.city,
+            country: b.country,
+            timezone: b.timezone,
+            locale: b.locale,
+            currency: b.currency,
+            external_id: b.external_id,
+            settings: b.settings,
+            is_active: b.is_active,
+        }
+    }
+}
+
+#[utoipa::path(patch, path = "/orgtnt/{id}", tag = "org",
+    params(("id" = Uuid, Path, description = "Tenant id")), request_body = OrgtntBody,
+    responses(
+        (status = 200, description = "Güncellenen tenant", body = serde_json::Value),
+        (status = 400, description = "Zorunlu alan boş ya da settings object değil"),
+    ),
+    security(("x_admin_key" = [])))]
+async fn update_orgtnt(
+    State(pool): State<PgPool>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<OrgtntBody>,
+) -> Result<Json<wf_org::models::Orgtnt>, AppError> {
+    repo::orgtnt::patch(&pool, id, body.into())
         .await
         .map(Json)
         .map_err(Into::into)

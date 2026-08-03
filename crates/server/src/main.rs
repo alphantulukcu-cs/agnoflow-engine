@@ -1,4 +1,5 @@
 mod attachments;
+mod branding;
 mod config;
 mod error;
 mod openapi;
@@ -105,7 +106,11 @@ async fn main() {
         }
     };
 
-    let org_router = guard(routes::org::router(pool.clone()));
+    // Marka varlığı rotaları storage'a da eriştiği için AppState ile kurulur;
+    // /org ağacına merge edilir ki aynı X-Admin-Key kapısının arkasında kalsın.
+    let org_router = guard(
+        routes::org::router(pool.clone()).merge(routes::org_branding::router(state.clone())),
+    );
     let db_router = guard(routes::db::router(state.clone()));
 
     // Tüm route'lar OpenApiRouter olarak toplanır → tek OpenApi belgesi üretilir.

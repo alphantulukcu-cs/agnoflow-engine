@@ -92,3 +92,37 @@ pub fn layout_key(orgtnt_id: uuid::Uuid, wfd_id: uuid::Uuid, version: i32) -> St
 pub fn legacy_layout_key(wfd_id: uuid::Uuid, version: i32) -> String {
     format!("wfd/{wfd_id}/{version}.layout.json")
 }
+
+/// Tenant'ın marka varlığı (logo/favicon) anahtarı — WFD JSON ile AYNI tenant kökü
+/// altında, `logo/` dizininde: `{orgtnt_id}/logo/{slot}.{ext}`.
+///
+/// Uzantı mime'dan türetilir; tam anahtar DB'de saklanır, böylece uzantı değiştiren
+/// yeniden yüklemede eski blob silinebilir.
+pub fn tenant_asset_key(orgtnt_id: uuid::Uuid, slot: &str, ext: &str) -> String {
+    format!("{orgtnt_id}/logo/{slot}.{ext}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tenant_asset_lives_under_tenant_logo_dir() {
+        let id = uuid::Uuid::nil();
+        assert_eq!(
+            tenant_asset_key(id, "logo", "png"),
+            "00000000-0000-0000-0000-000000000000/logo/logo.png"
+        );
+        assert_eq!(
+            tenant_asset_key(id, "favicon", "ico"),
+            "00000000-0000-0000-0000-000000000000/logo/favicon.ico"
+        );
+        // WFD JSON ile aynı tenant kökünü paylaşır.
+        let wfd = s3_key(id, uuid::Uuid::nil(), 1);
+        let asset = tenant_asset_key(id, "logo", "svg");
+        assert_eq!(
+            wfd.split('/').next().unwrap(),
+            asset.split('/').next().unwrap()
+        );
+    }
+}

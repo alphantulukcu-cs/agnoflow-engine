@@ -91,11 +91,54 @@ impl From<EngineError> for AppError {
 
 impl From<wf_org::error::OrgError> for AppError {
     fn from(e: wf_org::error::OrgError) -> Self {
+        // Şema kısıtı ihlali kullanıcı girdisinden doğar: 500 + çıplak SQL metni
+        // yerine 400/409 + okunabilir mesaj. Kısıt ADI üzerinden eşlenir; mesajı
+        // parse ETMEZ (Postgres metni sürümle değişir).
+        if let wf_org::error::OrgError::Database(sqlx::Error::Database(dbe)) = &e {
+            if let Some(app) = from_constraint(dbe.as_ref()) {
+                return app;
+            }
+        }
         let status = match &e {
             wf_org::error::OrgError::NotFound(_) => StatusCode::NOT_FOUND,
             wf_org::error::OrgError::BadRequest(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         AppError(e.to_string(), status)
+    }
+}
+
+/// Postgres kısıt ihlalini istemci hatasına çevirir.
+/// SQLSTATE: `23514` check, `23505` unique, `23503` foreign key.
+fn from_constraint(dbe: &dyn sqlx::error::DatabaseError) -> Option<AppError> {
+    let sqlstate = dbe.code()?.to_string();
+    let constraint = dbe.constraint().unwrap_or("");
+
+    // Bilinen kısıtlar için alan bazlı mesaj.
+    let known = match constraint {
+        "orgtnt_brand_color_hex" => Some("brand_color '#RRGGBB' biçiminde olmalı"),
+        "orgtnt_country_iso2" => Some("country ISO 3166-1 alpha-2 (iki harf) olmalı"),
+        "orgtnt_currency_iso4217" => Some("currency ISO 4217 (üç harf) olmalı"),
+        "orgtnt_locale_bcp47_lite" => Some("locale 'tr' ya da 'tr-TR' biçiminde olmalı"),
+        "orgtnt_contact_email_shape" => Some("contact_email geçerli bir e-posta olmalı"),
+        "orgtnt_settings_is_object" => Some("settings bir JSON object olmalı"),
+        "orgtnt_no_blank_text" => Some("alan boş metin olamaz"),
+        "orgtnt_external_id_unique" => Some("external_id başka bir tenant'ta kullanılıyor"),
+        "orgtnt_code_key" => Some("code başka bir tenant'ta kullanılıyor"),
+        _ => None,
+    };
+
+    match sqlstate.as_str() {
+        "23514" => Some(AppError(
+            known
+                .unwrap_or("gönderilen değer şema kısıtını ihlal ediyor")
+                .to_string(),
+            StatusCode::BAD_REQUEST,
+        )),
+        "23505" => Some(AppError(
+            known.unwrap_or("kayıt zaten mevcut").to_string(),
+            StatusCode::CONFLICT,
+        )),
+        _ => None,
     }
 }

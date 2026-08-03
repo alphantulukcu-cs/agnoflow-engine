@@ -75,3 +75,21 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
   JWT `/portal/wfe/*` ağacında: `GET /wfe/:id/attachments` (durum), `PUT/GET/DELETE .../:group/:item`.
 - Gate server-side: `apply_action`/`submit_action` hedef node'un `required` dosyaları eksikse
   `422 code:"attachment.missing"` döner. Detay: `docs/spec/decisions.md` Madde 8.
+
+## Tenant metadata + marka varlıkları (logo/favicon)
+
+- `org.orgtnt` kurumsal metadata'yı TİPLİ kolonlarda tutar (display_name, brand_color, legal_name,
+  tax_no/tax_office, iletişim, city/country, timezone/locale/currency, external_id) + esnek
+  tercihler için `settings jsonb`. DB CHECK'leri biçim garantisi verir; ihlal `error.rs`'te kısıt
+  ADINDAN 400/409'a çevrilir (SQL metni sızmaz).
+- `PATCH /org/orgtnt/{id}` semantiği: **alan gönderilmezse değişmez, boş string temizler** (NULL).
+  Zorunlular (name/code/timezone/locale/currency) boş gönderilirse 400. Okuma+yazma tek
+  transaction'da `FOR UPDATE` ile (repo `orgtnt::patch`).
+- Logo/favicon BAYT'ları WFD JSON ile AYNI tenant-prefixli bucket'ta, `logo/` dizininde:
+  `{orgtnt_id}/logo/{slot}.{ext}` (`wf_wfd::storage::tenant_asset_key`). DB yalnız
+  anahtar+mime+zaman damgası tutar; uzantı değişen yeniden yüklemede eski blob silinir.
+- Rotalar: admin `PUT/GET/DELETE /org/orgtnt/{id}/logo/{slot}` + `GET .../branding` (X-Admin-Key);
+  portal SALT OKUMA `GET /portal/branding` ve `GET /portal/branding/logo/{slot}` (JWT, tenant
+  token'dan çözülür). GET yetki ister → istemci `<img src>` yerine blob→objectURL kullanır.
+  Doğrulama+servis `crate::branding`'de: logo png/jpeg/webp/svg ≤2 MB, favicon +ico ≤512 KB;
+  SVG `nosniff` + katı CSP ile servis edilir.

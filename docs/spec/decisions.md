@@ -1032,3 +1032,189 @@ WFD'yi `(orgtnt_id, name, integer version)` ile saklar; `CallDef.wfd_id` ise dok
 gerekir — aksi halde her upload'da tenant'ın tüm WFD JSON'larını okumak gerekirdi. Bu
 yüzden DB-destekli `WfdProvider` Faz 2'ye (migration fazı) bırakıldı; Faz 1'de resolver
 trait'i ve tüm kurallar hazır, sahte katalogla test edilmiş durumdadır.
+
+## WOR-72 (2026-07-31) — OR-join: `join_mode` + K-of-N quorum
+
+**Karar.** `wft.parallel` iki alan kazandı: `join_mode: "and" | "or"` (varsayılan
+`and`) ve yalnız OR ile geçerli `join_threshold: K` (varsayılan 1). WOR-31'in
+AND-join'i tek seçenek olmaktan çıktı; "üç departmandan İKİSİ onaylarsa yeter"
+gibi kurallar tasarımcı tarafından ifade edilebiliyor.
+
+**Neden collapse ile modellemedik.** WOR-56 `collapse` zaten "kardeşleri düşür,
+hedefe git" yapıyor; her kolun join aksiyonunu `collapse: <join hedefi>`'ne
+derleyerek motor DEĞİŞMEDEN OR-join taklit edilebilirdi. Reddedildi çünkü:
+(a) audit'te `_join` yerine `_collapse` görünür, "join doldu" ile "biri akışı
+kesti" ayrımı kaybolur; (b) `parallel.join` ölü alana dönüşür — model kendi
+davranışını anlatmaz; (c) K-of-N quorum collapse ile İFADE EDİLEMEZ (collapse
+sayaç tutmaz, ilk collapse otoriterdir); (d) editör OR modunu geri okurken
+heuristiğe mahkûm kalırdı ("tüm kollar aynı hedefe collapse ⇒ OR").
+
+**Runtime TEK sayı taşır.** Mod + eşik ikilisi fork anında
+`ParallelSpec::quorum()` ile `Option<u32>`'a indirgenir (`None` = AND) ve
+`wf.wfe.join_threshold` kolonuna yazılır. İki alanın runtime'da ayrı ayrı
+yaşaması "mod or ama eşik yok" gibi tutarsız durumları mümkün kılardı. Eşik
+WFD'den her seferinde okunmaz: aynı join hedefine giden iki ayrı fork mümkündür,
+yani "hangi fork'un içindeyiz" bilgisi WFD'den tek başına çıkmaz.
+
+**K = kol sayısı REDDEDİLİR** (`parallel_join_threshold`). Matematiksel olarak
+AND'dir; iki yazım aynı davranışa gitse audit ve iki ayrı kod yolu (AND: kalan
+aktif kol sayımı, quorum: varış sayımı) bölünürdü. Tek temsil kuralı.
+
+**Quorum üyesi `superseded` DEĞİLDİR.** Eşiği dolduran varışta zaten varmış
+kardeşler (K'ya ancak K−1 varış + bu varış ile ulaşılır) quorum'un üyesidir;
+onayları geçersizleşmemiştir. WOR-60'ın `_branch_superseded` marker'ı yalnız
+collapse/terminal/failed yollarında üretilir. Eşik dışında kalan AKTİF kollar ise
+`cancelled` + `_branch_cancelled` alır; `_collapse` özetinin `kind`/`reason` alanı
+`join_quorum`'dur — "kimse reddetmedi, join yeterli onayı topladı".
+
+**Kol satırları quorum yolunda SİLİNMEZ.** AND-join'de `wfe_branch` satırları
+join anında silinir (audit WFAH'ta). Quorum'da iptal edilen kolların satırı
+`cancelled` olarak kalır: "hangi kol yetişemedi" portal tarafında görünür.
+
+**Yarış.** Tamamlanma kararı adapter'da `FOR UPDATE` altında TEKRAR hesaplanır
+(`JoinState::completes`) — engine'in (commit öncesi snapshot'a dayanan) görüşüyle
+uyuşmazsa `Conflict(BranchArrival)`, executor reload edip yeniden koşar. WOR-31'in
+"engine saf, adapter doğrular" sözleşmesi aynen korunur.
+
+**Geriye uyumluluk.** `join_mode` verilmeyen WFD'ler AND'dir ve serileştirmede alan
+YAZILMAZ (golden fixture birebir aynı). `wf.wfe.join_threshold` NULL = AND, veri
+dönüşümü gerekmez (migration: `20260731000001_join_quorum.sql`).
+
+## WOR-73 (2026-07-31) — ZEN join koşulu (`join_mode: expr`) + kol kimliği
+
+**Karar.** `wft.parallel` üçüncü bir join modu kazandı: `join_mode: "expr"` +
+`join_when: "<zen>"`. Gerekçe: K-of-N eşiği "üç departmandan ikisi" der ama
+**"(finans VE hukuk) YA DA genel müdür"** diyemez — bu kural bir sayı değildir.
+Eşik (`or`) KALDI: yaygın hâli ifade yazmadan kurulabilsin, portal "2/3" gösterirken
+Zen parse etmek zorunda kalmasın.
+
+**Kol kimliği `entry_node`'dur, `branch_node` DEĞİL.** `wfe_branch.branch_node` kol
+içinde her aksiyonla değişir (`BranchMoveTo`); "finans kolu vardı mı" sorusunu o
+kolonla cevaplamak, kol iki adım ilerlediğinde yanlış cevap verirdi. Fork'ta yazılan
+ve BİR DAHA DEĞİŞMEYEN `entry_node` eklendi — join koşulu namespace'i
+(`$branches.<entry_node>`), `_branch_*` marker'ları ve varış-kümesi doğrulaması bu
+kimlikle çalışır.
+
+**Namespace ikilidir, çünkü iki soru var.** `$branches.<kol>` "şu kol vardı mı"
+(bool; hiç varmamış kol `false` döner — eksik alanın null olmasına güvenmek
+gerekmesin), `$arrived` ise "kaç/hangi kol vardı" (dizi → `len($arrived) >= 2`,
+`'x' in $arrived`). İkisi aynı durumun iki görünümüdür, çelişemezler. Join bağlamı
+dışında boş obje/boş dizi olarak bağlanır (`$call` deseni): ifade patlamaz.
+
+**Tatmin edilemeyen join SESSİZ KALMAZ.** `and`/`quorum` bitişi garanti eder; ZEN
+koşulu etmez ("hukuk kolunu isteyen bir kural, hukuk kolu iptal edildiyse"). Son
+aktif kol da varıp ifade hâlâ `false` ise WFE paralel modda kilitlenirdi. Bunun
+yerine `Failed` + `end_response.reason = "WFD.JoinUnsatisfied"` (+ `join_rule`,
+`arrived`). Validator'dan statik garanti İSTEMİYORUZ: ifade tatmin edilebilirliği
+genel olarak karar verilemez; validator yalnız parse hatası ve bilinmeyen kol
+referansını yakalar (`parallel_join_when_unknown_branch` — yazım hatası runtime'da
+her zaman `false` dönen bir alan olurdu).
+
+**Yarış doğrulaması SAYIDAN KÜMEYE geçti.** WOR-72'de adapter "kaç kol vardı"
+sayarak engine'in kararını doğruluyordu; ZEN koşulu sayıyla ifade edilemediği için
+bu yetersiz kaldı. Artık engine kararını hangi VARIŞ KÜMESİ üzerinde verdiyse onu
+outcome'a koyar (`arrived_entries`), adapter kilit altında DB'deki kümeyle
+karşılaştırır. Küme aynıysa saf engine'in kararı da aynıdır — **adapter ZEN
+çalıştırmaz**; I/O katmanı motorun mantığını ikinci kez yazmaz. Bu değişiklik üç
+modun HEPSİ için tek doğrulama yolu bıraktı (AND/quorum'un ayrı sayımları gitti).
+
+**Runtime tek çözülmüş kural taşır.** `Wfes::join_rule: JoinRule` =
+`All | Quorum(k) | Expr(zen)`; DB'de iki nullable kolon (`join_threshold`,
+`join_when`) + `CHECK (biri NULL)`. "Mod expr ama ifade yok" gibi ara durumlar
+runtime'a hiç ulaşmaz (`ParallelSpec::join_rule()` tek noktada indirger).
+
+**Editör modeli AĞAÇ tutar, metin DEĞİL.** `ParallelStep.joinWhen` bir
+`JoinCond` ağacıdır (`branch` yaprakları STEP ID taşır, `group` VE/VEYA,
+`raw` elle yazılmış ZEN). Neden: panelde kol seçimli VE/VEYA ağacı kayıpsız
+düzenlenebilsin ve c_a yeniden adlandırıldığında (node key değişir) koşul bozulmasın.
+Metne çeviri yalnız export'ta (`compileJoinCond`), geri okuma import'ta
+(`parseJoinCond`); dar gramerin (yalnız kol referansları + and/or + parantez) dışına
+çıkan her ifade `raw` yaprağı olarak KORUNUR — panelde "Gelişmiş" sekmesinde görünür,
+sessizce düşmez. İç gruplar daima parantezlenir, kök grup parantezlenmez → ağaç →
+metin → ağaç turu birebir aynı metni üretir.
+
+**Geriye uyumluluk.** `join_mode` verilmeyen WFD'ler hâlâ AND'dir; `join_when`/
+`entry_node` yeni kolonlardır (migration `20260731000002_join_expr.sql`,
+`entry_node` backfill = `branch_node`). Golden fixture değişmedi.
+
+---
+
+## SLA-1 ve SLA-2 paraleli sonlandırabilir (2026-08-03, WOR-56)
+
+**Sorun.** Paralel kolda bekleyen bir iş için "kimse süresinde bakmadıysa bu paraleli
+kapat, işi şuraya götür" kuralı yazılamıyordu. Collapse yalnız bir AKSİYONUN kararıydı
+(`transition.wft = {collapse:{…}}`); SLA-1'in hedefi ise şemada **çıplak string** olduğu
+için collapse formu fiziksel olarak temsil edilemiyordu (SLA-2'de form parse ediliyor ama
+`sla_target_not_node` ile reddediliyordu). Sonuç: kimse aksiyon almazsa kol sonsuza kadar
+açık kalıyor, join hiç dolmuyordu.
+
+**Karar.** SLA-1'e opsiyonel bir BAYRAK eklendi: `claim_timeout.collapses_parallel`
+(varsayılan `false`). Hedef alanının tipi DEĞİŞMEDİ — `wft` hâlâ çıplak node key'i.
+
+- Neden yeni alan, `wft`'i `Wft` union'ına çevirmek değil: union'a geçmek wire formatını
+  kırardı (tüm mevcut dokümanlar + `cross_ref` + import yolu migration'ı). Bayrak
+  `deny_unknown_fields` altında ek bir alandır, eski dokümanlar bit-bit aynı kalır.
+- Neden bayrak, otomatik davranış değil: collapse kardeş kolların onaylarını iptal eder.
+  Bu bir politika kararıdır, bir zamanlayıcının varsayılanı olamaz — TASARIMCI ister.
+- `wft` ZORUNLU olur (`claim_timeout_collapse_requires_wft`): "aynı havuza dön" ile
+  collapse birlikte anlamsızdır (gidilecek hedef yok).
+- Hedef hâlâ yalnız NODE (`sla_terminal_target` değişmedi): collapse paralel modu
+  bitirir, AKIŞI bitirmez. Zaman aşımıyla akışı bitiren tek kural SLA-3 kalır — yani
+  2026-07-28 kararı daralmadı, yalnız "kolları düşürme" yetkisi ayrı bir kapıdan açıldı.
+- Paralel modda DEĞİLKEN bayrak yok sayılır, normal `{node}` devri uygulanır. Aynı node
+  hem kol içinden hem dışından erişilebilir; `resolve_wft` collapse'ı Single modda hata
+  saydığı için katı davranmak WFE'yi zaman aşımında kilitlerdi.
+- Fork'u olmayan dokümanda bayrak ölü ayardır → uyarı (`claim_timeout_collapse_no_parallel`),
+  yayın engellenmez.
+
+**Runtime.** `fire_claim_timeout` hedefi `Wft::Collapse{collapse:{node}}`'a sarar ve
+mevcut genel yoldan geçer: `CommitOutcome::CollapseTo` + `stage_parallel_markers`
+(`_collapse` özeti, kardeş kollar `cancelled`, varmış kollar `superseded`). Aksiyon
+collapse'ıyla tek fark tetikleyicinin system aktörü olması; audit'te SLA marker'ının
+input'una `collapse: true` yazılır (bayrak yokken anahtar hiç yazılmaz — eski kayıtların
+şekli korunur).
+
+**Editör.** `ClaimTimeoutMeta.collapsesParallel` → SLA/Claim Süresi modalında
+"Süre dolunca paraleli sonlandır" tiki; tik yalnız gerçekten bir kolun içindeki gruplarda
+(ya da zaten işaretli kayıtta) sunulur. "Aynı havuza dön"e geçilince tik düşer. Kapılar:
+`CLAIM_TIMEOUT_COLLAPSE_NO_TARGET` (hata), `CLAIM_TIMEOUT_COLLAPSE_OUTSIDE_PARALLEL` (uyarı).
+
+**SLA-2 (aynı gün, ayrı adım).** Escalation için AYNI yetki açıldı ama YENİ ALAN
+EKLENMEDİ: `escalation[].wft` zaten bir `Wft` union'ı olduğu için form yeterli —
+`{collapse:{node}}`. Yani iki SLA'nın wire biçimi farklı (bayrak vs. form), sebebi tek:
+SLA-1'in hedefi string, SLA-2'nin hedefi union. Editör modeli ikisini AYNI kavramla
+taşır (`collapsesParallel`), fark yalnız serileştirmede.
+
+Validator: `sla_target_not_node` artık node hedefli collapse'ı GEÇİRİR; terminal hedefli
+collapse `sla_terminal_target`'a düşer (akışı bitirme yasağı korunur). Runtime:
+`fire_escalation` paralel modda değilken collapse'ı düz `{node}` devrine indirger.
+
+Eski test `escalation_collapse_target_is_error` bu kararla GEÇERSİZ oldu.
+
+**Kapsam kuralı (aynı gün, ikinci tur).** Collapse YALNIZ bir paralel kolun İÇİNDEKİ
+node'da kullanılabilir — paralel akışa bağlı olmayan bir node'un süresi dolduğunda
+düşürülecek kardeş kol yoktur, ayar sessizce hiçbir şey yapmaz. İlk turda bu "dokümanda
+hiç fork var mı" uyarısıydı (`*_collapse_no_parallel`); yetersizdi: fork'u OLAN bir
+dokümanda kol DIŞINDAKİ bir node (join sonrası, kol dışı bir dal) hâlâ collapse
+işaretleyebiliyordu.
+
+Yerine gerçek kapsam hesabı geldi: `parallel_interior_nodes` — fork'un `branches`
+girişlerinden transition kenarlarıyla BFS, join'de dur (`check_parallel`'in branch
+subgraph yürüyüşünün aynısı). Kol GİRİŞİ olmak şart değil, kolun İÇİNDE kalmak şart.
+Sonuç uyarı değil HATA: `claim_timeout_collapse_outside_parallel` /
+`escalation_collapse_outside_parallel`. Editör aynı kuralı `parallelBranchCaGroupIds`
+ile uygular (tik yalnız kol içindeki gruplarda sunulur; koldan çıkmış bir kayıt tikini
+görmeye devam eder ki kaldırılabilsin).
+
+BFS bedeli yalnız gerçekten collapse isteyen bir SLA varsa ödenir (`wants_collapse`
+kapısı). Runtime fallback KALDI ama artık savunma yolu: kol içi bir node grafın başka
+bir yerinden de erişilebilir, o çağrıda WFE paralel modda olmaz.
+
+(`wfe-core/src/types/wfd_v22.rs::ClaimTimeout`, `validator.rs::check_sla`,
+`v22/pipeline.rs::fire_claim_timeout` + `fire_escalation`, `docs/spec/schema.json`
+(`claimTimeout.collapses_parallel`, `escalationStep.wft`, yeni `wftCollapseNode`);
+editör: `types/wfd.types.ts` (`ClaimTimeoutMeta`/`EscalationMeta.collapsesParallel`),
+`hooks/useExport.ts`, `utils/wfdImport.ts`, `utils/validation.ts`,
+`components/shared/ClaimTimeoutModal.tsx` + `EscalationModal.tsx`,
+`components/graph/PropertiesPanel.tsx`, `schema/wfd.schema.json`,
+`src/tests/sla.collapse.test.ts`.)

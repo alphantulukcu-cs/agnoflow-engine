@@ -819,7 +819,7 @@
         },
         "claim_timeout": {
           "$ref": "#/$defs/claimTimeout",
-          "description": "SLA-1: claim eden aktor 'after' suresinde aksiyon almazsa devreye girer. wft yoksa claim temizlenir ve is ayni havuza doner; wft NODE olmak zorundadir (terminal yasak)."
+          "description": "SLA-1: claim eden aktor 'after' suresinde aksiyon almazsa devreye girer. wft yoksa claim temizlenir ve is ayni havuza doner; wft NODE olmak zorundadir (terminal yasak). 2026-08-03: 'collapses_parallel: true' ile paralel kolda tetiklendiginde kardes kollari dusurup paraleli sonlandirir (wft zorunlu)."
         },
         "attachments": {
           "type": "array",
@@ -855,6 +855,11 @@
           "type": "string",
           "minLength": 1,
           "description": "Hedef NODE key'i (bare string — {node} sarmalayicisi YOK). TERMINAL olamaz (2026-07-28, validator sla_terminal_target). Belirtilmezse claim ayni havuza doner."
+        },
+        "collapses_parallel": {
+          "type": "boolean",
+          "default": false,
+          "description": "2026-08-03 (WOR-56/SLA-1) TASARIMCI TERCIHI: bu node bir paralel kolun icindeyken sure dolarsa yalnizca kolu tasima, PARALELI SONLANDIR - kardes kollar cancelled, paralel mod kapanir, WFE 'wft' hedefine gider (aksiyondaki wft.collapse ile ayni semantik). 'wft' ZORUNLU olur (validator claim_timeout_collapse_requires_wft); hedef hala yalniz NODE olabilir - collapse paraleli bitirir, AKISI bitirmez. Node bir paralel KOLUN ICINDE (fork ile join arasinda) olmak ZORUNDA - degilse validator claim_timeout_collapse_outside_parallel ile REDDEDER. Runtime savunmasi: kol ici node grafin baska bir yerinden de erisilebilir, o cagrida paralel mod yoksa bayrak yok sayilir ve duz node devri uygulanir."
         }
       }
     },
@@ -873,11 +878,18 @@
           "$ref": "#/$defs/wfesEffects"
         },
         "wft": {
-          "$ref": "#/$defs/wftNode",
-          "description": "SLA-2 hedefi — ZORUNLU ve YALNIZ {node} formu. terminal / conditions / parallel / collapse formlari 2026-07-28'de yasaklandi (validator sla_target_not_node, sla_terminal_target): SLA yalniz sıradaki aktor havuzuna devreder; dallanma, fork, kol dusurme ve akisi bitirme bir AKSIYONUN ya da SLA-3'un (root timeout) kararidir."
+          "anyOf": [
+            {
+              "$ref": "#/$defs/wftNode"
+            },
+            {
+              "$ref": "#/$defs/wftCollapseNode"
+            }
+          ],
+          "description": "SLA-2 hedefi - ZORUNLU. Iki form: {node} (siradaki aktor havuzuna devir) ve 2026-08-03'ten beri {collapse:{node}} (paraleli SONLANDIRARAK o node'a devir - kardes kollar cancelled). terminal / conditions / parallel formlari YASAK (validator sla_target_not_node, sla_terminal_target): SLA akisi bitirmez, dallanma/fork kararı vermez. Collapse hedefi de terminal olamaz."
         }
       },
-      "description": "SLA-2 (node escalation[]). Sure dolunca is bir sonraki NODE'a (aktor havuzuna) devredilir. wft ZORUNLUDUR (escalation_wft_required) ve yalnizca {node} olabilir — terminal/conditions/parallel/collapse yasak. 2026-07-28: 'terminate' KALDIRILDI (escalation_terminate_removed) — akisi bitirmek yalniz SLA-3'un isidir. wfes_effects opsiyoneldir ve $action.input.* / $exec.result.* tasiyamaz (sla_effect_namespace)."
+      "description": "SLA-2 (node escalation[]). Sure dolunca is bir sonraki NODE'a (aktor havuzuna) devredilir. wft ZORUNLUDUR (escalation_wft_required) ve {node} ya da node hedefli {collapse:{node}} olabilir - terminal/conditions/parallel yasak. 2026-08-03: collapse formu paraleli sonlandirir (kardes kollar cancelled) ve YALNIZ paralel kolun icindeki node'da kullanilabilir (escalation_collapse_outside_parallel); paralel baglam yoksa runtime duz devre duser. 2026-07-28: 'terminate' KALDIRILDI (escalation_terminate_removed) - akisi bitirmek yalniz SLA-3'un isidir. wfes_effects opsiyoneldir ve $action.input.* / $exec.result.* tasiyamaz (sla_effect_namespace)."
     },
     "wftNode": {
       "type": "object",
@@ -1015,12 +1027,31 @@
             },
             "join": {
               "$ref": "#/$defs/wftDefault",
-              "description": "AND-join hedefi: aktif kollarin SONUNCUSU vardiginda WFE'nin gidecegi node veya terminal. Kollardan biriyle ayni olamaz (custom validator)."
+              "description": "Join hedefi: join dolduğunda WFE'nin gidecegi node veya terminal. Kollardan biriyle ayni olamaz (custom validator). Join'in NE ZAMAN dolduğunu join_mode belirler."
+            },
+            "join_mode": {
+              "enum": [
+                "and",
+                "or",
+                "expr"
+              ],
+              "default": "and",
+              "description": "WOR-72: birlestirme mantigi. `and` (varsayilan, WOR-31) TUM kollarin varmasini bekler. `or` K-of-N quorum'dur: join_threshold kadar kol varir varmaz paralel mod OTORITER biter, kalan aktif kollar cancelled olur (collapse ile ayni iptal semantigi; quorum uyesi varmis kollar superseded DEGILDIR)."
+            },
+            "join_threshold": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "WOR-72: OR modunda yeterli varis sayisi (K-of-N). YALNIZ join_mode: or ile verilebilir (validator parallel_join_threshold); verilmezse 1 = ilk varan kazanir. K, kol sayisindan KUCUK olmalidir — K = kol sayisi matematiksel olarak AND'dir, o zaman join_mode: and kullanilir."
+            },
+            "join_when": {
+              "type": "string",
+              "minLength": 1,
+              "description": "WOR-73: ZEN join kosulu. YALNIZ join_mode: expr ile verilebilir ve o modda ZORUNLUDUR (validator parallel_join_when). Her kol varisinda degerlendirilir; true olunca join dolar ve kalan aktif kollar cancelled olur. Namespace: $branches.<kolGirisNodeKey> (bool — o kol vardi mi, degerlendirilen varis dahil), $arrived (varmis kol key'lerinin dizisi → len($arrived) >= 2); $ctx/$wfah/$actor da acik. Referans verilen her kol BU forkun kolu olmali (parallel_join_when_unknown_branch)."
             }
           }
         }
       },
-      "description": "WOR-31: fork/join. Start kuralinda (`start[].wft`) YASAKTIR; nested fork (bir branch subgraph'i icinde ikinci bir Parallel) YASAKTIR (custom validator)."
+      "description": "WOR-31: fork/join. Start kuralinda (`start[].wft`) YASAKTIR; nested fork (bir branch subgraph'i icinde ikinci bir Parallel) YASAKTIR (custom validator). WOR-72/WOR-73: join_mode ile AND / OR (quorum) / expr (ZEN kosulu) secilebilir."
     },
     "wft": {
       "oneOf": [
@@ -1302,6 +1333,20 @@
         }
       },
       "description": "WOR-56: paralel dalda sonlandiran aksiyon (collapse+goto). Start'ta YASAK."
+    },
+    "wftCollapseNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "collapse"
+      ],
+      "properties": {
+        "collapse": {
+          "$ref": "#/$defs/wftNode",
+          "description": "WOR-56/SLA-2: collapse hedefi - YALNIZ node. Terminal yasak (validator sla_terminal_target): collapse paraleli bitirir, AKISI bitirmez."
+        }
+      },
+      "description": "2026-08-03 (WOR-56/SLA-2): node hedefli collapse. SLA-2'de kullanilinca sure dolunca kardes kollar cancelled, paralel mod kapanir ve WFE bu node'a gider. Kaynak node bir paralel KOLUN ICINDE olmak ZORUNDA (validator escalation_collapse_outside_parallel). Paralel baglam yoksa duz {node} devrine duser (runtime savunmasi)."
     }
   }
 }

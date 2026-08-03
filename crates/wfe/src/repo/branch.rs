@@ -14,7 +14,7 @@ use uuid::Uuid;
 /// için taşınır. entered_at'a göre sıralı — deterministik görünüm.
 pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<BranchRow>, WfeError> {
     sqlx::query_as::<_, BranchRow>(
-        "SELECT branch_node, status, claimed_by, claimed_at, entered_at
+        "SELECT branch_node, entry_node, status, claimed_by, claimed_at, entered_at
          FROM wf.wfe_branch WHERE wfe_id = $1 ORDER BY entered_at, branch_node",
     )
     .bind(wfe_id)

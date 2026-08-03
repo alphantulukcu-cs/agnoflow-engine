@@ -25,7 +25,7 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
-use wfe_core::types::wfd_v22::{AutoexecDef, CallMode, StartAs, Wfd};
+use wfe_core::types::wfd_v22::{AutoexecDef, CallMode, JoinRule, StartAs, Wfd};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::ports::{
     AutoexecRunner, CallSite, CallView, CommitOutcome, ExecEnv, ExecFailure, NewWfe, PendingCall,
@@ -278,6 +278,7 @@ impl WfeStore for MemStore {
                 created_at: Utc::now(),
                 branches: vec![],
                 join_target: None,
+            join_rule: JoinRule::All,
             },
         );
         self.stage(new.orgtnt_id, new.wfe_id, &new.staged_calls);

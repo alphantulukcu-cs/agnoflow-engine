@@ -308,6 +308,31 @@ pub enum Wft {
 pub struct ParallelSpec {
     pub branches: Vec<String>,
     pub join: WftTarget,
+    // WOR-72: birlestirme mantigi. Verilmezse `and` (WOR-31) — serialize'da atlanir.
+    #[serde(default)]
+    pub join_mode: JoinMode,
+    // WOR-72: OR modunda yeterli varis sayisi (K-of-N). Yalniz join_mode: or ile
+    // verilebilir; verilmezse 1 = ilk varan kazanir. 1 <= K < branches.len().
+    #[serde(default)]
+    pub join_threshold: Option<u32>,
+    // WOR-73: ZEN join kosulu. Yalniz join_mode: expr ile verilebilir ve o modda
+    // ZORUNLUDUR. Namespace: $branches.<kolGirisNodeKey> (bool), $arrived (dizi);
+    // $ctx/$wfah/$actor da acik. Referanslar bu forkun kollari olmali.
+    #[serde(default)]
+    pub join_when: Option<String>,
+}
+
+// WOR-72: `and` = tum kollar beklenir (WOR-31). `or` = K-of-N quorum; esik dolunca
+// paralel mod OTORITER biter, kalan aktif kollar cancelled (collapse semantigi).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JoinMode {
+    #[default]
+    And,
+    Or,
+    // WOR-73: kosul `join_when` ZEN ifadesidir; true olunca Or ile ayni iptal
+    // semantigi uygulanir. Son kol da varip ifade false ise WFD.JoinUnsatisfied.
+    Expr,
 }
 
 #[derive(Debug, Deserialize)]

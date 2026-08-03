@@ -14,7 +14,7 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::delegation::DelegationGrant;
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::{AutoexecDef, COrgu, CandidateActor, Wfd};
+use wfe_core::types::wfd_v22::{AutoexecDef, COrgu, CandidateActor, JoinRule, Wfd};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::AuthDecision;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
@@ -123,6 +123,7 @@ fn wfes_at(node: &str) -> Wfes {
         created_at,
         branches: vec![],
         join_target: None,
+        join_rule: JoinRule::All,
     }
 }
 

@@ -6,7 +6,7 @@ use crate::error::EngineError;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::dynctx::DynCtx;
 use crate::types::wfah::{Wfah, WfahEntry};
-use crate::types::wfd_v22::{AutoexecDef, CallMode, StartAs, Wfd, WftTarget};
+use crate::types::wfd_v22::{AutoexecDef, CallMode, JoinRule, StartAs, Wfd, WftTarget};
 use crate::types::wfe::WfeStatus;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -33,6 +33,15 @@ pub struct BranchState {
     /// Kol token'ının şu an beklediği node slug'ı (fork'ta kolun giriş node'u).
     #[serde(rename = "node")]
     pub branch_node: String,
+    /// WOR-73: kolun DEĞİŞMEZ kimliği — fork'taki giriş node'u. `branch_node` kol
+    /// içinde aksiyon alındıkça değişir (`BranchMoveTo`), dolayısıyla "hangi kol"
+    /// sorusunun cevabı o değildir. Join koşulu (`$branches.<entry_node>`) ve
+    /// varış-kümesi doğrulaması bu alanla çalışır.
+    ///
+    /// `#[serde(default)]`: WOR-73 öncesi yazılmış sim_state blob'larında alan yok →
+    /// boş string okunur; `entry_or_current()` o durumda `branch_node`'a düşer.
+    #[serde(default)]
+    pub entry_node: String,
     pub status: BranchStatus,
     pub claimed_by: Option<Uuid>,
     pub claimed_at: Option<DateTime<Utc>>,
@@ -63,9 +72,27 @@ pub struct Wfes {
     pub created_at: DateTime<Utc>,
     /// WOR-31: paralel mod kol durumları — paralel modda değilken boş.
     pub branches: Vec<BranchState>,
-    /// WOR-31: fork'ta persist edilen AND-join hedefi; `Some(..)` = paralel mod
+    /// WOR-31: fork'ta persist edilen join hedefi; `Some(..)` = paralel mod
     /// (bu durumda `current_node` NULL'dır).
     pub join_target: Option<WftTarget>,
+    /// WOR-72/WOR-73: fork'ta persist edilen ÇÖZÜLMÜŞ join kuralı
+    /// (`ParallelSpec::join_rule`). Paralel mod DIŞINDA `All`. Kural WFD'den değil
+    /// buradan okunur: paralel mod boyunca WFD sürümü sabit olsa da "hangi fork'un
+    /// içindeyiz" bilgisi yalnızca WFE satırında durur (aynı join hedefine giden iki
+    /// fork mümkündür), dolayısıyla kural da kol durumlarıyla aynı yerde yaşar.
+    pub join_rule: JoinRule,
+}
+
+impl BranchState {
+    /// WOR-73: kol kimliği. WOR-73 öncesi kayıtlarda `entry_node` boştur — o zaman
+    /// `branch_node`'a düşer (kol hiç hareket etmediyse ikisi zaten aynıdır).
+    pub fn entry_or_current(&self) -> &str {
+        if self.entry_node.is_empty() {
+            &self.branch_node
+        } else {
+            &self.entry_node
+        }
+    }
 }
 
 impl Wfes {
@@ -110,9 +137,11 @@ pub enum CommitOutcome {
     },
     /// WOR-31 fork: her kol için branch satırı yaratılır, `current_node = NULL`,
     /// `join_target` persist edilir (paralel moda giriş).
+    /// WOR-72/WOR-73: çözülmüş `join_rule` de persist edilir.
     ForkTo {
         branches: Vec<String>,
         join: WftTarget,
+        join_rule: JoinRule,
     },
     /// WOR-31: tek kolun token hareketi — kol claim'i + entered_at sıfırlanır,
     /// paralel mod sürer.
@@ -120,16 +149,33 @@ pub enum CommitOutcome {
         from_node: String,
         node: String,
     },
-    /// WOR-31: kol join hedefine vardı, engine'in görüşüne göre ≥1 başka aktif
-    /// kol kaldı — kol `arrived` işaretlenir (join node'u İŞGAL ETMEZ).
+    /// WOR-31: kol join hedefine vardı, engine'in görüşüne göre join HENÜZ dolmadı
+    /// — kol `arrived` işaretlenir (join node'u İŞGAL ETMEZ).
     BranchArrived {
         from_node: String,
+        /// WOR-73: kararın DAYANDIĞI varış kümesi (kol giriş node'ları, bu varış
+        /// dahil, sıralı). Adapter kilit altında DB'deki kümeyle karşılaştırır:
+        /// eşleşmiyorsa engine eskimiş bir snapshot üzerinde karar vermiştir →
+        /// `Conflict(BranchArrival)`, executor reload edip yeniden koşar. Sayı
+        /// karşılaştırmasının yerini alır — ZEN join koşulu sayıyla ifade
+        /// edilemediği için kümenin kendisi doğrulanır.
+        arrived_entries: Vec<String>,
     },
-    /// WOR-31: varan kol engine'in görüşüne göre SONUNCU — paralel mod biter;
-    /// `next` join hedefi: `MoveTo{join}` veya join terminal ise `Terminal{..}`.
-    /// Yarış adapter doğrulaması + executor retry ile çözülür (T3); engine saftır.
+    /// WOR-31: varan kol engine'in görüşüne göre join'i TAMAMLADI — paralel mod
+    /// biter; `next` join hedefi: `MoveTo{join}` veya join terminal ise
+    /// `Terminal{..}`. Yarış adapter doğrulaması + executor retry ile çözülür
+    /// (T3); engine saftır.
+    ///
+    /// WOR-72: AND-join'de tamamlama = "son aktif kol vardı" (kardeş kalmaz).
+    /// OR/quorum join'de eşik dolduğu anda tamamlanır ve GERİDE kol kalabilir:
+    /// `quorum_collapse = true` ise adapter kalan aktif kolları `cancelled`
+    /// yapar (engine `_branch_cancelled`/`_branch_superseded` marker'larını
+    /// zaten stage etmiştir — collapse ile aynı iptal semantiği).
     JoinComplete {
         from_node: String,
+        quorum_collapse: bool,
+        /// WOR-73: bkz. `BranchArrived::arrived_entries`.
+        arrived_entries: Vec<String>,
         next: Box<CommitOutcome>,
     },
     /// WOR-56: kol collapse aksiyonu bir NODE hedefine — paralel mod biter,

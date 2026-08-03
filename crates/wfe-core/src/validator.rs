@@ -3,7 +3,8 @@
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
 use crate::types::wfd_v22::{
-    CallMode, CallRef, ParallelSpec, StartAs, Wfd, WfesEffects, Wft, WftCondition, WftTarget,
+    CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft, WftCondition,
+    WftTarget,
 };
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
@@ -1280,6 +1281,36 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
 // branches'ten biri olamaz; branch subgraph'ları (fork'tan join'e/terminale
 // kadar transition wft kenarları) birbirinden ayrık; subgraph içinde iç içe
 // (nested) Parallel yasak; her subgraph join'e veya bir terminal'e ulaşmalı.
+// WOR-72: join_mode: or (quorum) eklendi — eşik 1..N-1 olmalı, AND'de eşik verilemez.
+// Kol subgraph kuralları OR'da AYNEN geçerlidir: quorum dolmadan iptal edilmeyecek
+// kolların da bir çıkışı olmak zorundadır (yoksa quorum hiç dolmayabilir).
+
+/// WOR-73: `join_when` içindeki `$branches.<kol>` referanslarını çıkarır.
+///
+/// Neden ZEN AST'si değil: `zen_expression` ayrıştırılmış ağacı public API'de
+/// vermiyor (yalnız `validate_expression` + `evaluate_expression`). Sözdizimi
+/// yeterince dar: referans daima `$branches.` + identifier'dır (`$branches['x']`
+/// biçimi DESTEKLENMEZ ve zaten kullanılmasına gerek yoktur; node slug'ları
+/// identifier-uyumludur). Yanlış-pozitif olamaz: eşleşen her şey gerçekten bir
+/// kol referansıdır.
+fn branch_refs_in(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let needle = "$branches.";
+    let mut i = 0;
+    while let Some(pos) = expr[i..].find(needle) {
+        let start = i + pos + needle.len();
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end > start {
+            out.push(expr[start..end].to_string());
+        }
+        i = start.max(i + pos + 1);
+    }
+    out
+}
 
 fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
     // Parallel wft start kuralında kullanılamaz.
@@ -1351,6 +1382,93 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                         "join node '{join_node}' branches listesinde de var — join kollardan biri olamaz"
                     ),
                 );
+            }
+        }
+
+        // WOR-72: join_mode / join_threshold. Tek temsil kuralı: AND'in eşiği YOK,
+        // OR'un eşiği 1..N-1 aralığındadır. K == N matematiksel olarak AND'dir ve
+        // aynı davranışın ikinci bir yazımı olurdu → reddedilir (runtime AND yolunda
+        // kalan-aktif-kol sayımı, OR yolunda varış sayımı yapar; iki kod yolunun
+        // aynı anlama gelen iki girdiyle beslenmesi audit'i de ikiye böler).
+        // WOR-73: `join_when` yalnız `expr` ile verilebilir ve `expr` modunda
+        // ZORUNLUDUR; ifade parse edilebilmeli ve YALNIZ bu fork'un kollarına
+        // referans vermeli (yazım hatası sessizce `false` dönen bir alan olur ve
+        // join asla dolmaz → runtime'da WFD.JoinUnsatisfied ile patlar; statik
+        // olarak burada yakalanır).
+        if spec.join_mode != JoinMode::Expr && spec.join_when.is_some() {
+            report.error(
+                "parallel_join_when",
+                format!("{path}.parallel.join_when"),
+                "join_when yalnız join_mode: expr ile verilebilir".into(),
+            );
+        }
+        match spec.join_mode {
+            JoinMode::And => {
+                if spec.join_threshold.is_some() {
+                    report.error(
+                        "parallel_join_threshold",
+                        format!("{path}.parallel.join_threshold"),
+                        "join_threshold yalnız join_mode: or ile verilebilir (AND tüm kolları bekler)"
+                            .into(),
+                    );
+                }
+            }
+            JoinMode::Expr => {
+                if spec.join_threshold.is_some() {
+                    report.error(
+                        "parallel_join_threshold",
+                        format!("{path}.parallel.join_threshold"),
+                        "join_threshold yalnız join_mode: or ile verilebilir (expr koşulu sayıyı kendi ifade eder: len($arrived) >= k)"
+                            .into(),
+                    );
+                }
+                match spec.join_when.as_deref().map(str::trim) {
+                    None | Some("") => report.error(
+                        "parallel_join_when",
+                        format!("{path}.parallel.join_when"),
+                        "join_mode: expr için join_when ZEN koşulu zorunludur".into(),
+                    ),
+                    Some(expr) => {
+                        if let Err(e) = zen_expression::validate::validate_expression(expr) {
+                            report.error(
+                                "parallel_join_when",
+                                format!("{path}.parallel.join_when"),
+                                format!("join_when ZEN ifadesi parse edilemedi: {e}"),
+                            );
+                        }
+                        for referenced in branch_refs_in(expr) {
+                            if !spec.branches.iter().any(|b| b == &referenced) {
+                                report.error(
+                                    "parallel_join_when_unknown_branch",
+                                    format!("{path}.parallel.join_when"),
+                                    format!(
+                                        "join_when '$branches.{referenced}' referansı bu fork'un kolu değil — kol kimliği kolun GİRİŞ node'udur"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            JoinMode::Or => {
+                let n = spec.branches.len() as u32;
+                if let Some(k) = spec.join_threshold {
+                    if k == 0 {
+                        report.error(
+                            "parallel_join_threshold",
+                            format!("{path}.parallel.join_threshold"),
+                            "join_threshold en az 1 olmalı".into(),
+                        );
+                    } else if n >= 2 && k >= n {
+                        report.error(
+                            "parallel_join_threshold",
+                            format!("{path}.parallel.join_threshold"),
+                            format!(
+                                "join_threshold ({k}) kol sayısından ({n}) küçük olmalı — k = kol sayısı ise join_mode: and kullan"
+                            ),
+                        );
+                    }
+                }
             }
         }
     }
@@ -2112,8 +2230,12 @@ fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
 // ---- 2026-07-16 SLA sözleşmesi: escalation + claim_timeout ----
 // ---- 2026-07-28: SLA-1/SLA-2 YALNIZ bir node'a devreder. Akışı bitiremez
 //      (`terminate` kaldırıldı, terminal hedef yasak — bitirme yalnız SLA-3'ün işi) ve
-//      dallanma/fork/collapse kararı veremez (`wft` yalnız `{node}` formu).
+//      dallanma/fork kararı veremez (`wft` yalnız `{node}` formu).
 //      + SLA effects namespace kısıtı ----
+// ---- 2026-08-03 (WOR-56/SLA-1): HEDEF hâlâ yalnız node, ama SLA-1 tasarımcının
+//      açık tercihiyle (`claim_timeout.collapses_parallel`) paralel kolları
+//      düşürebilir. Bu bir DALLANMA kararı değil, "paralel modu kapat + hedefe git"
+//      kararıdır; akışı yine bitirmez (terminal hedef hâlâ yasak). ----
 
 /// `Wft`'in wire formunun kullanıcıya gösterilecek adı — SLA hedef formu hatasında
 /// hangi biçimin kullanıldığını söylemek için.
@@ -2148,7 +2270,71 @@ fn check_sla_effect_namespaces(effects: &WfesEffects, path: &str, report: &mut V
     }
 }
 
+/// WOR-56 (2026-08-03) — bir PARALEL KOLUN İÇİNDE yer alan node key'lerinin kümesi.
+///
+/// SLA collapse'ı yalnız bu kümedeki node'larda anlamlıdır: paralel akışa bağlı olmayan
+/// bir node'un süresi dolduğunda düşürülecek kardeş kol YOKTUR. Kural authoring-time'da
+/// burada kapatılır (`*_collapse_outside_parallel`).
+///
+/// Yürüyüş `check_parallel`'in branch subgraph BFS'iyle AYNI: fork'un `branches` giriş
+/// node'larından başlanır, transition wft kenarları izlenir, join node'unda durulur;
+/// collapse kenarları (kapsam dışına çıkarlar) ve iç içe parallel izlenmez. SLA kenarları
+/// (escalation / claim_timeout hedefleri) da izlenmez — onlar kolun İÇİNDEN dışarı çıkan
+/// devirlerdir, hedefi kolun parçası yapmaz.
+fn parallel_interior_nodes(wfd: &Wfd) -> HashSet<&str> {
+    let mut interior: HashSet<&str> = HashSet::new();
+    for t in &wfd.transitions {
+        let Wft::Parallel { parallel: spec } = &t.wft else {
+            continue;
+        };
+        let join_node: Option<&str> = match &spec.join {
+            WftTarget::Node { node } => Some(node.as_str()),
+            WftTarget::Terminal { .. } => None,
+        };
+        let mut queue: VecDeque<&str> = spec.branches.iter().map(|b| b.as_str()).collect();
+        let mut visited: HashSet<&str> = queue.iter().copied().collect();
+        while let Some(node_key) = queue.pop_front() {
+            if Some(node_key) == join_node {
+                continue; // join kolun parçası değildir — ötesine geçilmez.
+            }
+            interior.insert(node_key);
+            for tr in &wfd.transitions {
+                if !tr.from.contains(node_key) {
+                    continue;
+                }
+                if matches!(&tr.wft, Wft::Collapse { .. } | Wft::Parallel { .. }) {
+                    continue;
+                }
+                for (kind, target) in wft_targets(&tr.wft) {
+                    if kind != TargetKind::Node || Some(target) == join_node {
+                        continue;
+                    }
+                    if visited.insert(target) {
+                        queue.push_back(target);
+                    }
+                }
+            }
+        }
+    }
+    interior
+}
+
 fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
+    // Yalnız gerçekten collapse isteyen bir SLA görülürse hesaplanır (BFS bedeli).
+    let wants_collapse = wfd.nodes.values().any(|n| {
+        n.claim_timeout
+            .as_ref()
+            .is_some_and(|ct| ct.collapses_parallel)
+            || n.escalation
+                .iter()
+                .any(|e| matches!(&e.wft, Some(Wft::Collapse { .. })))
+    });
+    let interior = if wants_collapse {
+        parallel_interior_nodes(wfd)
+    } else {
+        HashSet::new()
+    };
+
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
             let path = format!("nodes[{key}].escalation[{j}]");
@@ -2167,13 +2353,24 @@ fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
                     "escalation adımı bir node hedefi (`wft`) içermelidir".into(),
                 );
             }
-            // SLA-2 hedefi YALNIZ `{node}` olabilir: terminal (akışı bitirir),
-            // conditions (dallanma kararı), parallel (fork) ve collapse (kolları
-            // düşürür) formlarının hepsi bir AKSİYONUN verebileceği kararlardır —
-            // bir zamanlayıcının değil. SLA sadece "sıradaki havuza devret" yapar.
+            // SLA-2 hedefi `{node}` ya da (2026-08-03, WOR-56/SLA-2) node hedefli
+            // `{collapse:{node}}` olabilir. Terminal (akışı bitirir), conditions
+            // (dallanma kararı) ve parallel (fork) formları hâlâ bir AKSİYONUN
+            // verebileceği kararlardır — bir zamanlayıcının değil.
+            //
+            // Collapse İSTİSNASI: "kimse süresinde bakmadıysa paraleli kapat" bir
+            // dallanma kararı DEĞİLDİR — hedef tektir ve tasarım anında sabittir;
+            // yalnız "paralel modu bitir + kardeşleri düşür" yan etkisi eklenir.
+            // Akışı yine bitirmez: collapse hedefi de terminal olamaz.
             match &esc.wft {
                 None | Some(Wft::Node { .. }) => {}
-                Some(Wft::Terminal { terminal }) => report.error(
+                Some(Wft::Collapse {
+                    collapse: WftTarget::Node { .. },
+                }) => {}
+                Some(Wft::Terminal { terminal })
+                | Some(Wft::Collapse {
+                    collapse: WftTarget::Terminal { terminal },
+                }) => report.error(
                     "sla_terminal_target",
                     format!("{path}.wft"),
                     format!(
@@ -2184,10 +2381,22 @@ fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
                     "sla_target_not_node",
                     format!("{path}.wft"),
                     format!(
-                        "SLA-2 escalation hedefi yalnız `{{node}}` olabilir — '{}' formu kullanılamaz. Dallanma/fork/collapse bir aksiyonun kararıdır; SLA yalnız sıradaki havuza devreder",
+                        "SLA-2 escalation hedefi `{{node}}` ya da `{{collapse:{{node}}}}` olabilir — '{}' formu kullanılamaz. Dallanma/fork bir aksiyonun kararıdır; SLA sıradaki havuza devreder (istenirse paraleli sonlandırarak)",
                         wft_form_name(other)
                     ),
                 ),
+            }
+            // 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da kullanılabilir:
+            // paralel akışa bağlı olmayan bir node'un süresi dolduğunda düşürülecek
+            // kardeş kol yoktur, "paraleli sonlandır" anlamsız bir ayardır.
+            if matches!(&esc.wft, Some(Wft::Collapse { .. })) && !interior.contains(key.as_str()) {
+                report.error(
+                    "escalation_collapse_outside_parallel",
+                    format!("{path}.wft"),
+                    format!(
+                        "'{key}' bir paralel kolun içinde değil — SLA-2 collapse hedefi yalnız fork ile join arasındaki node'larda kullanılabilir. Hedefi düz `{{node}}` formuna çevirin"
+                    ),
+                );
             }
             if let Some(effects) = &esc.wfes_effects {
                 check_sla_effect_namespaces(effects, &format!("{path}.wfes_effects"), report);
@@ -2219,6 +2428,28 @@ fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
                         format!("bilinmeyen node '{target}'"),
                     );
                 }
+            }
+            // WOR-56/SLA-1 (2026-08-03): "paraleli sonlandır" tercihi. Collapse'ın
+            // GİDECEĞİ bir hedef olmak zorunda — `wft` yoksa "aynı havuza dön"
+            // demektir ve kolları düşürmenin anlamı kalmaz.
+            if ct.collapses_parallel && ct.wft.is_none() {
+                report.error(
+                    "claim_timeout_collapse_requires_wft",
+                    path.clone(),
+                    "SLA-1 'collapses_parallel' bir node hedefi (`wft`) ister — paraleli sonlandırıp nereye gidileceği belirsiz kalamaz; hedef verin ya da bayrağı kaldırın".into(),
+                );
+            }
+            // 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da kullanılabilir:
+            // paralel akışa bağlı olmayan bir node'un süresi dolduğunda düşürülecek
+            // kardeş kol yoktur, "paraleli sonlandır" anlamsız bir ayardır.
+            if ct.collapses_parallel && !interior.contains(key.as_str()) {
+                report.error(
+                    "claim_timeout_collapse_outside_parallel",
+                    format!("{path}.collapses_parallel"),
+                    format!(
+                        "'{key}' bir paralel kolun içinde değil — 'collapses_parallel' yalnız fork ile join arasındaki node'larda kullanılabilir. Bayrağı kaldırın"
+                    ),
+                );
             }
         }
     }

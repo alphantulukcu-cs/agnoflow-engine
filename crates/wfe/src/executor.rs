@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
 use wfe_core::types::wfah::WfahEntry;
-use wfe_core::types::wfd_v22::{CallMode, StartAs, Wfd, WftTarget};
+use wfe_core::types::wfd_v22::{CallMode, JoinRule, StartAs, Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
@@ -187,9 +187,21 @@ pub struct WfeView {
     /// WOR-31 T4: paralel mod kol durumları — paralel modda değilken boş.
     /// JSON alan adı `node` (bkz. `BranchState`), artı sorgu-anında çözülmüş `c_a`.
     pub branches: Vec<BranchView>,
-    /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
+    /// WOR-31 T4: fork'ta persist edilen join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
     pub join_target: Option<WftTarget>,
+    /// WOR-72/WOR-73: join kuralının kısa adı — `"and"` | `"or"` | `"expr"`.
+    /// İstemci hangi mantığın işlediğini buradan bilir (paralel modda değilken
+    /// `join_target` gibi anlamsızdır, o yüzden yalnız paralel modda gönderilir).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_mode: Option<&'static str>,
+    /// WOR-72: quorum eşiği (yalnız `join_mode: "or"`) — istemci "3 kolun 2'si yeter"
+    /// bilgisini buradan gösterir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_threshold: Option<u32>,
+    /// WOR-73: ZEN join koşulu (yalnız `join_mode: "expr"`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_when: Option<String>,
     /// Madde 6: tek-kol modda viewer `current_node`'u claim edebilir mi ve NASIL
     /// (paralel modda daima `None` — kol-bazlı `BranchView.claim_as`'e bak). `None`
     /// = claim edemez / zaten claim'li / claim aşaması değil.
@@ -663,6 +675,18 @@ impl WfeExecutor {
             priority,
             rev,
             branches: branch_views,
+            join_mode: wfes
+                .join_target
+                .as_ref()
+                .map(|_| wfes.join_rule.kind()),
+            join_threshold: match &wfes.join_rule {
+                JoinRule::Quorum(k) => Some(*k),
+                _ => None,
+            },
+            join_when: match &wfes.join_rule {
+                JoinRule::Expr(e) => Some(e.clone()),
+                _ => None,
+            },
             join_target: wfes.join_target,
             claim_as,
             calls,

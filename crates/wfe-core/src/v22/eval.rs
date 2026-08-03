@@ -19,6 +19,36 @@ pub struct EvalEnv {
     pub exec_result: Option<Value>,
     /// WFC-OUT — yalnız WFC-RETURN bağlamında bağlanır (`$call.*`).
     pub call: Option<CallOutcome>,
+    /// WOR-73 — yalnız paralel join koşulu (`join_when`) değerlendirilirken bağlanır
+    /// (`$branches.*`, `$arrived`).
+    pub join: Option<JoinEnv>,
+}
+
+/// WOR-73: join koşulunun gördüğü kol durumu. Kol kimliği **giriş node'udur**
+/// (`BranchState::entry_node`) — `branch_node` kol içinde aksiyon alındıkça değişir,
+/// dolayısıyla ifadede kullanılamaz.
+#[derive(Debug, Clone, Default)]
+pub struct JoinEnv {
+    /// Fork'un TÜM kollarının giriş node'ları (sıra = `parallel.branches` sırası).
+    pub all: Vec<String>,
+    /// Join'e VARMIŞ kolların giriş node'ları — değerlendirilen varış DAHİL.
+    pub arrived: Vec<String>,
+}
+
+impl JoinEnv {
+    fn to_json(&self) -> (Value, Value) {
+        // `$branches` her kol için bool taşır: hiç varmamış kol `false` döner
+        // (eksik alanın null olmasına güvenmek zorunda kalınmasın).
+        let map: Map<String, Value> = self
+            .all
+            .iter()
+            .map(|b| (b.clone(), Value::Bool(self.arrived.contains(b))))
+            .collect();
+        (
+            Value::Object(map),
+            Value::Array(self.arrived.iter().cloned().map(Value::from).collect()),
+        )
+    }
 }
 
 /// Çağrılan WFE'nin sonucu — `$call.result.*` / `$call.status` / `$call.wfe_id`.
@@ -97,6 +127,12 @@ impl EvalEnv {
         self
     }
 
+    /// WOR-73: paralel join koşulu bağlamı — `$branches.*` ve `$arrived` görünür olur.
+    pub fn with_join(mut self, join: JoinEnv) -> Self {
+        self.join = Some(join);
+        self
+    }
+
     fn zen_context(&self) -> Value {
         let mut map = Map::new();
         map.insert("$ctx".into(), self.ctx.clone());
@@ -138,6 +174,15 @@ impl EvalEnv {
             "$timestamp".into(),
             Value::from(chrono::Utc::now().to_rfc3339()),
         );
+        // WOR-73: join bağlamı DIŞINDA `$branches` boş obje, `$arrived` boş dizidir —
+        // `$call` ile aynı gerekçe: ifade patlamak yerine "hiç kol varmamış" okur.
+        let (branches, arrived) = self
+            .join
+            .as_ref()
+            .map(JoinEnv::to_json)
+            .unwrap_or_else(|| (Value::Object(Map::new()), Value::Array(vec![])));
+        map.insert("$branches".into(), branches);
+        map.insert("$arrived".into(), arrived);
         Value::Object(map)
     }
 }
@@ -184,6 +229,33 @@ mod tests {
         let env = EvalEnv::new(&json!({}));
         assert!(!evaluate_bool("$ctx.within_limit == true", &env).unwrap());
         assert!(evaluate_bool("$ctx.within_limit != true", &env).unwrap());
+    }
+
+    /// WOR-73: `$branches` her kol için bool taşır, `$arrived` varmış kolların dizisi.
+    #[test]
+    fn join_namespace() {
+        let env = EvalEnv::new(&json!({})).with_join(JoinEnv {
+            all: vec!["self__fin".into(), "self__legal".into(), "self__hr".into()],
+            arrived: vec!["self__fin".into(), "self__hr".into()],
+        });
+        assert!(evaluate_bool("$branches.self__fin", &env).unwrap());
+        assert!(!evaluate_bool("$branches.self__legal", &env).unwrap());
+        assert!(evaluate_bool(
+            "($branches.self__fin and $branches.self__legal) or $branches.self__hr",
+            &env
+        )
+        .unwrap());
+        assert!(evaluate_bool("len($arrived) >= 2", &env).unwrap());
+        assert!(!evaluate_bool("len($arrived) >= 3", &env).unwrap());
+        assert!(evaluate_bool("'self__hr' in $arrived", &env).unwrap());
+    }
+
+    /// Join bağlamı DIŞINDA ifade patlamaz: `$branches.x` null → false, `$arrived` boş.
+    #[test]
+    fn join_namespace_is_empty_outside_join_context() {
+        let env = EvalEnv::new(&json!({}));
+        assert!(!evaluate_bool("$branches.self__fin == true", &env).unwrap());
+        assert!(evaluate_bool("len($arrived) == 0", &env).unwrap());
     }
 
     #[test]

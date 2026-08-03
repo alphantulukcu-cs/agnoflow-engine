@@ -20,6 +20,7 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
+use wfe_core::types::wfd_v22::JoinRule;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::types::wfe::WfeStatus;
@@ -124,6 +125,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         created_at,
         branches: vec![],
         join_target: None,
+        join_rule: JoinRule::All,
     }
 }
 
@@ -299,6 +301,7 @@ fn role_actor(orgu: Uuid, role: &str) -> Actor {
 fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchState {
     let now = chrono::Utc::now();
     BranchState {
+        entry_node: String::new(),
         branch_node: node.into(),
         status,
         claimed_by,

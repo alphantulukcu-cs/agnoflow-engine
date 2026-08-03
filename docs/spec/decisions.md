@@ -1136,3 +1136,85 @@ metin → ağaç turu birebir aynı metni üretir.
 **Geriye uyumluluk.** `join_mode` verilmeyen WFD'ler hâlâ AND'dir; `join_when`/
 `entry_node` yeni kolonlardır (migration `20260731000002_join_expr.sql`,
 `entry_node` backfill = `branch_node`). Golden fixture değişmedi.
+
+---
+
+## SLA-1 ve SLA-2 paraleli sonlandırabilir (2026-08-03, WOR-56)
+
+**Sorun.** Paralel kolda bekleyen bir iş için "kimse süresinde bakmadıysa bu paraleli
+kapat, işi şuraya götür" kuralı yazılamıyordu. Collapse yalnız bir AKSİYONUN kararıydı
+(`transition.wft = {collapse:{…}}`); SLA-1'in hedefi ise şemada **çıplak string** olduğu
+için collapse formu fiziksel olarak temsil edilemiyordu (SLA-2'de form parse ediliyor ama
+`sla_target_not_node` ile reddediliyordu). Sonuç: kimse aksiyon almazsa kol sonsuza kadar
+açık kalıyor, join hiç dolmuyordu.
+
+**Karar.** SLA-1'e opsiyonel bir BAYRAK eklendi: `claim_timeout.collapses_parallel`
+(varsayılan `false`). Hedef alanının tipi DEĞİŞMEDİ — `wft` hâlâ çıplak node key'i.
+
+- Neden yeni alan, `wft`'i `Wft` union'ına çevirmek değil: union'a geçmek wire formatını
+  kırardı (tüm mevcut dokümanlar + `cross_ref` + import yolu migration'ı). Bayrak
+  `deny_unknown_fields` altında ek bir alandır, eski dokümanlar bit-bit aynı kalır.
+- Neden bayrak, otomatik davranış değil: collapse kardeş kolların onaylarını iptal eder.
+  Bu bir politika kararıdır, bir zamanlayıcının varsayılanı olamaz — TASARIMCI ister.
+- `wft` ZORUNLU olur (`claim_timeout_collapse_requires_wft`): "aynı havuza dön" ile
+  collapse birlikte anlamsızdır (gidilecek hedef yok).
+- Hedef hâlâ yalnız NODE (`sla_terminal_target` değişmedi): collapse paralel modu
+  bitirir, AKIŞI bitirmez. Zaman aşımıyla akışı bitiren tek kural SLA-3 kalır — yani
+  2026-07-28 kararı daralmadı, yalnız "kolları düşürme" yetkisi ayrı bir kapıdan açıldı.
+- Paralel modda DEĞİLKEN bayrak yok sayılır, normal `{node}` devri uygulanır. Aynı node
+  hem kol içinden hem dışından erişilebilir; `resolve_wft` collapse'ı Single modda hata
+  saydığı için katı davranmak WFE'yi zaman aşımında kilitlerdi.
+- Fork'u olmayan dokümanda bayrak ölü ayardır → uyarı (`claim_timeout_collapse_no_parallel`),
+  yayın engellenmez.
+
+**Runtime.** `fire_claim_timeout` hedefi `Wft::Collapse{collapse:{node}}`'a sarar ve
+mevcut genel yoldan geçer: `CommitOutcome::CollapseTo` + `stage_parallel_markers`
+(`_collapse` özeti, kardeş kollar `cancelled`, varmış kollar `superseded`). Aksiyon
+collapse'ıyla tek fark tetikleyicinin system aktörü olması; audit'te SLA marker'ının
+input'una `collapse: true` yazılır (bayrak yokken anahtar hiç yazılmaz — eski kayıtların
+şekli korunur).
+
+**Editör.** `ClaimTimeoutMeta.collapsesParallel` → SLA/Claim Süresi modalında
+"Süre dolunca paraleli sonlandır" tiki; tik yalnız gerçekten bir kolun içindeki gruplarda
+(ya da zaten işaretli kayıtta) sunulur. "Aynı havuza dön"e geçilince tik düşer. Kapılar:
+`CLAIM_TIMEOUT_COLLAPSE_NO_TARGET` (hata), `CLAIM_TIMEOUT_COLLAPSE_OUTSIDE_PARALLEL` (uyarı).
+
+**SLA-2 (aynı gün, ayrı adım).** Escalation için AYNI yetki açıldı ama YENİ ALAN
+EKLENMEDİ: `escalation[].wft` zaten bir `Wft` union'ı olduğu için form yeterli —
+`{collapse:{node}}`. Yani iki SLA'nın wire biçimi farklı (bayrak vs. form), sebebi tek:
+SLA-1'in hedefi string, SLA-2'nin hedefi union. Editör modeli ikisini AYNI kavramla
+taşır (`collapsesParallel`), fark yalnız serileştirmede.
+
+Validator: `sla_target_not_node` artık node hedefli collapse'ı GEÇİRİR; terminal hedefli
+collapse `sla_terminal_target`'a düşer (akışı bitirme yasağı korunur). Runtime:
+`fire_escalation` paralel modda değilken collapse'ı düz `{node}` devrine indirger.
+
+Eski test `escalation_collapse_target_is_error` bu kararla GEÇERSİZ oldu.
+
+**Kapsam kuralı (aynı gün, ikinci tur).** Collapse YALNIZ bir paralel kolun İÇİNDEKİ
+node'da kullanılabilir — paralel akışa bağlı olmayan bir node'un süresi dolduğunda
+düşürülecek kardeş kol yoktur, ayar sessizce hiçbir şey yapmaz. İlk turda bu "dokümanda
+hiç fork var mı" uyarısıydı (`*_collapse_no_parallel`); yetersizdi: fork'u OLAN bir
+dokümanda kol DIŞINDAKİ bir node (join sonrası, kol dışı bir dal) hâlâ collapse
+işaretleyebiliyordu.
+
+Yerine gerçek kapsam hesabı geldi: `parallel_interior_nodes` — fork'un `branches`
+girişlerinden transition kenarlarıyla BFS, join'de dur (`check_parallel`'in branch
+subgraph yürüyüşünün aynısı). Kol GİRİŞİ olmak şart değil, kolun İÇİNDE kalmak şart.
+Sonuç uyarı değil HATA: `claim_timeout_collapse_outside_parallel` /
+`escalation_collapse_outside_parallel`. Editör aynı kuralı `parallelBranchCaGroupIds`
+ile uygular (tik yalnız kol içindeki gruplarda sunulur; koldan çıkmış bir kayıt tikini
+görmeye devam eder ki kaldırılabilsin).
+
+BFS bedeli yalnız gerçekten collapse isteyen bir SLA varsa ödenir (`wants_collapse`
+kapısı). Runtime fallback KALDI ama artık savunma yolu: kol içi bir node grafın başka
+bir yerinden de erişilebilir, o çağrıda WFE paralel modda olmaz.
+
+(`wfe-core/src/types/wfd_v22.rs::ClaimTimeout`, `validator.rs::check_sla`,
+`v22/pipeline.rs::fire_claim_timeout` + `fire_escalation`, `docs/spec/schema.json`
+(`claimTimeout.collapses_parallel`, `escalationStep.wft`, yeni `wftCollapseNode`);
+editör: `types/wfd.types.ts` (`ClaimTimeoutMeta`/`EscalationMeta.collapsesParallel`),
+`hooks/useExport.ts`, `utils/wfdImport.ts`, `utils/validation.ts`,
+`components/shared/ClaimTimeoutModal.tsx` + `EscalationModal.tsx`,
+`components/graph/PropertiesPanel.tsx`, `schema/wfd.schema.json`,
+`src/tests/sla.collapse.test.ts`.)

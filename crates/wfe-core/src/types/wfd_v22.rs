@@ -129,6 +129,27 @@ pub struct ClaimTimeout {
     pub wfes_effects: Option<WfesEffects>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wft: Option<String>,
+    /// WOR-56/SLA-1 (2026-08-03): TASARIMCININ TERCİHİ — bu node bir paralel kolun
+    /// içindeyken süre dolarsa yalnız kolu taşımak yerine PARALELİ SONLANDIR:
+    /// kardeş kollar iptal edilir, WFE paralel moddan çıkar ve `wft` hedefine gider
+    /// (aksiyon tarafındaki `Wft::Collapse` ile birebir aynı semantik).
+    ///
+    /// Sözleşme:
+    /// - `wft` ZORUNLU olur (validator `claim_timeout_collapse_requires_wft`) —
+    ///   "aynı havuza dön" ile collapse birlikte anlamsızdır: gidilecek hedef yok.
+    /// - Hedef hâlâ yalnız NODE olabilir (`sla_terminal_target` değişmedi): collapse
+    ///   paraleli bitirir, AKIŞI bitirmez — zaman aşımıyla akışı bitiren tek kural
+    ///   root `timeout` (SLA-3).
+    /// - Node paralel modda DEĞİLKEN tetiklenirse bayrak yok sayılır ve normal
+    ///   `{node}` devri uygulanır (bkz. `Pipeline::fire_claim_timeout`) — aynı node
+    ///   hem kol içinde hem dışında erişilebilir olabilir, runtime hatası vermek
+    ///   WFE'yi kilitlerdi.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub collapses_parallel: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

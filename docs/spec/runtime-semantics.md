@@ -192,7 +192,10 @@ bir adımın süresi dolmuş olması işin bittiği anlamına gelmez. İki kural
    | `{"terminal": …}` | `sla_terminal_target` | akışı bitirir → SLA-3'ün işi |
    | `{"conditions": […]}` | `sla_target_not_node` | dallanma bir karardır |
    | `{"parallel": …}` | `sla_target_not_node` | fork açmak bir karardır |
-   | `{"collapse": …}` | `sla_target_not_node` | kardeş kolları düşürmek bir karardır |
+   | `{"collapse": {"terminal"…}}` | `sla_terminal_target` | akışı bitirir → SLA-3'ün işi |
+
+   **İSTİSNA (2026-08-03):** node hedefli `{"collapse": {"node": …}}` SLA-2'de GEÇERLİDİR
+   — bkz. 8a-1. Kardeş kolları düşürmek bir dallanma kararı değildir: hedef tektir.
 
    Böylece **dolaylı** yollar da kapanır: SLA bir switch'i hedefleyip onun bir kolundan
    terminal'e inemez, çünkü switch hedefi zaten yasaktır. Autoexec hiçbir zaman bir `wft`
@@ -200,8 +203,56 @@ bir adımın süresi dolmuş olması işin bittiği anlamına gelmez. İki kural
 
 Sonuç: bir SLA-2 adımının tek olası runtime sonucu `MoveTo` (paralel modda
 `BranchMoveTo` / join hedefiyse `BranchArrived`) — `Terminated`, `CollapseTo` ya da
-`ForkTo` üretmesi imkânsızdır. Kardeş kolları düşürmek isteyen akışlar bunu bir
-AKSİYONUN `wft: {"collapse": …}` hedefiyle yapar.
+`ForkTo` üretmesi imkânsızdır.
+
+### 8a-1. SLA-1 ve SLA-2 paraleli SONLANDIRABİLİR — tasarımcının tercihiyle (2026-08-03)
+
+Her iki SLA da "süre dolunca paraleli kapat" yetkisini tasarımcının açık tercihiyle
+alır. Kol bağlamında tetiklendiğinde hedef `{collapse:{node}}` olarak çözülür → kardeş
+kollar `cancelled`, paralel mod kapanır, WFE hedefe gider (`CommitOutcome::CollapseTo`,
+`_collapse` özeti + `_branch_cancelled` detayları — aksiyon collapse'ıyla BİREBİR aynı
+yol, tetikleyicisi system aktörü). Audit'te SLA marker'ının input'una `collapse: true`
+yazılır (bayrak yokken anahtar hiç görünmez).
+
+Wire biçimi ikisinde FARKLIDIR, sebebi hedef alanının tipidir:
+
+| | Wire | Neden |
+|---|---|---|
+| **SLA-1** | `claim_timeout.collapses_parallel: true` (ayrı bayrak) | `claim_timeout.wft` çıplak bir node key STRING'idir; `{collapse:{…}}` objesi oraya sığmaz. Alanı `Wft` union'ına çevirmek wire'ı kırardı. |
+| **SLA-2** | `escalation[].wft = {collapse:{node}}` | `escalation[].wft` zaten bir `Wft` union'ı; yeni alan gerekmez, form yeterli. |
+
+Sözleşme (yukarıdaki 8a'yı DARALTMAZ):
+
+| Kural | Kod |
+|---|---|
+| **Node bir paralel KOLUN İÇİNDE olmalı** — fork ile join arasında | `claim_timeout_collapse_outside_parallel` / `escalation_collapse_outside_parallel` |
+| SLA-1: `wft` ZORUNLU — hedefsiz collapse gidilecek yer bırakmaz | `claim_timeout_collapse_requires_wft` |
+| SLA-2: `wft` zaten zorunluydu | `escalation_wft_required` (değişmedi) |
+| Hedef hâlâ yalnız NODE — collapse paraleli bitirir, AKIŞI bitirmez | `sla_terminal_target` (değişmedi) |
+
+**Kol içinde olmak** = `parallel_interior_nodes`: fork'un `branches` giriş node'larından
+başlayıp transition kenarlarıyla BFS, join node'unda dur. Yani kol GİRİŞİ olmak şart
+değil, kolun İÇİNDE kalmak şart — kolun 2., 3. adımı da collapse edebilir. Yürüyüş
+`check_parallel`'in branch subgraph BFS'iyle aynıdır (collapse ve iç içe parallel
+kenarları izlenmez; SLA kenarları da izlenmez — SLA hedefi kolun parçası olmaz).
+
+Paralel akışa BAĞLI OLMAYAN bir node collapse edemez: süresi dolduğunda düşürülecek
+kardeş kol yoktur, ayar sessizce hiçbir şey yapmaz. Bu yüzden uyarı değil HATA —
+doküman yayınlanamaz. (Dokümanda hiç fork yoksa interior kümesi boştur, aynı hataya
+düşer.)
+
+**Runtime savunması.** Authoring kuralı yukarıda kapatıldığı hâlde, kol içi bir node
+grafın BAŞKA bir yerinden de erişilebilir (kol dışı bir transition oraya gidebilir) — o
+çağrıda WFE paralel modda olmaz. Böyle bir tetiklemede bayrak/form yok sayılır ve düz
+`{node}` devri uygulanır; hata vermek WFE'yi zaman aşımında kilitlerdi. Bu bir savunma
+yolu, normal yol değil.
+
+Bayrak bir DALLANMA kararı değildir — hedef tektir ve tasarım anında sabittir; SLA yine
+"kim karar verecek" sorusunu değiştirir, "hangi yol" sorusunu değiştirmez.
+
+Aksiyon tarafındaki collapse (`transitions[].wft = {collapse:{…}}`) DEĞİŞMEDİ; tek fark
+onun terminal hedefi de alabilmesidir — bir insan kararı akışı bitirebilir, bir
+zamanlayıcı bitiremez.
 
 ### 8b. SLA effects (opsiyonel DynCtx yazımı)
 

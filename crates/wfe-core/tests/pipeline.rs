@@ -1388,6 +1388,7 @@ fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
         after: after.into(),
         wfes_effects: None,
         wft: wft.map(String::from),
+        collapses_parallel: false,
     });
     wfd
 }
@@ -1460,6 +1461,52 @@ async fn claim_timeout_due_with_wft_moves_like_escalation() {
                 commit.wfah_entries[0].action,
                 "claim_timeout:self__creditAnalyst"
             );
+        }
+        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
+    }
+}
+
+/// WOR-56/SLA-1 (2026-08-03): `collapses_parallel` işaretli olsa bile WFE paralel
+/// modda DEĞİLSE bayrak yok sayılır — normal `{node}` devri uygulanır. Aksi halde
+/// `resolve_wft` collapse'ı Single modda reddeder ve WFE zaman aşımında kilitlenirdi
+/// (aynı node kol içinden de kol dışından da erişilebilir).
+#[tokio::test]
+async fn claim_timeout_collapse_flag_ignored_outside_parallel() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let mut wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .claim_timeout
+        .as_mut()
+        .unwrap()
+        .collapses_parallel = true;
+    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    let claimed_at = wfes.created_at;
+    wfes.claimed_at = Some(claimed_at);
+    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
+
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, None)
+        .await
+        .unwrap()
+    {
+        ClaimTimeoutOutcome::Move(commit) => {
+            assert!(
+                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
+                "paralel dışı: collapse DEĞİL düz devir bekleniyordu — {:?}",
+                commit.outcome
+            );
+            // audit'te `collapse` anahtarı yazılmaz (yalnız gerçek collapse'ta).
+            let input = commit.wfah_entries[0].input.as_ref().unwrap();
+            assert!(input.get("collapse").is_none());
         }
         ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
     }
@@ -2832,6 +2879,7 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
         after: "PT2H".into(),
         wfes_effects: None,
         wft: None,
+        collapses_parallel: false,
     });
 
     let fin = Uuid::new_v4();

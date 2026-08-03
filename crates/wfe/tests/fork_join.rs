@@ -113,6 +113,16 @@ impl ParStore {
             }
         }
     }
+    /// Bir kolun entered_at'ını geçmişe alır (SLA-2 escalation dwell'i buradan ölçülür).
+    fn rewind_branch_entered(&self, wfe_id: Uuid, node: &str, at: chrono::DateTime<chrono::Utc>) {
+        let mut m = self.wfes.lock().unwrap();
+        let w = m.get_mut(&wfe_id).unwrap();
+        for b in &mut w.branches {
+            if b.branch_node == node {
+                b.entered_at = at;
+            }
+        }
+    }
 }
 
 fn active_count(w: &Wfes) -> usize {
@@ -1430,6 +1440,125 @@ async fn tick_timers_fires_branch_claim_timeout_release() {
         .entries()
         .iter()
         .any(|e| e.action == "claim_timeout:self__financeApprover"));
+}
+
+/// WOR-56/SLA-1 (2026-08-03): kol node'unda `collapses_parallel` + node hedefli
+/// claim_timeout.
+fn paralel_with_collapsing_branch_claim_timeout() -> Wfd {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["nodes"]["self__financeApprover"]["claim_timeout"] = json!({
+        "after": "PT10M",
+        "wft": "self__coordinator",
+        "collapses_parallel": true,
+    });
+    Wfd::from_value(v).unwrap()
+}
+
+/// WOR-56/SLA-1 ANA KABUL: `collapses_parallel` işaretli claim_timeout kol
+/// bağlamında dolunca yalnız kolu taşımaz — PARALELİ SONLANDIRIR: kardeş kollar
+/// iptal, paralel mod kapanır, WFE hedef node'a gider. Aksiyon collapse'ıyla aynı
+/// yol (`CommitOutcome::CollapseTo` + `_collapse` özeti), tetikleyicisi system.
+#[tokio::test]
+async fn tick_timers_branch_claim_timeout_collapses_parallel() {
+    let wfd = paralel_with_collapsing_branch_claim_timeout();
+    let store = Arc::new(ParStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(wfd.clone())),
+        store.clone(),
+        Arc::new(MockRunner),
+    );
+    let claimant = Uuid::new_v4();
+    let wfe_id = seed_parallel_state(&store, &wfd, "self__financeApprover", claimant);
+    store.rewind_branch_claim(
+        wfe_id,
+        "self__financeApprover",
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+    );
+
+    assert!(
+        exec.tick_timers(wfe_id).await.unwrap(),
+        "kol claim_timeout ateşlenmeli"
+    );
+
+    let w = store.snapshot(wfe_id);
+    assert_eq!(
+        w.current_node.as_deref(),
+        Some("self__coordinator"),
+        "collapse hedefine gidilmeli"
+    );
+    assert!(w.join_target.is_none(), "paralel mod kapanmalı");
+    assert!(
+        w.branches
+            .iter()
+            .all(|b| b.status != BranchStatus::Active),
+        "kardeş kollar iptal edilmeli: {:?}",
+        w.branches.iter().map(|b| b.status).collect::<Vec<_>>()
+    );
+    let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.contains(&"claim_timeout:self__financeApprover"),
+        "SLA-1 marker'ı: {actions:?}"
+    );
+    assert!(actions.contains(&"_collapse"), "collapse özeti: {actions:?}");
+}
+
+/// WOR-56/SLA-2 (2026-08-03): kol node'una node hedefli collapse escalation'ı.
+fn paralel_with_collapsing_branch_escalation() -> Wfd {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["nodes"]["self__financeApprover"]["escalation"] = json!([{
+        "after": "PT10M",
+        "wft": { "collapse": { "node": "self__coordinator" } }
+    }]);
+    Wfd::from_value(v).unwrap()
+}
+
+/// WOR-56/SLA-2 ANA KABUL: kol bekleme süresi (escalation) dolunca `{collapse:{node}}`
+/// hedefi paraleli SONLANDIRIR — kardeş kollar iptal, paralel mod kapanır, WFE hedefe
+/// gider. SLA-1 collapse'ıyla aynı yol; tek fark sayacın claim değil GİRİŞ anından
+/// (`entered_at`) ölçülmesi.
+#[tokio::test]
+async fn tick_timers_branch_escalation_collapses_parallel() {
+    let wfd = paralel_with_collapsing_branch_escalation();
+    let store = Arc::new(ParStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(wfd.clone())),
+        store.clone(),
+        Arc::new(MockRunner),
+    );
+    let wfe_id = seed_parallel_state(&store, &wfd, "none", Uuid::new_v4());
+    store.rewind_branch_entered(
+        wfe_id,
+        "self__financeApprover",
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+    );
+
+    assert!(
+        exec.tick_timers(wfe_id).await.unwrap(),
+        "kol escalation'ı ateşlenmeli"
+    );
+
+    let w = store.snapshot(wfe_id);
+    assert_eq!(
+        w.current_node.as_deref(),
+        Some("self__coordinator"),
+        "collapse hedefine gidilmeli"
+    );
+    assert!(w.join_target.is_none(), "paralel mod kapanmalı");
+    assert!(
+        w.branches
+            .iter()
+            .all(|b| b.status != BranchStatus::Active),
+        "kardeş kollar iptal edilmeli: {:?}",
+        w.branches.iter().map(|b| b.status).collect::<Vec<_>>()
+    );
+    let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.contains(&"escalate:self__financeApprover:0"),
+        "SLA-2 marker'ı: {actions:?}"
+    );
+    assert!(actions.contains(&"_collapse"), "collapse özeti: {actions:?}");
 }
 
 /// Belirli bir kolun mevcut claimant'ını Actor olarak döndürür (approve için).

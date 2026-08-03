@@ -1086,24 +1086,52 @@ impl<'a> Engine<'a> {
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         // WOR-63: collapse marker'larına tetikleyici olarak da yazılır.
         let trigger_action = escalation_marker(node_key, step_idx);
+        // WOR-56/SLA-2 (2026-08-03): collapse ateşlenecekse audit'e yazılır — `collapse`
+        // anahtarı YALNIZ gerçek collapse'ta görünür (eski kayıtların şekli korunur).
+        let collapsing = branch.is_some() && matches!(&step.wft, Some(Wft::Collapse { .. }));
         let mut wfah_entries = vec![WfahEntry {
             seq,
             action: trigger_action.clone(),
             actor: system.clone(),
-            input: Some(json!({"after": step.after})),
+            input: Some(if collapsing {
+                json!({"after": step.after, "collapse": true})
+            } else {
+                json!({"after": step.after})
+            }),
             applied_at: now,
         }];
         seq += 1;
 
-        // `wft` zorunludur (validator `escalation_wft_required`) ve YALNIZ `{node}`
-        // formu geçerlidir (`sla_target_not_node` / `sla_terminal_target`): SLA-2 ne
-        // akışı bitirir ne dallanma/fork/collapse kararı verir. `resolve_wft` genel
-        // yolu korunur (paralel modda BranchMoveTo çözümü oradan gelir).
+        // `wft` zorunludur (validator `escalation_wft_required`) ve yalnız `{node}` ya
+        // da node hedefli `{collapse:{node}}` formu geçerlidir (`sla_target_not_node` /
+        // `sla_terminal_target`): SLA-2 akışı bitirmez, dallanma/fork kararı vermez.
+        // `resolve_wft` genel yolu korunur (paralel modda BranchMoveTo / CollapseTo
+        // çözümü oradan gelir).
         let wft = step.wft.as_ref().ok_or_else(|| {
             EngineError::InvalidWfd(format!(
                 "escalation adımı wft içermeli: {node_key}[{step_idx}]"
             ))
         })?;
+        // WOR-56/SLA-2 (2026-08-03): collapse yalnız KOL bağlamında anlamlıdır. Validator
+        // collapse hedefini yalnız fork-join arasındaki node'larda kabul eder
+        // (`escalation_collapse_outside_parallel`); yine de kol içi bir node grafın
+        // başka bir yerinden erişilebilir → o çağrıda WFE paralel modda olmaz. Hata
+        // vermek WFE'yi zaman aşımında kilitlerdi → düz `{node}` devrine düşülür
+        // (SLA-1'deki `collapses_parallel` fallback'iyle aynı savunma).
+        let degraded = match (branch, wft) {
+            (None, Wft::Collapse { collapse }) => Some(match collapse {
+                WftTarget::Node { node } => Wft::Node {
+                    node: node.clone(),
+                },
+                // Validator `sla_terminal_target` bunu zaten reddeder; savunma olarak
+                // terminal collapse de düz terminal devrine düşer.
+                WftTarget::Terminal { terminal } => Wft::Terminal {
+                    terminal: terminal.clone(),
+                },
+            }),
+            _ => None,
+        };
+        let wft = degraded.as_ref().unwrap_or(wft);
         let all_entries = all_entry_nodes(wfes);
         let arrived_entries = branch
             .map(|b| arrived_entries_with(wfes, b))
@@ -1335,14 +1363,42 @@ impl<'a> Engine<'a> {
             Some(target) => {
                 // Bare string hedef — validator `sla_terminal_target` gereği yalnız
                 // node olabilir; referansın varlığı `cross_ref` ile garantidir.
-                let wft = Wft::Node {
-                    node: target.clone(),
+                //
+                // WOR-56/SLA-1 (2026-08-03): tasarımcı `collapses_parallel` işaretlediyse
+                // ve SLA gerçekten bir KOL bağlamında tetiklendiyse hedef `{collapse:{node}}`
+                // sarmalayıcısına alınır → kardeş kollar iptal, paralel mod kapanır, WFE
+                // hedefe gider (`CommitOutcome::CollapseTo`).
+                //
+                // Paralel modda DEĞİLKEN bayrak yok sayılır ve düz devir uygulanır. Bu bir
+                // SAVUNMA yoludur, normal yol değil: validator bayrağı yalnız fork-join
+                // arasındaki node'larda kabul eder (`claim_timeout_collapse_outside_parallel`).
+                // Ama kol içi bir node grafın başka bir yerinden de erişilebilir (kol dışı
+                // bir transition oraya gidebilir) — o durumda WFE paralel modda olmaz ve
+                // `resolve_wft` collapse'ı Single modda hata sayar. Hata vermek WFE'yi zaman
+                // aşımında kilitlerdi; devir yine yapılır, yalnız düşürecek kol yoktur.
+                let collapse = ct.collapses_parallel && branch.is_some();
+                let wft = if collapse {
+                    Wft::Collapse {
+                        collapse: WftTarget::Node {
+                            node: target.clone(),
+                        },
+                    }
+                } else {
+                    Wft::Node {
+                        node: target.clone(),
+                    }
                 };
                 let mut wfah_entries = vec![WfahEntry {
                     seq,
                     action: marker.clone(),
                     actor: system.clone(),
-                    input: Some(json!({"after": ct.after, "wft": target})),
+                    // `collapse` anahtarı YALNIZ collapse'ta yazılır — eski audit
+                    // kayıtlarının/golden fixture'ların şekli birebir korunur.
+                    input: Some(if collapse {
+                        json!({"after": ct.after, "wft": target, "collapse": true})
+                    } else {
+                        json!({"after": ct.after, "wft": target})
+                    }),
                     applied_at: now,
                 }];
                 seq += 1;

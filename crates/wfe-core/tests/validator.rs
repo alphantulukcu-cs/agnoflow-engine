@@ -485,6 +485,70 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
 
+// ---- 2026-08-03 (WOR-56/SLA-1): claim_timeout.collapses_parallel ----
+
+#[test]
+fn claim_timeout_collapse_without_wft_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
+        json!({"after": "PT2H", "collapses_parallel": true});
+    assert!(has_error(
+        &validate_value(v),
+        "claim_timeout_collapse_requires_wft"
+    ));
+}
+
+/// Paraleli sonlandırma hedefi de yalnız NODE olabilir: collapse paralel modu
+/// bitirir, AKIŞI bitirmez (bitirme SLA-3'ün işi).
+#[test]
+fn claim_timeout_collapse_terminal_target_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "terminal_rejected", "collapses_parallel": true});
+    assert!(has_error(&validate_value(v), "sla_terminal_target"));
+}
+
+/// Fork'u olan dokümanda node hedefli collapse temiz geçer (hata + uyarı yok).
+#[test]
+fn claim_timeout_collapse_with_node_target_is_valid_in_parallel_wfd() {
+    let mut v = parallel_fixture_value();
+    v["nodes"]["self__financeApprover"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "self__coordinator", "collapses_parallel": true});
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+    assert!(
+        report.warnings.is_empty(),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
+}
+
+/// 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da: dokümanda hiç fork
+/// yoksa hiçbir node kol içinde değildir → HATA (eskiden uyarıydı).
+#[test]
+fn claim_timeout_collapse_without_any_fork_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "self__branchManager", "collapses_parallel": true});
+    assert!(has_error(
+        &validate_value(v),
+        "claim_timeout_collapse_outside_parallel"
+    ));
+}
+
+/// Fork VAR ama node kolun DIŞINDA (join sonrası koordinatör) → HATA. Paralel akışa
+/// bağlı olmayan bir node'un süresi dolduğunda düşürülecek kardeş kol yoktur.
+#[test]
+fn claim_timeout_collapse_on_node_outside_branch_is_error() {
+    let mut v = parallel_fixture_value();
+    v["nodes"]["self__coordinator"]["claim_timeout"] =
+        json!({"after": "PT2H", "wft": "self__financeApprover", "collapses_parallel": true});
+    assert!(has_error(
+        &validate_value(v),
+        "claim_timeout_collapse_outside_parallel"
+    ));
+}
+
 // ---- 2026-07-28: SLA hedefleri terminal OLAMAZ (sla_terminal_target) ----
 
 #[test]
@@ -528,12 +592,92 @@ fn escalation_parallel_target_is_error() {
     assert!(has_error(&validate_value(v), "sla_target_not_node"));
 }
 
+// ---- 2026-08-03 (WOR-56/SLA-2): node hedefli collapse ARTIK GEÇERLİ ----
+
+/// Fork'u olan dokümanda SLA-2 `{collapse:{node}}` temiz geçer: "kimse süresinde
+/// bakmadıysa paraleli kapat, işi şu gruba götür" bir dallanma kararı değildir.
 #[test]
-fn escalation_collapse_target_is_error() {
+fn escalation_collapse_node_target_is_valid_in_parallel_wfd() {
+    let mut v = parallel_fixture_value();
+    v["nodes"]["self__financeApprover"]["escalation"] = json!([{
+        "after": "P1D",
+        "wft": { "collapse": { "node": "self__coordinator" } }
+    }]);
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+    assert!(
+        report.warnings.is_empty(),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
+}
+
+/// Collapse hedefi de terminal olamaz — collapse paraleli bitirir, AKIŞI bitirmez.
+#[test]
+fn escalation_collapse_terminal_target_is_error() {
+    let mut v = parallel_fixture_value();
+    v["nodes"]["self__financeApprover"]["escalation"] = json!([{
+        "after": "P1D",
+        "wft": { "collapse": { "terminal": "terminal_rejected" } }
+    }]);
+    assert!(has_error(&validate_value(v), "sla_terminal_target"));
+}
+
+/// 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da: dokümanda hiç fork
+/// yoksa HATA (eskiden uyarıydı).
+#[test]
+fn escalation_collapse_without_any_fork_is_error() {
     let mut v = fixture_value();
     v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
         json!({ "collapse": { "node": "self__branchManager" } });
-    assert!(has_error(&validate_value(v), "sla_target_not_node"));
+    assert!(has_error(
+        &validate_value(v),
+        "escalation_collapse_outside_parallel"
+    ));
+}
+
+/// Fork VAR ama kaynak node kolun DIŞINDA → HATA.
+#[test]
+fn escalation_collapse_on_node_outside_branch_is_error() {
+    let mut v = parallel_fixture_value();
+    v["nodes"]["self__coordinator"]["escalation"] = json!([{
+        "after": "P1D",
+        "wft": { "collapse": { "node": "self__financeApprover" } }
+    }]);
+    assert!(has_error(
+        &validate_value(v),
+        "escalation_collapse_outside_parallel"
+    ));
+}
+
+/// Kol GİRİŞİ olmayan ama kolun İÇİNDE kalan node da collapse edebilir: interior
+/// kümesi kol girişinden transition'larla BFS ile derinleşir (`check_parallel`'in
+/// branch subgraph yürüyüşüyle aynı). Fixture'ın kolları tek adımlık olduğu için
+/// finans kolu burada `requester`'a uzatılır (o da join'e çıkar → dead-end yok).
+#[test]
+fn escalation_collapse_on_deep_branch_node_is_valid() {
+    let mut v = parallel_fixture_value();
+    let txs = v["transitions"].as_array_mut().unwrap();
+    txs.push(json!({
+        "id": "t_fin_revise", "from": "self__financeApprover", "action": "reject",
+        "when": "$ctx.request.amount > 1000000",
+        "wft": { "node": "self__requester" }
+    }));
+    txs.push(json!({
+        "id": "t_requester_resubmit", "from": "self__requester", "action": "approve",
+        "wft": { "node": "self__resultCoordinator" }
+    }));
+    // Kolun DERİNİNDEKİ node (`self__requester`) collapse edebilir.
+    v["nodes"]["self__requester"]["escalation"] = json!([{
+        "after": "P1D",
+        "wft": { "collapse": { "node": "self__coordinator" } }
+    }]);
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "escalation_collapse_outside_parallel"),
+        "kol derinliğindeki node kol içi sayılmalı: {:#?}",
+        report.errors
+    );
 }
 
 #[test]

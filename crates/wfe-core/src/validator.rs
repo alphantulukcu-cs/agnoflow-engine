@@ -3,7 +3,8 @@
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
 use crate::types::wfd_v22::{
-    CallMode, CallRef, ParallelSpec, StartAs, Wfd, WfesEffects, Wft, WftCondition, WftTarget,
+    CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft, WftCondition,
+    WftTarget,
 };
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
@@ -1234,6 +1235,36 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
 // branches'ten biri olamaz; branch subgraph'ları (fork'tan join'e/terminale
 // kadar transition wft kenarları) birbirinden ayrık; subgraph içinde iç içe
 // (nested) Parallel yasak; her subgraph join'e veya bir terminal'e ulaşmalı.
+// WOR-72: join_mode: or (quorum) eklendi — eşik 1..N-1 olmalı, AND'de eşik verilemez.
+// Kol subgraph kuralları OR'da AYNEN geçerlidir: quorum dolmadan iptal edilmeyecek
+// kolların da bir çıkışı olmak zorundadır (yoksa quorum hiç dolmayabilir).
+
+/// WOR-73: `join_when` içindeki `$branches.<kol>` referanslarını çıkarır.
+///
+/// Neden ZEN AST'si değil: `zen_expression` ayrıştırılmış ağacı public API'de
+/// vermiyor (yalnız `validate_expression` + `evaluate_expression`). Sözdizimi
+/// yeterince dar: referans daima `$branches.` + identifier'dır (`$branches['x']`
+/// biçimi DESTEKLENMEZ ve zaten kullanılmasına gerek yoktur; node slug'ları
+/// identifier-uyumludur). Yanlış-pozitif olamaz: eşleşen her şey gerçekten bir
+/// kol referansıdır.
+fn branch_refs_in(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let needle = "$branches.";
+    let mut i = 0;
+    while let Some(pos) = expr[i..].find(needle) {
+        let start = i + pos + needle.len();
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end > start {
+            out.push(expr[start..end].to_string());
+        }
+        i = start.max(i + pos + 1);
+    }
+    out
+}
 
 fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
     // Parallel wft start kuralında kullanılamaz.
@@ -1305,6 +1336,93 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                         "join node '{join_node}' branches listesinde de var — join kollardan biri olamaz"
                     ),
                 );
+            }
+        }
+
+        // WOR-72: join_mode / join_threshold. Tek temsil kuralı: AND'in eşiği YOK,
+        // OR'un eşiği 1..N-1 aralığındadır. K == N matematiksel olarak AND'dir ve
+        // aynı davranışın ikinci bir yazımı olurdu → reddedilir (runtime AND yolunda
+        // kalan-aktif-kol sayımı, OR yolunda varış sayımı yapar; iki kod yolunun
+        // aynı anlama gelen iki girdiyle beslenmesi audit'i de ikiye böler).
+        // WOR-73: `join_when` yalnız `expr` ile verilebilir ve `expr` modunda
+        // ZORUNLUDUR; ifade parse edilebilmeli ve YALNIZ bu fork'un kollarına
+        // referans vermeli (yazım hatası sessizce `false` dönen bir alan olur ve
+        // join asla dolmaz → runtime'da WFD.JoinUnsatisfied ile patlar; statik
+        // olarak burada yakalanır).
+        if spec.join_mode != JoinMode::Expr && spec.join_when.is_some() {
+            report.error(
+                "parallel_join_when",
+                format!("{path}.parallel.join_when"),
+                "join_when yalnız join_mode: expr ile verilebilir".into(),
+            );
+        }
+        match spec.join_mode {
+            JoinMode::And => {
+                if spec.join_threshold.is_some() {
+                    report.error(
+                        "parallel_join_threshold",
+                        format!("{path}.parallel.join_threshold"),
+                        "join_threshold yalnız join_mode: or ile verilebilir (AND tüm kolları bekler)"
+                            .into(),
+                    );
+                }
+            }
+            JoinMode::Expr => {
+                if spec.join_threshold.is_some() {
+                    report.error(
+                        "parallel_join_threshold",
+                        format!("{path}.parallel.join_threshold"),
+                        "join_threshold yalnız join_mode: or ile verilebilir (expr koşulu sayıyı kendi ifade eder: len($arrived) >= k)"
+                            .into(),
+                    );
+                }
+                match spec.join_when.as_deref().map(str::trim) {
+                    None | Some("") => report.error(
+                        "parallel_join_when",
+                        format!("{path}.parallel.join_when"),
+                        "join_mode: expr için join_when ZEN koşulu zorunludur".into(),
+                    ),
+                    Some(expr) => {
+                        if let Err(e) = zen_expression::validate::validate_expression(expr) {
+                            report.error(
+                                "parallel_join_when",
+                                format!("{path}.parallel.join_when"),
+                                format!("join_when ZEN ifadesi parse edilemedi: {e}"),
+                            );
+                        }
+                        for referenced in branch_refs_in(expr) {
+                            if !spec.branches.iter().any(|b| b == &referenced) {
+                                report.error(
+                                    "parallel_join_when_unknown_branch",
+                                    format!("{path}.parallel.join_when"),
+                                    format!(
+                                        "join_when '$branches.{referenced}' referansı bu fork'un kolu değil — kol kimliği kolun GİRİŞ node'udur"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            JoinMode::Or => {
+                let n = spec.branches.len() as u32;
+                if let Some(k) = spec.join_threshold {
+                    if k == 0 {
+                        report.error(
+                            "parallel_join_threshold",
+                            format!("{path}.parallel.join_threshold"),
+                            "join_threshold en az 1 olmalı".into(),
+                        );
+                    } else if n >= 2 && k >= n {
+                        report.error(
+                            "parallel_join_threshold",
+                            format!("{path}.parallel.join_threshold"),
+                            format!(
+                                "join_threshold ({k}) kol sayısından ({n}) küçük olmalı — k = kol sayısı ise join_mode: and kullan"
+                            ),
+                        );
+                    }
+                }
             }
         }
     }

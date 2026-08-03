@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::PgPool;
 use uuid::Uuid;
-use wfe_core::types::wfd_v22::WftTarget;
+use wfe_core::types::wfd_v22::{JoinRule, WftTarget};
 use wfe_core::types::{
     actor::Actor,
     dynctx::DynCtx,
@@ -181,22 +181,86 @@ async fn lock_wfe_parallel(
     }
 }
 
-/// Paralel-mod kilidi (bkz. `lock_wfe_parallel`) + kilit ALTINDA kalan aktif kol
-/// sayısı — eşzamanlı varış commit'lerini serialize eder.
-async fn lock_and_count_active(
+/// WOR-72/WOR-73: kilit ALTINDA okunan kol tablosu — varış commit'lerinin
+/// doğrulama girdisi.
+struct JoinState {
+    /// Bu commit'ten ÖNCE `active` olan kol sayısı (acting kol dahil).
+    active: i64,
+    /// Bu commit'ten ÖNCE join'e varmış kolların KİMLİKLERİ (`entry_node`), sıralı.
+    arrived_entries: Vec<String>,
+}
+
+impl JoinState {
+    /// WOR-73: engine kararını hangi varış kümesi üzerinde verdiyse (`arrived_entries`,
+    /// acting kol dahil) kilit altındaki gerçek küme de o olmalıdır.
+    ///
+    /// Neden sayı DEĞİL küme: ZEN join koşulu ("finans VE hukuk") sayıyla ifade
+    /// edilemez, dolayısıyla adapter "kaç kol vardı" ile engine'in kararını
+    /// doğrulayamaz. Kümeyi doğrulamak üç modun HEPSİ için yeterlidir: küme aynıysa
+    /// engine'in (saf) kararı da aynıdır. Adapter ZEN çalıştırmaz — I/O katmanı
+    /// motorun mantığını ikinci kez yazmaz.
+    ///
+    /// `acting_entry`: bu commit'te varan kolun kimliği; DB kümesine eklenerek
+    /// karşılaştırılır (satır bu tx'te `arrived`'a alınıyor).
+    fn arrival_matches(&self, acting_entry: &str, expected: &[String]) -> bool {
+        let mut actual = self.arrived_entries.clone();
+        actual.push(acting_entry.to_string());
+        actual.sort();
+        actual.dedup();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        expected.dedup();
+        actual == expected
+    }
+}
+
+/// Paralel-mod kilidi (bkz. `lock_wfe_parallel`) + kilit ALTINDA kol durumları —
+/// eşzamanlı varış commit'lerini serialize eder.
+async fn lock_and_read_join_state(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     wfe_id: Uuid,
     orgtnt_id: Uuid,
-) -> Result<i64, EngineError> {
+) -> Result<JoinState, EngineError> {
     lock_wfe_parallel(tx, wfe_id, orgtnt_id).await?;
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM wf.wfe_branch WHERE wfe_id = $1 AND status = 'active'",
+    let rows = sqlx::query_as::<_, (String, Option<String>, String)>(
+        "SELECT status, entry_node, branch_node FROM wf.wfe_branch WHERE wfe_id = $1",
     )
     .bind(wfe_id)
-    .fetch_one(&mut **tx)
+    .fetch_all(&mut **tx)
     .await
     .map_err(db_err)?;
-    Ok(count)
+    let active = rows.iter().filter(|(st, _, _)| st == "active").count() as i64;
+    let mut arrived_entries: Vec<String> = rows
+        .iter()
+        .filter(|(st, _, _)| st == "arrived")
+        // WOR-73 öncesi satırlarda entry_node NULL olabilir → branch_node'a düşülür
+        // (migration backfill'iyle aynı kural).
+        .map(|(_, entry, node)| entry.clone().unwrap_or_else(|| node.clone()))
+        .collect();
+    arrived_entries.sort();
+    Ok(JoinState {
+        active,
+        arrived_entries,
+    })
+}
+
+/// WOR-73: bir kolun kimliği (`entry_node`), kilit altında okunur.
+async fn branch_entry_node(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    wfe_id: Uuid,
+    branch_node: &str,
+) -> Result<String, EngineError> {
+    let row = sqlx::query_as::<_, (Option<String>, String)>(
+        "SELECT entry_node, branch_node FROM wf.wfe_branch
+         WHERE wfe_id = $1 AND branch_node = $2",
+    )
+    .bind(wfe_id)
+    .bind(branch_node)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db_err)?
+    .ok_or(EngineError::Conflict(ConflictKind::BranchMoved))?;
+    Ok(row.0.unwrap_or(row.1))
 }
 
 #[async_trait]
@@ -248,6 +312,7 @@ impl WfeStore for WfeAdapter {
         let branches: Vec<BranchState> = branch_rows
             .into_iter()
             .map(|b| BranchState {
+                entry_node: b.entry_node.unwrap_or_else(|| b.branch_node.clone()),
                 branch_node: b.branch_node,
                 status: match b.status.as_str() {
                     "arrived" => BranchStatus::Arrived,
@@ -280,6 +345,14 @@ impl WfeStore for WfeAdapter {
             created_at: row.created_at,
             branches,
             join_target,
+            // WOR-72/WOR-73: iki kolon → tek çözülmüş kural. Negatif/0 eşik DB
+            // CHECK'iyle, "ikisi birden dolu" hâli `wfe_join_rule_single` ile
+            // engellenir; yine de eşik önce okunur (deterministik).
+            join_rule: match (row.join_threshold, row.join_when) {
+                (Some(k), _) => JoinRule::Quorum(k.max(1) as u32),
+                (None, Some(expr)) => JoinRule::Expr(expr),
+                (None, None) => JoinRule::All,
+            },
         })
     }
 
@@ -401,6 +474,7 @@ impl WfeStore for WfeAdapter {
                     "UPDATE wf.wfe
                      SET status = 'terminal', current_node = NULL, current_c_a = '[]'::jsonb,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
+                         join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )
@@ -420,6 +494,7 @@ impl WfeStore for WfeAdapter {
                     "UPDATE wf.wfe
                      SET status = 'error', current_node = NULL, current_c_a = '[]'::jsonb,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
+                         join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )
@@ -439,6 +514,7 @@ impl WfeStore for WfeAdapter {
                     "UPDATE wf.wfe
                      SET status = 'terminated', current_node = NULL, current_c_a = '[]'::jsonb,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
+                         join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )
@@ -451,24 +527,41 @@ impl WfeStore for WfeAdapter {
             }
             // WOR-31: paralel moda GİRİŞ — her kol için satır, current_node=NULL,
             // join_target persist. Fork tekil modda gerçekleştiği için CAS gerekmez.
-            CommitOutcome::ForkTo { branches, join } => {
+            CommitOutcome::ForkTo {
+                branches,
+                join,
+                join_rule,
+            } => {
                 let join_json = serde_json::to_value(join).map_err(db_err)?;
+                // WOR-72/WOR-73: çözülmüş kural fork anında persist edilir.
+                // İkisi de NULL = AND-join.
+                let (threshold, when) = match join_rule {
+                    JoinRule::All => (None, None),
+                    JoinRule::Quorum(k) => (Some(*k as i32), None),
+                    JoinRule::Expr(e) => (None, Some(e.clone())),
+                };
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET current_node = NULL, current_c_a = '[]'::jsonb, claimed_by = NULL,
-                         claimed_at = NULL, join_target = $1, updated_at = now()
+                         claimed_at = NULL, join_target = $1, join_threshold = $4,
+                         join_when = $5, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
                 )
                 .bind(&join_json)
                 .bind(commit.wfe_id)
                 .bind(commit.orgtnt_id)
+                .bind(threshold)
+                .bind(when)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;
                 for branch_node in branches {
+                    // WOR-73: entry_node = giriş node'u ve BİR DAHA DEĞİŞMEZ
+                    // (BranchMoveTo yalnız branch_node'u günceller) — kol kimliği.
                     sqlx::query(
-                        "INSERT INTO wf.wfe_branch (wfe_id, branch_node, status, entered_at)
-                         VALUES ($1, $2, 'active', now())",
+                        "INSERT INTO wf.wfe_branch
+                             (wfe_id, branch_node, entry_node, status, entered_at)
+                         VALUES ($1, $2, $2, 'active', now())",
                     )
                     .bind(commit.wfe_id)
                     .bind(branch_node)
@@ -500,30 +593,54 @@ impl WfeStore for WfeAdapter {
                     return Err(EngineError::Conflict(ConflictKind::BranchMoved));
                 }
             }
-            // WOR-31: kol join'e vardı, engine'in görüşüne göre ≥1 başka aktif kol
-            // kaldı. FOR UPDATE ile serialize et; kol CAS + kilit altında aktif kol
-            // sayımı ≥1 olmalı — 0 ise engine'in görüşü eskimiş (bu kol aslında
-            // sonuncu) → Conflict, executor reload edip JoinComplete emit eder.
-            CommitOutcome::BranchArrived { from_node } => {
-                let remaining =
-                    lock_and_count_active(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
+            // WOR-31: kol join'e vardı, engine'in görüşüne göre join HENÜZ dolmadı.
+            // FOR UPDATE ile serialize et; kol CAS + kilit altında aynı ölçüt
+            // (WOR-72: AND → kalan aktif kol, quorum → varış sayısı) yeniden
+            // hesaplanır. Doldu çıkarsa engine'in görüşü eskimiştir (bu kol aslında
+            // join'i tamamlıyor) → Conflict, executor reload edip JoinComplete emit eder.
+            CommitOutcome::BranchArrived {
+                from_node,
+                arrived_entries,
+            } => {
+                let join = lock_and_read_join_state(&mut tx, commit.wfe_id, commit.orgtnt_id)
+                    .await?;
+                let acting = branch_entry_node(&mut tx, commit.wfe_id, from_node).await?;
                 mark_branch_arrived(&mut tx, commit.wfe_id, from_node).await?;
-                // bu kolu düştükten sonra ≥1 aktif kalmalı
-                if remaining <= 1 {
+                if !join.arrival_matches(&acting, arrived_entries) {
                     return Err(EngineError::Conflict(ConflictKind::BranchArrival));
                 }
             }
-            // WOR-31: varan kol engine'in görüşüne göre SONUNCU — paralel mod biter.
-            // FOR UPDATE serialize + kol CAS; kilit altında bu kol düştükten sonra
-            // 0 aktif kalmalı (aksi halde başka aktif kol var → Conflict). Ardından
-            // `next` (join node MoveTo / join terminal) uygulanır + `_join` marker'ı.
-            CommitOutcome::JoinComplete { from_node, next } => {
-                let remaining =
-                    lock_and_count_active(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
+            // WOR-31: varan kol engine'in görüşüne göre join'i TAMAMLIYOR — paralel
+            // mod biter. FOR UPDATE serialize + kol CAS; kilit altında tamamlanma
+            // ölçütü doğrulanır (AND: bu kol düşünce 0 aktif kalmalı; WOR-72 quorum:
+            // varış sayısı eşiğe ulaşmalı) — tutmazsa Conflict. Ardından `next`
+            // (join node MoveTo / join terminal) uygulanır + `_join` marker'ı.
+            CommitOutcome::JoinComplete {
+                from_node,
+                quorum_collapse,
+                arrived_entries,
+                next,
+            } => {
+                let join = lock_and_read_join_state(&mut tx, commit.wfe_id, commit.orgtnt_id)
+                    .await?;
+                let acting = branch_entry_node(&mut tx, commit.wfe_id, from_node).await?;
                 mark_branch_arrived(&mut tx, commit.wfe_id, from_node).await?;
-                if remaining != 1 {
-                    // bu kol dışında hâlâ aktif kol var → henüz son değil
+                if !join.arrival_matches(&acting, arrived_entries) {
                     return Err(EngineError::Conflict(ConflictKind::BranchArrival));
+                }
+                // WOR-72: engine'in "eşik dolarken geride aktif kol kaldı" görüşü de
+                // kilit altında doğrulanır — uyuşmazsa marker'lar (kimin işi iptal
+                // edildi) gerçekle çelişirdi, bu yüzden yeniden koşulur.
+                let leftover_active = join.active - 1;
+                if *quorum_collapse != (leftover_active > 0) {
+                    return Err(EngineError::Conflict(ConflictKind::BranchArrival));
+                }
+                if *quorum_collapse {
+                    // Kalan kollar `cancelled` + claim'leri düşer (engine
+                    // `_branch_cancelled` marker'larını zaten stage etti). Satırlar
+                    // AND yolunun aksine SİLİNMEZ (aşağıya bak) — "hangi kol quorum
+                    // yüzünden düştü" portal tarafında görünür kalsın.
+                    cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 }
                 // `_join` sistem marker'ı (dokümante istisna: adapter ekler) —
                 // seq = son staged wfah seq + 1.
@@ -542,16 +659,21 @@ impl WfeStore for WfeAdapter {
                 insert_wfah_entries(&mut tx, commit.wfe_id, std::slice::from_ref(&join_entry))
                     .await?;
 
+                // WOR-31: AND-join'de kol satırları silinir (audit WFAH'ta durur).
+                // WOR-72: quorum join'de SİLİNMEZ — iptal edilen kolların satırı
+                // `cancelled` olarak kalır (collapse yolundaki davranış).
+                let drop_branch_rows = !*quorum_collapse;
                 match next.as_ref() {
                     CommitOutcome::MoveTo { node } => {
-                        // Join node'a UNASSIGNED giriş; paralel mod biter (kollar
-                        // audit için silinir, join_target temizlenir).
+                        // Join node'a UNASSIGNED giriş; paralel mod biter
+                        // (join_target + join_threshold temizlenir).
                         let c_a_json =
                             serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
                         sqlx::query(
                             "UPDATE wf.wfe
                              SET current_node = $1, current_c_a = $2, claimed_by = NULL,
-                                 claimed_at = NULL, join_target = NULL, updated_at = now()
+                                 claimed_at = NULL, join_target = NULL,
+                                 join_threshold = NULL, join_when = NULL, updated_at = now()
                              WHERE wfe_id = $3 AND orgtnt_id = $4",
                         )
                         .bind(node)
@@ -561,11 +683,13 @@ impl WfeStore for WfeAdapter {
                         .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
-                        sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
-                            .bind(commit.wfe_id)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(db_err)?;
+                        if drop_branch_rows {
+                            sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
+                                .bind(commit.wfe_id)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(db_err)?;
+                        }
                     }
                     CommitOutcome::Terminal { end_response } => {
                         // Join hedefi terminal → WFE burada başarıyla biter.
@@ -573,7 +697,8 @@ impl WfeStore for WfeAdapter {
                             "UPDATE wf.wfe
                              SET status = 'terminal', current_node = NULL,
                                  current_c_a = '[]'::jsonb, claimed_by = NULL, claimed_at = NULL,
-                                 join_target = NULL, end_response = $1, updated_at = now()
+                                 join_target = NULL, join_threshold = NULL, join_when = NULL,
+                                 end_response = $1, updated_at = now()
                              WHERE wfe_id = $2 AND orgtnt_id = $3",
                         )
                         .bind(end_response)
@@ -582,11 +707,13 @@ impl WfeStore for WfeAdapter {
                         .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
-                        sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
-                            .bind(commit.wfe_id)
-                            .execute(&mut *tx)
-                            .await
-                            .map_err(db_err)?;
+                        if drop_branch_rows {
+                            sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
+                                .bind(commit.wfe_id)
+                                .execute(&mut *tx)
+                                .await
+                                .map_err(db_err)?;
+                        }
                     }
                     other => {
                         return Err(EngineError::WfePort(format!(
@@ -619,7 +746,8 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET current_node = $1, current_c_a = $2, claimed_by = NULL,
-                         claimed_at = NULL, join_target = NULL, updated_at = now()
+                         claimed_at = NULL, join_target = NULL, join_threshold = NULL, join_when = NULL,
+                         updated_at = now()
                      WHERE wfe_id = $3 AND orgtnt_id = $4",
                 )
                 .bind(node)

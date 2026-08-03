@@ -221,7 +221,7 @@ yazardı; validator reddeder (`sla_effect_namespace`). `wfes_effects` verilmezse
 - Tanınmayan `wfd_version` = yükleme reddi. Root'ta bilinmeyen alan yasak.
 - Çalışan WFE'ler başladıkları WFD (id+version)'a sabitlenir; kural değişikliği yeni WFD versiyonu doğurur — node slug'ları bu sayede WFE ömrü boyunca kararlıdır. Versiyon-aşırı metrikler `label` üzerinden agregat edilmelidir.
 
-## 5b. Parallel Fork/Join Validation (WOR-31)
+## 5b. Parallel Fork/Join Validation (WOR-31, WOR-72, WOR-73)
 
 `wft`'in 4. formu: `{"parallel": {"branches": [...], "join": {node|terminal}}}` (bkz.
 decisions.md WOR-31 — eski `WftRule::Parallel`'in WOR-25'te kaldırılışını
@@ -230,6 +230,20 @@ yeniden tasarlayarak supersede eder; `join_when` YOK, join deklaratif bir hedef)
 
 - Parallel wft `start[].wft`'te YASAK.
 - `branches` ≥2 ve distinct; `join` kollardan biriyle aynı olamaz.
+- **WOR-72 `join_mode`:** `and` (varsayılan, WOR-31) tüm kolları bekler; `or`
+  K-of-N quorum'dur. `join_threshold` YALNIZ `or` ile verilebilir
+  (`parallel_join_threshold`), 1 ≤ K < kol sayısı olmalıdır ve verilmezse 1'dir
+  (ilk varan kazanır). K = kol sayısı AND'in ikinci yazımı olurdu → reddedilir.
+  Kol subgraph kuralları OR'da da AYNEN geçerlidir (quorum dolmadan iptal
+  edilmeyecek kolların da bir çıkışı olmalı).
+- **WOR-73 `join_mode: expr` + `join_when`:** join koşulu ZEN ifadesidir —
+  "(finans VE hukuk) YA DA GM" gibi SAYIYLA ifade edilemeyen kurallar için.
+  `join_when` yalnız `expr` ile verilebilir ve o modda ZORUNLUDUR
+  (`parallel_join_when`); ifade parse edilebilmeli ve `$branches.<x>` referansları
+  BU fork'un kolları olmalıdır (`parallel_join_when_unknown_branch` — yazım hatası
+  runtime'da sessizce `false` dönen bir alan olur ve join hiç dolmaz).
+  `join_threshold` `expr` ile birlikte verilemez (sayıyı ifade kendisi anlatır:
+  `len($arrived) >= k`).
 - Branch subgraph'ları (fork'tan join/terminal'e kadar transition `wft` kenarları
   izlenerek BFS) pairwise AYRIK olmalı; içlerinde nested Parallel YASAK; her biri
   join node'a veya bir terminal'e ulaşabilmeli.
@@ -238,7 +252,51 @@ yeniden tasarlayarak supersede eder; `join_when` YOK, join deklaratif bir hedef)
   `WFD.Unreachable` görünür).
 
 Runtime yürütme semantiği (branch token, AND-join, iptal/SLA davranışı) T2 işinde
-kodlanacak; bu commit yalnızca model + validator + spec'i getirir.
+kodlanmıştır.
+
+**OR-join runtime (WOR-72).** Fork anında mod + eşik TEK sayıya indirgenir
+(`ParallelSpec::quorum`) ve WFE satırına yazılır (`wf.wfe.join_threshold`;
+NULL = AND). Bir kol join hedefine vardığında tamamlanma ölçütü:
+
+| mod | tamamlandı | tamamlanmadı |
+|---|---|---|
+| AND (`NULL`) | başka aktif kol kalmadı → `JoinComplete` | `BranchArrived` |
+| quorum (`k`) | varış sayısı ≥ k → `JoinComplete` | `BranchArrived` |
+| expr (WOR-73) | `join_when` ZEN koşulu `true` → `JoinComplete` | `BranchArrived` |
+
+**Kol kimliği (WOR-73).** `wfe_branch.branch_node` kol içinde aksiyon alındıkça
+DEĞİŞİR (`BranchMoveTo`), dolayısıyla "hangi kol" sorusunun cevabı o değildir.
+Kimlik `wfe_branch.entry_node`'dur — fork'taki giriş node'u, bir daha değişmez.
+Join koşulu namespace'i bu kimlikle çalışır:
+
+| ifade | anlamı |
+|---|---|
+| `$branches.<entry_node>` | o kol join'e vardı mı (DEĞERLENDİRİLEN varış dahil) — hiç varmamış kol `false` |
+| `$arrived` | varmış kol kimliklerinin dizisi → `len($arrived) >= 2`, `'x' in $arrived` |
+
+`$ctx`/`$wfah`/`$actor`/`$action.input.*` da açıktır ("tutar 1M üstündeyse GM de
+onaylasın"). Join bağlamı DIŞINDA `$branches` boş obje, `$arrived` boş dizidir —
+ifade patlamaz (`$call` ile aynı gerekçe).
+
+**Tatmin edilemeyen join (WOR-73).** `and` ve `quorum` bitişi garanti eder; ZEN
+koşulu etmez. SON aktif kol da varıp ifade hâlâ `false` ise WFE paralel modda
+sessizce kilitlenirdi — bunun yerine engine-defined fail üretilir:
+`CommitOutcome::Failed`, `end_response = {reason: "WFD.JoinUnsatisfied", join_rule,
+arrived}`. Validator tatmin edilebilirliği KANITLAYAMAZ (genel olarak karar
+verilemez); yalnız bilinmeyen kol referansını yakalar.
+
+Quorum eşiği dolarken geride aktif kol kalırsa (`quorum_collapse`):
+kalan kollar `cancelled` olur, `_collapse` özeti + kol başına `_branch_cancelled`
+marker'ları yazılır (`kind`/`reason` = `join_quorum`, `target` = join node'u). Eşiğin
+ÜYESİ olan varmış kollar `superseded` İŞARETLENMEZ — onayları sayılmıştır. Kol
+satırları AND yolunda silinir, quorum yolunda `cancelled` olarak KALIR (hangi kolun
+neden düştüğü portalda görünsün). `_fork` marker'ı `join_threshold` taşır.
+Yarış (WOR-73 ile genelleşti): engine kararını hangi VARIŞ KÜMESİ üzerinde verdiyse
+onu outcome'a koyar (`arrived_entries`, acting kol dahil); adapter `FOR UPDATE`
+altında DB'deki kümeyle karşılaştırır (`JoinState::arrival_matches`), uyuşmazsa
+`Conflict(BranchArrival)` → executor reload + yeniden koşar. Sayı karşılaştırması
+YETMEZ: ZEN koşulu sayıyla ifade edilemez, ama küme aynıysa saf engine'in kararı da
+aynıdır — adapter ZEN ÇALIŞTIRMAZ (I/O katmanı motorun mantığını ikinci kez yazmaz).
 
 ## Symmetric start (v2.2)
 

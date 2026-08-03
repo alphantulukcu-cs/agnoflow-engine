@@ -21,13 +21,13 @@ use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{
-    ActionDef, AutoexecDef, CallMode, CandidateActor, EscalationStep, StartAs, Transition,
-    TriggerInvocation, Wfd, Wft, WftTarget,
+    ActionDef, AutoexecDef, CallMode, CandidateActor, EscalationStep, JoinRule, StartAs,
+    Transition, TriggerInvocation, Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
-use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv};
+use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv, JoinEnv};
 use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
 use crate::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallSite, CommitOutcome, ExecEnv, ExecFailure,
@@ -589,7 +589,11 @@ impl<'a> Engine<'a> {
         )
         .await?;
 
-        // §7.8 — wft, kol bağlamıyla (varış / kol hareketi / WFE-terminal ayrımı)
+        // §7.8 — wft, kol bağlamıyla (varış / kol hareketi / WFE-terminal ayrımı).
+        // WOR-73: kol kimlikleri (giriş node'ları) + bu varış dahil varış kümesi —
+        // join kuralının değerlendirileceği snapshot.
+        let all_entries = all_entry_nodes(wfes);
+        let arrived_entries = arrived_entries_with(wfes, branch_node);
         let (outcome, resolved_c_a, final_ctx, landed) = self
             .resolve_wft(
                 &transition.wft,
@@ -605,6 +609,9 @@ impl<'a> Engine<'a> {
                     join,
                     from_node: branch_node,
                     others_active: active.len() - 1,
+                    rule: &wfes.join_rule,
+                    all_entries: &all_entries,
+                    arrived_entries: &arrived_entries,
                 },
             )
             .await?;
@@ -1079,11 +1086,18 @@ impl<'a> Engine<'a> {
                 "escalation adımı wft içermeli: {node_key}[{step_idx}]"
             ))
         })?;
+        let all_entries = all_entry_nodes(wfes);
+        let arrived_entries = branch
+            .map(|b| arrived_entries_with(wfes, b))
+            .unwrap_or_default();
         let mode = match (branch, wfes.join_target.as_ref()) {
             (Some(b), Some(join)) => WftMode::Branch {
                 join,
                 from_node: b,
                 others_active: active_others(wfes, b),
+                rule: &wfes.join_rule,
+                all_entries: &all_entries,
+                arrived_entries: &arrived_entries,
             },
             (Some(_), None) => {
                 return Err(EngineError::InvalidWfd(
@@ -1314,11 +1328,18 @@ impl<'a> Engine<'a> {
                     applied_at: now,
                 }];
                 seq += 1;
+                let all_entries = all_entry_nodes(wfes);
+                let arrived_entries = branch
+                    .map(|b| arrived_entries_with(wfes, b))
+                    .unwrap_or_default();
                 let mode = match (branch, wfes.join_target.as_ref()) {
                     (Some(b), Some(join)) => WftMode::Branch {
                         join,
                         from_node: b,
                         others_active: active_others(wfes, b),
+                        rule: &wfes.join_rule,
+                        all_entries: &all_entries,
+                        arrived_entries: &arrived_entries,
                     },
                     (Some(_), None) => {
                         return Err(EngineError::InvalidWfd(
@@ -1891,6 +1912,9 @@ impl<'a> Engine<'a> {
                             CommitOutcome::ForkTo {
                                 branches: parallel.branches.clone(),
                                 join: parallel.join.clone(),
+                                // WOR-72/WOR-73: mod + eşik/ifade burada TEK çözülmüş
+                                // kurala indirgenir; runtime bundan sonra yalnız onu taşır.
+                                join_rule: parallel.join_rule(),
                             },
                             resolved,
                             staged,
@@ -1952,6 +1976,9 @@ impl<'a> Engine<'a> {
             join,
             from_node,
             others_active,
+            rule,
+            all_entries,
+            arrived_entries,
         } = mode
         {
             let arrived = match (&target, join) {
@@ -1960,19 +1987,72 @@ impl<'a> Engine<'a> {
                 _ => false,
             };
             if arrived {
-                if others_active > 0 {
-                    // Engine'in görüşü: başka aktif kol var — yarış varsa adapter
+                // WOR-72/WOR-73: "join doldu mu" ölçütü kurala göre AYRI:
+                // - All (AND): kardeş aktif kol kalmamalı (WOR-31 davranışı).
+                // - Quorum(k): bu varışla birlikte varış sayısı eşiğe ulaşmalı.
+                // - Expr(e): ZEN koşulu bu varış dahil kol kümesiyle `true` olmalı
+                //   ("(finans VE hukuk) YA DA gm" gibi sayıyla ifade edilemeyen kural).
+                //
+                // `quorum_collapse` = "geride İPTAL EDİLECEK aktif kol var".
+                // Join'i dolduran varışta zaten varmış kardeşler kuralın ÜYESİdir —
+                // onaylarının geçersizleşmesi diye bir şey yok, `superseded`
+                // işaretlenmezler (bkz. `stage_parallel_markers`).
+                let completes = match rule {
+                    JoinRule::All => others_active == 0,
+                    JoinRule::Quorum(k) => arrived_entries.len() as u32 >= *k,
+                    JoinRule::Expr(expr) => {
+                        let mut env = EvalEnv::new(&staged)
+                            .with_wfah(wfah)
+                            .with_node(Some(from_node))
+                            .with_actor(actor)
+                            .with_wfe_id(wfe_id)
+                            .with_join(JoinEnv {
+                                all: all_entries.to_vec(),
+                                arrived: arrived_entries.to_vec(),
+                            });
+                        if let Some(input) = action_input {
+                            env = env.with_action_input(input);
+                        }
+                        if let Some(c) = call {
+                            env = env.with_call(c.clone());
+                        }
+                        evaluate_bool(expr, &env)?
+                    }
+                };
+                let quorum_collapse = completes && others_active > 0;
+                if !completes {
+                    // WOR-73: ZEN koşulu SON kol da varınca hâlâ `false` ise join asla
+                    // dolmayacaktır — WFE paralel modda sessizce kilitlenirdi. Bu bir
+                    // TASARIM hatasıdır (validator tatmin edilebilirliği kanıtlayamaz),
+                    // engine-defined fail ile yüzeye çıkarılır: WFE `error` olur ve
+                    // `end_response.reason` neyin olduğunu söyler.
+                    if others_active == 0 {
+                        return Ok((
+                            CommitOutcome::Failed {
+                                end_response: json!({
+                                    "reason": "WFD.JoinUnsatisfied",
+                                    "join_rule": rule.kind(),
+                                    "arrived": arrived_entries,
+                                }),
+                            },
+                            vec![],
+                            staged,
+                            None,
+                        ));
+                    }
+                    // Engine'in görüşü: join henüz dolmadı — yarış varsa adapter
                     // doğrulaması + executor retry düzeltir (T3).
                     return Ok((
                         CommitOutcome::BranchArrived {
                             from_node: from_node.to_string(),
+                            arrived_entries: arrived_entries.to_vec(),
                         },
                         vec![],
                         staged,
                         None,
                     ));
                 }
-                // Son varış: paralel mod biter, join hedefine promotion.
+                // Join doldu: paralel mod biter, join hedefine promotion.
                 return match join {
                     WftTarget::Node { node } => {
                         let resolved = self
@@ -1981,6 +2061,8 @@ impl<'a> Engine<'a> {
                         Ok((
                             CommitOutcome::JoinComplete {
                                 from_node: from_node.to_string(),
+                                quorum_collapse,
+                                arrived_entries: arrived_entries.to_vec(),
                                 next: Box::new(CommitOutcome::MoveTo { node: node.clone() }),
                             },
                             resolved,
@@ -2001,6 +2083,8 @@ impl<'a> Engine<'a> {
                         Ok((
                             CommitOutcome::JoinComplete {
                                 from_node: from_node.to_string(),
+                                quorum_collapse,
+                                arrived_entries: arrived_entries.to_vec(),
                                 next: Box::new(CommitOutcome::Terminal { end_response }),
                             },
                             vec![],
@@ -2199,6 +2283,14 @@ enum WftMode<'p> {
         join: &'p WftTarget,
         from_node: &'p str,
         others_active: usize,
+        /// WOR-72/WOR-73: çözülmüş join kuralı (`Wfes::join_rule`).
+        rule: &'p JoinRule,
+        /// WOR-73: fork'un TÜM kollarının giriş node'ları — `$branches` namespace'i
+        /// hiç varmamış kollar için de `false` taşıyabilsin diye gerekir.
+        all_entries: &'p [String],
+        /// WOR-73: bu varış DAHİL, join'e varmış kolların giriş node'ları (sıralı).
+        /// Hem quorum sayımı hem ZEN koşulu hem adapter doğrulaması bunu kullanır.
+        arrived_entries: &'p [String],
     },
 }
 
@@ -2217,12 +2309,46 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
         .count()
 }
 
+/// WOR-73: fork'un TÜM kollarının giriş node'ları (kol kimlikleri, `branches`
+/// sırasında). `$branches` namespace'i hiç varmamış kollar için de alan taşısın diye.
+fn all_entry_nodes(wfes: &Wfes) -> Vec<String> {
+    wfes.branches
+        .iter()
+        .map(|b| b.entry_or_current().to_string())
+        .collect()
+}
+
+/// WOR-73: join'e varmış kol kimlikleri + `acting` kolun kendisi (varış ANINDA
+/// değerlendirildiği için karar kümesine dahildir). Sıralı döner: küme
+/// karşılaştırması (adapter doğrulaması) sıraya duyarsız olsun.
+fn arrived_entries_with(wfes: &Wfes, acting_branch: &str) -> Vec<String> {
+    let mut out: Vec<String> = wfes
+        .branches
+        .iter()
+        .filter(|b| b.status == BranchStatus::Arrived)
+        .map(|b| b.entry_or_current().to_string())
+        .collect();
+    if let Some(acting) = wfes
+        .branches
+        .iter()
+        .find(|b| b.status == BranchStatus::Active && b.branch_node == acting_branch)
+    {
+        out.push(acting.entry_or_current().to_string());
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// WOR-31 sistem marker'ları — ENGINE tarafından staged edilir; tek istisna
 /// `_join`: o, son-varış doğrulamasıyla aynı transaction'da ADAPTER tarafından
 /// eklenir (dokümante edilmiş istisna).
-/// - `ForkTo` → `_fork` {branches, join}
+/// - `ForkTo` → `_fork` {branches, join, join_threshold} (WOR-72: null = AND)
 /// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node, approved_by,
 ///   approved_at, claimed_at} (WOR-68: claim başlangıcı; hold = approved_at − claimed_at)
+/// - WOR-72: quorum (OR) join eşiği dolup geride aktif kol kalırsa `JoinComplete`
+///   de aşağıdaki collapse yoluna girer (`kind`/`reason` = `join_quorum`); eşiğin
+///   ÜYESİ olan varmış kardeşler `superseded` işaretlenMEZ (onayları sayıldı).
 /// - paralel modda Terminal/Failed/Terminated/CollapseTo → önce `_collapse` özeti,
 ///   sonra acting kol DIŞINDAKİ her AKTİF kol için `_branch_cancelled`
 ///   {node, reason, claimed_by, claimed_at, trigger_*}, her ARRIVED kol için
@@ -2269,10 +2395,30 @@ fn stage_parallel_markers(
         *seq += 1;
     };
     match outcome {
-        CommitOutcome::ForkTo { branches, join } => {
-            push("_fork", json!({"branches": branches, "join": join}));
+        CommitOutcome::ForkTo {
+            branches,
+            join,
+            join_rule,
+        } => {
+            // WOR-72/WOR-73: audit'te join kuralının kaydı ŞART — "neden 3 kolun
+            // 2'siyle devam etti" sorusu yalnız buradan cevaplanır.
+            let (threshold, when) = match join_rule {
+                JoinRule::All => (Value::Null, Value::Null),
+                JoinRule::Quorum(k) => (json!(k), Value::Null),
+                JoinRule::Expr(e) => (Value::Null, json!(e)),
+            };
+            push(
+                "_fork",
+                json!({
+                    "branches": branches,
+                    "join": join,
+                    "join_mode": join_rule.kind(),
+                    "join_threshold": threshold,
+                    "join_when": when,
+                }),
+            );
         }
-        CommitOutcome::BranchArrived { from_node }
+        CommitOutcome::BranchArrived { from_node, .. }
         | CommitOutcome::JoinComplete { from_node, .. } => {
             // WOR-60: varış anındaki onaylayan + zaman burada kalıcılaşır. Kol satırı
             // varışta claim'ini kaybettiği (`mark_branch_arrived`) için sonradan
@@ -2317,8 +2463,33 @@ fn stage_parallel_markers(
         }
         // Node hedefli collapse (WOR-56). Terminal hedefli collapse yukarıya düşer.
         CommitOutcome::CollapseTo { node, .. } => ("collapsed", "collapse_to", json!(node)),
+        // WOR-72: quorum (OR) join eşiği doldu ve geride aktif kol kaldı — iptal
+        // semantiği collapse ile AYNI, nedeni farklı: kimse "reddetmedi", join
+        // yeterli onayı topladı. `target` join node'u (terminal hedefte null).
+        CommitOutcome::JoinComplete {
+            quorum_collapse: true,
+            next,
+            ..
+        } => (
+            "join_quorum",
+            "join_quorum",
+            match next.as_ref() {
+                CommitOutcome::MoveTo { node } => json!(node),
+                _ => Value::Null,
+            },
+        ),
         _ => return,
     };
+    // WOR-72: quorum join'de ZATEN VARMIŞ kardeşler eşiğin ÜYESİdir (onayları
+    // sayıldı) — `superseded` işaretlenmezler. Diğer tüm yollarda (collapse /
+    // terminal / failed / terminated) varmış kolun onayı geçersizleşir (WOR-60).
+    let supersede_arrived = !matches!(
+        outcome,
+        CommitOutcome::JoinComplete {
+            quorum_collapse: true,
+            ..
+        }
+    );
 
     // Etkilenen kolları ÖNCE sınıflandır: WOR-61 özet marker'ı listeleri taşıdığı
     // için detay marker'larından ÖNCE (manşet olarak) yazılmak zorunda.
@@ -2334,7 +2505,9 @@ fn stage_parallel_markers(
             // WOR-60: onaylanmış ama join'lenmemiş kol: onayı geçersizleşti.
             // Kol satırının statüsü `arrived` KALIR (bkz. decisions.md) —
             // izlenebilirlik marker ile sağlanır, şema değişmez.
-            BranchStatus::Arrived => superseded.push(b),
+            // WOR-72: quorum join'de bu kollar eşiğin üyesidir → atlanır.
+            BranchStatus::Arrived if supersede_arrived => superseded.push(b),
+            BranchStatus::Arrived => {}
             BranchStatus::Cancelled => {}
         }
     }

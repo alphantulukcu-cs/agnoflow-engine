@@ -673,6 +673,133 @@ fn parallel_join_equal_to_branch_is_error() {
     assert!(has_error(&validate_value(v), "parallel_join"));
 }
 
+// ---- WOR-72: join_mode / join_threshold ----------------------------------------
+
+#[test]
+fn quorum_or_join_is_valid() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["transitions"][0]["wft"]["parallel"]["join_threshold"] = json!(2);
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "2-of-3 quorum geçerli olmalı: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn quorum_or_join_without_threshold_is_valid() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("or");
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "eşiksiz OR = 1-of-N, geçerli: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn join_threshold_without_or_mode_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_threshold"] = json!(2);
+    assert!(has_error(
+        &validate_value(v),
+        "parallel_join_threshold"
+    ));
+}
+
+/// K = kol sayısı matematiksel olarak AND'dir; aynı davranışın ikinci yazımı
+/// olmasın diye reddedilir (tek temsil kuralı).
+#[test]
+fn join_threshold_equal_to_branch_count_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["transitions"][0]["wft"]["parallel"]["join_threshold"] = json!(3);
+    assert!(has_error(&validate_value(v), "parallel_join_threshold"));
+}
+
+#[test]
+fn join_threshold_zero_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["transitions"][0]["wft"]["parallel"]["join_threshold"] = json!(0);
+    assert!(has_error(&validate_value(v), "parallel_join_threshold"));
+}
+
+// ---- WOR-73: join_mode: expr + join_when -------------------------------------
+
+const JOIN_EXPR: &str =
+    "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover";
+
+#[test]
+fn expr_join_with_valid_when_is_valid() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["transitions"][0]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "geçerli ZEN join koşulu kabul edilmeli: {:?}",
+        report.errors
+    );
+}
+
+#[test]
+fn expr_join_without_when_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("expr");
+    assert!(has_error(&validate_value(v), "parallel_join_when"));
+}
+
+#[test]
+fn join_when_without_expr_mode_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
+    assert!(has_error(&validate_value(v), "parallel_join_when"));
+}
+
+#[test]
+fn expr_join_with_threshold_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["transitions"][0]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
+    v["transitions"][0]["wft"]["parallel"]["join_threshold"] = json!(2);
+    assert!(has_error(&validate_value(v), "parallel_join_threshold"));
+}
+
+#[test]
+fn expr_join_with_unparsable_when_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["transitions"][0]["wft"]["parallel"]["join_when"] = json!("$branches.a and and");
+    assert!(has_error(&validate_value(v), "parallel_join_when"));
+}
+
+/// Yazım hatası SESSİZ kalmamalı: `$branches.yanlisKol` runtime'da `false` döner ve
+/// join hiç dolmaz — statik olarak yakalanır.
+#[test]
+fn expr_join_referencing_unknown_branch_is_error() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["transitions"][0]["wft"]["parallel"]["join_when"] =
+        json!("$branches.self__financeApprover or $branches.self__yokBoyleKol");
+    assert!(has_error(
+        &validate_value(v),
+        "parallel_join_when_unknown_branch"
+    ));
+}
+
+/// `len($arrived) >= 2` de geçerli bir ifadedir (kol referansı içermez).
+#[test]
+fn expr_join_with_arrived_count_is_valid() {
+    let mut v = parallel_fixture_value();
+    v["transitions"][0]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["transitions"][0]["wft"]["parallel"]["join_when"] = json!("len($arrived) >= 2");
+    assert!(validate_value(v).errors.is_empty());
+}
+
 #[test]
 fn parallel_unknown_branch_node_is_error() {
     // branch/join hedeflerinin var olması generic cross_ref (wft_targets) ile denetlenir.

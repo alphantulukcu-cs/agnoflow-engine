@@ -9,7 +9,7 @@ use wfe_core::types::{
     actor::Actor,
     dynctx::DynCtx,
     wfah::{Wfah, WfahEntry},
-    wfd_v22::WftTarget,
+    wfd_v22::{JoinRule, WftTarget},
     wfe::WfeStatus,
 };
 use wfe_core::v22::ports::{
@@ -30,9 +30,18 @@ pub struct SimState {
     /// (fork öncesi üretilmiş) sim_state blob'ları bu alan olmadan da parse edilir.
     #[serde(default)]
     pub branches: Vec<BranchState>,
-    /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod.
+    /// WOR-31 T4: fork'ta persist edilen join hedefi; `Some` = paralel mod.
     #[serde(default)]
     pub join_target: Option<WftTarget>,
+    /// WOR-72: fork'ta persist edilen quorum eşiği; `None` = AND-join (tüm kollar),
+    /// `Some(k)` = k varış yeterli. `#[serde(default)]` — WOR-72 öncesi üretilmiş
+    /// sim_state blob'ları bu alan olmadan parse edilir (AND olarak okunur).
+    #[serde(default)]
+    pub join_threshold: Option<u32>,
+    /// WOR-73: fork'ta persist edilen ZEN join koşulu (`join_mode: expr`); `None` =
+    /// eşik/AND kuralı. Eşikle birlikte DOLU OLMAZ (bkz. `join_rule`).
+    #[serde(default)]
+    pub join_when: Option<String>,
     /// WFC: bu adımda yapılacak iş akışı çağrıları.
     ///
     /// Simülasyonda GERÇEK bir WFE yaratılmaz — çağrılan akışı koşturmak simülasyonun
@@ -95,6 +104,8 @@ impl SimState {
             end_response,
             branches: vec![],
             join_target: None,
+            join_threshold: None,
+            join_when: None,
             pending_calls: new.staged_calls.iter().map(SimCall::from_staged).collect(),
         }
     }
@@ -143,6 +154,13 @@ impl SimState {
             created_at,
             branches,
             join_target: self.join_target.clone(),
+            // WOR-72/WOR-73: iki alan → tek çözülmüş kural (adapter'daki okuma ile
+            // aynı sıra: eşik önce).
+            join_rule: match (self.join_threshold, self.join_when.clone()) {
+                (Some(k), _) => JoinRule::Quorum(k.max(1)),
+                (None, Some(expr)) => JoinRule::Expr(expr),
+                (None, None) => JoinRule::All,
+            },
         }
     }
 
@@ -188,13 +206,26 @@ impl SimState {
     /// sözleşmesi: "JoinComplete verify trivially true", Conflict imkansız).
     fn apply_branch_outcome(&mut self, outcome: &CommitOutcome) {
         match outcome {
-            CommitOutcome::ForkTo { branches, join } => {
+            CommitOutcome::ForkTo {
+                branches,
+                join,
+                join_rule,
+            } => {
                 self.join_target = Some(join.clone());
+                let (threshold, when) = match join_rule {
+                    JoinRule::All => (None, None),
+                    JoinRule::Quorum(k) => (Some(*k), None),
+                    JoinRule::Expr(e) => (None, Some(e.clone())),
+                };
+                self.join_threshold = threshold;
+                self.join_when = when;
                 let now = chrono::Utc::now();
                 self.branches = branches
                     .iter()
                     .map(|n| BranchState {
                         branch_node: n.clone(),
+                        // WOR-73: kol kimliği = giriş node'u, bir daha değişmez.
+                        entry_node: n.clone(),
                         status: BranchStatus::Active,
                         claimed_by: None,
                         claimed_at: None,
@@ -210,7 +241,7 @@ impl SimState {
                     b.entered_at = chrono::Utc::now();
                 }
             }
-            CommitOutcome::BranchArrived { from_node } => {
+            CommitOutcome::BranchArrived { from_node, .. } => {
                 if let Some(b) = self.active_branch_mut(from_node) {
                     b.status = BranchStatus::Arrived;
                     b.claimed_by = None;
@@ -236,9 +267,13 @@ impl SimState {
                     input: None,
                     applied_at: chrono::Utc::now(),
                 });
-                // Son varış — paralel mod biter; kollar (DB'nin aksine, audit
-                // amacıyla) sim'de basitçe temizlenir.
+                // Join doldu — paralel mod biter; kollar (DB'nin aksine, audit
+                // amacıyla) sim'de basitçe temizlenir. WOR-72: quorum modunda
+                // geride kalan aktif kollar iptal edilmiş sayılır (marker'lar
+                // engine'de staged edildi) — sim'de ayrı işaretleme gerekmez.
                 self.join_target = None;
+                self.join_threshold = None;
+                self.join_when = None;
                 self.branches.clear();
             }
             CommitOutcome::Terminal { .. }
@@ -248,6 +283,8 @@ impl SimState {
                 // sayılır (`_branch_cancelled` marker'ları engine tarafından
                 // zaten wfah_entries'e staged edildi); sim'de satırlar tutulmaz.
                 self.join_target = None;
+                self.join_threshold = None;
+                self.join_when = None;
                 self.branches.clear();
             }
             // WOR-56: node hedefli collapse — paralel mod biter (kardeşler iptal,
@@ -255,6 +292,8 @@ impl SimState {
             // outcome_parts'ta set edilir); kol satırları sim'de temizlenir.
             CommitOutcome::CollapseTo { .. } => {
                 self.join_target = None;
+                self.join_threshold = None;
+                self.join_when = None;
                 self.branches.clear();
             }
             CommitOutcome::MoveTo { .. } => {}

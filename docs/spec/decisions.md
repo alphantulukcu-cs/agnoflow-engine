@@ -1032,3 +1032,107 @@ WFD'yi `(orgtnt_id, name, integer version)` ile saklar; `CallDef.wfd_id` ise dok
 gerekir — aksi halde her upload'da tenant'ın tüm WFD JSON'larını okumak gerekirdi. Bu
 yüzden DB-destekli `WfdProvider` Faz 2'ye (migration fazı) bırakıldı; Faz 1'de resolver
 trait'i ve tüm kurallar hazır, sahte katalogla test edilmiş durumdadır.
+
+## WOR-72 (2026-07-31) — OR-join: `join_mode` + K-of-N quorum
+
+**Karar.** `wft.parallel` iki alan kazandı: `join_mode: "and" | "or"` (varsayılan
+`and`) ve yalnız OR ile geçerli `join_threshold: K` (varsayılan 1). WOR-31'in
+AND-join'i tek seçenek olmaktan çıktı; "üç departmandan İKİSİ onaylarsa yeter"
+gibi kurallar tasarımcı tarafından ifade edilebiliyor.
+
+**Neden collapse ile modellemedik.** WOR-56 `collapse` zaten "kardeşleri düşür,
+hedefe git" yapıyor; her kolun join aksiyonunu `collapse: <join hedefi>`'ne
+derleyerek motor DEĞİŞMEDEN OR-join taklit edilebilirdi. Reddedildi çünkü:
+(a) audit'te `_join` yerine `_collapse` görünür, "join doldu" ile "biri akışı
+kesti" ayrımı kaybolur; (b) `parallel.join` ölü alana dönüşür — model kendi
+davranışını anlatmaz; (c) K-of-N quorum collapse ile İFADE EDİLEMEZ (collapse
+sayaç tutmaz, ilk collapse otoriterdir); (d) editör OR modunu geri okurken
+heuristiğe mahkûm kalırdı ("tüm kollar aynı hedefe collapse ⇒ OR").
+
+**Runtime TEK sayı taşır.** Mod + eşik ikilisi fork anında
+`ParallelSpec::quorum()` ile `Option<u32>`'a indirgenir (`None` = AND) ve
+`wf.wfe.join_threshold` kolonuna yazılır. İki alanın runtime'da ayrı ayrı
+yaşaması "mod or ama eşik yok" gibi tutarsız durumları mümkün kılardı. Eşik
+WFD'den her seferinde okunmaz: aynı join hedefine giden iki ayrı fork mümkündür,
+yani "hangi fork'un içindeyiz" bilgisi WFD'den tek başına çıkmaz.
+
+**K = kol sayısı REDDEDİLİR** (`parallel_join_threshold`). Matematiksel olarak
+AND'dir; iki yazım aynı davranışa gitse audit ve iki ayrı kod yolu (AND: kalan
+aktif kol sayımı, quorum: varış sayımı) bölünürdü. Tek temsil kuralı.
+
+**Quorum üyesi `superseded` DEĞİLDİR.** Eşiği dolduran varışta zaten varmış
+kardeşler (K'ya ancak K−1 varış + bu varış ile ulaşılır) quorum'un üyesidir;
+onayları geçersizleşmemiştir. WOR-60'ın `_branch_superseded` marker'ı yalnız
+collapse/terminal/failed yollarında üretilir. Eşik dışında kalan AKTİF kollar ise
+`cancelled` + `_branch_cancelled` alır; `_collapse` özetinin `kind`/`reason` alanı
+`join_quorum`'dur — "kimse reddetmedi, join yeterli onayı topladı".
+
+**Kol satırları quorum yolunda SİLİNMEZ.** AND-join'de `wfe_branch` satırları
+join anında silinir (audit WFAH'ta). Quorum'da iptal edilen kolların satırı
+`cancelled` olarak kalır: "hangi kol yetişemedi" portal tarafında görünür.
+
+**Yarış.** Tamamlanma kararı adapter'da `FOR UPDATE` altında TEKRAR hesaplanır
+(`JoinState::completes`) — engine'in (commit öncesi snapshot'a dayanan) görüşüyle
+uyuşmazsa `Conflict(BranchArrival)`, executor reload edip yeniden koşar. WOR-31'in
+"engine saf, adapter doğrular" sözleşmesi aynen korunur.
+
+**Geriye uyumluluk.** `join_mode` verilmeyen WFD'ler AND'dir ve serileştirmede alan
+YAZILMAZ (golden fixture birebir aynı). `wf.wfe.join_threshold` NULL = AND, veri
+dönüşümü gerekmez (migration: `20260731000001_join_quorum.sql`).
+
+## WOR-73 (2026-07-31) — ZEN join koşulu (`join_mode: expr`) + kol kimliği
+
+**Karar.** `wft.parallel` üçüncü bir join modu kazandı: `join_mode: "expr"` +
+`join_when: "<zen>"`. Gerekçe: K-of-N eşiği "üç departmandan ikisi" der ama
+**"(finans VE hukuk) YA DA genel müdür"** diyemez — bu kural bir sayı değildir.
+Eşik (`or`) KALDI: yaygın hâli ifade yazmadan kurulabilsin, portal "2/3" gösterirken
+Zen parse etmek zorunda kalmasın.
+
+**Kol kimliği `entry_node`'dur, `branch_node` DEĞİL.** `wfe_branch.branch_node` kol
+içinde her aksiyonla değişir (`BranchMoveTo`); "finans kolu vardı mı" sorusunu o
+kolonla cevaplamak, kol iki adım ilerlediğinde yanlış cevap verirdi. Fork'ta yazılan
+ve BİR DAHA DEĞİŞMEYEN `entry_node` eklendi — join koşulu namespace'i
+(`$branches.<entry_node>`), `_branch_*` marker'ları ve varış-kümesi doğrulaması bu
+kimlikle çalışır.
+
+**Namespace ikilidir, çünkü iki soru var.** `$branches.<kol>` "şu kol vardı mı"
+(bool; hiç varmamış kol `false` döner — eksik alanın null olmasına güvenmek
+gerekmesin), `$arrived` ise "kaç/hangi kol vardı" (dizi → `len($arrived) >= 2`,
+`'x' in $arrived`). İkisi aynı durumun iki görünümüdür, çelişemezler. Join bağlamı
+dışında boş obje/boş dizi olarak bağlanır (`$call` deseni): ifade patlamaz.
+
+**Tatmin edilemeyen join SESSİZ KALMAZ.** `and`/`quorum` bitişi garanti eder; ZEN
+koşulu etmez ("hukuk kolunu isteyen bir kural, hukuk kolu iptal edildiyse"). Son
+aktif kol da varıp ifade hâlâ `false` ise WFE paralel modda kilitlenirdi. Bunun
+yerine `Failed` + `end_response.reason = "WFD.JoinUnsatisfied"` (+ `join_rule`,
+`arrived`). Validator'dan statik garanti İSTEMİYORUZ: ifade tatmin edilebilirliği
+genel olarak karar verilemez; validator yalnız parse hatası ve bilinmeyen kol
+referansını yakalar (`parallel_join_when_unknown_branch` — yazım hatası runtime'da
+her zaman `false` dönen bir alan olurdu).
+
+**Yarış doğrulaması SAYIDAN KÜMEYE geçti.** WOR-72'de adapter "kaç kol vardı"
+sayarak engine'in kararını doğruluyordu; ZEN koşulu sayıyla ifade edilemediği için
+bu yetersiz kaldı. Artık engine kararını hangi VARIŞ KÜMESİ üzerinde verdiyse onu
+outcome'a koyar (`arrived_entries`), adapter kilit altında DB'deki kümeyle
+karşılaştırır. Küme aynıysa saf engine'in kararı da aynıdır — **adapter ZEN
+çalıştırmaz**; I/O katmanı motorun mantığını ikinci kez yazmaz. Bu değişiklik üç
+modun HEPSİ için tek doğrulama yolu bıraktı (AND/quorum'un ayrı sayımları gitti).
+
+**Runtime tek çözülmüş kural taşır.** `Wfes::join_rule: JoinRule` =
+`All | Quorum(k) | Expr(zen)`; DB'de iki nullable kolon (`join_threshold`,
+`join_when`) + `CHECK (biri NULL)`. "Mod expr ama ifade yok" gibi ara durumlar
+runtime'a hiç ulaşmaz (`ParallelSpec::join_rule()` tek noktada indirger).
+
+**Editör modeli AĞAÇ tutar, metin DEĞİL.** `ParallelStep.joinWhen` bir
+`JoinCond` ağacıdır (`branch` yaprakları STEP ID taşır, `group` VE/VEYA,
+`raw` elle yazılmış ZEN). Neden: panelde kol seçimli VE/VEYA ağacı kayıpsız
+düzenlenebilsin ve c_a yeniden adlandırıldığında (node key değişir) koşul bozulmasın.
+Metne çeviri yalnız export'ta (`compileJoinCond`), geri okuma import'ta
+(`parseJoinCond`); dar gramerin (yalnız kol referansları + and/or + parantez) dışına
+çıkan her ifade `raw` yaprağı olarak KORUNUR — panelde "Gelişmiş" sekmesinde görünür,
+sessizce düşmez. İç gruplar daima parantezlenir, kök grup parantezlenmez → ağaç →
+metin → ağaç turu birebir aynı metni üretir.
+
+**Geriye uyumluluk.** `join_mode` verilmeyen WFD'ler hâlâ AND'dir; `join_when`/
+`entry_node` yeni kolonlardır (migration `20260731000002_join_expr.sql`,
+`entry_node` backfill = `branch_node`). Golden fixture değişmedi.

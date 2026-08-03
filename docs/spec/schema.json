@@ -1015,12 +1015,31 @@
             },
             "join": {
               "$ref": "#/$defs/wftDefault",
-              "description": "AND-join hedefi: aktif kollarin SONUNCUSU vardiginda WFE'nin gidecegi node veya terminal. Kollardan biriyle ayni olamaz (custom validator)."
+              "description": "Join hedefi: join dolduğunda WFE'nin gidecegi node veya terminal. Kollardan biriyle ayni olamaz (custom validator). Join'in NE ZAMAN dolduğunu join_mode belirler."
+            },
+            "join_mode": {
+              "enum": [
+                "and",
+                "or",
+                "expr"
+              ],
+              "default": "and",
+              "description": "WOR-72: birlestirme mantigi. `and` (varsayilan, WOR-31) TUM kollarin varmasini bekler. `or` K-of-N quorum'dur: join_threshold kadar kol varir varmaz paralel mod OTORITER biter, kalan aktif kollar cancelled olur (collapse ile ayni iptal semantigi; quorum uyesi varmis kollar superseded DEGILDIR)."
+            },
+            "join_threshold": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "WOR-72: OR modunda yeterli varis sayisi (K-of-N). YALNIZ join_mode: or ile verilebilir (validator parallel_join_threshold); verilmezse 1 = ilk varan kazanir. K, kol sayisindan KUCUK olmalidir — K = kol sayisi matematiksel olarak AND'dir, o zaman join_mode: and kullanilir."
+            },
+            "join_when": {
+              "type": "string",
+              "minLength": 1,
+              "description": "WOR-73: ZEN join kosulu. YALNIZ join_mode: expr ile verilebilir ve o modda ZORUNLUDUR (validator parallel_join_when). Her kol varisinda degerlendirilir; true olunca join dolar ve kalan aktif kollar cancelled olur. Namespace: $branches.<kolGirisNodeKey> (bool — o kol vardi mi, degerlendirilen varis dahil), $arrived (varmis kol key'lerinin dizisi → len($arrived) >= 2); $ctx/$wfah/$actor da acik. Referans verilen her kol BU forkun kolu olmali (parallel_join_when_unknown_branch)."
             }
           }
         }
       },
-      "description": "WOR-31: fork/join. Start kuralinda (`start[].wft`) YASAKTIR; nested fork (bir branch subgraph'i icinde ikinci bir Parallel) YASAKTIR (custom validator)."
+      "description": "WOR-31: fork/join. Start kuralinda (`start[].wft`) YASAKTIR; nested fork (bir branch subgraph'i icinde ikinci bir Parallel) YASAKTIR (custom validator). WOR-72/WOR-73: join_mode ile AND / OR (quorum) / expr (ZEN kosulu) secilebilir."
     },
     "wft": {
       "oneOf": [

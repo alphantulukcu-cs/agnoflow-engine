@@ -303,3 +303,177 @@ async fn sim_possible_actions_unions_active_branches() {
         "approve üç kolda da mümkün olmalı, her biri kendi node'uyla"
     );
 }
+
+// ---- WOR-72: OR-join (quorum) sim karşılığı ------------------------------------
+
+/// Fixture'ın fork'unu quorum join'e çevirir (3 kol, `join_mode: or`, eşik k).
+fn quorum_wfd(k: u32) -> Wfd {
+    let mut v: serde_json::Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["wft"].get("parallel").is_some() {
+            t["wft"]["parallel"]["join_mode"] = json!("or");
+            t["wft"]["parallel"]["join_threshold"] = json!(k);
+        }
+    }
+    Wfd::from_value(v).unwrap()
+}
+
+/// Editör simülasyonunda 2-of-3 quorum: ilk varış paralel modu sürdürür, ikinci
+/// varış join'i tamamlar (3. kolu beklemeden). `fork_join.rs`
+/// `quorum_2_of_3_completes_on_second_arrival`'ın sim karşılığı.
+#[tokio::test]
+async fn sim_quorum_2_of_3_completes_on_second_arrival() {
+    let wfd = quorum_wfd(2);
+    let eng = engine();
+    let mut sim_state = fork_setup(&eng, &wfd).await;
+    assert_eq!(sim_state.join_threshold, Some(2), "eşik sim state'e yazıldı");
+
+    let a = actor("financeApprover");
+    let wfes = sim_state.to_wfes(Some(a.user_id));
+    let commit = eng
+        .apply(
+            &wfd,
+            &wfes,
+            &a,
+            "approve",
+            &json!({}),
+            Some("self__financeApprover"),
+        )
+        .await
+        .unwrap();
+    sim_state.apply_commit(&commit);
+    assert!(sim_state.join_target.is_some(), "eşik dolmadı, hâlâ paralel");
+
+    let b = actor("legalApprover");
+    let wfes = sim_state.to_wfes(Some(b.user_id));
+    let commit = eng
+        .apply(
+            &wfd,
+            &wfes,
+            &b,
+            "approve",
+            &json!({}),
+            Some("self__legalApprover"),
+        )
+        .await
+        .unwrap();
+    sim_state.apply_commit(&commit);
+
+    assert_eq!(
+        sim_state.current_node.as_deref(),
+        Some("self__resultCoordinator"),
+        "2 onay yeterli — 3. kol beklenmedi"
+    );
+    assert!(sim_state.join_target.is_none(), "paralel mod bitti");
+    assert!(sim_state.join_threshold.is_none(), "eşik temizlendi");
+    assert!(sim_state.wfah.iter().any(|e| e.action == "_join"));
+    // Eşik dışında kalan tek kol için iptal marker'ı; quorum üyesi superseded değil.
+    assert_eq!(
+        sim_state
+            .wfah
+            .iter()
+            .filter(|e| e.action == "_branch_cancelled")
+            .count(),
+        1,
+        "yalnız hrApprover kolu iptal"
+    );
+    assert!(!sim_state
+        .wfah
+        .iter()
+        .any(|e| e.action == "_branch_superseded"));
+    let collapse = sim_state
+        .wfah
+        .iter()
+        .find(|e| e.action == "_collapse")
+        .and_then(|e| e.input.clone())
+        .expect("_collapse özeti");
+    assert_eq!(collapse["kind"], json!("join_quorum"));
+}
+
+// ---- WOR-73: ZEN join koşulu (sim) --------------------------------------------
+
+/// Fixture'ın fork'unu ZEN join koşuluna çevirir: "(finans VE hukuk) YA DA İK".
+fn join_expr_wfd() -> Wfd {
+    let mut v: serde_json::Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["wft"].get("parallel").is_some() {
+            t["wft"]["parallel"]["join_mode"] = json!("expr");
+            t["wft"]["parallel"]["join_when"] = json!(
+                "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover"
+            );
+        }
+    }
+    Wfd::from_value(v).unwrap()
+}
+
+/// Editör simülasyonunda ZEN join: İK tek başına onaylayınca akış devam eder
+/// (finans tek başına yetmez — `and` tarafı eksik kalır).
+#[tokio::test]
+async fn sim_join_expr_or_side_completes_alone() {
+    let wfd = join_expr_wfd();
+    let eng = engine();
+    let mut sim_state = fork_setup(&eng, &wfd).await;
+    assert!(sim_state.join_when.is_some(), "ZEN kuralı sim state'e yazıldı");
+
+    let hr = actor("hrApprover");
+    let wfes = sim_state.to_wfes(Some(hr.user_id));
+    let commit = eng
+        .apply(
+            &wfd,
+            &wfes,
+            &hr,
+            "approve",
+            &json!({}),
+            Some("self__hrApprover"),
+        )
+        .await
+        .unwrap();
+    sim_state.apply_commit(&commit);
+
+    assert_eq!(
+        sim_state.current_node.as_deref(),
+        Some("self__resultCoordinator"),
+        "İK tek başına yeter (or tarafı)"
+    );
+    assert!(sim_state.join_target.is_none());
+    assert!(sim_state.join_when.is_none(), "kural temizlendi");
+    assert_eq!(
+        sim_state
+            .wfah
+            .iter()
+            .filter(|e| e.action == "_branch_cancelled")
+            .count(),
+        2,
+        "finans + hukuk kolları iptal"
+    );
+}
+
+/// Finans tek başına yetmez: paralel mod sürer, sonra hukuk tamamlar.
+#[tokio::test]
+async fn sim_join_expr_and_side_needs_both() {
+    let wfd = join_expr_wfd();
+    let eng = engine();
+    let mut sim_state = fork_setup(&eng, &wfd).await;
+
+    for (role, node, still_parallel) in [
+        ("financeApprover", "self__financeApprover", true),
+        ("legalApprover", "self__legalApprover", false),
+    ] {
+        let a = actor(role);
+        let wfes = sim_state.to_wfes(Some(a.user_id));
+        let commit = eng
+            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node))
+            .await
+            .unwrap();
+        sim_state.apply_commit(&commit);
+        assert_eq!(
+            sim_state.join_target.is_some(),
+            still_parallel,
+            "{node} sonrası paralel mod beklentisi"
+        );
+    }
+    assert_eq!(
+        sim_state.current_node.as_deref(),
+        Some("self__resultCoordinator")
+    );
+}

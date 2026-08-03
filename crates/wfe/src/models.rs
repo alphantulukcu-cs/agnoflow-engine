@@ -18,9 +18,15 @@ pub struct WfeRow {
     pub deadline: Option<DateTime<Utc>>,
     /// SLA-1: en son claim anı; claimed_by temizlenince NULL'lanır (node değişimi dahil).
     pub claimed_at: Option<DateTime<Utc>>,
-    /// WOR-31: fork'ta persist edilen AND-join hedefi ({node}/{terminal} untagged
+    /// WOR-31: fork'ta persist edilen join hedefi ({node}/{terminal} untagged
     /// JSON); NOT NULL = paralel mod (bu durumda current_node NULL'dır).
     pub join_target: Option<serde_json::Value>,
+    /// WOR-72: fork'ta persist edilen quorum eşiği; NULL = AND-join (tüm kollar
+    /// beklenir), k = k varış yeterli (kalan kollar eşik dolunca cancelled).
+    pub join_threshold: Option<i32>,
+    /// WOR-73: fork'ta persist edilen ZEN join koşulu (`join_mode: expr`); NULL =
+    /// eşik/AND kuralı. `join_threshold` ile ikisi birden dolu OLAMAZ (DB CHECK).
+    pub join_when: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -29,6 +35,9 @@ pub struct WfeRow {
 #[derive(Debug, FromRow)]
 pub struct BranchRow {
     pub branch_node: String,
+    /// WOR-73: kolun değişmez kimliği (fork'taki giriş node'u). WOR-73 öncesi
+    /// satırlarda NULL olabilir → çağıran `branch_node`'a düşer.
+    pub entry_node: Option<String>,
     pub status: String,
     pub claimed_by: Option<serde_json::Value>,
     pub claimed_at: Option<DateTime<Utc>>,

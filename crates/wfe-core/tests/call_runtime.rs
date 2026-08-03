@@ -18,7 +18,7 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::{CallMode, StartAs, Wfd};
+use wfe_core::types::wfd_v22::{CallMode, JoinRule, StartAs, Wfd};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::Engine;
 use wfe_core::v22::ports::{AutoexecRunner, CallSite, CommitOutcome, ExecEnv, ExecFailure, Wfes};
@@ -105,6 +105,7 @@ fn wfes_owned(node: &str, ctx: Value, owner: Option<Uuid>) -> Wfes {
         created_at,
         branches: vec![],
         join_target: None,
+        join_rule: JoinRule::All,
     }
 }
 

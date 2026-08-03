@@ -22,7 +22,7 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
-use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, Wfd};
+use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, JoinRule, Wfd};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::ports::{
     AutoexecRunner, CommitOutcome, ExecEnv, ExecFailure, NewWfe, TransitionCommit, WfdStore,
@@ -140,6 +140,7 @@ impl WfeStore for MemStore {
             created_at: chrono::Utc::now(),
             branches: vec![],
             join_target: None,
+            join_rule: JoinRule::All,
         };
         self.wfes.lock().unwrap().insert(new.wfe_id, wfes);
         Ok(())

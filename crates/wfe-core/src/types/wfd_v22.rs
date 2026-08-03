@@ -527,8 +527,9 @@ pub enum Wft {
         default: Option<WftTarget>,
     },
     /// WOR-31: fork/join. `branches` paralel kollara giriş node'larıdır (≥2,
-    /// distinct — validator zorunlu kılar); `join` tüm kollar (AND-join)
-    /// bittiğinde WFE'nin gideceği hedeftir (node veya terminal).
+    /// distinct — validator zorunlu kılar); `join` kollar bittiğinde WFE'nin
+    /// gideceği hedeftir (node veya terminal). WOR-72: birleştirme mantığı
+    /// `join_mode` ile seçilir (AND = tüm kollar, OR = K-of-N quorum).
     Parallel {
         parallel: ParallelSpec,
     },
@@ -549,6 +550,94 @@ pub enum Wft {
 pub struct ParallelSpec {
     pub branches: Vec<String>,
     pub join: WftTarget,
+    /// WOR-72: birleştirme mantığı. Verilmezse `and` (WOR-31 davranışı) —
+    /// serileştirmede de atlanır, eski dosyalar birebir aynı kalır.
+    #[serde(default, skip_serializing_if = "JoinMode::is_and")]
+    pub join_mode: JoinMode,
+    /// WOR-72: OR modunda yeterli varış sayısı (K-of-N). Yalnız `join_mode: or`
+    /// ile birlikte verilebilir (validator zorunlu kılar); verilmezse 1 = saf OR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_threshold: Option<u32>,
+    /// WOR-73: `join_mode: expr` için ZEN join koşulu. Yalnız `expr` ile birlikte
+    /// verilebilir ve `expr` modunda ZORUNLUDUR (validator). Her kol varışında
+    /// değerlendirilir; `true` olunca join dolar.
+    ///
+    /// Namespace (bkz. `EvalEnv::with_join`): `$branches.<kolGirişNode'u>` (bool —
+    /// o kol join'e vardı mı; DEĞERLENDİRİLEN varış dahil), `$arrived` (varmış kol
+    /// giriş node'larının dizisi → `len($arrived) >= 2`). Mevcut namespace'ler
+    /// (`$ctx`, `$wfah`, `$actor`, …) de açıktır — "tutar 1M üstündeyse GM de
+    /// onaylasın" gibi kurallar yazılabilir.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_when: Option<String>,
+}
+
+/// WOR-72: join birleştirme mantığı.
+///
+/// - `And` (varsayılan, WOR-31): TÜM kollar join hedefine varmalı; son varan kol
+///   paralel modu kapatır.
+/// - `Or`: **K-of-N quorum**. `join_threshold` kadar kol varır varmaz paralel mod
+///   OTORİTER biçimde kapanır — kalan aktif kollar `cancelled`, daha önce varmış
+///   fazla kollar `superseded` (collapse ile aynı iptal semantiği, bkz.
+///   `stage_parallel_markers`). Eşik verilmezse 1 (ilk varan kazanır).
+/// - `Expr` (WOR-73): join koşulu `join_when` ZEN ifadesidir — "(finans VE hukuk)
+///   YA DA genel müdür" gibi sayıyla anlatılamayan kurallar için. İfade `true`
+///   olunca `Or` ile aynı iptal semantiği uygulanır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JoinMode {
+    #[default]
+    And,
+    Or,
+    Expr,
+}
+
+impl JoinMode {
+    /// `skip_serializing_if` — varsayılan mod wire'a yazılmaz.
+    pub fn is_and(&self) -> bool {
+        matches!(self, JoinMode::And)
+    }
+}
+
+/// WOR-72/WOR-73: **çözülmüş** join kuralı — mod + eşik/ifade üçlüsü tek değere
+/// indirgenmiş hâli. Runtime'ın taşıdığı TEK temsil budur (`Wfes::join_rule`,
+/// `wf.wfe.join_threshold` + `wf.wfe.join_when`): "mod expr ama ifade yok" gibi
+/// tutarsız ara durumlar runtime'a hiç ulaşmaz.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum JoinRule {
+    /// AND-join (WOR-31): iptal edilmemiş tüm kollar varmalı.
+    #[default]
+    All,
+    /// K-of-N quorum (WOR-72).
+    Quorum(u32),
+    /// ZEN join koşulu (WOR-73).
+    Expr(String),
+}
+
+impl JoinRule {
+    /// Audit/`_fork` marker'ı ve API görünümü için kısa etiket.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            JoinRule::All => "and",
+            JoinRule::Quorum(_) => "or",
+            JoinRule::Expr(_) => "expr",
+        }
+    }
+}
+
+impl ParallelSpec {
+    /// Mod + eşik/ifade → tek çözülmüş kural. `join_mode: expr` olup `join_when`
+    /// verilmemişse (validator bunu reddeder) güvenli tarafa, AND'e düşer —
+    /// runtime "koşulsuz expr" ile hiç karşılaşmaz.
+    pub fn join_rule(&self) -> JoinRule {
+        match self.join_mode {
+            JoinMode::And => JoinRule::All,
+            JoinMode::Or => JoinRule::Quorum(self.join_threshold.unwrap_or(1).max(1)),
+            JoinMode::Expr => match self.join_when.as_deref().map(str::trim) {
+                Some(expr) if !expr.is_empty() => JoinRule::Expr(expr.to_string()),
+                _ => JoinRule::All,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -757,5 +846,74 @@ mod wft_roundtrip_tests {
             "parallel": {"branches": ["a"], "join": {"node": "x"}}
         }));
         assert!(res.is_ok());
+    }
+
+    /// WOR-72: `join_mode` verilmemişse AND (WOR-31 davranışı) ve serileştirmede
+    /// ALAN HİÇ YAZILMAZ — eski dosyalar/golden fixture'lar birebir aynı kalır.
+    #[test]
+    fn join_mode_defaults_to_and_and_is_omitted_when_serialized() {
+        let wft: Wft = serde_json::from_value(serde_json::json!({
+            "parallel": {"branches": ["a", "b"], "join": {"node": "x"}}
+        }))
+        .unwrap();
+        match &wft {
+            Wft::Parallel { parallel } => {
+                assert_eq!(parallel.join_mode, JoinMode::And);
+                assert_eq!(parallel.join_rule(), JoinRule::All);
+            }
+            other => panic!("expected Wft::Parallel, got {other:?}"),
+        }
+        let json = serde_json::to_value(&wft).unwrap();
+        let spec = json.get("parallel").unwrap();
+        assert!(spec.get("join_mode").is_none());
+        assert!(spec.get("join_threshold").is_none());
+    }
+
+    /// WOR-72: `or` eşiksiz = saf OR (1-of-N).
+    #[test]
+    fn join_mode_or_without_threshold_is_one_of_n() {
+        let wft: Wft = serde_json::from_value(serde_json::json!({
+            "parallel": {"branches": ["a", "b"], "join": {"node": "x"}, "join_mode": "or"}
+        }))
+        .unwrap();
+        match &wft {
+            Wft::Parallel { parallel } => {
+                assert_eq!(parallel.join_mode, JoinMode::Or);
+                assert_eq!(parallel.join_rule(), JoinRule::Quorum(1));
+            }
+            other => panic!("expected Wft::Parallel, got {other:?}"),
+        }
+        // OR modu wire'a AÇIKÇA yazılır (varsayılan olmadığı için atlanamaz).
+        let json = serde_json::to_value(&wft).unwrap();
+        assert_eq!(json["parallel"]["join_mode"], serde_json::json!("or"));
+    }
+
+    /// WOR-72: K-of-N quorum roundtrip.
+    #[test]
+    fn join_mode_or_with_threshold_roundtrips() {
+        let wft = roundtrip(serde_json::json!({
+            "parallel": {
+                "branches": ["a", "b", "c"],
+                "join": {"node": "x"},
+                "join_mode": "or",
+                "join_threshold": 2,
+            }
+        }));
+        match wft {
+            Wft::Parallel { parallel } => {
+                assert_eq!(parallel.join_rule(), JoinRule::Quorum(2));
+                assert_eq!(parallel.join_threshold, Some(2));
+            }
+            other => panic!("expected Wft::Parallel, got {other:?}"),
+        }
+    }
+
+    /// WOR-72: bilinmeyen mod adı reddedilir (yazım hatası sessizce AND'e düşmez).
+    #[test]
+    fn join_mode_rejects_unknown_value() {
+        let res: Result<Wft, _> = serde_json::from_value(serde_json::json!({
+            "parallel": {"branches": ["a", "b"], "join": {"node": "x"}, "join_mode": "xor"}
+        }));
+        assert!(res.is_err());
     }
 }

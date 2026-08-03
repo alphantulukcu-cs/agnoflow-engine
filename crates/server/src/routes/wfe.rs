@@ -342,6 +342,9 @@ struct WfeListItem {
 /// `status` metni enum'a eşlenir (aktif dışı zaten sorguda süzülür).
 fn branch_list_row_to_state(r: wf_wfe::models::BranchListRow) -> BranchState {
     BranchState {
+        // WOR-73: liste sorgusu kol kimliğini çekmiyor (havuz görünümü kimliği
+        // kullanmaz) — boş bırakılır, `entry_or_current()` branch_node'a düşer.
+        entry_node: String::new(),
         branch_node: r.branch_node,
         status: match r.status.as_str() {
             "arrived" => BranchStatus::Arrived,

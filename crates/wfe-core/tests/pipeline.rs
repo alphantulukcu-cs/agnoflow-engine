@@ -16,8 +16,7 @@ use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
     AutoexecDef, AutoexecType, COrgu, CandidateActor, ClaimTimeout, EscalationStep, Wfd,
-    WfesEffects, Wft, WftTarget,
-};
+    WfesEffects, Wft, WftTarget, JoinRule,};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
@@ -166,6 +165,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         created_at,
         branches: vec![],
         join_target: None,
+        join_rule: JoinRule::All,
     }
 }
 
@@ -1798,6 +1798,7 @@ fn actor_with_role(role: &str) -> Actor {
 fn branch(node: &str, status: BranchStatus, claimed_by: Option<Uuid>) -> BranchState {
     let now = Utc::now();
     BranchState {
+        entry_node: node.into(),
         branch_node: node.into(),
         status,
         claimed_by,
@@ -1831,6 +1832,8 @@ fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfe
         created_at,
         branches,
         join_target: Some(join),
+        // WOR-72: bu yardımcı AND-join kurar; quorum/expr testleri kendi kuralını verir.
+        join_rule: JoinRule::All,
     }
 }
 
@@ -1866,7 +1869,7 @@ async fn start_review_forks_into_three_branches() {
         .await
         .unwrap();
 
-    let CommitOutcome::ForkTo { branches, join } = &commit.outcome else {
+    let CommitOutcome::ForkTo { branches, join, .. } = &commit.outcome else {
         panic!("ForkTo bekleniyordu: {:?}", commit.outcome);
     };
     assert_eq!(
@@ -1964,7 +1967,7 @@ async fn branch_approve_arrives_without_occupying_join() {
         .unwrap();
 
     assert!(
-        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node } if from_node == "self__financeApprover"),
+        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node, .. } if from_node == "self__financeApprover"),
         "{:?}",
         commit.outcome
     );
@@ -2123,7 +2126,7 @@ async fn last_branch_arrival_completes_join_to_node() {
         .await
         .unwrap();
 
-    let CommitOutcome::JoinComplete { from_node, next } = &commit.outcome else {
+    let CommitOutcome::JoinComplete { from_node, next, .. } = &commit.outcome else {
         panic!("JoinComplete bekleniyordu: {:?}", commit.outcome);
     };
     assert_eq!(from_node, "self__hrApprover");
@@ -2178,7 +2181,7 @@ async fn last_branch_arrival_completes_join_to_terminal() {
         .await
         .unwrap();
 
-    let CommitOutcome::JoinComplete { from_node, next } = &commit.outcome else {
+    let CommitOutcome::JoinComplete { from_node, next, .. } = &commit.outcome else {
         panic!("JoinComplete bekleniyordu: {:?}", commit.outcome);
     };
     assert_eq!(from_node, "self__hrApprover");
@@ -2944,7 +2947,7 @@ async fn branch_escalation_fires_from_branch_entered_at() {
         .await
         .unwrap();
     assert!(
-        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node } if from_node == "self__financeApprover"),
+        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node, .. } if from_node == "self__financeApprover"),
         "{:?}",
         commit.outcome
     );
@@ -3298,4 +3301,171 @@ async fn optional_input_sent_as_value_is_written() {
         .await
         .expect("aksiyon uygulanmalı");
     assert_eq!(commit.new_dynctx["internal_notes"], json!("müdür notu"));
+}
+
+// ---- WOR-73: ZEN join koşulu (join_mode: expr) --------------------------------
+
+/// Kural: "(finans VE hukuk) YA DA İK" — sayıyla ifade EDİLEMEZ (2-of-3 değil:
+/// finans+İK ikilisi yetmez, finans+hukuk yeter, tek başına İK yeter).
+const JOIN_EXPR: &str =
+    "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover";
+
+fn expr_wfes(branches: Vec<BranchState>) -> Wfes {
+    let mut w = parallel_wfes(branches, join_node(), parallel_ctx());
+    w.join_rule = JoinRule::Expr(JOIN_EXPR.into());
+    w
+}
+
+async fn apply_approve(wfes: &Wfes, actor: &Actor, node: &str) -> CommitOutcome {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    engine
+        .apply(&paralel(), wfes, actor, "approve", &json!({}), Some(node))
+        .await
+        .expect("aksiyon uygulanmalı")
+        .outcome
+}
+
+/// İfade henüz `false` (yalnız finans vardı) → ara varış.
+#[tokio::test]
+async fn expr_join_incomplete_arrival_is_branch_arrived() {
+    let fin = actor_with_role("financeApprover");
+    let wfes = expr_wfes(vec![
+        branch(
+            "self__financeApprover",
+            BranchStatus::Active,
+            Some(fin.user_id),
+        ),
+        branch("self__legalApprover", BranchStatus::Active, None),
+        branch("self__hrApprover", BranchStatus::Active, None),
+    ]);
+    let outcome = apply_approve(&wfes, &fin, "self__financeApprover").await;
+    match outcome {
+        CommitOutcome::BranchArrived {
+            from_node,
+            arrived_entries,
+        } => {
+            assert_eq!(from_node, "self__financeApprover");
+            // Karar bu küme üzerinde verildi — adapter kilit altında bunu doğrular.
+            assert_eq!(arrived_entries, vec!["self__financeApprover".to_string()]);
+        }
+        other => panic!("BranchArrived beklendi: {other:?}"),
+    }
+}
+
+/// finans ZATEN varmış, hukuk varıyor → ifade `true`, geride İK kolu kaldığı için
+/// quorum_collapse (kalan kol iptal).
+#[tokio::test]
+async fn expr_join_completes_when_and_side_satisfied() {
+    let legal = actor_with_role("legalApprover");
+    let wfes = expr_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Arrived, None),
+        branch(
+            "self__legalApprover",
+            BranchStatus::Active,
+            Some(legal.user_id),
+        ),
+        branch("self__hrApprover", BranchStatus::Active, None),
+    ]);
+    let outcome = apply_approve(&wfes, &legal, "self__legalApprover").await;
+    match outcome {
+        CommitOutcome::JoinComplete {
+            quorum_collapse,
+            arrived_entries,
+            next,
+            ..
+        } => {
+            assert!(quorum_collapse, "geride İK kolu kaldı → iptal edilecek");
+            assert_eq!(
+                arrived_entries,
+                vec![
+                    "self__financeApprover".to_string(),
+                    "self__legalApprover".to_string()
+                ]
+            );
+            assert!(matches!(*next, CommitOutcome::MoveTo { ref node } if node == "self__resultCoordinator"));
+        }
+        other => panic!("JoinComplete beklendi: {other:?}"),
+    }
+}
+
+/// İK tek başına yeter (`or` tarafı) — iki kardeş kol hâlâ aktifken join dolar.
+/// Aynı senaryo K-of-N ile ifade EDİLEMEZ: eşik 1 olsaydı finans tek başına da
+/// yeterdi, eşik 2 olsaydı İK tek başına yetmezdi.
+#[tokio::test]
+async fn expr_join_or_side_completes_alone() {
+    let hr = actor_with_role("hrApprover");
+    let wfes = expr_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Active, None),
+        branch("self__legalApprover", BranchStatus::Active, None),
+        branch("self__hrApprover", BranchStatus::Active, Some(hr.user_id)),
+    ]);
+    let outcome = apply_approve(&wfes, &hr, "self__hrApprover").await;
+    match outcome {
+        CommitOutcome::JoinComplete {
+            quorum_collapse,
+            arrived_entries,
+            ..
+        } => {
+            assert!(quorum_collapse);
+            assert_eq!(arrived_entries, vec!["self__hrApprover".to_string()]);
+        }
+        other => panic!("JoinComplete beklendi: {other:?}"),
+    }
+}
+
+/// Finans + İK varmış, SON kol (hukuk) da varıyor ama ifade... `or $branches.hr`
+/// yüzünden zaten `true` olur. Tatmin edilemezliği görmek için yalnız `and`
+/// tarafını isteyen bir kural kurup İK'yı hiç varmamış gösteriyoruz.
+#[tokio::test]
+async fn expr_join_unsatisfiable_at_last_arrival_fails_loudly() {
+    let fin = actor_with_role("financeApprover");
+    let mut wfes = expr_wfes(vec![
+        branch(
+            "self__financeApprover",
+            BranchStatus::Active,
+            Some(fin.user_id),
+        ),
+        branch("self__legalApprover", BranchStatus::Cancelled, None),
+        branch("self__hrApprover", BranchStatus::Cancelled, None),
+    ]);
+    // Kural yalnız hukuk kolunu istiyor; o kol iptal edilmiş → hiç dolamaz.
+    wfes.join_rule = JoinRule::Expr("$branches.self__legalApprover".into());
+    let outcome = apply_approve(&wfes, &fin, "self__financeApprover").await;
+    match outcome {
+        CommitOutcome::Failed { end_response } => {
+            assert_eq!(end_response["reason"], json!("WFD.JoinUnsatisfied"));
+            assert_eq!(end_response["join_rule"], json!("expr"));
+        }
+        other => panic!("Failed(WFD.JoinUnsatisfied) beklendi: {other:?}"),
+    }
+}
+
+/// Kol İÇİNDE hareket eden kolun kimliği DEĞİŞMEZ: ifade giriş node'unu görür.
+/// (`branch_node` hareketle değişir — kimlik `entry_node`'dur.)
+#[tokio::test]
+async fn expr_join_identifies_branch_by_entry_node_after_move() {
+    let hr = actor_with_role("hrApprover");
+    let mut moved = branch("self__hrApprover", BranchStatus::Active, Some(hr.user_id));
+    // Kol İK girişinden başlayıp başka bir node'a taşınmış olsun.
+    moved.branch_node = "self__hrApprover".into();
+    moved.entry_node = "self__hrApprover".into();
+    let wfes = expr_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Active, None),
+        branch("self__legalApprover", BranchStatus::Active, None),
+        moved,
+    ]);
+    let outcome = apply_approve(&wfes, &hr, "self__hrApprover").await;
+    match outcome {
+        CommitOutcome::JoinComplete {
+            arrived_entries, ..
+        } => assert_eq!(arrived_entries, vec!["self__hrApprover".to_string()]),
+        other => panic!("JoinComplete beklendi: {other:?}"),
+    }
 }

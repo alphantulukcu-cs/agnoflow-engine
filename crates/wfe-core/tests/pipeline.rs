@@ -58,6 +58,40 @@ impl OrgPort for MockOrg {
     }
 }
 
+// ---- katı org mock: gerçek adapter gibi NIL anchor'ı reddeder ----
+//
+// Prod'da `OrgAdapter::resolve_c_orgu` → `repo::user_role::resolve_orgu` →
+// `orgu::get_orgt_id(anchor)`; anchor yoksa `not found: orgu <id>` döner. Global
+// tip seçicisi (`*:[...]`) anchor'a BAKMADAN çözülür (erken dönüş). `MockOrg`
+// nil anchor'ı sessizce kabul ettiği için SLA yollarındaki nil-anchor hatası
+// testlerden kaçmıştı; bu mock prod davranışını yansıtır.
+struct StrictAnchorOrg;
+
+#[async_trait]
+impl OrgPort for StrictAnchorOrg {
+    async fn resolve_c_orgu(
+        &self,
+        anchor: Uuid,
+        expr: &str,
+        _orgtnt: Uuid,
+    ) -> Result<Vec<OrgUnit>, EngineError> {
+        if !expr.starts_with("*:") && anchor.is_nil() {
+            return Err(EngineError::OrgPort(format!("not found: orgu {anchor}")));
+        }
+        Ok(vec![OrgUnit {
+            orgu_id: if anchor.is_nil() { Uuid::new_v4() } else { anchor },
+            orgu_type: json!({"type": "branch"}),
+            path: "1".into(),
+        }])
+    }
+    async fn check_user_role(&self, _: Uuid, _: Uuid, _: &str) -> Result<bool, EngineError> {
+        Ok(true)
+    }
+    async fn orgtnt_for_orgu(&self, _: Uuid) -> Result<Uuid, EngineError> {
+        Ok(Uuid::nil())
+    }
+}
+
 // ---- mock autoexec runner ----
 
 enum RestBehavior {
@@ -1037,6 +1071,86 @@ async fn escalation_fires_after_sla_and_moves_wfe() {
         "escalate:self__creditAnalyst:0"
     );
     assert_eq!(commit.wfah_entries[0].actor.role, "system");
+}
+
+/// Geçmişinde gerçek bir aktör olan WFE — prod durumu. `wfes_at`'in wfah'ı yalnız
+/// nil-orgu'lu `system` girdisi taşır; anchor'lı sistem aktörünü sınamak için
+/// insan aktör gerekir.
+fn wfes_with_human_history(node: &str, assigned: Option<Uuid>, ctx: Value) -> (Wfes, Uuid) {
+    let human_orgu = Uuid::new_v4();
+    let mut wfes = wfes_at(node, assigned, ctx);
+    let wfah = Wfah::empty().push("submitApplication".into(), clerk(human_orgu), None);
+    wfes.created_at = wfah.entries()[0].applied_at;
+    wfes.claimed_at = assigned.map(|_| wfes.created_at);
+    wfes.wfah = wfah;
+    (wfes, human_orgu)
+}
+
+/// SLA-2: escalation, hedefin c_a'sının YANINDA `wfd.listable` kriterlerini de
+/// çözer (`node_candidates`). Golden fixture'ın listable'ı `self`/`parent`
+/// çapalıdır — saf sistem aktörünün nil orgu'su ile çözülemez. Prod'da bu, timer
+/// süpürücüsünün her turda aynı hatayı vermesine (sonsuz WARN döngüsü) yol açtı:
+/// escalation hiç commit edilemediği için vade geçmiş kalıyor.
+#[tokio::test]
+async fn escalation_resolves_anchored_listable_via_wfah_actor() {
+    let org = StrictAnchorOrg;
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let wfd = golden();
+    let (wfes, human_orgu) = wfes_with_human_history("self__creditAnalyst", None, start_input());
+    let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
+    let now = entered_at + Duration::days(3) + Duration::seconds(1);
+
+    let commit = engine
+        .fire_escalation(&wfd, &wfes, 0, now, None)
+        .await
+        .expect("escalation nil-anchor hatası vermeden çözülmeli");
+
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+    );
+    // Çözüm wfah'taki son insan aktörüne çapalanır — listable `self` buna göre çözülür.
+    assert!(commit
+        .resolved_c_a
+        .iter()
+        .any(|c| c.orgu_id == human_orgu));
+    // Audit izi DEĞİŞMEZ: marker yine nil-orgu'lu saf `system` aktörüdür.
+    assert_eq!(commit.wfah_entries[0].actor.role, "system");
+    assert!(commit.wfah_entries[0].actor.orgu_id.is_nil());
+}
+
+/// SLA-1 Move yolu aynı çözümü yapar → aynı çapa gerekir.
+#[tokio::test]
+async fn claim_timeout_move_resolves_anchored_listable_via_wfah_actor() {
+    let org = StrictAnchorOrg;
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+    };
+    let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
+    let (wfes, human_orgu) =
+        wfes_with_human_history("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
+    let now = wfes.claimed_at.unwrap() + Duration::hours(1) + Duration::seconds(1);
+
+    match engine
+        .fire_claim_timeout(&wfd, &wfes, now, None)
+        .await
+        .expect("claim timeout nil-anchor hatası vermeden çözülmeli")
+    {
+        ClaimTimeoutOutcome::Move(commit) => {
+            assert!(commit
+                .resolved_c_a
+                .iter()
+                .any(|c| c.orgu_id == human_orgu));
+            assert_eq!(commit.wfah_entries[0].actor.role, "system");
+            assert!(commit.wfah_entries[0].actor.orgu_id.is_nil());
+        }
+        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
+    }
 }
 
 #[tokio::test]

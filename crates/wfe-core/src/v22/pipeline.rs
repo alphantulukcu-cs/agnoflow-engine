@@ -1110,13 +1110,19 @@ impl<'a> Engine<'a> {
             }
             (None, _) => WftMode::Single,
         };
+        // Hedefin c_a'sı ve `wfd.listable` kriterleri `self`/`parent` ÇAPALI olabilir;
+        // saf sistem aktörünün nil orgu'su ile çözülemezler (bkz.
+        // `system_actor_anchored` ve WFC dönüş yolundaki aynı gerekçe). WFAH
+        // marker'ı ve SLA effects'i YUKARIDA saf `system` ile yazıldı — audit izi
+        // değişmez; çapa YALNIZ çözümlemede kullanılır.
+        let anchored = system_actor_anchored(wfes);
         let (outcome, resolved_c_a, final_ctx, landed) = self
             .resolve_wft(
                 wft,
                 wfd,
                 staged,
                 &wfes.wfah,
-                &system,
+                &anchored,
                 wfes.wfe_id,
                 None,
                 None,
@@ -1139,7 +1145,7 @@ impl<'a> Engine<'a> {
         );
 
         let staged_calls =
-            self.stage_calls(wfd, landed.as_ref(), &final_ctx, &system, wfes.wfe_id, now)?;
+            self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -1345,13 +1351,16 @@ impl<'a> Engine<'a> {
                     }
                     (None, _) => WftMode::Single,
                 };
+                // SLA-2 ile aynı gerekçe: hedef c_a'sı / `listable` çapalı olabilir,
+                // çözüm nil-orgu sistem aktörüyle yapılamaz. Audit izi saf `system`.
+                let anchored = system_actor_anchored(wfes);
                 let (outcome, resolved_c_a, final_ctx, landed) = self
                     .resolve_wft(
                         &wft,
                         wfd,
                         staged,
                         &wfes.wfah,
-                        &system,
+                        &anchored,
                         wfes.wfe_id,
                         None,
                         None,
@@ -1372,7 +1381,7 @@ impl<'a> Engine<'a> {
                     now,
                 );
                 let staged_calls =
-                    self.stage_calls(wfd, landed.as_ref(), &final_ctx, &system, wfes.wfe_id, now)?;
+                    self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
                 Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
                     wfe_id: wfes.wfe_id,
                     orgtnt_id: wfes.orgtnt_id,

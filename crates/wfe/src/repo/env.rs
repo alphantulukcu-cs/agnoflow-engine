@@ -119,10 +119,10 @@ pub async fn resolve_environment(
 
 /// Bir koşumun ortam değişkenlerini yükler ve çözer.
 ///
-/// `include_secrets = false` → secret satırlar HİÇ yüklenmez (draft/`simulate` koşumu).
-/// GitLab'ın "protected variable" kuralının karşılığı: taslak denemesi prod kimlik
-/// bilgisiyle dış sisteme istek atamaz. Eksik secret, kullanan autoexec'i `$env.X tanımlı
-/// değil` ile düşürür — boş string'le devam edip kimliksiz istek atmaktan iyidir.
+/// `include_secrets = false` → secret satırlar HİÇ yüklenmez. Bugün çağıranların HEPSİ
+/// `true` geçiyor (2026-08-04 kararı: tasarımcı anahtar isteyen bir ucu editörde
+/// deneyebilmeli; gerekçe `crate::env_adapter`'da). Parametre, korumayı ortam bazına
+/// geri getirmek istenirse bağlanacak seam olarak duruyor.
 pub async fn load_run_env(
     pool: &PgPool,
     project_id: Uuid,
@@ -156,7 +156,15 @@ pub async fn load_run_env(
                 None => continue,
             }
         } else {
-            value.unwrap_or_default()
+            // `value IS NULL` = anahtar TANIMLI ama bu ortamda DEĞERİ GİRİLMEMİŞ.
+            // Matris UI'ında satır bir kez açılır, hücreler sonra doldurulur; boş hücre
+            // boş string DEĞİLDİR. Boş string'e çevirseydik `$env.AUTH_API` sessizce ""
+            // olur ve "https:///v1" gibi bir istek giderdi — eksik anahtarın hata olması
+            // kuralının tam olarak kaçırmak istediği durum.
+            match value {
+                Some(v) => v,
+                None => continue,
+            }
         };
         let typed = typed_value(&value_type, &raw)
             .ok_or_else(|| EnvError(format!("'{key}' değeri {value_type} değil: '{raw}'")))?;

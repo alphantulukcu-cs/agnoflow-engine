@@ -55,6 +55,11 @@ pub struct BranchState {
 pub struct Wfes {
     pub wfe_id: Uuid,
     pub orgtnt_id: Uuid,
+    /// Koşum ortamı — start'ta sabitlenir, ÖMÜR BOYU değişmez. Timer sweeper, retry ve
+    /// escalation'da ortada bir çağıran yoktur; `$env`'i o anlarda çözebilmenin tek yolu
+    /// ortamın örneğin üstünde durmasıdır. `None` = tenant'ın varsayılan ortamı (kolon
+    /// NOT NULL'a çekilene kadarki geçiş durumu).
+    pub environment_id: Option<Uuid>,
     pub wfd_id: Uuid,
     pub wfd_version: i32,
     pub dynctx: DynCtx,
@@ -263,6 +268,8 @@ pub struct TransitionCommit {
 pub struct NewWfe {
     pub wfe_id: Uuid,
     pub orgtnt_id: Uuid,
+    /// Start'ta çözülen ortam; örnek ömrü boyunca sabit kalır.
+    pub environment_id: Option<Uuid>,
     pub wfd_id: Uuid,
     pub wfd_version: i32,
     pub initial_dynctx: Value,
@@ -534,4 +541,38 @@ pub struct ExecEnv {
 pub trait AutoexecRunner: Send + Sync {
     /// Ham sonucu döner; timeout PIPELINE tarafından uygulanır.
     async fn run(&self, def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure>;
+}
+
+/// Ortam konfigürasyonunu (`$env`) çözen port.
+///
+/// Çekirdek I/O yapmaz: değişkenler DB'de, mantıksal WFD kimliği `(project_id, wfd_name)`
+/// altında durur ve `wfd_id`'den çözülür. Bu, `OrgPort`/`WfdStore` ile aynı gerekçe.
+///
+/// Secret'ların döndürülüp döndürülmeyeceğine **adapter** karar verir: yalnız `published`
+/// bir WFD koşumunda secret'lar yüklenir (GitLab'ın "protected variable" kuralı). Taslak
+/// denemesi prod kimlik bilgisiyle dış sisteme istek atamaz.
+#[async_trait]
+pub trait EnvPort: Send + Sync {
+    /// `environment_id` verilmezse tenant'ın varsayılan ortamı kullanılır.
+    async fn load_run_env(
+        &self,
+        orgtnt_id: Uuid,
+        wfd_id: Uuid,
+        environment_id: Option<Uuid>,
+    ) -> Result<RunEnv, EngineError>;
+}
+
+/// `$env` kullanmayan bağlamlar (saf unit testler, simülasyon) için boş port.
+pub struct NoEnv;
+
+#[async_trait]
+impl EnvPort for NoEnv {
+    async fn load_run_env(
+        &self,
+        _orgtnt_id: Uuid,
+        _wfd_id: Uuid,
+        _environment_id: Option<Uuid>,
+    ) -> Result<RunEnv, EngineError> {
+        Ok(RunEnv::default())
+    }
 }

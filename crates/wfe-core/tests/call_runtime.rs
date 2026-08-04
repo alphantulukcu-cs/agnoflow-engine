@@ -92,6 +92,7 @@ fn wfes_owned(node: &str, ctx: Value, owner: Option<Uuid>) -> Wfes {
     Wfes {
         wfe_id: Uuid::new_v4(),
         orgtnt_id: Uuid::nil(),
+        environment_id: None,
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),

@@ -127,6 +127,7 @@ impl WfeStore for MemStore {
         let wfes = Wfes {
             wfe_id: new.wfe_id,
             orgtnt_id: new.orgtnt_id,
+            environment_id: None,
             wfd_id: new.wfd_id,
             wfd_version: new.wfd_version,
             dynctx: DynCtx(new.initial_dynctx.clone()),

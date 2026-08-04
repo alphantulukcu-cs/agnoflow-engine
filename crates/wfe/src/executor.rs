@@ -13,8 +13,8 @@ use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
-    AutoexecRunner, BranchState, BranchStatus, CallView, CommitOutcome, PendingCall, WfdStore,
-    WfeStore, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CallView, CommitOutcome, EnvPort, NoEnv,
+    PendingCall, WfdStore, WfeStore, Wfes,
 };
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
 use wfe_core::{ConflictKind, EngineError, OrgPort};
@@ -143,6 +143,8 @@ pub struct WfeExecutor {
     pub wfd: Arc<dyn WfdStore>,
     pub wfe: Arc<dyn WfeStore>,
     pub runner: Arc<dyn AutoexecRunner>,
+    /// Ortam konfigürasyonu (`$env`) kaynağı. `NoEnv` = $env kullanılmıyor.
+    pub env: Arc<dyn EnvPort>,
     /// Event-driven SLA timer sinyali (bkz. `crate::timer`): create/commit/claim
     /// sonrası dürtülür; timer servisi next-due'yu yeniden hesaplar. `notify_one`
     /// permit biriktirdiği için sweep sırasında gelen sinyal KAYBOLMAZ.
@@ -289,6 +291,7 @@ pub struct ReassignOutcome {
 }
 
 impl WfeExecutor {
+    /// `$env` kullanmayan kurulum (testler, sim). Ortam gerekiyorsa `with_env`.
     pub fn new(
         org: Arc<dyn OrgPort>,
         wfd: Arc<dyn WfdStore>,
@@ -300,16 +303,41 @@ impl WfeExecutor {
             wfd,
             wfe,
             runner,
+            env: Arc::new(NoEnv),
             timer_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
+    /// Ortam konfigürasyonu kaynağını bağlar (`crate::env_adapter::EnvAdapter`).
+    pub fn with_env(mut self, env: Arc<dyn EnvPort>) -> Self {
+        self.env = env;
+        self
+    }
+
+    /// `$env` GEREKTİRMEYEN yollar için motor (claim uygunluğu, escalation tahmini,
+    /// possible-actions). Bu yollar ifade değerlendirmez ya da yalnız yetki/zaman
+    /// bakar; boş ortam doğru cevaptır.
     fn engine(&self) -> Engine<'_> {
         Engine {
             org: &*self.org,
             exec: &*self.runner,
             env: Default::default(),
         }
+    }
+
+    /// Bir WFE'nin KENDİ ortamıyla motor. Aksiyon uygulayan, autoexec koşturan ve ifade
+    /// değerlendiren her yol bunu kullanır — ortam örneğin üstünde sabittir, dolayısıyla
+    /// timer/retry/escalation gibi çağıranın olmadığı anlarda da doğru çözülür.
+    async fn engine_for(&self, wfes: &Wfes) -> Result<Engine<'_>, EngineError> {
+        let env = self
+            .env
+            .load_run_env(wfes.orgtnt_id, wfes.wfd_id, wfes.environment_id)
+            .await?;
+        Ok(Engine {
+            org: &*self.org,
+            exec: &*self.runner,
+            env,
+        })
     }
 
     /// Timer servisinin dinlediği sinyal kanalı (bkz. `crate::timer::run_timer_service`).
@@ -334,17 +362,49 @@ impl WfeExecutor {
         input: &Value,
         deadline: Option<&str>,
     ) -> Result<WfeStartResult, EngineError> {
+        self.start_in(wfd_id, version, actor, action, input, deadline, None)
+            .await
+    }
+
+    /// `environment_id`: koşum ortamı — start'ta SABİTLENİR, örnek ömrü boyunca
+    /// değişmez. `None` = tenant'ın varsayılan ortamı.
+    ///
+    /// Çağıran ortam ADINI seçer, DEĞERLERİNİ değil: değer geçirebilmek, publish
+    /// edilmiş bir prod akışını başkasının sunucusuna yönlendirmeye izin veren bir
+    /// enjeksiyon yüzeyi olurdu.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_in(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        actor: &Actor,
+        action: Option<&str>,
+        input: &Value,
+        deadline: Option<&str>,
+        environment_id: Option<Uuid>,
+    ) -> Result<WfeStartResult, EngineError> {
         let wfd = self.wfd.fetch(wfd_id, version).await?;
         let orgtnt_id = self.org.orgtnt_for_orgu(actor.orgu_id).await?;
 
+        // Start pipeline'ı da autoexec koşturup ifade değerlendirir — ortam ÖNCE çözülür.
+        let run_env = self
+            .env
+            .load_run_env(orgtnt_id, wfd_id, environment_id)
+            .await?;
+        let engine = Engine {
+            org: &*self.org,
+            exec: &*self.runner,
+            env: run_env,
+        };
+
         // wfe_id ÖNCE üretilir; $wfe_id effects gerçek id ile çözülür (WOR-6)
         let wfe_id = Uuid::new_v4();
-        let mut new = self
-            .engine()
+        let mut new = engine
             .start(&wfd, actor, orgtnt_id, action, input, wfe_id, deadline)
             .await?;
         new.wfd_id = wfd_id;
         new.wfd_version = version;
+        new.environment_id = environment_id;
 
         self.wfe.create(&new).await?;
         self.nudge_timers(); // deadline / node dwell / claim_timeout vadesi değişti
@@ -401,7 +461,8 @@ impl WfeExecutor {
             let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
 
             let commit = self
-                .engine()
+                .engine_for(&wfes)
+                .await?
                 .apply(&wfd, &wfes, actor, action, input, node_hint)
                 .await?;
             match self.wfe.commit(&commit).await {
@@ -707,7 +768,7 @@ impl WfeExecutor {
             return Ok(vec![]);
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        possible_actions_for(&self.engine(), &wfd, &wfes, actor).await
+        possible_actions_for(&self.engine_for(&wfes).await?, &wfd, &wfes, actor).await
     }
 
     /// Tek WFE için zamanlayıcı kontrolü — sıra (2026-07-16 SLA sözleşmesi):
@@ -857,14 +918,17 @@ impl WfeExecutor {
             None => None,
         };
 
+        // WFC: çağrılan çocuk WFE ebeveynin ORTAMINI MİRAS ALIR, geçersiz kılınamaz.
+        // Aksi hâlde prod bir akış test ortamında bir çocuk koştururdu.
         let started = self
-            .start(
+            .start_in(
                 callee_wfd_id,
                 callee_version,
                 &actor,
                 start_action.as_deref(),
                 &call.input,
                 None,
+                caller.environment_id,
             )
             .await;
 
@@ -934,7 +998,8 @@ impl WfeExecutor {
             None => Vec::new(),
         };
         let commit = self
-            .engine()
+            .engine_for(&caller)
+            .await?
             .fire_call_return(
                 &wfd,
                 &caller,
@@ -1025,7 +1090,9 @@ impl WfeExecutor {
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
         let now = chrono::Utc::now();
-        let engine = self.engine();
+        // Timer yolunda ortada bir çağıran YOKTUR — ortam WFE satırından okunur.
+        // `$env`'i DB'de tutmanın (çağırandan almamanın) asıl gerekçesi budur.
+        let engine = self.engine_for(&wfes).await?;
 
         // SLA-3 deadline wfe-seviyesidir (paralel modda da) — tüm kolları iptal eder.
         if engine.deadline_due(&wfes, now) {

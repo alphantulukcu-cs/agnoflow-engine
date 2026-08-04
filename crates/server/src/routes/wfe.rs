@@ -13,6 +13,32 @@ use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::v22::ports::{BranchState, BranchStatus, WfdStore};
 
+/// Ortam ADINI tenant'ın kayıtlı ortamlarına çözer. Bilinmeyen ad 422 — serbest metin
+/// kabul edilmez, bir tipo sessizce yeni bir ortam yaratmaz. `None` = tenant varsayılanı
+/// (executor tarafında çözülür).
+async fn resolve_environment_id(
+    s: &AppState,
+    actor: &Actor,
+    name: Option<&str>,
+) -> Result<Option<uuid::Uuid>, AppError> {
+    let Some(name) = name else { return Ok(None) };
+    let orgtnt_id = s
+        .executor
+        .org
+        .orgtnt_for_orgu(actor.orgu_id)
+        .await
+        .map_err(AppError::from)?;
+    wf_wfe::repo::env::resolve_environment(&s.pool, orgtnt_id, Some(name))
+        .await
+        .map(|e| Some(e.id))
+        .map_err(|e| {
+            AppError(
+                e.to_string(),
+                axum::http::StatusCode::UNPROCESSABLE_ENTITY,
+            )
+        })
+}
+
 pub fn router(state: AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(start_wfe, list_wfe))
@@ -72,6 +98,10 @@ struct StartBody {
     /// WFD `timeout` tanımlıysa tavan olarak uygulanır (aşarsa InvalidInput).
     #[serde(default)]
     deadline: Option<String>,
+    /// Koşum ortamı ADI (`test` | `prod` | ...). Verilmezse tenant'ın varsayılanı.
+    /// Örnek ömrü boyunca SABİTLENİR. Çağıran yalnız adı seçer, değerleri değil.
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 #[utoipa::path(post, path = "/", tag = "wfe",
@@ -84,14 +114,16 @@ async fn start_wfe(
     Json(body): Json<StartBody>,
 ) -> Result<Json<wf_wfe::executor::WfeStartResult>, AppError> {
     let actor = extract_actor(&headers)?;
+    let environment_id = resolve_environment_id(&s, &actor, body.environment.as_deref()).await?;
     s.executor
-        .start(
+        .start_in(
             body.wfd_id,
             body.version,
             &actor,
             body.action.as_deref(),
             &body.input,
             body.deadline.as_deref(),
+            environment_id,
         )
         .await
         .map(Json)

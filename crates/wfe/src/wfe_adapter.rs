@@ -332,6 +332,7 @@ impl WfeStore for WfeAdapter {
         Ok(Wfes {
             wfe_id,
             orgtnt_id: row.orgtnt_id,
+            environment_id: row.environment_id,
             wfd_id: row.wfd_id,
             wfd_version: row.wfd_version,
             dynctx: DynCtx(ctx),
@@ -380,11 +381,12 @@ impl WfeStore for WfeAdapter {
 
         sqlx::query(
             "INSERT INTO wf.wfe
-               (wfe_id, orgtnt_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+               (wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(new.wfe_id)
         .bind(new.orgtnt_id)
+        .bind(new.environment_id)
         .bind(new.wfd_id)
         .bind(new.wfd_version)
         .bind(status)

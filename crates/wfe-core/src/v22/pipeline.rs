@@ -257,6 +257,9 @@ impl<'a> Engine<'a> {
             orgtnt_id,
             wfd_id: parse_wfd_uuid(wfd)?,
             wfd_version: 0, // store katmanı gerçek versiyon satırını bilir; executor doldurur
+            // Ortam kimliği de executor'ın işi: çekirdek `RunEnv`'in DEĞERLERİNİ görür,
+            // hangi satırdan geldiğini değil (I/O yok).
+            environment_id: None,
             initial_dynctx: final_ctx,
             wfah_entries,
             outcome,

@@ -6,9 +6,11 @@ use crate::types::wfd_v22::{
     AutoexecType, CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft,
     WftCondition, WftTarget,
 };
+use crate::error::EngineError;
 use crate::v22::duration::parse_iso8601_duration;
+use crate::v22::env;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 #[derive(Debug, Clone)]
 pub struct ValidationIssue {
@@ -89,7 +91,60 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_retries(wfd, &mut report);
     check_string_namespaces(wfd, &mut report);
     check_sla(wfd, &mut report);
+    check_env_references(wfd, &mut report);
     report
+}
+
+/// Dokümandaki TÜM `$env.*` referanslarını toplar.
+///
+/// Server publish ucunda bu küme, WFD'nin tanımlı her ortamındaki anahtarlarla
+/// karşılaştırılır (eksik anahtar → 422). Bu fonksiyon I/O YAPMAZ — çekirdek yalnız
+/// referansları çıkarır, DB'yle karşılaştırma server'ın işidir.
+///
+/// Yürüyüş, alan alan gezmek yerine serileştirilmiş dokümanın TÜM string'leri üzerinde
+/// yapılır: yeni bir `$env` taşıyabilen alan (yeni bir autoexec config anahtarı, yeni bir
+/// effect yeri) eklendiğinde bu fonksiyonu güncellemeyi unutmak, prod'da runtime hatası
+/// demek olurdu.
+///
+/// Serbest metin alanları (`description` vb.) ELENMEZ. Elenmeleri düşünüldü ve reddedildi:
+/// bir REST gövdesindeki `{"name": "$env.TENANT"}` çok yaygın bir kalıptır ve ad bazlı
+/// eleme onu da atlardı — runtime'da çözülen ama publish'te doğrulanmayan bir referans,
+/// yani prod'da hata. Ters yöndeki bedel çok daha ucuz: bir açıklamada geçen "$env.FOO"
+/// publish'i "tanımlı değil" diye bloklar, tasarımcı metni değiştirir.
+pub fn env_references(wfd: &Wfd) -> Result<BTreeSet<String>, EngineError> {
+    let doc = serde_json::to_value(wfd)
+        .map_err(|e| EngineError::InvalidWfd(format!("WFD serileştirilemedi: {e}")))?;
+    let mut out = BTreeSet::new();
+    collect_env_refs(&doc, &mut out)?;
+    Ok(out)
+}
+
+fn collect_env_refs(v: &Value, out: &mut BTreeSet<String>) -> Result<(), EngineError> {
+    match v {
+        Value::String(s) => {
+            out.extend(env::references(s)?);
+        }
+        Value::Array(a) => {
+            for item in a {
+                collect_env_refs(item, out)?;
+            }
+        }
+        Value::Object(m) => {
+            for item in m.values() {
+                collect_env_refs(item, out)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Bozuk `$env` referansı (`$env.foo`, `$env.` gibi) yayını ENGELLER: runtime'da düz metin
+/// olarak dışarı sızar ve URL'ye "$env.foo" yazılmış bir istek gider.
+fn check_env_references(wfd: &Wfd, report: &mut ValidationReport) {
+    if let Err(e) = env_references(wfd) {
+        report.error("env_reference_malformed", "$".into(), e.to_string());
+    }
 }
 
 // ---- WFC — İş Akışı Çağrısı: yerel kurallar ----
@@ -1631,6 +1686,11 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
              Son/ilk girdi için $prev / $first kullan."
                 .to_string(),
         ));
+    }
+    // `$env` referans biçimi — editör ve WFD validator'ı AYNI kaynaktan beslensin diye
+    // burada. Bozuk referans runtime'da düz metin olarak dışarı sızar.
+    if let Err(e) = env::references(expr) {
+        out.push(("env_reference_malformed", true, e.to_string()));
     }
     if indexes_wfah_directly(expr) {
         out.push((

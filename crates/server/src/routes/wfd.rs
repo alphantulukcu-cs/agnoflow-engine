@@ -163,6 +163,10 @@ async fn upload_wfd(
     Json(body): Json<UploadBody>,
 ) -> Result<Json<Value>, AppError> {
     let project_id = resolve_project_for_write(&s, &auth, body.orgtnt_id, body.project_id).await?;
+    // Lokal DB bağlantıları WFD'ye aittir: doküman başkasının lokalini taşıyamaz.
+    if let Some(name) = body.wfd.get("name").and_then(Value::as_str) {
+        super::db::assert_no_foreign_local_connections(&s.pool, project_id, name, &body.wfd).await?;
+    }
     let (wfd_id, version) = s
         .wfd
         .upload(body.orgtnt_id, Some(project_id), &body.wfd)
@@ -435,6 +439,11 @@ async fn save_draft(
     Json(b): Json<SaveDraftBody>,
 ) -> Result<StatusCode, AppError> {
     require_design_on_wfd(&s, &auth, id, ver).await?;
+    let meta = wf_wfd::repo::get_meta_any(&s.pool, id, ver)
+        .await
+        .map_err(map_wfd_err)?;
+    super::db::assert_no_foreign_local_connections(&s.pool, meta.project_id, &meta.name, &b.wfd)
+        .await?;
     s.wfd
         .save_draft(id, ver, &b.wfd, b.description.as_deref(), b.tags.as_deref())
         .await

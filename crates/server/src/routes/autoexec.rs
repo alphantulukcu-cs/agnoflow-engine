@@ -75,7 +75,9 @@ async fn test_autoexec(
         env: Default::default(),
     };
 
-    let request_info = Some(wf_wfe::runner::resolved_config(&def, &env));
+    // Çözüm başarısızsa (ör. tanımsız `$env` anahtarı) request_info gösterilecek bir şey
+    // yoktur — çalıştırma zaten aynı hatayla düşecek ve mesajı yanıtta görünecek.
+    let request_info = wf_wfe::runner::resolved_config(&def, &env).ok();
     let timeout = std::time::Duration::from_secs(def.timeout_seconds as u64);
     match tokio::time::timeout(timeout, runner.run(&def, &env)).await {
         Ok(Ok(result)) => Ok(Json(TestAutoexecResponse {

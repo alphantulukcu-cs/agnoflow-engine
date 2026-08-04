@@ -117,6 +117,7 @@ async fn main() {
     let api_router = OpenApiRouter::with_openapi(openapi::ApiDoc::openapi())
         .nest("/org", org_router)
         .nest("/db", db_router)
+        .nest("/env", routes::env::router(state.clone()))
         .nest("/auth", routes::auth::router(state.clone()))
         .nest("/users", routes::users::router(state.clone()))
         .nest("/project", routes::project::router(state.clone()))

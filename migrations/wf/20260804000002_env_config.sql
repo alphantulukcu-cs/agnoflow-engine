@@ -113,7 +113,18 @@ UPDATE wf.wfe e
    AND env.is_default
    AND e.environment_id IS NULL;
 
-ALTER TABLE wf.wfe ALTER COLUMN environment_id SET NOT NULL;
+-- NOT NULL sıkılaştırması BİLİNÇLİ olarak burada DEĞİL.
+--
+-- Kolon start yolunda yazılacak (WFE başlatılırken ortam adı çözülüp sabitlenir), ama o
+-- bağlama henüz inmedi. Şimdi NOT NULL yapmak, bu migration'ı uygulayan bir kurulumda
+-- yeni WFE oluşturmayı anında kırardı. Start yolu indiğinde ayrı bir migration ile:
+--
+--   UPDATE wf.wfe e SET environment_id = env.id FROM wf.environment env
+--    WHERE env.orgtnt_id = e.orgtnt_id AND env.is_default AND e.environment_id IS NULL;
+--   ALTER TABLE wf.wfe ALTER COLUMN environment_id SET NOT NULL;
+--
+-- O ana kadar NULL = "tenant'ın varsayılan ortamı" (repo::env::resolve_environment).
+CREATE INDEX wfe_environment_idx ON wf.wfe(environment_id) WHERE environment_id IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- db_connection alanları $env ile şablonlanabilir.

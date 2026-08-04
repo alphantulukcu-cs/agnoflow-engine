@@ -35,14 +35,13 @@ impl EnvPort for EnvAdapter {
     ) -> Result<RunEnv, EngineError> {
         // Değerlerin sahibi MANTIKSAL WFD'dir: `(project_id, name)`. `wfd_id` her versiyon
         // için ayrı bir satırdır, ona bağlamak conf'u yeni versiyonda koparırdı.
-        let Some((project_id, wfd_name, status)) =
-            sqlx::query_as::<_, (Option<Uuid>, String, String)>(
-                "SELECT project_id, name, status FROM wf.wfd_meta WHERE wfd_id = $1",
-            )
-            .bind(wfd_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(db_err)?
+        let Some((project_id, wfd_name)) = sqlx::query_as::<_, (Option<Uuid>, String)>(
+            "SELECT project_id, name FROM wf.wfd_meta WHERE wfd_id = $1",
+        )
+        .bind(wfd_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?
         else {
             return Ok(RunEnv::default());
         };
@@ -61,12 +60,23 @@ impl EnvPort for EnvAdapter {
             }
         };
 
-        // GitLab'ın "protected variable" kuralı: secret'lar YALNIZ published WFD
-        // koşumunda çözülür. Taslak denemesi prod kimlik bilgisiyle dış sisteme istek
-        // atamaz; eksik secret, kullanan autoexec'i açık bir hatayla düşürür.
-        let include_secrets = status == "published";
-
-        repo::env::load_run_env(&self.pool, project_id, &wfd_name, env_id, include_secrets)
+        // Secret'lar taslak/yayınlanmış AYRIMI OLMADAN çözülür.
+        //
+        // Başlangıçta GitLab'ın "protected variable" kuralı alınmıştı (secret yalnız
+        // published koşumda). 2026-08-04'te kullanıcı kararıyla KALDIRILDI: kural yanlış
+        // eksende koruyordu. Tasarımcı akışı kurarken autoexec'ini ve simülasyonunu
+        // gerçek uçlara karşı denemek zorunda; taslakta secret'ı kesmek, anahtar isteyen
+        // her entegrasyonu editörde denenemez yapıyordu. Erişim kontrolü ağ katmanının
+        // işidir (FW kuralları / ortam erişilebilirliği): prod'a ulaşamayan bir makineden
+        // prod anahtarı zaten bir işe yaramaz.
+        //
+        // Koruma tamamen kalkmadı — secret DEĞERLERİ hâlâ hiçbir ekrana dönmez:
+        // `resolved_config()` ve hata metinleri `[MASKED]` uygular, ZEN/effects secret'ı
+        // hiç görmez (tip düzeyinde). Yani kullanılabilir ama okunamaz.
+        //
+        // `include_secrets` parametresi bilerek DURUYOR: korumayı ortam bazına (örn.
+        // `wf.environment.is_protected`) geri getirmek istenirse bağlanacak seam odur.
+        repo::env::load_run_env(&self.pool, project_id, &wfd_name, env_id, true)
             .await
             .map_err(db_err)
     }

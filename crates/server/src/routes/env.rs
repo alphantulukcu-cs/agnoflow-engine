@@ -39,6 +39,42 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .with_state(state)
 }
 
+/// Editör/simülasyon uçları için ortam çözümü.
+///
+/// `orgtnt_id` ya da `wfd_id` verilmezse BOŞ ortam döner — `$env` kullanmayan çağrılar
+/// (eski istemciler dahil) etkilenmesin. Ortam adı verilmezse tenant varsayılanı.
+///
+/// Secret'lar DAHİL çözülür: tasarımcı anahtar isteyen bir ucu editörde deneyebilmeli
+/// (2026-08-04 kararı — gerekçe `wf_wfe::env_adapter`'da). Değerler ekrana dönmez;
+/// `resolved_config()` ve hata metinleri maskelenir.
+pub(crate) async fn resolve_run_env(
+    pool: &PgPool,
+    orgtnt_id: Option<Uuid>,
+    wfd_id: Option<Uuid>,
+    environment: Option<&str>,
+) -> Result<wfe_core::v22::env::RunEnv, AppError> {
+    let (Some(orgtnt_id), Some(wfd_id)) = (orgtnt_id, wfd_id) else {
+        return Ok(Default::default());
+    };
+    let env_id = match environment {
+        Some(name) => Some(
+            wf_wfe::repo::env::resolve_environment(pool, orgtnt_id, Some(name))
+                .await
+                .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?
+                .id,
+        ),
+        None => None,
+    };
+    wfe_core::v22::ports::EnvPort::load_run_env(
+        &wf_wfe::env_adapter::EnvAdapter::new(pool.clone()),
+        orgtnt_id,
+        wfd_id,
+        env_id,
+    )
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))
+}
+
 /// Secret değer maskelenebilir mi? GitLab'ın kuralı: tek satır, ≥8 karakter, boşluksuz.
 /// Kısa ya da boşluklu bir değeri log'da aramak log'u kullanılamaz hâle getirir.
 fn assert_maskable(key: &str, value: &str) -> Result<(), AppError> {

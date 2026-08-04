@@ -3,6 +3,7 @@
 
 pub mod duration;
 pub mod effects;
+pub mod env;
 pub mod eval;
 pub mod matcher;
 pub mod pipeline;

@@ -8,6 +8,7 @@ use crate::types::dynctx::DynCtx;
 use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{AutoexecDef, CallMode, JoinRule, StartAs, Wfd, WftTarget};
 use crate::types::wfe::WfeStatus;
+use crate::v22::env::RunEnv;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -523,6 +524,10 @@ pub struct ExecEnv {
     /// WOR-84: tetikleyen ACT'in girdisi — `calc` ifadelerinde `$action.input.*`.
     /// Terminal/escalation kaynaklı çalıştırmalarda `None`.
     pub action_input: Option<Value>,
+    /// Ortam konfigürasyonu (`$env`) — **secret'lar DAHİL**. Autoexec config'i ve
+    /// `db_connection` alanları tek çözüm yoludur; `calc` ifadeleri ZEN üzerinden
+    /// yalnız secret'sız görünümü görür (`EnvSet::public`).
+    pub env: RunEnv,
 }
 
 #[async_trait]

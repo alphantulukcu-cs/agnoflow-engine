@@ -170,6 +170,7 @@ async fn delegated_person_can_claim() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
@@ -219,6 +220,7 @@ async fn delegated_pool_can_claim() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
@@ -249,6 +251,7 @@ async fn non_grantee_cannot_claim() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
@@ -276,6 +279,7 @@ async fn no_active_delegation_denies() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
@@ -303,6 +307,7 @@ async fn direct_eligibility_still_works() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");
@@ -334,6 +339,7 @@ async fn delegator_not_holding_seat_denies() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst");

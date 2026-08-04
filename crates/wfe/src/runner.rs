@@ -373,6 +373,7 @@ mod tests {
 
     fn env(ctx: Value) -> ExecEnv {
         ExecEnv {
+            env: Default::default(),
             wfe_id: Uuid::nil(),
             ctx,
             node: Some("self__creditAnalyst".into()),

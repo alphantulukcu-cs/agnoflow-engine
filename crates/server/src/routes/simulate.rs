@@ -156,6 +156,7 @@ async fn sim_start(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: Default::default(),
     };
 
     let orgtnt_id = wfe_core::OrgPort::orgtnt_for_orgu(&*org, body.actor.orgu_id)
@@ -224,6 +225,7 @@ async fn sim_apply(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: Default::default(),
     };
 
     let mut sim_state = body.sim_state;
@@ -322,6 +324,7 @@ async fn sim_call_return(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: Default::default(),
     };
 
     let mut sim_state = body.sim_state;
@@ -391,6 +394,7 @@ async fn sim_possible_actions(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: Default::default(),
     };
 
     sim_actions_for(&engine, &wfd, &body.sim_state, &body.actor)

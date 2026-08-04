@@ -308,6 +308,7 @@ impl WfeExecutor {
         Engine {
             org: &*self.org,
             exec: &*self.runner,
+            env: Default::default(),
         }
     }
 

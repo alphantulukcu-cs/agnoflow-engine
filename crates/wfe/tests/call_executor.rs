@@ -898,6 +898,7 @@ async fn simulated_call_node_is_a_resolvable_stop_not_a_dead_end() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let clerk = actor("branchClerk");
 

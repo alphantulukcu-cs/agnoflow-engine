@@ -72,6 +72,7 @@ async fn test_autoexec(
         },
         wfah: body.wfah,
         action_input: body.action_input,
+        env: Default::default(),
     };
 
     let request_info = Some(wf_wfe::runner::resolved_config(&def, &env));

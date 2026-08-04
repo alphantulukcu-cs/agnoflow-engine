@@ -7,6 +7,7 @@ use crate::types::{
     actor::Actor,
     wfah::{Wfah, WfahEntry},
 };
+use crate::v22::env::{self, PublicEnv};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -51,6 +52,9 @@ pub struct EvalEnv {
     /// WOR-73 — yalnız paralel join koşulu (`join_when`) değerlendirilirken bağlanır
     /// (`$branches.*`, `$arrived`).
     pub join: Option<JoinEnv>,
+    /// Ortam konfigürasyonu (`$env`) — **secret'sız** görünüm. Secret bir değer ZEN'e
+    /// hiç girmez: girseydi bir `calc` ifadesi onu ctx'e yazar ve portalda görünürdü.
+    pub env: PublicEnv,
 }
 
 /// WOR-73: join koşulunun gördüğü kol durumu. Kol kimliği **giriş node'udur**
@@ -152,6 +156,12 @@ impl EvalEnv {
         self
     }
 
+    /// Ortam konfigürasyonunu bağlar (`$env.*`). Secret'sız görünüm beklenir.
+    pub fn with_env(mut self, env: &PublicEnv) -> Self {
+        self.env = env.clone();
+        self
+    }
+
     fn zen_context(&self) -> Value {
         let mut map = Map::new();
         map.insert("$ctx".into(), self.ctx.clone());
@@ -213,12 +223,24 @@ impl EvalEnv {
             .unwrap_or_else(|| (Value::Object(Map::new()), Value::Array(vec![])));
         map.insert("$branches".into(), branches);
         map.insert("$arrived".into(), arrived);
+        map.insert("$env".into(), self.env.to_json());
         Value::Object(map)
     }
 }
 
+/// Değerlendirme öncesi `$env` ön-kontrolü.
+///
+/// ZEN'de eksik alan `null` okur; `$env` için bunu kabul edemeyiz — null bir domain
+/// `https://null/...` üretir. ZEN'in attribute erişimine giremediğimiz için ifadenin METNİ
+/// taranır: tanımsız (ya da secret olduğu için görünmeyen) bir anahtar, değerlendirme hiç
+/// başlamadan hata verir. Gerekçenin tamamı: `v22::env` modül başlığı.
+fn check_env_refs(expr: &str, env: &EvalEnv) -> Result<(), EngineError> {
+    env::assert_refs_defined(expr, &env.env)
+}
+
 /// Boolean sonuç bekleyen değerlendirme (`when`, `terminal_when`, guard'lar).
 pub fn evaluate_bool(expr: &str, env: &EvalEnv) -> Result<bool, EngineError> {
+    check_env_refs(expr, env)?;
     let result = zen_expression::evaluate_expression(expr, env.zen_context().into())
         .map_err(|e| EngineError::ZenEvaluation(format!("'{expr}': {e}")))?;
     result
@@ -228,6 +250,7 @@ pub fn evaluate_bool(expr: &str, env: &EvalEnv) -> Result<bool, EngineError> {
 
 /// Herhangi bir değer üreten değerlendirme (calc autoexec).
 pub fn evaluate_value(expr: &str, env: &EvalEnv) -> Result<Value, EngineError> {
+    check_env_refs(expr, env)?;
     let result = zen_expression::evaluate_expression(expr, env.zen_context().into())
         .map_err(|e| EngineError::ZenEvaluation(format!("'{expr}': {e}")))?;
     serde_json::to_value(result)
@@ -389,6 +412,51 @@ mod tests {
     fn actor_namespace() {
         let env = EvalEnv::new(&json!({})).with_actor(&actor());
         assert!(evaluate_bool("$actor.role == 'creditAnalyst'", &env).unwrap());
+    }
+
+    fn env_set() -> crate::v22::env::EnvSet {
+        use crate::v22::env::{EnvSet, EnvValue};
+        EnvSet::new(std::collections::BTreeMap::from([
+            ("REGION".to_string(), EnvValue::public(json!("tr-central"))),
+            ("MAX_TUTAR".to_string(), EnvValue::public(json!(50000))),
+            ("DEBUG".to_string(), EnvValue::public(json!(true))),
+            (
+                "API_KEY".to_string(),
+                EnvValue::secret(json!("sk-live-xyz")),
+            ),
+        ]))
+    }
+
+    /// `$env` ZEN'de okunur ve TİPLİ gelir — `value_type` bu yüzden var: string tutulsaydı
+    /// `$env.MAX_TUTAR > 1000` zen'de "Compare: Unsupported type" verirdi.
+    #[test]
+    fn env_namespace() {
+        let e = EvalEnv::new(&json!({})).with_env(&env_set().public());
+        assert!(evaluate_bool("$env.REGION == 'tr-central'", &e).unwrap());
+        assert!(evaluate_bool("$env.MAX_TUTAR > 1000", &e).unwrap());
+        assert!(evaluate_bool("$env.DEBUG", &e).unwrap());
+        assert_eq!(evaluate_value("$env.MAX_TUTAR", &e).unwrap(), json!(50000));
+    }
+
+    /// KRİTİK: secret bir anahtar ZEN'de YOKTUR. Olsaydı bir `calc` ifadesi onu ctx'e
+    /// yazar ve portalda görünürdü. Sessizce `null` da okumaz — hata verir.
+    #[test]
+    fn secret_is_invisible_to_zen() {
+        let e = EvalEnv::new(&json!({})).with_env(&env_set().public());
+        let err = evaluate_bool("$env.API_KEY == 'sk-live-xyz'", &e)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("API_KEY"), "{err}");
+        assert_eq!(e.zen_context()["$env"].get("API_KEY"), None);
+    }
+
+    /// Tanımsız anahtar `$ctx`'in aksine null okumaz — değerlendirme başlamadan patlar.
+    #[test]
+    fn undefined_env_key_fails_before_eval() {
+        let e = EvalEnv::new(&json!({})).with_env(&env_set().public());
+        assert!(evaluate_bool("$env.YOK == 'x'", &e).is_err());
+        // Ortam hiç bağlanmamışsa da aynı: sessiz null yok.
+        assert!(evaluate_bool("$env.REGION == 'x'", &EvalEnv::new(&json!({}))).is_err());
     }
 
     #[test]

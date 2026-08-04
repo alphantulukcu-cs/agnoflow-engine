@@ -1394,3 +1394,60 @@ editör: `utils/zenFunctions.ts` (yeni), `utils/zenParser.ts` (`extractZenCalls`
 nesnesi alır), `hooks/useEngineExpressionVerdicts.ts` (yeni),
 `api/engineApi.ts::validateExpressionsOnEngine`, `components/zen/*`,
 `components/shared/WhenModal.tsx`.)
+
+---
+
+## DB bağlantı kapsamı (2026-08-04): global (tenant) + lokal (tek WFD)
+
+**Sorun:** `wf.db_connection` tek kapsamlıydı — `UNIQUE (orgtnt_id, name)` ile tenant
+genelinde. Yani bir WFD için tanımlanan bağlantı tenant'taki HER WFD'nin listesinde
+çıkıyordu ve yönetimi de WFD editörünün ayarlar sekmesindeydi (ortak bir kaydı bir WFD'nin
+içinden düzenlemek). İki ihtiyaç ayrışmadı: kurumsal, her projede kullanılan bağlantılar
+ile yalnız tek bir akışın kullandığı bağlantılar.
+
+**Karar:** `db_connection.scope ∈ {global, local}`.
+
+1. **global** — tenant genelinde; her projedeki her WFD'de görünür ve SQL autoexec
+   adımlarında kullanılabilir. **Ayarlar sayfasından** yönetilir. Sahiplik alanları
+   (`project_id`, `wfd_name`) NULL'dur. Proje seçimi YOKTUR: global = tüm projeler
+   (proje bazlı görünürlük istenirse ayrı bir eşleme tablosu gerekir, bilinçli olarak
+   alınmadı).
+2. **lokal** — yalnız TEK bir WFD'de görünür/kullanılabilir; başka WFD'nin listesinde
+   çıkmaz. **WFD ayarları sekmesinden** yönetilir.
+
+**Lokal sahiplik anahtarı `(project_id, wfd_name)`'dir — `wfd_id` DEĞİL.** Çünkü
+`wfd_meta`'da her versiyon AYRI bir `wfd_id` satırıdır (`wfd_id` PK): `wfd_id`'ye bağlamak
+yeni versiyon yayınlandığında bağlantıyı koparırdı, oysa WFD JSON'undaki
+`autoexec.<k>.config.connection` uuid'i versiyonlar arası kopyalanır. Mantıksal WFD kimliği
+bu repoda her yerde `(project_id, name)`'dir (bkz. `wfd_meta_project_name_version_key`,
+`wfd_single_draft`). Bunun iki sonucu var ve ikisi de bilinçli:
+- Grup yeniden adlandırılınca lokaller de taşınır — `repo::update_group_metadata`
+  ifadesindeki `renamed_conns` CTE'si (veri değiştiren CTE referans edilmese de bir kez ve
+  tam olarak koşar).
+- Gruptaki son satır silinince lokaller sahipsiz kalırdı → `repo::delete_draft` aynı
+  transaction'da onları da siler.
+
+**İsim benzersizliği kapsam başına iner:** kısmi unique index'ler
+`db_connection_global_name (orgtnt_id, name) WHERE global` ve
+`db_connection_local_name (project_id, wfd_name, name) WHERE local`. Aynı ad bir global ve
+bir lokalde yan yana durabilir (referans uuid'dir); editör seçicisi lokali işaretler.
+
+**Kapsam create'te belirlenir, update'te DEĞİŞMEZ.** Global'i lokale (ya da tersine)
+çevirmek, ona referans veren WFD'lerin görünürlüğünü sessizce kaydırırdı.
+
+**Yüzey.** `GET /db/connections?orgtnt_id=..&wfd_id=..` — `wfd_id` verilirse global'lerin
+yanına O WFD'nin lokalleri eklenir, verilmezse (ayarlar sayfası) yalnız global'ler döner;
+her satır `scope` taşır. `POST` gövdesi `scope` (default `global`) + `scope=local` için
+zorunlu `wfd_id` alır; grup kimliği sunucuda çözülür. WFD ekranında global satırlar
+salt-okunurdur (test AÇIK, düzenle/sil KAPALI) — düzenleme tüm projeleri etkilerdi.
+
+**Yazma kapısı.** `POST /wfd` ve `PUT /wfd/draft/{id}/{v}`, doküman BAŞKA bir WFD'ye ait
+bir lokal bağlantıya referans veriyorsa `422` döner
+(`routes::db::assert_no_foreign_local_connections`). Elle düzenlenmiş/kopyalanmış JSON
+içindir; editör listesi zaten kapsamla filtreli. Bilinmeyen (silinmiş) id'ler hata DEĞİL —
+eskiden de kaydedilebiliyorlardı, çalışma anında "connection bulunamadı" ile düşerler.
+
+(`migrations/wf/20260804000001_db_connection_scope.sql`,
+`server/src/routes/db.rs`, `server/src/routes/wfd.rs`, `wfd/src/repo.rs`; editör:
+`components/engine/DbConnections.tsx`, `components/engine/EngineSettings.tsx`,
+`components/shared/AutoexecConfigModal.tsx`, `api/engineApi.ts`.)

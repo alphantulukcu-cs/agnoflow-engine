@@ -1934,12 +1934,12 @@ fn anchor_to_orgu_kinded_field_is_valid() {
 }
 
 #[test]
-fn anchor_to_user_kinded_field_is_valid() {
-    // `user` ORGU'yu KAPSAR: içindeki orgu_id anchor'a yeter.
+fn anchor_to_actor_kinded_field_is_valid() {
+    // `actor` ORGU'yu KAPSAR: içindeki orgu_id anchor'a yeter.
     let v = with_kinded_field(
         with_listable_anchor("$ctx.talep_sahibi"),
         "talep_sahibi",
-        "user",
+        "actor",
         json!({ "user_id": { "type": "string" }, "orgu_id": { "type": "string" } }),
     );
     assert!(!has_error(
@@ -1954,7 +1954,7 @@ fn anchor_to_orgu_id_child_of_kinded_field_is_valid() {
     let v = with_kinded_field(
         with_listable_anchor("$ctx.talep_sahibi.orgu_id"),
         "talep_sahibi",
-        "user",
+        "actor",
         json!({ "user_id": { "type": "string" }, "orgu_id": { "type": "string" } }),
     );
     assert!(!has_error(

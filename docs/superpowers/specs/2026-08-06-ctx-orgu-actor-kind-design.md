@@ -1,4 +1,4 @@
-# Context alan kind'ları (`orgu` / `user`) + C_A'nın context'ten beslenmesi
+# Context alan kind'ları (`orgu` / `actor`) + C_A'nın context'ten beslenmesi
 
 **Tarih:** 2026-08-06
 **Kapsam:** `agnoflow-engine` (spec + `wfe-core`) · `agnoflow-frontend` (Context Studio + C_A editörleri)
@@ -45,9 +45,9 @@ editör aynı cevabı önden verir.
 | kind | kanonik şekil | besleyebildiği kanal |
 |---|---|---|
 | `orgu` | `{orgu_id, name?}` | `c_orgu.from` |
-| `user` | `{user_id, orgu_id, role?, name?}` | `c_u` **ve** `c_orgu.from` |
+| `actor` | `{user_id, orgu_id, role?, name?}` | `c_u` **ve** `c_orgu.from` |
 
-`user` kind'ı `orgu`'yu **kapsar**: `wfes_effects.set: {x: "$actor"}` alana
+`actor` kind'ı `orgu`'yu **kapsar**: `wfes_effects.set: {x: "$actor"}` alana
 `{orgu_id, user_id, role}` yazıyor ve `resolver::extract_orgu_uuid` obje içinde
 `orgu`/`orgu_id` anahtarını buluyor. Yani tek alan iki kanalı besler. İkisi simetrik
 kavramlar değil; `orgu` kind'lı alan (ör. bir REST'in döndürdüğü şube) yalnız `c_orgu`'yu
@@ -64,12 +64,17 @@ besler, çünkü içinde kişi yoktur.
 - **`format` yanlış eksen.** JSON Schema'da `format` metin biçimi içindir; obje kimliği için
   anlamsal olarak yanlış ve şekli anlatmaz.
 
+> **Adlandırma düzeltmesi (aynı gün).** Kind ilk turda `user` diye adlandırılmıştı; `terminology.md`
+> §USER/ROLE/ACTOR'a göre **User (U)** koltuksuz kişidir, `(ORGU,(U,R))` üçlüsünün adı ise **Actor**'dür
+> — ve alana yazılan şey (`$actor`) tam olarak o üçlüdür. Kind `actor` olarak düzeltildi. Salt kişi tutan
+> bir alan için ayrı bir `user` kind'ı gerekirse sonra eklenir; o yalnız `c_u`'yu besler.
+
 ## 3. Faz 1 — `orgu` kind
 
 ### 3.1 Spec
 
 - `schema.json` → `contextSchemaNode.properties`'e
-  `"x-wf-kind": {"type":"string","enum":["orgu","user"]}`. **Enum ikisini birden tanımlar**
+  `"x-wf-kind": {"type":"string","enum":["orgu","actor"]}`. **Enum ikisini birden tanımlar**
   ki Faz 2 şema değişikliği istemesin; Faz 1'de yalnız `orgu` tüketilir.
 - `decisions.md`'ye karar maddesi (kavram + kurallar + §3.3 davranış değişikliği).
 
@@ -119,7 +124,7 @@ ayrı yol. `anchor_from_ctx` `$ctx.` önekini `strip_prefix(...).unwrap_or(path)
 | kural | seviye | koşul |
 |---|---|---|
 | `c_orgu_anchor_unknown_field` | hata | yol context şemasında yok |
-| `c_orgu_anchor_not_orgu_kind` | hata | yol `orgu`/`user` kind'lı bir düğüme ya da bunlardan birinin `orgu_id`/`orgu` çocuğuna çözülmüyor |
+| `c_orgu_anchor_not_orgu_kind` | hata | yol `orgu`/`actor` kind'lı bir düğüme ya da bunlardan birinin `orgu_id`/`orgu` çocuğuna çözülmüyor |
 | `c_orgu_anchor_kind_unverifiable` | **uyarı** | şema o derinliği kısıtlamıyor → kind doğrulanamıyor |
 
 Üçüncü kural, uygulama sırasında ortaya çıkan bir boşluğu kapatıyor: `initiated_by: {"type":"object"}`
@@ -168,9 +173,9 @@ eksik anchor) — belge seviyesinde ise hiç kapsam yok.
 
 ### 3.7 Faz 1 kapsamı DIŞI
 
-`user` kind'ının tüketimi · dinamik `c_u` · `CaRuleEditor`'a `wfah` anchor'ı ekleme.
+`actor` kind'ının `c_u` tarafından tüketilmesi · dinamik `c_u` · `CaRuleEditor`'a `wfah` anchor'ı ekleme.
 
-## 4. Faz 2 — `user` kind + dinamik `c_u`
+## 4. Faz 2 — dinamik `c_u`
 
 ### 4.1 Gerekçe
 
@@ -208,7 +213,7 @@ türetilir.
 
 `authorize`'ın 3. adımı `CuItem::Ref`'i ctx'ten çözer, sonra bugünkü UUID/ad
 karşılaştırmasını uygular. Değer çıkarımı `extract_orgu_uuid`'in simetriği olur
-(`extract_user_ident`): ham string, ya da obje içinde `user_id`/`user`. Böylece
+(`extract_user_ident`): ham string, ya da obje içinde `user_id`/`actor`. Böylece
 `{from:"$ctx.talep_sahibi"}` (son ek olmadan) da çalışır.
 
 **Çözülemeyen `Ref` → o kanal eşleşmez** (hata değil). `$ctx`'in "eksik = null" sözleşmesiyle
@@ -241,11 +246,11 @@ cache **çözülmüş** adayları tutuyor (`routes/portal/pool.rs`). Dinamik `c_
 | kural | koşul |
 |---|---|
 | `c_u_literal_dollar_prefix` | `Literal` öğesi `$` ile başlıyor (yazım hatası kullanıcı adı sanılmasın) |
-| `c_u_ref_not_user_kind` | `Ref.from` bir `user` kind'lı alana ya da onun `user_id` çocuğuna çözülmüyor |
+| `c_u_ref_not_actor_kind` | `Ref.from` bir `actor` kind'lı alana ya da onun `user_id` çocuğuna çözülmüyor |
 
 ### 4.8 Editör (Faz 2)
 
-Context Studio tip açılırına `user`; `c_u` satırlarına "context'ten kişi" seçeneği
+`c_u` satırlarına "context'ten kişi" seçeneği
 (`CaRuleEditor` ve `OrgCaModal`'ın rol/kişi bölümü).
 
 ### 4.9 Faz 2 kapsamı DIŞI
@@ -266,5 +271,5 @@ Context Studio tip açılırına `user`; `c_u` satırlarına "context'ten kişi"
 **Faz 2**
 6. `c_u: [{from:"$ctx.<user alanı>.user_id"}]` yazılabiliyor, matcher onu çözüyor, havuz
    listelemesi kişiyi görüyor.
-7. `Literal` öğede `$` öneki ve `user` kind'lı olmayan `Ref` publish'te hata veriyor.
+7. `Literal` öğede `$` öneki ve `actor` kind'lı olmayan `Ref` publish'te hata veriyor.
 8. Eski düz-string `c_u` belgeleri değişmeden çalışıyor; node key'leri aynı kalıyor.

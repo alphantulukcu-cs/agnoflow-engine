@@ -200,8 +200,8 @@ durumunda kapıyı `actor.orgu ∈ {actor.orgu}` sorusuna, yani daima-doğruya �
 tümüyle kalkar. Boş küme ile node görünür biçimde durur; `claim_timeout`/`escalation`
 bunun için vardır. `default_anchor` yalnız **static selector** biçiminin `self` köküdür.
 
-Anchor'ın işaret ettiği alan, context şemasında `x-wf-kind: orgu|user` ile bildirilmek
-zorundadır (validator `c_orgu_anchor_not_orgu_kind`).
+Anchor'ın işaret ettiği alan, context şemasında `x-wf-kind: orgu|actor` ile bildirilmek
+zorundadır (validator `c_orgu_anchor_not_orgu_kind`); bkz. **SCHEMA ANNOTATION UZANTILARI**.
 
 **Eşleşme semantiği (kanonik):**
 
@@ -413,6 +413,33 @@ field'lar WFD'ye özel bir uzantı taşıyabilir.
 aynıdır (`c_orgu` / `c_r` / `c_u`). Kriterler **bağımsızdır ve aralarında OR
 vardır**; kural sağlanmazsa Actor field'ı DynCtx'te göremez. Listable erişimi
 olan Actor için de geçerlidir. Ayrıntı: **VISIBILITY / V** bölümü.
+
+**`x-wf-kind`** *(enum: `orgu` | `actor`)* — field'ın **anlamsal** tipi. `type`'a
+ORTOGONALDİR: kind'lı field her zaman `type: "object"`tir; kind onun İÇİNDE ne
+durduğunu söyler.
+
+| kind | kanonik şekil | ne yapar |
+|---|---|---|
+| `orgu` | `{orgu_id, name?}` | bir ORGU tutar |
+| `actor` | `{user_id, orgu_id, role?, name?}` | bir **ACTOR** — yani `(ORGU,(U,R))` üçlüsü; `$actor` effect'inin yazdığı şekil |
+
+`actor`, `orgu`'yu **KAPSAR**: içindeki `orgu_id` anchor'a yeter, dolayısıyla bir
+`actor` field'ı hem `c_orgu.from`'u hem kişi referanslarını (`c_u`) besleyebilir.
+Tersi geçerli değil — `orgu` field'ında kişi yoktur (ör. bir autoexec'in döndürdüğü
+birim kimliği).
+
+Neden gerekli: "bu field bir ORGU tutar" bilgisi WFD'den **türetilemez** (bir REST
+sonucunun içindeki birim kimliğinde `$actor` izi yoktur), o yüzden açıkça bildirilir.
+Validator `c_orgu.from`'un kind'lı bir yola işaret etmesini ZORUNLU kılar
+(`c_orgu_anchor_not_orgu_kind`); şemanın kısıtlamadığı derinliğe düşen yol
+`c_orgu_anchor_kind_unverifiable` uyarısı üretir. Motor `$ref`'i yalnız burada,
+`#/$defs/<Ad>` biçimiyle sınırlı olarak çözer.
+
+> **Saf `user` kind'ı YOKTUR.** Sözlükte **User (U)** koltuksuz kişidir (birden fazla
+> ORGU'ya bağlı olabilir), **Actor** ise `(ORGU,(U,R))` üçlüsüdür. Context'e yazılan
+> şey pratikte daima üçlüdür (`$actor`), o yüzden kind `actor` adını taşır. Salt kişi
+> tutan bir field ihtiyacı doğarsa ayrı bir `user` kind'ı eklenir — o yalnız `c_u`'yu
+> besleyebilir, `c_orgu`'yu besleyemez.
 
 > **`x-wf-readonly` KALDIRILDI (WOR-71).** "Bu alanı yalnız engine yazar" artık
 > ayrı bir flag ile değil, WFD'nin kendisinden okunur: alan hiçbir

@@ -157,10 +157,11 @@ fn check_env_references(wfd: &Wfd, report: &mut ValidationReport) {
 // runtime'da anchor çözülemez ve KİMSE yetkilenmez (bkz. `resolver::resolve_c_orgu`) —
 // yani akış sessizce kilitlenir. Anlamsal tip context şemasında `x-wf-kind` ile bildirilir.
 
-/// `x-wf-kind` değerleri — `user` ORGU'yu KAPSAR (içindeki `orgu_id` anchor'a yeter).
-const ORGU_CAPABLE_KINDS: [&str; 2] = ["orgu", "user"];
+/// `x-wf-kind` değerleri — `actor` ORGU'yu KAPSAR (içindeki `orgu_id` anchor'a yeter).
+/// `actor` = terminology.md'deki (ORGU,(U,R)) üçlüsü, yani `$actor`'ün yazdığı şekil.
+const ORGU_CAPABLE_KINDS: [&str; 2] = ["orgu", "actor"];
 
-/// `user`/`orgu` kind'lı bir nesnenin içinde ORGU tutan alan adları
+/// `actor`/`orgu` kind'lı bir nesnenin içinde ORGU tutan alan adları
 /// (`resolver::extract_orgu_uuid` bu iki anahtarı arar).
 const ORGU_CHILD_KEYS: [&str; 2] = ["orgu", "orgu_id"];
 
@@ -276,7 +277,7 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
                 format!(
                     "c_orgu anchor'ı '{from}' şemanın kısıtlamadığı bir derinliğe düşüyor — \
                      bu yolun bir ORGU tuttuğu doğrulanamıyor. Alanı Context Studio'da \
-                     `orgu` (ya da kişi tutuyorsa `user`) tipiyle bildirin; aksi halde \
+                     `orgu` (ya da bir aktör tutuyorsa `actor`) tipiyle bildirin; aksi halde \
                      anchor runtime'da çözülemezse o node'da KİMSE yetkilenmez."
                 ),
             ),
@@ -294,7 +295,7 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
                     continue;
                 }
                 // Yol bir ORGU alt-alanını gösteriyorsa ebeveynin kind'ı yeter:
-                // `$ctx.talep_sahibi.orgu_id` ↔ `talep_sahibi` = user/orgu.
+                // `$ctx.talep_sahibi.orgu_id` ↔ `talep_sahibi` = actor/orgu.
                 if let Some((parent, last)) = bare.rsplit_once('.') {
                     if ORGU_CHILD_KEYS.contains(&last) {
                         if let NodeAt::Found(p) = context_node_at(&wfd.context, parent) {
@@ -309,8 +310,8 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
                     format!("{path}.from"),
                     format!(
                         "c_orgu anchor'ı '{from}' bir ORGU tutmayan alanı işaret ediyor. \
-                         Context Studio'da o alanın tipini `orgu` (ya da kişi tutuyorsa `user`) \
-                         yapın — anchor yalnız `x-wf-kind: orgu|user` bildirilmiş bir alandan \
+                         Context Studio'da o alanın tipini `orgu` (ya da bir aktör tutuyorsa `actor`) \
+                         yapın — anchor yalnız `x-wf-kind: orgu|actor` bildirilmiş bir alandan \
                          ya da onun orgu_id/orgu çocuğundan çözülebilir."
                     ),
                 );

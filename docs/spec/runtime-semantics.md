@@ -79,6 +79,35 @@ v2.1 ile aynı: start'tan BFS reachability (escalation kenarları DAHİL), eriş
 
 v2.1 ile aynı: input path'leri, readonly yasağı, `wfes_effects.set` path+tip (catch ve escalation effects dahil), `$exec.response.*` = hata, ZEN parse + boolean sonuç, `WFD.ALL` tek başına ve son retrier'da, `catch.error_equals` default `["WFD.ALL"]`.
 
+### 6a-1. İfade TİP denetimi (`expr_types`)
+
+Her `when` / `wft.conditions[].when` / `listable[].when` / `calc` ifadesi motorun AST'si
+üzerinden tip denetimine girer. Kurallar `zen-expression`ın VM davranışının karşılığıdır:
+`Equal` yalnız aynı tipteki skalerleri (ve `Null`/`Date` çiftlerini) eşler — diğer her
+kombinasyon sessizce `false`, `!=` sessizce `true`; `Compare` yalnız sayı/tarih bilir,
+gerisi RUNTIME hatasıdır. Bu üç davranış yayında iz bırakmadığı için tasarım zamanında
+durdurulur.
+
+| Kod | Kural |
+|---|---|
+| `zen_wfah_field_unknown` | `#.<alan>` / `$prev.<alan>` / `$first.<alan>` motorun `$wfah` izdüşümünde (`seq · action · actor(.orgu_id/.user_id/.role) · input · at`) olmalı; `input.<yol>` ise bir aksiyonun bildirdiği input yoluyla ÖRTÜŞMELİ (iki yönlü kapsama). Aksi halde koşul sessizce `null` okur → hep-false. |
+| `zen_object_compare` | Karşılaştırmanın bir tarafı object/array ise reddedilir — **obje==obje dahil** (motor eşleştirmez, `!=` daima true). Alt alan karşılaştırılır ya da varlık `== null` / `!= null` ile sorulur. |
+| `zen_ordering_not_number` | `> < >= <=` yalnız sayıda (ve `d()` ile tarihte) çalışır; metin/bool tarafta motor `Compare: Unsupported type` ile patlar. `at` de METİNDİR → zaman sıralaması için `seq` kullanılır. |
+| `zen_type_mismatch` | İki tarafın tipi de biliniyor ve farklı → koşul sessizce hep aynı sonucu verir. `null` karşılaştırması muaftır (varlık sorgusu). |
+| `zen_list_type_mismatch` | `in` / `not in` listesinin ÖĞELERİ sol tarafla aynı tipte olmalı — motor öğe öğe eşitlik arar, farklı tipli öğe hiç eşleşmez (`#.seq in ["a"]` hep-false). Sol taraf object/array ise `in` de reddedilir. |
+| `zen_text_op_not_string` | `contains` / `startsWith` / `endsWith` / `matches` METİN ister; sayı/bool/obje tarafta motor hata verir ya da sessizce yanlış döner. |
+| `zen_timestamp_format` | `at` sabit biçimli bir damgadır (UTC `yyyyMMddHHmmss`, 14 rakam) → sabitin biçimi denetlenir: eşitlik ve `in` TAM damga ister, `startsWith` anlamlı bir alan sınırında bitmeli (4·6·8·10·12·14 = yıl·ay·gün·saat·dakika·saniye), `contains`/`endsWith` yalnız rakam, `matches` muaf. Biçime uymayan sabit hiçbir kayıtla eşleşmez ve iki taraf da `string` olduğu için `zen_type_mismatch` bunu görmez. |
+| `zen_input_needs_action_gate` | `#.input.*` sıralama karşılaştırması aynı `and` zincirinde ve ÖNCE `#.action == "…"` (ya da `in`) kapısı ister; `or` kapı değildir, closure'a girerken kapı sıfırlanır. |
+
+**Tip nereden bilinir:** `$ctx.<yol>` context şemasından; sabitler kendi JSON tipinden;
+`$actor` object, `$timestamp`/`$wfe_id`/`$node` string. `#.input.<yol>` ve
+`$action.input.<yol>` ise **girdiyi context'e yazan `wfes_effects.set` üzerinden**:
+`{"applicant": "$action.input.applicant"}` varsa `#.input.applicant.name`in tipi
+`context.properties.applicant.properties.name`tir. Aksiyon girdisi context'e yazılmak
+zorunda olduğu için (`unused_action_input`) bu bilgi HER geçerli WFD'de vardır — elle
+yazılmış dosya da aynı bilgiyi taşımak zorundadır. Tip çözülemiyorsa kural sessiz kalır
+(fonksiyon sonuçları da bilinmez sayılır: `d(#.at) > d($ctx.x)` meşrudur).
+
 ### 6b. Context yazma sözleşmesi (WOR-70)
 
 `context.required` KALDIRILDI. Zorunluluk artık **tek yerde** bildirilir (`actions.<ad>.input.required`)

@@ -12,6 +12,7 @@ chrono      = { workspace = true }
 async-trait = { workspace = true }
 zen-engine      = { workspace = true }
 zen-expression  = { workspace = true }
+bumpalo         = { workspace = true }
 tracing     = { workspace = true }
 tokio       = { workspace = true }
 

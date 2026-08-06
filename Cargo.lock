@@ -4841,6 +4841,7 @@ name = "wfe-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bumpalo",
  "chrono",
  "serde",
  "serde_json",

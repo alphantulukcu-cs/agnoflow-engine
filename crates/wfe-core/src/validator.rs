@@ -6,6 +6,7 @@ use crate::types::wfd_v22::{
     AutoexecType, CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft,
     WftCondition, WftTarget,
 };
+use crate::expr_types::{self, ExprEnv};
 use crate::v22::duration::parse_iso8601_duration;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -477,7 +478,7 @@ fn callee_inputs(callee: &Wfd, start_id: Option<&str>) -> Option<CalleeInputs> {
 }
 
 /// Bir context şeması yolundaki `type` değeri (biliniyorsa).
-fn schema_type_at(context: &Value, dotted: &str) -> Option<String> {
+pub(crate) fn schema_type_at(context: &Value, dotted: &str) -> Option<String> {
     let mut current = context;
     for segment in dotted.split('.') {
         current = current.get("properties")?.get(segment)?;
@@ -654,7 +655,7 @@ fn json_literal_type(v: &Value) -> Option<String> {
 }
 
 /// `integer` bir `number` yerine geçebilir; gerisi tam eşleşme ister.
-fn types_compatible(got: &str, want: &str) -> bool {
+pub(crate) fn types_compatible(got: &str, want: &str) -> bool {
     got == want || (got == "integer" && want == "number")
 }
 
@@ -1646,9 +1647,46 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
     out
 }
 
+/// İfade tip denetiminin ihtiyaç duyduğu WFD bilgisi. Editör bunları JSON'dan çıkarıyorsa
+/// motor da çıkarabilir — elle yazılmış dosya bu bilgileri taşımak ZORUNDADIR (taşımıyorsa
+/// eksiklik kendi kuralıyla ayrıca reddedilir: `input_path` / `unused_action_input`).
+///
+/// **public**: `POST /wfd/validate-expression` de aynı bağlamı kurar — editörün serbest ZEN
+/// satırı, yayın kapısıyla AYNI cevabı satır yazılırken almak zorundadır.
+pub fn expr_env(wfd: &Wfd) -> ExprEnv<'_> {
+    let mut input_ctx_map: HashMap<String, String> = HashMap::new();
+    for (_, effects) in each_effects(wfd) {
+        for (target, raw) in &effects.set {
+            let Some(path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) else {
+                continue;
+            };
+            input_ctx_map
+                .entry(path.to_string())
+                .or_insert_with(|| target.clone());
+        }
+    }
+    let declared_inputs = wfd
+        .actions
+        .values()
+        .flat_map(|a| a.input.required.iter().chain(&a.input.optional))
+        .cloned()
+        .collect();
+    ExprEnv {
+        context: &wfd.context,
+        input_ctx_map,
+        declared_inputs,
+    }
+}
+
 fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
+    let env = expr_env(wfd);
     let check = |expr: &str, path: String, report: &mut ValidationReport| {
-        for (code, is_error, message) in expression_issues(expr) {
+        // Yüzey kontrolleri (parse/indeks) + TİP kontrolleri aynı kapıdan geçer: editörün
+        // koşul kurucusundaki kural setiyle motor tarafı ayrışmasın.
+        let issues = expression_issues(expr)
+            .into_iter()
+            .chain(expr_types::expression_type_issues(expr, &env));
+        for (code, is_error, message) in issues {
             if is_error {
                 report.error(code, path.clone(), message);
             } else {

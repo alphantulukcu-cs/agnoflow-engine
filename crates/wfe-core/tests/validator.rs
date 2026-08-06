@@ -1594,3 +1594,239 @@ fn golden_fixture_has_no_dead_conditions() {
         "wft_dead_condition"
     ));
 }
+
+// ---- when ifadelerinin TİP denetimi (expr_types) ----
+//
+// Editörün ürettiği JSON ile ELLE yazılan JSON aynı kurallara uymak zorundadır. Bu
+// kurallar önce yalnız editörde vardı; upload kapısı bakmıyordu, dolayısıyla elle
+// hazırlanmış bir dosya `some($wfah, #.actor == "ali")` ile yayınlanabiliyordu.
+//
+// Kuralların dayanağı `zen-expression`ın VM'i (bkz. src/expr_types.rs modül dokümanı):
+// `Equal` yalnız aynı tipteki skalerleri eşler, diğer her kombinasyon sessizce `false`
+// (`!=` sessizce `true`); `Compare` yalnız sayı/tarih bilir, gerisi RUNTIME hatası.
+
+/// İlk transition'ın `when`ini verilen ifadeyle değiştirir.
+fn fixture_with_when(expr: &str) -> Value {
+    let mut v = fixture_value();
+    v["transitions"][0]["when"] = json!(expr);
+    v
+}
+
+fn errors_for_when(expr: &str) -> Vec<String> {
+    validate_value(fixture_with_when(expr))
+        .errors
+        .into_iter()
+        .map(|e| e.code)
+        .collect()
+}
+
+#[test]
+fn wfah_object_compared_with_scalar_is_error() {
+    // `#.actor` bir nesnedir ({orgu_id, user_id, role}) — metinle eşleşmesi imkânsız.
+    assert!(errors_for_when(r#"some($wfah, #.actor == "ali")"#)
+        .contains(&"zen_object_compare".to_string()));
+}
+
+#[test]
+fn object_compared_with_object_is_error() {
+    // Golden'da `initiated_by` object'tir. Obje==obje motorda DAİMA false döner
+    // (`!=` daima true) — "aynı kişi mi" sorusu alt alanla sorulur.
+    assert!(
+        errors_for_when(r#"some($wfah, #.actor == $ctx.initiated_by)"#)
+            .contains(&"zen_object_compare".to_string()),
+        "obje-obje karşılaştırması reddedilmeli"
+    );
+}
+
+#[test]
+fn actor_subfield_comparison_is_clean() {
+    let report = validate_value(fixture_with_when(r#"some($wfah, #.actor.role == "creditAnalyst")"#));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn wfah_input_type_is_inferred_from_effects() {
+    // `#.input.applicant.name` TİPSİZ bildirilir (actions[].input yalnız yol listesidir),
+    // ama `applicant` context'e `$action.input.applicant` ile yazılır → tipi ctx şemasından
+    // bilinir: `applicant.name` string. Sağ taraf number → sessizce hep-false olurdu.
+    assert!(
+        errors_for_when(
+            r#"some($wfah, #.action == "create_application" and #.input.applicant.name == $ctx.credit_info.amount_requested)"#
+        )
+        .contains(&"zen_type_mismatch".to_string()),
+        "metin ↔ sayı karşılaştırması yakalanmalı"
+    );
+}
+
+#[test]
+fn matching_types_are_clean() {
+    let report = validate_value(fixture_with_when(
+        r#"some($wfah, #.action == "create_application" and #.input.applicant.name == $ctx.applicant.name)"#,
+    ));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn string_literal_against_number_field_is_error() {
+    assert!(
+        errors_for_when(r#"$ctx.credit_info.amount_requested == "1000""#)
+            .contains(&"zen_type_mismatch".to_string()),
+        "sayı alanına metin sabiti yakalanmalı"
+    );
+}
+
+#[test]
+fn ordering_on_text_field_is_error() {
+    // Metin alanda `>` zen'de RUNTIME hatası verir (Compare: Unsupported type).
+    // `#.at` de metindir (`yyyyMMddHHmmss`) — sıralaması aynı kurala takılır.
+    assert!(errors_for_when(r#"some($wfah, #.actor.role > "mudur")"#)
+        .contains(&"zen_ordering_not_number".to_string()));
+    assert!(errors_for_when(r#"some($wfah, #.at > "20260115103000")"#)
+        .contains(&"zen_ordering_not_number".to_string()));
+}
+
+// `#.at` düz bir METİNDİR (`yyyyMMddHHmmss`, UTC, 14 rakam) ve karşılaştırmaları string
+// temellidir. Tip kuralı bunu görmez (iki taraf da `string`), denetlenen şey SABİTİN BİÇİMİ:
+// biçime uymayan değer hiçbir kayıtla eşleşmez → satır sessizce hep-false olur.
+#[test]
+fn timestamp_literal_format_is_checked() {
+    for when in [
+        r#"some($wfah, #.at == "2026-01-01")"#,
+        r#"some($wfah, #.at != "onay")"#,
+        r#"some($wfah, #.at == "20260115")"#, // yarım damga — eşitlik 14 hane ister
+        r#"$prev.at == "bugün""#,
+        r#"some($wfah, startsWith(#.at, "Ocak"))"#,
+        r#"some($wfah, startsWith(#.at, "2026-01"))"#,
+        r#"some($wfah, startsWith(#.at, "2026011"))"#, // yarım alan
+        r#"some($wfah, contains(#.at, "-01-"))"#,
+        r#"some($wfah, #.at in ["20260115103000", "2026"])"#,
+    ] {
+        assert!(
+            errors_for_when(when).contains(&"zen_timestamp_format".to_string()),
+            "yakalanmalı: {when}"
+        );
+    }
+}
+
+#[test]
+fn timestamp_string_comparisons_are_clean() {
+    for when in [
+        r#"some($wfah, #.at == "20260115103000")"#,
+        r#"some($wfah, startsWith(#.at, "2026"))"#,
+        r#"some($wfah, startsWith(#.at, "20260115"))"#,
+        r#"some($wfah, contains(#.at, "0115"))"#,
+        r#"some($wfah, matches(#.at, "^2026"))"#,
+        r#"some($wfah, #.at in ["20260115103000", "20260116090000"])"#,
+        "some($wfah, #.at != null)",
+    ] {
+        let report = validate_value(fixture_with_when(when));
+        assert!(
+            report.errors.is_empty(),
+            "temiz geçmeli: {when} — hatalar: {:#?}",
+            report.errors
+        );
+    }
+}
+
+// Motorun `In` opcode'u öğe öğe `Equal` yapar → farklı tipli öğe HİÇ eşleşmez, koşul
+// sessizce hep-false olur. `in` dalı eskiden tip denetiminden erken dönüyordu.
+#[test]
+fn list_element_type_mismatch_is_error() {
+    assert!(errors_for_when(r#"some($wfah, #.seq in ["a", "b"])"#)
+        .contains(&"zen_list_type_mismatch".to_string()));
+    assert!(
+        errors_for_when(r#"$ctx.credit_info.amount_requested in ["1000"]"#)
+            .contains(&"zen_list_type_mismatch".to_string())
+    );
+}
+
+#[test]
+fn list_element_type_match_is_clean() {
+    let report = validate_value(fixture_with_when("some($wfah, #.seq in [1, 2])"));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+// Metin fonksiyonu biçimli operatörler METİN ister; `type_of` fonksiyon çağrısını
+// `Unknown` saydığı için bu satırlar hiçbir kurala takılmıyordu.
+#[test]
+fn text_op_on_number_field_is_error() {
+    assert!(errors_for_when(r#"some($wfah, startsWith(#.seq, "1"))"#)
+        .contains(&"zen_text_op_not_string".to_string()));
+    assert!(
+        errors_for_when(r#"contains($ctx.credit_info.amount_requested, "10")"#)
+            .contains(&"zen_text_op_not_string".to_string())
+    );
+}
+
+#[test]
+fn text_op_on_string_field_is_clean() {
+    let report = validate_value(fixture_with_when(
+        r#"some($wfah, startsWith(#.action, "create"))"#,
+    ));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn ordering_on_number_field_is_clean() {
+    let report = validate_value(fixture_with_when("some($wfah, #.seq > 1)"));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn unknown_wfah_field_is_error() {
+    // `actor.name` motorun izdüşümünde YOK (`{seq, action, actor, input, at}`) — koşul
+    // sessizce null okur.
+    assert!(errors_for_when(r#"some($wfah, #.actor.name == "ali")"#)
+        .contains(&"zen_wfah_field_unknown".to_string()));
+}
+
+#[test]
+fn undeclared_input_path_is_error() {
+    assert!(
+        errors_for_when(r#"some($wfah, #.input.boyle_bir_girdi_yok == "x")"#)
+            .contains(&"zen_wfah_field_unknown".to_string()),
+        "hiçbir aksiyonun bildirmediği girdi yolu reddedilmeli"
+    );
+}
+
+#[test]
+fn ungated_input_ordering_is_error() {
+    // Girdisi olmayan bir geçmiş kaydında `null > 1000` → RUNTIME hatası (HTTP 500).
+    assert!(
+        errors_for_when("some($wfah, #.input.credit_info.amount_requested > 1000)")
+            .contains(&"zen_input_needs_action_gate".to_string()),
+        "kapısız sıralama reddedilmeli"
+    );
+}
+
+#[test]
+fn gated_input_ordering_is_clean() {
+    let report = validate_value(fixture_with_when(
+        r#"some($wfah, #.action == "analyst_approve" and #.input.credit_info.amount_requested > 1000)"#,
+    ));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn or_is_not_a_gate() {
+    // `or` kapı DEĞİLDİR: sol dal koşmadığında girdi garanti değildir.
+    assert!(errors_for_when(
+        r#"some($wfah, #.action == "analyst_approve" or #.input.credit_info.amount_requested > 1000)"#
+    )
+    .contains(&"zen_input_needs_action_gate".to_string()));
+}
+
+#[test]
+fn null_comparison_is_clean() {
+    // Varlık sorgusu (editörün "var"/"yok" operatörü) — obje alanda BİLE meşrudur.
+    let report = validate_value(fixture_with_when("some($wfah, #.input == null)"));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn date_wrapped_ordering_is_exempt() {
+    // `d()` sonucu Dynamic'tir ve motorun `Compare`ı (Date,Date) çiftini bilir — fonksiyon
+    // sonuçları BİLİNMEZ sayıldığı için kural buraya karışmaz.
+    let report = validate_value(fixture_with_when(r#"some($wfah, d(#.at) > d("2026-01-01"))"#));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}

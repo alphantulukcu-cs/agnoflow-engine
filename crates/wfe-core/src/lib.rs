@@ -1,4 +1,5 @@
 pub mod error;
+pub mod expr_types;
 pub mod ports;
 pub mod timestamp;
 pub mod types;

@@ -42,6 +42,18 @@ struct ListQuery {
     wfd_id: Option<Uuid>,
 }
 
+/// Kayıtlı bağlantı testinin ortam bağlamı — query param olarak gelir.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct TestQuery {
+    #[serde(default)]
+    orgtnt_id: Option<Uuid>,
+    #[serde(default)]
+    wfd_id: Option<Uuid>,
+    #[serde(default)]
+    environment: Option<String>,
+}
+
 #[derive(Deserialize, ToSchema)]
 struct ConnBody {
     orgtnt_id: Option<Uuid>,
@@ -59,6 +71,11 @@ struct ConnBody {
     options: Value,
     /// Parola/dizedeki gizli — verilmezse (update) mevcut korunur.
     secret: Option<String>,
+    /// Bağlantı testinin hangi ortamın `$env` değerleriyle koşacağı (ad). Verilmezse
+    /// tenant varsayılanı. Alanlar `$env` ile şablonlanabildiği için test bir ortam
+    /// seçmeden anlamlı değildir — hangi hosta bağlanacağı ortamdan çıkar.
+    #[serde(default)]
+    environment: Option<String>,
     /// `global` (varsayılan) | `local`. Yalnızca create'te anlamlıdır: kapsam
     /// oluşturulduktan sonra değişmez (update kapsamı görmezden gelir).
     #[serde(default)]
@@ -95,19 +112,19 @@ fn map_write_err(e: sqlx::Error) -> AppError {
     }
 }
 
-/// Metin port'u bağlantı için sayıya çevirir.
+/// ÇÖZÜLMÜŞ port metnini sayıya çevirir.
 ///
 /// Kolon `text` çünkü `$env.PG_PORT` gibi bir şablon tutabilir (tek bağlantı satırı tüm
-/// ortamlara hizmet etsin diye). Şablonun ÇÖZÜMÜ bir koşum ortamı gerektirir; bağlantı
-/// testi henüz ortam almadığı için burada açık bir hata veririz — sessizce varsayılan
-/// porta düşmek yanlış bir hedefe bağlanmak demek olurdu.
+/// ortamlara hizmet etsin diye). Buraya gelen değer şablonu ÇÖZÜLMÜŞ olmalıdır —
+/// çözülmemiş bir `$env.` görürsek ortam bağlanmamış demektir, sessizce varsayılan porta
+/// düşmek yanlış bir hedefe bağlanmak olurdu.
 fn parse_port(raw: Option<&str>) -> Result<Option<i32>, AppError> {
     let Some(s) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
     if s.starts_with("$env.") {
         return Err(AppError(
-            format!("port bir $env şablonu ('{s}') — bu uç henüz ortam almıyor"),
+            format!("'{s}' çözülemedi — bu ortamda böyle bir değişken tanımlı değil"),
             StatusCode::UNPROCESSABLE_ENTITY,
         ));
     }
@@ -116,17 +133,40 @@ fn parse_port(raw: Option<&str>) -> Result<Option<i32>, AppError> {
         .map_err(|_| AppError(format!("geçersiz port: '{s}'"), StatusCode::BAD_REQUEST))
 }
 
-fn to_config(b: &ConnBody, secret: Option<String>) -> Result<DbConfig, AppError> {
+/// Bağlantı alanlarındaki `$env` şablonlarını verilen ortamla çözer.
+///
+/// Test yolunda kullanılır: kaydetme şablonu OLDUĞU GİBİ saklar (çözüm koşum anındadır),
+/// ama "Test et" gerçekten bağlanacağı için somut değerlere ihtiyaç duyar.
+fn resolve_field(
+    raw: Option<&str>,
+    env: &wfe_core::v22::env::RunEnv,
+) -> Result<Option<String>, AppError> {
+    let Some(s) = raw else { return Ok(None) };
+    match wfe_core::v22::env::resolve_string(s, env.full()) {
+        Ok(Some(v)) => Ok(Some(match v {
+            Value::String(x) => x,
+            other => other.to_string(),
+        })),
+        Ok(None) => Ok(Some(s.to_string())),
+        Err(e) => Err(AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY)),
+    }
+}
+
+fn to_config(
+    b: &ConnBody,
+    secret: Option<String>,
+    env: &wfe_core::v22::env::RunEnv,
+) -> Result<DbConfig, AppError> {
     let driver = DbDriver::parse(&b.driver)
         .ok_or_else(|| AppError("geçersiz driver".into(), StatusCode::BAD_REQUEST))?;
     Ok(DbConfig {
         driver,
         mode: b.mode.clone(),
-        host: b.host.clone(),
-        port: parse_port(b.port.as_deref())?,
-        database: b.database.clone(),
-        username: b.username.clone(),
-        secret,
+        host: resolve_field(b.host.as_deref(), env)?,
+        port: parse_port(resolve_field(b.port.as_deref(), env)?.as_deref())?,
+        database: resolve_field(b.database.as_deref(), env)?,
+        username: resolve_field(b.username.as_deref(), env)?,
+        secret: resolve_field(secret.as_deref(), env)?,
         options: if b.options.is_null() {
             json!({})
         } else {
@@ -279,20 +319,26 @@ async fn delete(State(s): State<AppState>, Path(id): Path<Uuid>) -> Result<Statu
     responses((status = 200, description = "Bağlantı testi sonucu (ok/message)", body = serde_json::Value)),
     security(("x_admin_key" = [])))]
 async fn test_draft(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     Json(b): Json<ConnBody>,
 ) -> Result<Json<Value>, AppError> {
-    let cfg = to_config(&b, b.secret.clone())?;
+    // Alanlar `$env` ile şablonlanabildiği için test bir ORTAM seçmeden anlamlı değil:
+    // hangi hosta bağlanacağı ortamdan çıkar.
+    let env = crate::routes::env::resolve_run_env(
+        &s.pool, b.orgtnt_id, b.wfd_id, b.environment.as_deref(),
+    ).await?;
+    let cfg = to_config(&b, b.secret.clone(), &env)?;
     Ok(Json(run_test(&cfg).await))
 }
 
 #[utoipa::path(post, path = "/connections/{id}/test", tag = "db",
-    params(("id" = Uuid, Path, description = "Bağlantı id")),
+    params(("id" = Uuid, Path, description = "Bağlantı id"), TestQuery),
     responses((status = 200, description = "Kayıtlı bağlantı testi sonucu (ok/message)", body = serde_json::Value)),
     security(("x_admin_key" = [])))]
 async fn test_saved(
     State(s): State<AppState>,
     Path(id): Path<Uuid>,
+    Query(q): Query<TestQuery>,
 ) -> Result<Json<Value>, AppError> {
     let row = sqlx::query_as::<
         _,
@@ -324,14 +370,18 @@ async fn test_saved(
         ),
         None => None,
     };
+    // Kayıtlı satırın alanları da `$env` şablonu olabilir — test seçilen ortamla çözer.
+    let env = crate::routes::env::resolve_run_env(
+        &s.pool, q.orgtnt_id, q.wfd_id, q.environment.as_deref(),
+    ).await?;
     let cfg = DbConfig {
         driver,
         mode: row.1,
-        host: row.2,
-        port: parse_port(row.3.as_deref())?,
-        database: row.4,
-        username: row.5,
-        secret,
+        host: resolve_field(row.2.as_deref(), &env)?,
+        port: parse_port(resolve_field(row.3.as_deref(), &env)?.as_deref())?,
+        database: resolve_field(row.4.as_deref(), &env)?,
+        username: resolve_field(row.5.as_deref(), &env)?,
+        secret: resolve_field(secret.as_deref(), &env)?,
         options: row.6,
     };
     let result = run_test(&cfg).await;

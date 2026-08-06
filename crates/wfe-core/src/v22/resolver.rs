@@ -10,7 +10,20 @@ use serde_json::Value;
 use uuid::Uuid;
 
 /// Bir c_orgu ifadesini ORGU kümesine çözer.
-/// `default_anchor` — anchor çözülemezse kullanılacak ORGU (genelde actor'ün orgu'su).
+///
+/// `default_anchor` — `Selector` biçiminin `self` kökü (genelde aktörün orgu'su). Yalnız
+/// O biçimde kullanılır; `Anchor` biçiminde anchor'ın kaynağı ctx/wfah'tır.
+///
+/// **Anchor çözülemezse BOŞ küme döner — aktörün birimine DÜŞMEZ.** Eskiden düşüyordu ve bu
+/// bir mantık hatasıydı: `{from: "$ctx.initiated_by", traverse: "self"}` kuralı "talebin
+/// açıldığı birimin müdürü" demek isterken, alan o an yazılmamışsa anchor aktörün kendi
+/// birimine düşüyor ve kapı `actor.orgu ∈ {actor.orgu}` sorusuna dönüşüyordu — DAİMA doğru.
+/// Yani kısıt kısıt olmaktan çıkıyor, o rolü taşıyan herkes geçiyordu; sessizce, iz
+/// bırakmadan. Hata `Selector` dalı için doğru olan varsayılanın (`self` = aktörün birimi)
+/// anlamı tersine çeviren bu dala kopyalanmasından geliyordu.
+///
+/// Boş küme = kimse yetkilenmez → node görünür biçimde durur ve `claim_timeout`/`escalation`
+/// devreye girer. "Verilmeyen alan false'dur, wildcard değil" (§3) ile de tutarlıdır.
 pub async fn resolve_c_orgu(
     c_orgu: &COrgu,
     default_anchor: Uuid,
@@ -22,7 +35,9 @@ pub async fn resolve_c_orgu(
     match c_orgu {
         COrgu::Selector(expr) => org.resolve_c_orgu(default_anchor, expr, orgtnt_id).await,
         COrgu::Anchor { from, traverse } => {
-            let anchor = resolve_anchor(from, ctx, wfah)?.unwrap_or(default_anchor);
+            let Some(anchor) = resolve_anchor(from, ctx, wfah)? else {
+                return Ok(Vec::new());
+            };
             let expr = normalize_traverse(traverse);
             org.resolve_c_orgu(anchor, &expr, orgtnt_id).await
         }
@@ -281,15 +296,21 @@ mod tests {
         assert_eq!(called_anchor, first_orgu);
     }
 
+    /// Çözülemeyen anchor aktörün birimine DÜŞMEZ — org'a hiç sorulmaz, küme boştur.
+    ///
+    /// Eski davranış (`unwrap_or(default_anchor)`) bir mantık hatasıydı: `traverse: "self"`
+    /// ile kapı `actor.orgu ∈ {actor.orgu}` sorusuna dönüşüp DAİMA doğru oluyordu, yani
+    /// kısıt kalkıyordu. Aşağıdaki iki assert birlikte onu geri getirmeyi engelliyor:
+    /// küme boş OLMALI ve org'a çağrı YAPILMAMALI.
     #[tokio::test]
-    async fn missing_anchor_falls_back_to_default() {
+    async fn missing_anchor_resolves_to_empty_set() {
         let default_anchor = Uuid::new_v4();
-        let org = org_with(vec![]);
+        let org = org_with(vec![unit(default_anchor)]);
         let c_orgu = COrgu::Anchor {
             from: AnchorFrom::Ctx("$ctx.ghost".into()),
             traverse: "self".into(),
         };
-        resolve_c_orgu(
+        let result = resolve_c_orgu(
             &c_orgu,
             default_anchor,
             &json!({}),
@@ -299,7 +320,40 @@ mod tests {
         )
         .await
         .unwrap();
-        let (called_anchor, _) = org.last_call.lock().unwrap().clone().unwrap();
-        assert_eq!(called_anchor, default_anchor);
+        assert!(
+            result.is_empty(),
+            "çözülemeyen anchor kimseyi yetkilendirmemeli"
+        );
+        assert!(
+            org.last_call.lock().unwrap().is_none(),
+            "anchor yoksa traversal hiç koşmamalı — aktörün birimiyle koşmak yetkiyi genişletirdi"
+        );
+    }
+
+    /// Aynı kural, eksik WFAH anchor'ı için de geçerli (iki dal aynı yerden geçiyor).
+    #[tokio::test]
+    async fn missing_wfah_anchor_resolves_to_empty_set() {
+        let default_anchor = Uuid::new_v4();
+        let org = org_with(vec![unit(default_anchor)]);
+        let c_orgu = COrgu::Anchor {
+            from: AnchorFrom::Wfah {
+                wfah: "hic_olmayan_aksiyon".into(),
+                field: "actor.orgu".into(),
+                occurrence: None,
+            },
+            traverse: "self".into(),
+        };
+        let result = resolve_c_orgu(
+            &c_orgu,
+            default_anchor,
+            &json!({}),
+            &Wfah::empty(),
+            Uuid::nil(),
+            &org,
+        )
+        .await
+        .unwrap();
+        assert!(result.is_empty());
+        assert!(org.last_call.lock().unwrap().is_none());
     }
 }

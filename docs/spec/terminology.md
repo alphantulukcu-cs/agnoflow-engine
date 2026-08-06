@@ -193,6 +193,16 @@ wft         = tek routing authority; hedef node id veya terminal id
 | `c_r` | c_r/c_u'dan en az biri | Rol kanalı |
 | `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni) |
 
+**Anchor biçimi çözülemezse `resolve(c_orgu)` BOŞ kümedir** — aktörün kendi birimine
+DÜŞMEZ. `{from: "$ctx.<yol>", traverse}` "o alandaki birim" demektir; alan yazılmamışsa
+cevap "bilinmiyor"dur, "soranın birimi" değil. Aktörün birimine düşmek `traverse: "self"`
+durumunda kapıyı `actor.orgu ∈ {actor.orgu}` sorusuna, yani daima-doğruya çevirir ve kısıt
+tümüyle kalkar. Boş küme ile node görünür biçimde durur; `claim_timeout`/`escalation`
+bunun için vardır. `default_anchor` yalnız **static selector** biçiminin `self` köküdür.
+
+Anchor'ın işaret ettiği alan, context şemasında `x-wf-kind: orgu|user` ile bildirilmek
+zorundadır (validator `c_orgu_anchor_not_orgu_kind`).
+
 **Eşleşme semantiği (kanonik):**
 
 ```text

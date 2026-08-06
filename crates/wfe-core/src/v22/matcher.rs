@@ -353,4 +353,95 @@ mod tests {
         .await
         .unwrap());
     }
+
+    // ---- ctx-anchor'lı c_orgu: çözülemeyen anchor yetkiyi GENİŞLETMEZ ----
+    //
+    // Bu iki test bir mantık hatasının geri gelmesini engelliyor. Kural
+    // `{from: "$ctx.initiated_by", traverse: "self"}` "talebin açıldığı birimin müdürü"
+    // demek ister. Alan o an yazılmamışsa anchor eskiden AKTÖRÜN KENDİ birimine düşüyordu;
+    // `traverse: "self"` ile çözülen küme {aktörün birimi} olduğundan kapı
+    // `actor.orgu ∈ {actor.orgu}` sorusuna dönüşüp DAİMA doğru oluyordu → o rolü taşıyan
+    // HERKES geçiyordu, sessizce.
+    //
+    // `MockOrg` bunu gösteremez (anchor'ı yok sayıp sabit liste döner), o yüzden anchor'ı
+    // yansıtan ayrı bir mock gerekiyor: `resolve(anchor, "self") = {anchor}` — gerçek
+    // ORGTRVLANG semantiği.
+    struct EchoAnchorOrg;
+
+    #[async_trait]
+    impl OrgPort for EchoAnchorOrg {
+        async fn resolve_c_orgu(
+            &self,
+            anchor: Uuid,
+            _: &str,
+            _: Uuid,
+        ) -> Result<Vec<OrgUnit>, EngineError> {
+            Ok(vec![unit(anchor)])
+        }
+        async fn check_user_role(&self, _: Uuid, _: Uuid, _: &str) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+        async fn orgtnt_for_orgu(&self, _: Uuid) -> Result<Uuid, EngineError> {
+            Ok(Uuid::nil())
+        }
+    }
+
+    fn ctx_anchored_rule(path: &str) -> CandidateActor {
+        CandidateActor {
+            c_orgu: COrgu::Anchor {
+                from: crate::types::wfd_v22::AnchorFrom::Ctx(path.into()),
+                traverse: "self".into(),
+            },
+            c_r: Some(vec!["subeMuduru".into()]),
+            c_u: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_ctx_anchor_denies_even_with_matching_role() {
+        // Rol doğru VE atanmış; tek eksik anchor. Yetki verilmemeli.
+        let a = actor(Uuid::new_v4(), "subeMuduru");
+        assert!(
+            !authorize(
+                &ctx_anchored_rule("$ctx.initiated_by"),
+                &a,
+                env(&EMPTY_CTX, &EMPTY_WFAH),
+                &EchoAnchorOrg
+            )
+            .await
+            .unwrap(),
+            "anchor çözülemezken yetki vermek, kuralı 'o rolü taşıyan herkes' haline getirir"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolved_ctx_anchor_authorizes_only_the_anchored_unit() {
+        let anchored_orgu = Uuid::new_v4();
+        let ctx = json!({ "initiated_by": { "orgu_id": anchored_orgu.to_string() } });
+
+        // Anchor'ın işaret ettiği birimdeki müdür geçer.
+        let inside = actor(anchored_orgu, "subeMuduru");
+        assert!(authorize(
+            &ctx_anchored_rule("$ctx.initiated_by"),
+            &inside,
+            env(&ctx, &EMPTY_WFAH),
+            &EchoAnchorOrg
+        )
+        .await
+        .unwrap());
+
+        // BAŞKA bir birimdeki müdür geçmez — eski davranışta geçiyordu.
+        let outside = actor(Uuid::new_v4(), "subeMuduru");
+        assert!(
+            !authorize(
+                &ctx_anchored_rule("$ctx.initiated_by"),
+                &outside,
+                env(&ctx, &EMPTY_WFAH),
+                &EchoAnchorOrg
+            )
+            .await
+            .unwrap(),
+            "anchor birimi dışındaki müdür yetkilenmemeli"
+        );
+    }
 }

@@ -87,12 +87,28 @@ girer:
 ### 3.3 Motor davranış düzeltmesi
 
 `resolver.rs`'te `resolve_anchor(from, ...)?.unwrap_or(default_anchor)` → anchor
-çözülemezse **boş küme** döner, hiç kimse eşleşmez. Gerekçe: "verilmeyen alan false'dur,
-wildcard değil" değişmezi. `COrgu::Selector` yolundaki `default_anchor` (`self` = aktörün
-birimi) **aynen kalır** — orada doğru davranıştır.
+çözülemezse **boş küme** döner, hiç kimse eşleşmez. `COrgu::Selector` yolundaki
+`default_anchor` (`self` = aktörün birimi) **aynen kalır** — orada doğru davranıştır.
 
-Bu bir davranış değişikliğidir ama geriye uyumluluk maliyeti sıfır: repoda ctx-anchor
-kullanan hiçbir belge yok (§1.3).
+Bu bir mantık hatasının düzeltilmesidir, tercih değişikliği değil. `traverse: "self"` olan
+bir kuralda fallback ORGU kapısını **etkisiz** kılıyordu:
+
+1. `{from: "$ctx.initiated_by", traverse: "self"}` = "talebin açıldığı birimin müdürü"
+2. Alan o an yazılmamışsa anchor `default_anchor`'a düşer; matcher onu `actor.orgu_id`
+   olarak geçer (`matcher.rs`)
+3. `resolve(actor.orgu, "self")` = `{aktörün birimi}`
+4. Kapı `resolved.any(|u| u.orgu_id == actor.orgu_id)` → **daima doğru**
+
+Yani kural "o rolü taşıyan **herkes**"e dönüşüyordu; hata yok, log yok, WFAH'ta meşru
+görünen bir ACT. Hatanın kaynağı, `Selector` dalı için doğru olan varsayılanın anlamı
+tersine çeviren `Anchor` dalına kopyalanmasıydı. Aynı genişleme `x-visibility` için de
+geçerliydi (`visibility.rs` de `actor.orgu_id`'yi default anchor geçiyor) — maskeli alan
+görünür hale gelebiliyordu.
+
+Boş küme = node görünür biçimde durur, `claim_timeout`/`escalation` devreye girer. Gürültülü
+tıkanma, sessiz yetki genişlemesine yeğdir.
+
+Geriye uyumluluk maliyeti sıfır: repoda ctx-anchor kullanan hiçbir belge yok (§1.3).
 
 ### 3.4 Validator kuralları
 

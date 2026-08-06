@@ -201,6 +201,17 @@ async fn validate_wfd(Json(wfd_json): Json<Value>) -> Result<Json<Value>, AppErr
 struct ValidateExpressionRequest {
     /// Doğrulanacak ZEN ifadeleri. Sıra korunur; yanıt aynı indekslerle döner.
     expressions: Vec<String>,
+    /// İfadelerin ait olduğu WFD (wire biçimi). Verilirse TİP kuralları da koşar
+    /// (`expr_types`: obje karşılaştırması, tip uyuşmazlığı, izdüşüm dışı `$wfah` alanı,
+    /// kapısız sıralama) — tip bilgisi context şemasından ve `wfes_effects` eşlemesinden
+    /// çıkarılır, ikisi de bu belgede durur.
+    ///
+    /// Verilmezse (ya da belge v2.2 olarak parse edilemezse — kurucu yarım bir taslakta
+    /// da çalışır) yalnız yüzey kuralları koşar ve yanıt `typed: false` döner. Yayın kapısı
+    /// tip kurallarını her hâlükârda uygular; buradaki eksiklik yalnız "hatayı ne kadar
+    /// erken görüyorsun" farkıdır.
+    #[serde(default)]
+    wfd: Option<Value>,
 }
 
 /// Koşul kurucusu için: TEK TEK ZEN ifadelerini motorun kendi parser'ıyla doğrula.
@@ -225,14 +236,20 @@ async fn validate_expression(
             StatusCode::BAD_REQUEST,
         ));
     }
-    Ok(Json(expression_report(&req.expressions)))
+    Ok(Json(expression_report(&req.expressions, req.wfd.as_ref())))
 }
 
 const MAX_VALIDATED_EXPRESSIONS: usize = 64;
 
 /// Rotanın saf gövdesi — DB'siz test edilebilsin diye ayrı (handler yalnız sınır kontrolü
 /// yapar). Yanıt sırası girdi sırasıyla birebir hizalıdır; editör indeksle eşler.
-fn expression_report(expressions: &[String]) -> Value {
+///
+/// `wfd` verilmişse tip kuralları da koşar; parse edilemeyen taslak SESSİZCE yüzey
+/// kurallarına düşer (`typed: false`) — kurucu yarım belgede de çalışabilmeli, orada
+/// "belgeniz geçersiz" demek ifade doğrulamasının işi değil.
+fn expression_report(expressions: &[String], wfd: Option<&Value>) -> Value {
+    let parsed = wfd.and_then(|v| wfe_core::types::wfd_v22::Wfd::from_value(v.clone()).ok());
+    let env = parsed.as_ref().map(wfe_core::validator::expr_env);
     let results: Vec<Value> = expressions
         .iter()
         .map(|expr| {
@@ -241,7 +258,10 @@ fn expression_report(expressions: &[String]) -> Value {
             if expr.trim().is_empty() {
                 return serde_json::json!({ "ok": true, "errors": [], "warnings": [] });
             }
-            let issues = wfe_core::validator::expression_issues(expr);
+            let mut issues = wfe_core::validator::expression_issues(expr);
+            if let Some(env) = &env {
+                issues.extend(wfe_core::expr_types::expression_type_issues(expr, env));
+            }
             let pick = |want_error: bool| -> Vec<Value> {
                 issues
                     .iter()
@@ -257,7 +277,9 @@ fn expression_report(expressions: &[String]) -> Value {
             })
         })
         .collect();
-    serde_json::json!({ "results": results })
+    // `typed`: tip kuralları koştu mu. Editör bunu göstermek zorunda değil ama "neden
+    // yeşil?" sorusunun cevabı burada — belge gönderilmediyse/parse edilemediyse false.
+    serde_json::json!({ "results": results, "typed": env.is_some() })
 }
 
 #[cfg(test)]
@@ -265,8 +287,13 @@ mod validate_expression_tests {
     use super::*;
 
     fn report(exprs: &[&str]) -> Vec<Value> {
+        report_with(exprs, None)
+    }
+
+    /// Belge VERİLİRSE tip kuralları da koşar (bkz. `expression_report`).
+    fn report_with(exprs: &[&str], wfd: Option<&Value>) -> Vec<Value> {
         let owned: Vec<String> = exprs.iter().map(|s| s.to_string()).collect();
-        expression_report(&owned)["results"]
+        expression_report(&owned, wfd)["results"]
             .as_array()
             .unwrap()
             .clone()
@@ -324,6 +351,52 @@ mod validate_expression_tests {
     #[test]
     fn empty_request_is_empty_report() {
         assert!(report(&[]).is_empty());
+    }
+
+    // TİP kuralları belge verilince koşar. Editörün SERBEST ZEN satırı bu rotayı kullanır;
+    // belge gönderilmeden `#.actor == "ali"` satırı yeşil görünüyordu ve hata ancak
+    // Yayınla'da çıkıyordu. Kural setinin sahibi motor — cevabı satır yazılırken verir.
+    fn golden() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../../docs/spec/examples/kredi-basvuru.golden.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn type_rules_run_when_the_document_is_supplied() {
+        let wfd = golden();
+        let out = report_with(&[r#"some($wfah, #.actor == "ali")"#], Some(&wfd));
+        assert_eq!(out[0]["ok"], false, "{:?}", out[0]);
+        assert_eq!(out[0]["errors"][0]["code"], "zen_object_compare");
+    }
+
+    #[test]
+    fn type_rules_are_skipped_without_the_document() {
+        // Belge yoksa YÜZEY kuralları koşar: ifade parse ediliyor, `ok` kalır.
+        let out = report(&[r#"some($wfah, #.actor == "ali")"#]);
+        assert_eq!(out[0]["ok"], true);
+    }
+
+    #[test]
+    fn typed_flag_reports_whether_type_rules_ran() {
+        let wfd = golden();
+        let owned = vec!["true".to_string()];
+        assert_eq!(expression_report(&owned, Some(&wfd))["typed"], true);
+        assert_eq!(expression_report(&owned, None)["typed"], false);
+        // Yarım/geçersiz taslak: kurucu çalışmaya devam eder, yalnız tip kuralları düşer.
+        let draft = serde_json::json!({ "wfd_version": "2.2" });
+        assert_eq!(expression_report(&owned, Some(&draft))["typed"], false);
+    }
+
+    #[test]
+    fn valid_expression_stays_clean_with_the_document() {
+        let wfd = golden();
+        let out = report_with(
+            &[r#"some($wfah, #.actor.role == "creditAnalyst")"#],
+            Some(&wfd),
+        );
+        assert_eq!(out[0]["ok"], true, "{:?}", out[0]["errors"]);
     }
 }
 

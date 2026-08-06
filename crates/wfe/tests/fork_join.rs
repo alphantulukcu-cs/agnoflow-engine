@@ -217,6 +217,7 @@ impl WfeStore for ParStore {
         let w = Wfes {
             wfe_id: new.wfe_id,
             orgtnt_id: new.orgtnt_id,
+            environment_id: None,
             wfd_id: new.wfd_id,
             wfd_version: new.wfd_version,
             dynctx: DynCtx(new.initial_dynctx.clone()),
@@ -1356,6 +1357,7 @@ fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claima
     store.seed(Wfes {
         wfe_id,
         orgtnt_id: Uuid::nil(),
+        environment_id: None,
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(json!({})),

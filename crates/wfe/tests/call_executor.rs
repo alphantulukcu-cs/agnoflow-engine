@@ -265,6 +265,7 @@ impl WfeStore for MemStore {
             Wfes {
                 wfe_id: new.wfe_id,
                 orgtnt_id: new.orgtnt_id,
+                environment_id: new.environment_id,
                 wfd_id: new.wfd_id,
                 wfd_version: new.wfd_version,
                 dynctx: DynCtx(new.initial_dynctx.clone()),
@@ -898,6 +899,7 @@ async fn simulated_call_node_is_a_resolvable_stop_not_a_dead_end() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let clerk = actor("branchClerk");
 

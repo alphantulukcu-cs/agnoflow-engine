@@ -68,6 +68,9 @@ Flux ile cluster'a uygulanır. Bu repo yalnız kod + `Dockerfile` + `.gitlab-ci.
 
 `DATABASE_URL`, `PORT`, `JWT_SECRET` (zorunlu), `STORAGE_BACKEND=local|s3` (+`STORAGE_PATH`),
 `CORS_ORIGINS` (virgülle; unset = localhost dev), `ADMIN_API_KEY` (/org koruması; unset = dev uyarısı).
+`DB_CONN_SECRET` (base64 32 byte; `db_connection` secret'ları + `$env` secret'ları). **Virgülle
+ayrılmış LİSTE olabilir** — şifreleme daima ilkiyle, çözme hepsi denenerek: anahtar rotasyonu
+yeni anahtarı başa eklemekle yapılır (GitLab `db_key_base` dizisiyle aynı yaklaşım).
 Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE_BACKEND=local|s3`
 (+`ATTACHMENT_STORAGE_PATH`, local default `../work-pool-portal/storage`; `ATTACHMENT_STORAGE_S3_BUCKET/REGION`).
 
@@ -80,6 +83,61 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
   JWT `/portal/wfe/*` ağacında: `GET /wfe/:id/attachments` (durum), `PUT/GET/DELETE .../:group/:item`.
 - Gate server-side: `apply_action`/`submit_action` hedef node'un `required` dosyaları eksikse
   `422 code:"attachment.missing"` döner. Detay: `docs/spec/decisions.md` Madde 8.
+
+## DB bağlantı kapsamı (global / lokal)
+
+- `wf.db_connection.scope`: `global` = tenant genelinde, HER projedeki her WFD'de görünür
+  (Ayarlar sayfasından yönetilir); `local` = yalnız TEK WFD'de görünür (WFD ayarları
+  sekmesinden yönetilir). Global satırlar WFD ekranında SALT-OKUNUR.
+- Lokal sahiplik anahtarı `(project_id, wfd_name)` — `wfd_id` DEĞİL (her versiyon ayrı
+  `wfd_id` satırıdır). Grup adı değişince `repo::update_group_metadata` lokalleri taşır;
+  gruptaki son satır silinince `repo::delete_draft` onları temizler.
+- Kapsam create'te belirlenir, **update'te değişmez**. `GET /db/connections` `wfd_id`
+  verilirse global + o WFD'nin lokalleri, verilmezse yalnız global döner.
+- WFD yazma uçları başka bir WFD'nin lokalini referans eden dokümanı 422 ile reddeder
+  (`routes::db::assert_no_foreign_local_connections`). Detay: `docs/spec/decisions.md`.
+
+## Ortam konfigürasyonu (`$env`)
+
+Bir WFD bir kez tasarlanır, şirketin farklı ortamlarında (test/prod/uat) koşar.
+Tasarım: `docs/superpowers/specs/2026-08-04-env-config-design.md`.
+
+- **Depolama DB'de, şifreleme anahtarı deployment'ta.** Değerler `wf.wfd_env_var`,
+  secret'lar `value_enc` (AES-256-GCM); anahtar `DB_CONN_SECRET` env değişkeninden
+  (K8s Secret + SOPS). GitLab'ın `ci_variables` + `gitlab-secrets.json` mimarisiyle
+  aynı: DB dump'ı tek başına işe yaramaz.
+- **Sahiplik `(project_id, wfd_name)`** — `wfd_id` DEĞİL (lokal `db_connection` ile
+  aynı gerekçe). Conf WFD dokümanının DIŞINDA: doküman `(wfd_id, version)` bazında
+  immutable, prod domaini değişince yeni versiyon publish etmek gerekmesin.
+- **Ortam runtime'da seçilir.** `POST /wfe` body'sinde `environment` **ADI**; verilmezse
+  tenant varsayılanı. `wfe.environment_id`'ye yazılır ve **ömür boyu sabit** kalır —
+  timer/retry/escalation'da çağıran yoktur, `$env` ancak satırdan çözülebilir. Çağıran
+  DEĞER geçiremez: geçirebilseydi prod akışı başkasının sunucusuna yönlendirilirdi.
+  WFC'de çocuk ebeveynin ortamını **miras alır**.
+- **`$env` ara-değer çözülen TEK namespace'tir**: `"$env.AUTH_API/v1/users"` çalışır.
+  Anahtar `[A-Z][A-Z0-9_]*`, ilk küçük harf/`/`/`:` karakterinde biter. Tam eşleşme
+  (`"$env.MAX_TUTAR"`) `value_type`'a göre TİPLİ döner.
+- **Eksik anahtar `null` DEĞİL, HATADIR** — `$ctx`'in aksine. Null bir domain
+  `https://null/v1` üretirdi. Publish kapısı bunu önceden yakalar (`env.missing_key`).
+- **Secret'lar `EvalEnv`/`EffectEnv`'e HİÇ girmez** (tip düzeyinde: `PublicEnv`). ZEN ve
+  `wfes_effects` secret göremez → ctx'e yazılamaz → portalda görünemez. Secret yalnız
+  autoexec config / `db_connection` alanlarında çözülür ve `resolved_config()` ile hata
+  metinlerinde `[MASKED]` olur.
+- **Secret'lar taslakta da çözülür** (2026-08-04 kararı). Başta GitLab'ın "protected
+  variable" kuralı alınmıştı (yalnız published); kaldırıldı çünkü yanlış eksende
+  koruyordu — tasarımcı anahtar isteyen bir ucu editörde hiç deneyemiyordu. Erişim
+  kontrolü ağ katmanının işi (FW / ortam erişilebilirliği). Koruma kalkmadı, yer
+  değiştirdi: secret **kullanılabilir ama okunamaz** (maskeleme + ZEN/effects yasağı).
+  Geri getirmek istenirse seam `repo::env::load_run_env(include_secrets)`; doğru eksen
+  ortam bazlı olurdu (`wf.environment.is_protected`), taslak bazlı değil.
+- `/autoexec/test` ve `/wfe/simulate` gövdelerinde `orgtnt_id` + `wfd_id` + `environment`
+  verilirse `$env` bağlanır; verilmezse boş ortam (eski istemciler etkilenmez).
+- `env_id IS NULL` = `*` joker kapsam; çözüm **tam eşleşme > joker > hata**.
+- `db_connection` alanları (host/port/database/username/secret/options) `$env` ile
+  şablonlanır — TEK satır tüm ortamlara hizmet eder, ortam kolonu yoktur. `port` bu
+  yüzden `text`; çözümden sonra parse edilir.
+- Yeni ifade-yüzeyi kuralı `validator::expression_issues`'a yazılır (editör ile ortak);
+  doküman geneli referans toplama `validator::env_references`.
 
 ## Tenant metadata + marka varlıkları (logo/favicon)
 

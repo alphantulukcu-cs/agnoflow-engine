@@ -27,6 +27,7 @@ use crate::types::wfd_v22::{
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
+use crate::v22::env::RunEnv;
 use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv, JoinEnv};
 use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
 use crate::v22::ports::{
@@ -41,6 +42,9 @@ use uuid::Uuid;
 pub struct Engine<'a> {
     pub org: &'a dyn OrgPort,
     pub exec: &'a dyn AutoexecRunner,
+    /// Koşumun ortam konfigürasyonu (`$env`). Çağıran, WFE'nin `environment_id`'sine göre
+    /// çözüp verir; `Default` boş ortamdır ($env kullanmayan WFD'ler için).
+    pub env: RunEnv,
 }
 
 /// Claim uygunluk sonucu — portal'a neden bilgisi taşır.
@@ -187,6 +191,7 @@ impl<'a> Engine<'a> {
 
         if let Some(effects) = &rule.wfes_effects {
             let env = EffectEnv {
+                env: self.env.public(),
                 call: None,
                 actor,
                 wfe_id,
@@ -252,6 +257,9 @@ impl<'a> Engine<'a> {
             orgtnt_id,
             wfd_id: parse_wfd_uuid(wfd)?,
             wfd_version: 0, // store katmanı gerçek versiyon satırını bilir; executor doldurur
+            // Ortam kimliği de executor'ın işi: çekirdek `RunEnv`'in DEĞERLERİNİ görür,
+            // hangi satırdan geldiğini değil (I/O yok).
+            environment_id: None,
             initial_dynctx: final_ctx,
             wfah_entries,
             outcome,
@@ -368,6 +376,7 @@ impl<'a> Engine<'a> {
         // §7.6 — transition effects STAGED
         if let Some(effects) = &transition.wfes_effects {
             let env = EffectEnv {
+                env: self.env.public(),
                 call: None,
                 actor,
                 wfe_id: wfes.wfe_id,
@@ -558,6 +567,7 @@ impl<'a> Engine<'a> {
         // §7.6 — transition effects STAGED
         if let Some(effects) = &transition.wfes_effects {
             let env = EffectEnv {
+                env: self.env.public(),
                 call: None,
                 actor,
                 wfe_id: wfes.wfe_id,
@@ -1072,6 +1082,7 @@ impl<'a> Engine<'a> {
         let mut staged = wfes.dynctx.as_value().clone();
         if let Some(effects) = &step.wfes_effects {
             let env = EffectEnv {
+                env: self.env.public(),
                 call: None,
                 actor: &system,
                 wfe_id: wfes.wfe_id,
@@ -1341,6 +1352,7 @@ impl<'a> Engine<'a> {
         let has_effects = ct.wfes_effects.is_some();
         if let Some(effects) = &ct.wfes_effects {
             let env = EffectEnv {
+                env: self.env.public(),
                 call: None,
                 actor: &system,
                 wfe_id: wfes.wfe_id,
@@ -1523,6 +1535,7 @@ impl<'a> Engine<'a> {
                 Ok(result) => {
                     if let Some(effects) = &def.wfes_effects {
                         let env = EffectEnv {
+                            env: self.env.public(),
                             call: None,
                             actor: &system,
                             wfe_id,
@@ -1551,6 +1564,7 @@ impl<'a> Engine<'a> {
                     });
                     if let Some(catch) = caught {
                         let env = EffectEnv {
+                            env: self.env.public(),
                             call: None,
                             actor: &system,
                             wfe_id,
@@ -1614,6 +1628,7 @@ impl<'a> Engine<'a> {
         action_input: Option<&Value>,
     ) -> Result<Value, ExecFailure> {
         let env = ExecEnv {
+            env: self.env.clone(),
             wfe_id,
             ctx: staged.clone(),
             node: node.map(String::from),
@@ -1706,6 +1721,7 @@ impl<'a> Engine<'a> {
         let mut staged = wfes.dynctx.as_value().clone();
         if let Some(effects) = &call_ref.wfes_effects {
             let env = EffectEnv {
+                env: self.env.public(),
                 actor: &system,
                 wfe_id: wfes.wfe_id,
                 node: Some(node_key),
@@ -1901,6 +1917,7 @@ impl<'a> Engine<'a> {
         // çağrı girdisinde yasaktır (validator `call_input_namespace`); burada `None`
         // olması onları sessizce `null` yapar, yani bozuk bir WFD veri uydurmaz.
         let env = EffectEnv {
+            env: self.env.public(),
             actor,
             wfe_id,
             node: match site {
@@ -2339,6 +2356,7 @@ impl<'a> Engine<'a> {
             })?;
         let now = Utc::now();
         let env = EffectEnv {
+            env: self.env.public(),
             call,
             actor,
             wfe_id,
@@ -2938,6 +2956,7 @@ mod tests {
         let engine = Engine {
             org: &org,
             exec: &runner,
+            env: Default::default(),
         };
         let actor = Actor {
             orgu_id: Uuid::new_v4(),
@@ -2971,6 +2990,7 @@ mod tests {
         let engine = Engine {
             org: &org,
             exec: &runner,
+            env: Default::default(),
         };
         let actor = Actor {
             orgu_id: Uuid::new_v4(),
@@ -3006,6 +3026,7 @@ mod tests {
         let engine = Engine {
             org: &org,
             exec: &runner,
+            env: Default::default(),
         };
         let actor = Actor {
             orgu_id: Uuid::new_v4(),
@@ -3038,6 +3059,7 @@ mod tests {
         let engine = Engine {
             org: &org,
             exec: &runner,
+            env: Default::default(),
         };
         let actor = Actor {
             orgu_id: Uuid::new_v4(),

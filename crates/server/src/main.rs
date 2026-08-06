@@ -50,12 +50,15 @@ async fn main() {
     let wfe_adapter = Arc::new(WfeAdapter::new(pool.clone()));
     let runner = Arc::new(LiveAutoexecRunner::new(Some(pool.clone())));
 
-    let executor = Arc::new(WfeExecutor::new(
-        org_adapter.clone(),
-        wfd_adapter.clone(),
-        wfe_adapter,
-        runner,
-    ));
+    let executor = Arc::new(
+        WfeExecutor::new(
+            org_adapter.clone(),
+            wfd_adapter.clone(),
+            wfe_adapter,
+            runner,
+        )
+        .with_env(Arc::new(wf_wfe::env_adapter::EnvAdapter::new(pool.clone()))),
+    );
 
     // M5/M6 — escalation & root-timeout süpürücüsü (WOR-46/47).
     // Event-driven (2026-07-17): en yakın SLA vadesine kadar uyur; executor
@@ -117,6 +120,7 @@ async fn main() {
     let api_router = OpenApiRouter::with_openapi(openapi::ApiDoc::openapi())
         .nest("/org", org_router)
         .nest("/db", db_router)
+        .nest("/env", routes::env::router(state.clone()))
         .nest("/auth", routes::auth::router(state.clone()))
         .nest("/users", routes::users::router(state.clone()))
         .nest("/project", routes::project::router(state.clone()))

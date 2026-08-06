@@ -164,6 +164,18 @@ pub async fn update_group_metadata(
                AND m.name = a.old_name
                AND m.is_active = true
              RETURNING {M_COLS}
+         ),
+         renamed_conns AS (
+             -- Lokal DB bağlantılarının sahipliği (project_id, wfd_name)'dir; grup adı
+             -- değişince onlar da taşınmalı, yoksa bağlantılar WFD'den kopar.
+             -- Veri değiştiren CTE referans edilmese de bir kez ve tam olarak koşar.
+             UPDATE wf.db_connection c
+             SET wfd_name = COALESCE($3, c.wfd_name), updated_at = now()
+             FROM anchor a
+             WHERE c.scope = 'local'
+               AND c.project_id = a.project_id
+               AND c.wfd_name = a.old_name
+             RETURNING 1
          )
          SELECT {COLS} FROM updated ORDER BY version DESC"
     ))
@@ -272,16 +284,37 @@ pub async fn set_published(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<
 
 /// Draft satırını siler (published silinemez).
 pub async fn delete_draft(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
-    let n =
-        sqlx::query("DELETE FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2 AND status='draft'")
-            .bind(wfd_id)
-            .bind(version)
-            .execute(pool)
-            .await?
-            .rows_affected();
-    if n == 0 {
+    let mut tx = pool.begin().await?;
+    // Silinen satırın grup kimliği: son versiyon da gidiyorsa gruba ait lokal DB
+    // bağlantıları sahipsiz kalır (hiçbir WFD listelemez) → onlar da temizlenir.
+    let owner = sqlx::query_as::<_, (Uuid, String)>(
+        "DELETE FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2 AND status='draft' \
+         RETURNING project_id, name",
+    )
+    .bind(wfd_id)
+    .bind(version)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((project_id, name)) = owner else {
         return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+    };
+    let remaining: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM wf.wfd_meta WHERE project_id=$1 AND name=$2")
+            .bind(project_id)
+            .bind(&name)
+            .fetch_one(&mut *tx)
+            .await?;
+    if remaining == 0 {
+        sqlx::query(
+            "DELETE FROM wf.db_connection \
+             WHERE scope='local' AND project_id=$1 AND wfd_name=$2",
+        )
+        .bind(project_id)
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?;
     }
+    tx.commit().await?;
     Ok(())
 }
 

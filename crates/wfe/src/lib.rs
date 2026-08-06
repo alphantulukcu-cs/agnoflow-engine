@@ -1,4 +1,5 @@
 pub mod db;
+pub mod env_adapter;
 pub mod error;
 pub mod executor;
 pub mod models;

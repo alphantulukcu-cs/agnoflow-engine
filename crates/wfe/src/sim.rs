@@ -141,6 +141,7 @@ impl SimState {
         Wfes {
             wfe_id: self.wfe_id,
             orgtnt_id: self.orgtnt_id,
+            environment_id: None,
             wfd_id: Uuid::nil(),
             wfd_version: 0,
             dynctx: DynCtx(self.dynctx.clone()),

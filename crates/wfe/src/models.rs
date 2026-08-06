@@ -6,6 +6,9 @@ use uuid::Uuid;
 pub struct WfeRow {
     pub wfe_id: Uuid,
     pub orgtnt_id: Uuid,
+    /// Koşum ortamı ($env) — start'ta sabitlenir, ömür boyu değişmez.
+    /// NULL = tenant'ın varsayılan ortamı (kolon NOT NULL'a çekilene kadarki geçiş).
+    pub environment_id: Option<Uuid>,
     pub wfd_id: Uuid,
     pub wfd_version: i32,
     pub status: String,

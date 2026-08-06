@@ -69,6 +69,7 @@ fn engine() -> Engine<'static> {
     Engine {
         org: &MOCK_ORG,
         exec: &MOCK_RUNNER,
+        env: Default::default(),
     }
 }
 

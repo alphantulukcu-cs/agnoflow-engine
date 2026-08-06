@@ -186,6 +186,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
     Wfes {
         wfe_id: Uuid::new_v4(),
         orgtnt_id: Uuid::nil(),
+        environment_id: None,
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
@@ -214,6 +215,7 @@ async fn start_moves_to_analyst_node_with_real_wfe_id_effects() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let orgu = Uuid::new_v4();
     let actor = clerk(orgu);
@@ -263,6 +265,7 @@ async fn declared_input_alone_does_not_reach_ctx() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
 
@@ -312,6 +315,7 @@ async fn absent_optional_input_nulls_the_field() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let orgu = Uuid::new_v4();
     let m = manager(orgu);
@@ -354,6 +358,7 @@ async fn start_rejects_undeclared_input_path() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
@@ -387,6 +392,7 @@ async fn start_rejects_missing_required_action_input() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
     let input = json!({"applicant": {"name": "Ayşe"}}); // credit_info yok
@@ -418,6 +424,7 @@ async fn start_rejects_readonly_field_in_input() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
@@ -448,6 +455,7 @@ async fn start_with_named_action_selects_matching_rule() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
 
@@ -475,6 +483,7 @@ async fn start_with_unknown_action_is_not_eligible() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
 
@@ -502,6 +511,7 @@ async fn start_ineligible_actor_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
 
@@ -531,6 +541,7 @@ async fn apply_on_unclaimed_wfe_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
@@ -558,6 +569,7 @@ async fn apply_by_non_owner_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
@@ -587,6 +599,7 @@ async fn analyst_approve_within_limit_reaches_terminal_approved() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
@@ -640,6 +653,7 @@ async fn analyst_approve_over_limit_routes_to_branch_manager() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
@@ -682,6 +696,7 @@ async fn failing_score_fetch_is_retried_then_caught_and_routed() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
@@ -730,6 +745,7 @@ async fn hanging_autoexec_times_out_and_is_caught() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let a = analyst(Uuid::new_v4());
     let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
@@ -768,6 +784,7 @@ async fn manager_reject_takes_default_terminal() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let mut ctx = start_input();
@@ -804,6 +821,7 @@ async fn manager_approve_condition_hits_terminal_approved() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -835,6 +853,7 @@ async fn undeclared_input_path_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -862,6 +881,7 @@ async fn missing_required_input_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -900,6 +920,7 @@ async fn first_matching_when_wins_in_array_order() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -940,6 +961,7 @@ async fn conditional_without_default_and_no_match_errors() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -969,6 +991,7 @@ async fn claim_checks() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
 
@@ -1005,6 +1028,7 @@ async fn owner_sees_available_actions() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -1035,6 +1059,7 @@ async fn escalation_fires_after_sla_and_moves_wfe() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
@@ -1098,6 +1123,7 @@ async fn escalation_resolves_anchored_listable_via_wfah_actor() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let (wfes, human_orgu) = wfes_with_human_history("self__creditAnalyst", None, start_input());
@@ -1130,6 +1156,7 @@ async fn claim_timeout_move_resolves_anchored_listable_via_wfah_actor() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
     let (wfes, human_orgu) =
@@ -1162,6 +1189,7 @@ async fn fired_escalation_step_does_not_refire() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
@@ -1196,6 +1224,7 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
 
     // Golden'a creditAnalyst node'una ikinci bir escalation adımı (P5D) ekle.
@@ -1281,6 +1310,7 @@ async fn start_wft_targeting_own_from_node_lands_there() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
 
@@ -1328,6 +1358,7 @@ async fn escalation_fires_normally_at_start_node() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfes = wfes_at("type_branch__branchClerk", None, start_input());
     let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
@@ -1364,6 +1395,7 @@ async fn deadline_due_fires_terminated_not_error() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
     let deadline = wfes.created_at + Duration::days(30);
@@ -1400,6 +1432,7 @@ async fn start_resolves_deadline_and_allows_exceeding_wfd_timeout() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden(); // timeout: P30D
     let actor = clerk(Uuid::new_v4());
@@ -1470,6 +1503,7 @@ async fn start_without_deadline_or_timeout_leaves_deadline_null() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfd = golden();
     wfd.timeout = None;
@@ -1516,6 +1550,7 @@ async fn claim_timeout_due_without_wft_releases_claim() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_claim_timeout("PT2H", None);
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
@@ -1555,6 +1590,7 @@ async fn claim_timeout_due_with_wft_moves_like_escalation() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
@@ -1593,6 +1629,7 @@ async fn claim_timeout_collapse_flag_ignored_outside_parallel() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
     wfd.nodes
@@ -1658,6 +1695,7 @@ async fn claim_timeout_release_applies_wfes_effects() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_claim_timeout_effects("PT2H", None);
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
@@ -1696,6 +1734,7 @@ async fn claim_timeout_move_applies_wfes_effects_before_wft() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_claim_timeout_effects("PT1H", Some("self__branchManager"));
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
@@ -1730,6 +1769,7 @@ async fn claim_timeout_not_due_without_claim() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_claim_timeout("PT1H", None);
     // hiç claim edilmemiş (claimed_at None) — asla due olmaz
@@ -1753,6 +1793,7 @@ async fn escalation_without_wft_errors_instead_of_terminating() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfd = golden();
     {
@@ -1780,6 +1821,7 @@ async fn escalation_with_node_target_moves_and_never_terminates() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden();
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
@@ -1811,6 +1853,7 @@ async fn terminal_wfe_rejects_actions() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let mut wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -1845,6 +1888,7 @@ async fn terminated_wfe_is_treated_like_terminal() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
     let mut wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
@@ -1900,6 +1944,7 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
 
@@ -1983,6 +2028,7 @@ fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfe
     Wfes {
         wfe_id: Uuid::new_v4(),
         orgtnt_id: Uuid::nil(),
+        environment_id: None,
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
@@ -2024,6 +2070,7 @@ async fn start_review_forks_into_three_branches() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let coord = actor_with_role("coordinator");
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
@@ -2075,6 +2122,7 @@ async fn single_mode_node_hint_must_match_current_node() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let coord = actor_with_role("coordinator");
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
@@ -2102,6 +2150,7 @@ async fn branch_approve_arrives_without_occupying_join() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
@@ -2155,6 +2204,7 @@ async fn ambiguous_action_without_node_hint_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
@@ -2209,6 +2259,7 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
 
@@ -2272,6 +2323,7 @@ async fn last_branch_arrival_completes_join_to_node() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let hr = actor_with_role("hrApprover");
     let wfes = parallel_wfes(
@@ -2326,6 +2378,7 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let hr = actor_with_role("hrApprover");
     let wfes = parallel_wfes(
@@ -2366,6 +2419,7 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let legal = actor_with_role("legalApprover");
     // finance hâlâ aktif, hr çoktan vardı — yalnız AKTİF sibling iptal edilir
@@ -2452,6 +2506,7 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     // finance acting; legal aktif (iptal edilecek); hr çoktan vardı (iptal EDİLMEZ).
@@ -2530,6 +2585,7 @@ async fn collapse_marker_carries_dropped_claim_owner() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     let legal_owner = Uuid::new_v4();
@@ -2594,6 +2650,7 @@ async fn collapse_summary_marker_describes_whole_event() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
@@ -2684,6 +2741,7 @@ async fn branch_escalation_does_not_touch_sibling_branches() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfd = paralel();
     wfd.nodes
@@ -2740,6 +2798,7 @@ async fn collapse_summary_on_terminal_path_has_null_target() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfes = parallel_wfes(
         vec![
@@ -2795,6 +2854,7 @@ async fn collapse_outside_parallel_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let coord = actor_with_role("coordinator");
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
@@ -2845,6 +2905,7 @@ async fn branch_moves_to_normal_node_and_stays_parallel() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
@@ -2911,6 +2972,7 @@ async fn nested_parallel_at_runtime_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let fin = actor_with_role("financeApprover");
     let wfes = parallel_wfes(
@@ -2957,6 +3019,7 @@ async fn start_wft_parallel_is_rejected_at_runtime() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let req = actor_with_role("requester");
 
@@ -2987,6 +3050,7 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfd = paralel();
     wfd.nodes
@@ -3058,6 +3122,7 @@ async fn branch_escalation_fires_from_branch_entered_at() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfd = paralel();
     wfd.nodes
@@ -3131,6 +3196,7 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let mut wfes = parallel_wfes(
         vec![
@@ -3202,6 +3268,7 @@ async fn reassign_by_authorized_manager_to_eligible_target() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_reassign();
 
@@ -3235,6 +3302,7 @@ async fn reassign_to_pool_writes_unclaim_marker() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_reassign();
 
@@ -3263,6 +3331,7 @@ async fn reassign_by_unauthorized_actor_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_reassign();
 
@@ -3291,6 +3360,7 @@ async fn reassign_on_node_without_rule_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     // reassign kuralı EKLENMEMİŞ düz golden — devir tamamen kapalı.
     let wfd = golden();
@@ -3320,6 +3390,7 @@ async fn reassign_to_ineligible_target_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_reassign();
 
@@ -3348,6 +3419,7 @@ async fn reassign_on_terminal_wfe_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let wfd = golden_with_reassign();
 
@@ -3377,6 +3449,7 @@ async fn required_input_sent_as_null_is_rejected() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
@@ -3411,6 +3484,7 @@ async fn required_input_allows_null_in_undeclared_subfield() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
@@ -3442,6 +3516,7 @@ async fn optional_input_sent_as_value_is_written() {
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     let orgu = Uuid::new_v4();
     let m = manager(orgu);
@@ -3489,6 +3564,7 @@ async fn apply_approve(wfes: &Wfes, actor: &Actor, node: &str) -> CommitOutcome 
     let engine = Engine {
         org: &org,
         exec: &runner,
+        env: Default::default(),
     };
     engine
         .apply(&paralel(), wfes, actor, "approve", &json!({}), Some(node))

@@ -92,6 +92,7 @@ fn wfes_owned(node: &str, ctx: Value, owner: Option<Uuid>) -> Wfes {
     Wfes {
         wfe_id: Uuid::new_v4(),
         orgtnt_id: Uuid::nil(),
+        environment_id: None,
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(ctx),
@@ -128,6 +129,7 @@ async fn entering_a_call_node_stages_the_call() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfd = caller_wfd();
     let a = actor("branchClerk");
@@ -181,6 +183,7 @@ async fn detached_mode_stages_without_deadline() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let new = engine
         .start(
@@ -211,6 +214,7 @@ async fn successful_return_writes_result_and_routes_on_it() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfd = caller_wfd();
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
@@ -250,6 +254,7 @@ async fn low_score_return_routes_to_default_target() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let commit = engine
         .fire_call_return(
@@ -277,6 +282,7 @@ async fn timeout_return_is_a_normal_decision_not_a_crash() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     for status in ["timeout", "failed", "terminated"] {
         let commit = engine
@@ -306,6 +312,7 @@ async fn return_on_a_non_call_node_is_rejected() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let err = engine
         .fire_call_return(
@@ -331,6 +338,7 @@ async fn successful_terminal_stages_the_successor_call() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfd = caller_wfd();
     let mut ctx = ctx_with_basvuru();
@@ -370,6 +378,7 @@ async fn terminal_without_a_successor_stages_nothing() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let boss = actor("branchManager");
     let commit = engine
@@ -402,6 +411,7 @@ async fn sla_deadline_termination_does_not_trigger_the_successor() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let mut wfes = wfes_at("self__branchManager", ctx_with_basvuru());
     wfes.deadline = Some(Utc::now() - chrono::Duration::seconds(1));
@@ -427,6 +437,7 @@ async fn call_return_resolves_self_anchored_target() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     // Fixture'ın çağrı node'u `self__branchManager`'a (c_orgu: "self") gidiyor.
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
@@ -468,6 +479,7 @@ async fn call_return_without_any_real_actor_fails_loudly() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let mut wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
     // Tüm WFAH aktörlerini nil'e çek (gerçekte oluşmaz; savunma testi).
@@ -521,6 +533,7 @@ async fn callee_history_is_inlined_in_chronological_order() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
     let base = wfes.wfah.entries()[0].applied_at;
@@ -587,6 +600,7 @@ async fn inlined_entries_keep_original_actor_and_timestamp() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
     let base = wfes.wfah.entries()[0].applied_at;
@@ -625,6 +639,7 @@ async fn inlined_actions_are_namespaced_to_avoid_wfah_collisions() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
     let base = wfes.wfah.entries()[0].applied_at;
@@ -670,6 +685,7 @@ async fn long_callee_history_is_truncated_with_an_explicit_marker() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
     let base = wfes.wfah.entries()[0].applied_at;
@@ -714,6 +730,7 @@ async fn empty_callee_history_still_applies_the_return() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let commit = engine
         .fire_call_return(
@@ -744,6 +761,7 @@ async fn claim_is_refused_on_a_call_node() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let wfd = caller_wfd();
     let wfes = wfes_at("self__creditAnalyst", ctx_with_basvuru());
@@ -763,6 +781,7 @@ async fn claim_button_is_hidden_on_a_call_node() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let decision = engine
         .claim_decision(
@@ -783,6 +802,7 @@ async fn claim_still_works_on_a_normal_pool_node() {
     let engine = Engine {
         org: &MockOrg,
         exec: &NoRunner,
+        env: Default::default(),
     };
     let check = engine
         .can_claim(

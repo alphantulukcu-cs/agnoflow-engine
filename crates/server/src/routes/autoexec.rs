@@ -35,6 +35,15 @@ pub struct TestAutoexecBody {
     /// WOR-84: `$action.input.*` için örnek ACT girdisi.
     #[serde(default)]
     action_input: Option<Value>,
+    /// `$env.*` çözümü için tenant. Verilmezse ortam değişkenleri BAĞLANMAZ.
+    #[serde(default)]
+    orgtnt_id: Option<Uuid>,
+    /// Değerlerin sahibi WFD — `(project_id, wfd_name)`'e çözülür. Taslak da olur.
+    #[serde(default)]
+    wfd_id: Option<Uuid>,
+    /// Hangi ortamın değerleriyle koşulacağı (ad). Verilmezse tenant varsayılanı.
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 #[derive(serde::Serialize, ToSchema)]
@@ -60,6 +69,11 @@ async fn test_autoexec(
         )
     })?;
 
+    // `$env` bağlama: editör header'ındaki ortam seçicisi buraya düşer.
+    let run_env = crate::routes::env::resolve_run_env(
+        &s.pool, body.orgtnt_id, body.wfd_id, body.environment.as_deref(),
+    ).await?;
+
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
     let env = ExecEnv {
         wfe_id: Uuid::new_v4(),
@@ -72,9 +86,12 @@ async fn test_autoexec(
         },
         wfah: body.wfah,
         action_input: body.action_input,
+        env: run_env,
     };
 
-    let request_info = Some(wf_wfe::runner::resolved_config(&def, &env));
+    // Çözüm başarısızsa (ör. tanımsız `$env` anahtarı) request_info gösterilecek bir şey
+    // yoktur — çalıştırma zaten aynı hatayla düşecek ve mesajı yanıtta görünecek.
+    let request_info = wf_wfe::runner::resolved_config(&def, &env).ok();
     let timeout = std::time::Duration::from_secs(def.timeout_seconds as u64);
     match tokio::time::timeout(timeout, runner.run(&def, &env)).await {
         Ok(Ok(result)) => Ok(Json(TestAutoexecResponse {

@@ -2,7 +2,7 @@ use crate::{error::WfeError, models::WfeRow};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-const WFE_COLUMNS: &str = "wfe_id, orgtnt_id, wfd_id, wfd_version, status,
+const WFE_COLUMNS: &str = "wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status,
                 current_node, current_c_a, claimed_by, end_response,
                 deadline, claimed_at, join_target, join_threshold, join_when,
                 created_at, updated_at";

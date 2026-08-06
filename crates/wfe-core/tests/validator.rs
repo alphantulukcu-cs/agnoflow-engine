@@ -1830,3 +1830,59 @@ fn date_wrapped_ordering_is_exempt() {
     let report = validate_value(fixture_with_when(r#"some($wfah, d(#.at) > d("2026-01-01"))"#));
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
+
+// ---- $env — ortam konfigürasyonu referansları ----
+
+/// Editör sözleşmesi `$env`'i de kapsar: bozuk referans `POST /wfd/validate-expression`
+/// üzerinden anında görünür, WFD validator'ıyla aynı koddan.
+#[test]
+fn expression_issues_flags_malformed_env_reference() {
+    assert!(expression_issues("$env.AUTH_API == 'x'").is_empty());
+    assert!(expression_issues("$env.MAX_TUTAR > 1000").is_empty());
+
+    // Küçük harfli anahtar zen'de GEÇERLİ bir property path'tir — parse geçer,
+    // yakalayan tek şey bu kuraldır.
+    let issues = expression_issues("$env.auth_api == 'x'");
+    assert!(
+        issues
+            .iter()
+            .any(|(c, e, _)| *c == "env_reference_malformed" && *e),
+        "{issues:?}"
+    );
+
+    // `$env.` tek başına zaten parse edilemez; parse hatası diğer kontrolleri kısa devre
+    // yapar (mevcut sözleşme) — bu kural onu değiştirmez.
+    let dangling = expression_issues("$env. == 'x'");
+    assert_eq!(dangling.len(), 1);
+    assert_eq!(dangling[0].0, "zen_parse");
+}
+
+/// Referans toplama doküman GENELİNDEDİR: autoexec config, ZEN ifadeleri, effects.
+/// Alan alan gezilmediği için yeni bir alan eklendiğinde güncelleme gerekmez.
+#[test]
+fn env_references_collects_across_document() {
+    let mut v = fixture_value();
+    assert!(
+        wfe_core::validator::env_references(&Wfd::from_value(v.clone()).unwrap())
+            .unwrap()
+            .is_empty(),
+        "golden fixture $env kullanmaz"
+    );
+
+    v["autoexec"]["kredi_skoru_getir"]["config"]["url"] = json!("$env.SCORE_API/v1/score");
+    v["autoexec"]["kredi_skoru_getir"]["config"]["params"] =
+        json!({ "region": "$env.REGION" });
+    let refs = wfe_core::validator::env_references(&Wfd::from_value(v).unwrap()).unwrap();
+    assert_eq!(
+        refs.into_iter().collect::<Vec<_>>(),
+        vec!["REGION".to_string(), "SCORE_API".to_string()]
+    );
+}
+
+/// Bozuk referans YAYINI ENGELLER — runtime'da "$env.foo" düz metin olarak URL'ye girer.
+#[test]
+fn malformed_env_reference_blocks_publish() {
+    let mut v = fixture_value();
+    v["autoexec"]["kredi_skoru_getir"]["config"]["url"] = json!("https://x/$env.score_api");
+    assert!(has_error(&validate_value(v), "env_reference_malformed"));
+}

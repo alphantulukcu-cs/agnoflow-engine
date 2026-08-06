@@ -163,6 +163,10 @@ async fn upload_wfd(
     Json(body): Json<UploadBody>,
 ) -> Result<Json<Value>, AppError> {
     let project_id = resolve_project_for_write(&s, &auth, body.orgtnt_id, body.project_id).await?;
+    // Lokal DB bağlantıları WFD'ye aittir: doküman başkasının lokalini taşıyamaz.
+    if let Some(name) = body.wfd.get("name").and_then(Value::as_str) {
+        super::db::assert_no_foreign_local_connections(&s.pool, project_id, name, &body.wfd).await?;
+    }
     let (wfd_id, version) = s
         .wfd
         .upload(body.orgtnt_id, Some(project_id), &body.wfd)
@@ -508,6 +512,11 @@ async fn save_draft(
     Json(b): Json<SaveDraftBody>,
 ) -> Result<StatusCode, AppError> {
     require_design_on_wfd(&s, &auth, id, ver).await?;
+    let meta = wf_wfd::repo::get_meta_any(&s.pool, id, ver)
+        .await
+        .map_err(map_wfd_err)?;
+    super::db::assert_no_foreign_local_connections(&s.pool, meta.project_id, &meta.name, &b.wfd)
+        .await?;
     s.wfd
         .save_draft(id, ver, &b.wfd, b.description.as_deref(), b.tags.as_deref())
         .await
@@ -557,11 +566,95 @@ async fn publish_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
     require_can_publish_wfd(&s, &auth, id, ver).await?;
+    assert_env_keys_defined(&s, id, ver).await?;
     s.wfd
         .publish_draft(id, ver)
         .await
         .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "published" })))
         .map_err(map_wfd_err)
+}
+
+/// Yayın kapısı: dokümandaki her `$env.X` referansı, WFD'nin SATIRI OLAN her ortamda
+/// tanımlı olmalı.
+///
+/// Çekirdek yalnız referansları çıkarır (`validator::env_references`, I/O yok); DB'yle
+/// karşılaştırma burada yapılır. Bu, ortam başına ayrı doküman modelinin tek zayıf noktası
+/// olan **drift**'in karşılığıdır: test'e eklenip prod'a eklenmeyen anahtar, runtime'da
+/// değil publish anında yakalanır.
+///
+/// Hiç satırı olmayan ortam SESSİZ geçilir — bir WFD'nin her ortamda koşması zorunlu
+/// değildir; zorunlu tutmak yeni bir ortam açan herkesin tüm WFD'lerini bozardı.
+async fn assert_env_keys_defined(s: &AppState, wfd_id: Uuid, version: i32) -> Result<(), AppError> {
+    let wfd = s
+        .wfd
+        .fetch(wfd_id, version)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    let refs = wfe_core::validator::env_references(&wfd)
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    if refs.is_empty() {
+        return Ok(());
+    }
+
+    let Some((project_id, wfd_name)) = sqlx::query_as::<_, (Option<Uuid>, String)>(
+        "SELECT project_id, name FROM wf.wfd_meta WHERE wfd_id = $1",
+    )
+    .bind(wfd_id)
+    .fetch_optional(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
+    .and_then(|(p, n)| p.map(|p| (p, n))) else {
+        return Ok(());
+    };
+
+    // Anahtar × ortam: joker (`env_id IS NULL`) satır TÜM ortamları karşılar.
+    let rows = sqlx::query_as::<_, (Option<String>, String)>(
+        "SELECT e.name, v.key FROM wf.wfd_env_var v            LEFT JOIN wf.environment e ON e.id = v.env_id           WHERE v.project_id = $1 AND v.wfd_name = $2",
+    )
+    .bind(project_id)
+    .bind(&wfd_name)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+
+    let mut wildcard: std::collections::BTreeSet<String> = Default::default();
+    let mut per_env: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    for (env_name, key) in rows {
+        match env_name {
+            None => {
+                wildcard.insert(key);
+            }
+            Some(name) => {
+                per_env.entry(name).or_default().insert(key);
+            }
+        }
+    }
+
+    let mut missing: Vec<String> = Vec::new();
+    for (env_name, keys) in &per_env {
+        for key in &refs {
+            if !keys.contains(key) && !wildcard.contains(key) {
+                missing.push(format!("{env_name}: $env.{key}"));
+            }
+        }
+    }
+    // Hiç ortam satırı yoksa joker tek başına yeterli olmalı.
+    if per_env.is_empty() {
+        for key in &refs {
+            if !wildcard.contains(key) {
+                missing.push(format!("*: $env.{key}"));
+            }
+        }
+    }
+
+    if !missing.is_empty() {
+        return Err(AppError(
+            format!("env.missing_key — tanımsız ortam değişkenleri: {}", missing.join(", ")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    Ok(())
 }
 
 /// Taslağı yayın onayına gönderir (tasarım yetkisi yeter). Validator kapısı

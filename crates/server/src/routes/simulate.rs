@@ -64,6 +64,13 @@ struct SimStartBody {
     action: Option<String>,
     #[serde(default)]
     input: Value,
+    /// `$env.*` çözümü — editör header'ındaki ortam seçicisi. Verilmezse boş ortam.
+    #[serde(default)]
+    orgtnt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    wfd_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 /// Sim claim-eşdeğeri uygunluk — gerçek `WfeExecutor::can_claim` ile aynı kural:
@@ -156,6 +163,9 @@ async fn sim_start(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: crate::routes::env::resolve_run_env(
+            &s.pool, body.orgtnt_id, body.wfd_id, body.environment.as_deref(),
+        ).await?,
     };
 
     let orgtnt_id = wfe_core::OrgPort::orgtnt_for_orgu(&*org, body.actor.orgu_id)
@@ -199,6 +209,13 @@ struct SimApplyBody {
     /// WOR-31 T4: paralel modda kol seçimi (bkz. `routes/wfe.rs::ApplyBody.node`).
     #[serde(default)]
     node: Option<String>,
+    /// `$env.*` çözümü — editör header'ındaki ortam seçicisi. Verilmezse boş ortam.
+    #[serde(default)]
+    orgtnt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    wfd_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 #[derive(serde::Serialize, ToSchema)]
@@ -224,6 +241,9 @@ async fn sim_apply(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: crate::routes::env::resolve_run_env(
+            &s.pool, body.orgtnt_id, body.wfd_id, body.environment.as_deref(),
+        ).await?,
     };
 
     let mut sim_state = body.sim_state;
@@ -291,6 +311,13 @@ struct SimCallReturnBody {
     /// Çağrılanın `wfe_end_response`'u — `$call.result.*` buradan çözülür.
     #[serde(default)]
     result: Option<Value>,
+    /// `$env.*` çözümü — editör header'ındaki ortam seçicisi. Verilmezse boş ortam.
+    #[serde(default)]
+    orgtnt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    wfd_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 fn default_call_status() -> String {
@@ -322,6 +349,9 @@ async fn sim_call_return(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: crate::routes::env::resolve_run_env(
+            &s.pool, body.orgtnt_id, body.wfd_id, body.environment.as_deref(),
+        ).await?,
     };
 
     let mut sim_state = body.sim_state;
@@ -376,6 +406,13 @@ struct SimPossibleActionsBody {
     sim_state: SimState,
     #[schema(value_type = Object)]
     actor: Actor,
+    /// `$env.*` çözümü — editör header'ındaki ortam seçicisi. Verilmezse boş ortam.
+    #[serde(default)]
+    orgtnt_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    wfd_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    environment: Option<String>,
 }
 
 #[utoipa::path(post, path = "/possible-actions", tag = "simulate",
@@ -391,6 +428,9 @@ async fn sim_possible_actions(
     let engine = Engine {
         org: &*org,
         exec: &runner,
+        env: crate::routes::env::resolve_run_env(
+            &s.pool, body.orgtnt_id, body.wfd_id, body.environment.as_deref(),
+        ).await?,
     };
 
     sim_actions_for(&engine, &wfd, &body.sim_state, &body.actor)

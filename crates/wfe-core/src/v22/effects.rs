@@ -7,6 +7,7 @@
 use crate::error::EngineError;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::WfesEffects;
+use crate::v22::env::{self, PublicEnv};
 use crate::v22::eval::CallOutcome;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -23,6 +24,9 @@ pub struct EffectEnv<'a> {
     /// çözülmez ve `null` yazar (validator `call_result_in_detached` /
     /// `call_next_result_ref` bu durumu tasarım anında yakalar).
     pub call: Option<&'a CallOutcome>,
+    /// Ortam konfigürasyonu (`$env`) — **secret'sız** görünüm. Effects ctx'e yazar;
+    /// secret bir değerin buradan geçmesi onu portalda görünür kılardı.
+    pub env: &'a PublicEnv,
     pub now: DateTime<Utc>,
 }
 
@@ -78,6 +82,12 @@ pub fn resolve_value(raw: &Value, ctx: &Value, env: &EffectEnv<'_>) -> Result<Va
 }
 
 fn resolve_dollar_string(s: &str, ctx: &Value, env: &EffectEnv<'_>) -> Result<Value, EngineError> {
+    // `$env` EN BAŞTA: diğer $-formlarının aksine ara-değer de çözülür, yani string'in
+    // tamamı olmak zorunda değil. İçinde `$env.` geçmiyorsa `None` döner ve akış aşağıdaki
+    // tam-eşleşme kurallarına devam eder.
+    if let Some(v) = env::resolve_string(s, env.env)? {
+        return Ok(v);
+    }
     match s {
         "$actor" => serde_json::to_value(env.actor)
             .map_err(|e| EngineError::EffectValue(format!("$actor serileştirilemedi: {e}"))),
@@ -174,6 +184,21 @@ mod tests {
             action_input: input,
             exec_result: exec,
             call: None,
+            env: &env::EMPTY_PUBLIC_ENV,
+            now: Utc::now(),
+        }
+    }
+
+    /// `$env`'li varyant — enterpolasyon ve secret ayrımı testleri için.
+    fn env_with<'a>(a: &'a Actor, e: &'a PublicEnv) -> EffectEnv<'a> {
+        EffectEnv {
+            actor: a,
+            wfe_id: Uuid::nil(),
+            node: Some("self__creditAnalyst"),
+            action_input: None,
+            exec_result: None,
+            call: None,
+            env: e,
             now: Utc::now(),
         }
     }
@@ -342,5 +367,65 @@ mod tests {
         let ctx = json!({"a": 1});
         let _ = apply_effects(&ctx, &effects(&[("a", json!(2))]), &e).unwrap();
         assert_eq!(ctx["a"], json!(1));
+    }
+
+    fn public_env() -> PublicEnv {
+        env::EnvSet::new(std::collections::BTreeMap::from([
+            (
+                "AUTH_API".to_string(),
+                env::EnvValue::public(json!("https://auth.test")),
+            ),
+            ("RETRIES".to_string(), env::EnvValue::public(json!(3))),
+            (
+                "API_KEY".to_string(),
+                env::EnvValue::secret(json!("sk-live-xyz")),
+            ),
+        ]))
+        .public()
+    }
+
+    /// Effects `$env`'i çözer: tam eşleşme tipi korur, ara-değer string üretir.
+    #[test]
+    fn env_resolves_in_effects() {
+        let a = actor();
+        let p = public_env();
+        let e = env_with(&a, &p);
+        let out = apply_effects(
+            &json!({}),
+            &effects(&[
+                ("uc", json!("$env.AUTH_API/v1/skor")),
+                ("deneme", json!("$env.RETRIES")),
+            ]),
+            &e,
+        )
+        .unwrap();
+        assert_eq!(out["uc"], json!("https://auth.test/v1/skor"));
+        assert_eq!(out["deneme"], json!(3), "tam eşleşme sayıyı sayı bırakır");
+    }
+
+    /// KRİTİK: secret bir değer effects üzerinden ctx'e YAZILAMAZ. Yazılabilseydi
+    /// portalda görünür ve `$exec` üzerinden dışarı sızardı.
+    #[test]
+    fn secret_cannot_reach_ctx_through_effects() {
+        let a = actor();
+        let p = public_env();
+        let e = env_with(&a, &p);
+        let err = apply_effects(&json!({}), &effects(&[("k", json!("$env.API_KEY"))]), &e)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("API_KEY"),
+            "secret anahtar tanımsız gibi davranmalı, sessizce null yazmamalı: {err}"
+        );
+    }
+
+    /// Eksik anahtar `$ctx`'in aksine null DEĞİL, hata — null bir domain
+    /// `https://null/...` üretirdi.
+    #[test]
+    fn missing_env_key_fails_effects() {
+        let a = actor();
+        let p = public_env();
+        let e = env_with(&a, &p);
+        assert!(apply_effects(&json!({}), &effects(&[("k", json!("$env.YOK"))]), &e).is_err());
     }
 }

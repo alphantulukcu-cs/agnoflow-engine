@@ -152,6 +152,7 @@ async fn start_wfd(
         role: actor.role.clone(),
     };
 
+    // Portal ortam adı geçirmez: tenant'ın varsayılan ortamı kullanılır.
     let result = s
         .executor
         .start(

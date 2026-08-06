@@ -27,10 +27,14 @@
    yalnızca `wfes_effects.set: {alan: "$actor"}` yazan upstream adımlardan çıkarıyor
    (`cOrguUtils.getUpstreamActorFields().ctx`). Bir REST autoexec'in ctx'e yazdığı
    `musteri.sube_id` bu listeye giremiyor.
-3. **Kod yolu test edilmemiş ve sessizce yanlış davranıyor.** `"traverse"` kelimesi repodaki
-   hiçbir fixture/örnek/testte geçmiyor. Ve `resolve_anchor(...)?.unwrap_or(default_anchor)`
-   anchor çözülemezse **aktörün kendi birimine düşüyor** — "ctx'teki şubenin müdürü" kuralı
-   alan boşsa "aktörün kendi şubesinin müdürü"ne dönüşüp **yanlış kişiyi yetkilendiriyor**.
+3. **Anchor çözülemezse yanlış kişiyi yetkilendiriyor.** `resolve_anchor(...)?.unwrap_or(default_anchor)`
+   aktörün **kendi birimine** düşüyor — "ctx'teki şubenin müdürü" kuralı alan boşsa "aktörün
+   kendi şubesinin müdürü"ne dönüşüyor. Bu davranış `resolver.rs`'in inline test modülünde
+   `missing_anchor_falls_back_to_default` ile sabitlenmiş; ancak spec'in hiçbir yerinde
+   (terminology / runtime-semantics / decisions) yazmıyor ve resolver'ın ilk yazıldığı
+   commit'te (6e1d9dc) testiyle birlikte gelmiş — spec'ten türeyen bir sözleşme değil,
+   uygulama tercihi. Belge kapsamı ise gerçekten test edilmemiş: hiçbir fixture/örnek
+   ctx-anchor kullanmıyor.
 
 ## 2. Karar
 
@@ -96,10 +100,16 @@ Kural `c_orgu.from`'un **string** olduğu her durumda koşar — `from` objeyse 
 ayrı yol. `anchor_from_ctx` `$ctx.` önekini `strip_prefix(...).unwrap_or(path)` ile soyduğu için
 önek **opsiyoneldir**; validator da aynı normalizasyonu yapar (editör daima `$ctx.` yazar).
 
-| kural | koşul |
-|---|---|
-| `c_orgu_anchor_unknown_field` | yol context şemasında yok |
-| `c_orgu_anchor_not_orgu_kind` | yol `orgu`/`user` kind'lı bir düğüme ya da bunlardan birinin `orgu_id`/`orgu` çocuğuna çözülmüyor |
+| kural | seviye | koşul |
+|---|---|---|
+| `c_orgu_anchor_unknown_field` | hata | yol context şemasında yok |
+| `c_orgu_anchor_not_orgu_kind` | hata | yol `orgu`/`user` kind'lı bir düğüme ya da bunlardan birinin `orgu_id`/`orgu` çocuğuna çözülmüyor |
+| `c_orgu_anchor_kind_unverifiable` | **uyarı** | şema o derinliği kısıtlamıyor → kind doğrulanamıyor |
+
+Üçüncü kural, uygulama sırasında ortaya çıkan bir boşluğu kapatıyor: `initiated_by: {"type":"object"}`
+gibi property'siz bir alanın **alt yolu** (`$ctx.initiated_by.orgu`) şemada çözülemez. Bu biçim
+meşru ve yaygın olduğu için hata olamaz; ama sessiz geçerse kuralı tümüyle atlatmanın yolu olur.
+Uyarı, tasarımcıyı alanı `orgu` tipiyle bildirmeye yönlendirir.
 
 Kural **tüm `c_orgu` yüzeylerinde** koşar — beşi:
 
@@ -114,10 +124,12 @@ yeni bir C_A taşıyıcısı eklendiğinde tek yerde güncellenir.
 
 ### 3.5 Test
 
-Bu kod yolunun bugün **sıfır** testi var.
+`resolver.rs`'in inline modülünde 5 test var (selector, ctx-obje, wfah occurrence first/last,
+eksik anchor) — belge seviyesinde ise hiç kapsam yok.
 
-- `resolver` birim testleri: obje/ham‑UUID/`_id` fallback'i, eksik yol → boş küme (yeni
-  davranış), bozuk UUID → hata.
+- `resolver` birim testleri: ham‑UUID ve `_id` fallback'i (kapsanmıyor), bozuk UUID → hata
+  (kapsanmıyor). **`missing_anchor_falls_back_to_default` testi §3.3 gereği tersine çevrilir**
+  (`missing_anchor_resolves_to_empty_set`).
 - `validator` testleri: iki kural × beş yüzey, `$defs` arkasındaki alan, döngülü `$ref`.
 - **Golden fixture DEĞİŞMEZ** (CLAUDE.md). Ctx-anchor'lı **yeni** bir örnek fixture
   eklenir; `crates/wfe-core/tests/fixtures/` kopyası senkron tutulur.

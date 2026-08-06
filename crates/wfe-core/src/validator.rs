@@ -94,6 +94,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_string_namespaces(wfd, &mut report);
     check_sla(wfd, &mut report);
     check_env_references(wfd, &mut report);
+    check_c_orgu_anchor_kinds(wfd, &mut report);
     report
 }
 
@@ -146,6 +147,175 @@ fn collect_env_refs(v: &Value, out: &mut BTreeSet<String>) -> Result<(), EngineE
 fn check_env_references(wfd: &Wfd, report: &mut ValidationReport) {
     if let Err(e) = env_references(wfd) {
         report.error("env_reference_malformed", "$".into(), e.to_string());
+    }
+}
+
+// ---- x-wf-kind: c_orgu anchor'ının context alanına bağlanması ----
+//
+// `c_orgu`'nun anchor formu (`{from: "$ctx.<yol>", traverse}`) bir context alanından ORGU
+// çözer. Alanın gerçekten bir ORGU tuttuğu tasarım-zamanında bilinmelidir: aksi halde
+// runtime'da anchor çözülemez ve KİMSE yetkilenmez (bkz. `resolver::resolve_c_orgu`) —
+// yani akış sessizce kilitlenir. Anlamsal tip context şemasında `x-wf-kind` ile bildirilir.
+
+/// `x-wf-kind` değerleri — `user` ORGU'yu KAPSAR (içindeki `orgu_id` anchor'a yeter).
+const ORGU_CAPABLE_KINDS: [&str; 2] = ["orgu", "user"];
+
+/// `user`/`orgu` kind'lı bir nesnenin içinde ORGU tutan alan adları
+/// (`resolver::extract_orgu_uuid` bu iki anahtarı arar).
+const ORGU_CHILD_KEYS: [&str; 2] = ["orgu", "orgu_id"];
+
+/// `#/$defs/<Ad>` referanslarını çözer.
+///
+/// Motor `$ref`'i başka hiçbir yerde çözmüyor (`expr_types`'ta hiç yok, `resolve_schema_path`
+/// onu `Opaque` sayıyor) ama EDİTÖR çözüyor: Context Studio alanı `{"$ref":"#/$defs/Musteri"}`
+/// olarak yazabiliyor. Bu asimetri kalırsa `$defs` arkasındaki kind'lı alanı göremeyip MEŞRU
+/// bir belgeyi reddederdik. Kapsam bilinçli olarak dar: yalnız editörün ürettiği tek biçim
+/// (`#/$defs/<Ad>`, iç içe yol yok), zincir uzunluğu sınırlı → döngü asla dönmez.
+fn deref_defs<'a>(root: &'a Value, node: &'a Value) -> Option<&'a Value> {
+    let mut current = node;
+    for _ in 0..16 {
+        let Some(reference) = current.get("$ref").and_then(Value::as_str) else {
+            return Some(current);
+        };
+        let name = reference.strip_prefix("#/$defs/")?;
+        if name.contains('/') {
+            return None; // iç içe pointer — çözmüyoruz, opak kalır
+        }
+        current = root.get("$defs")?.get(name)?;
+    }
+    None // 16 hop'tan uzun zincir = döngü kabul edilir
+}
+
+enum NodeAt<'a> {
+    Found(&'a Value),
+    Missing,
+    /// Şema bu derinliği kısıtlamıyor (`properties` yok, çözülemeyen `$ref`, ...).
+    Opaque,
+}
+
+/// Bir context yolundaki şema düğümü, `$defs` çözülerek.
+fn context_node_at<'a>(context: &'a Value, dotted: &str) -> NodeAt<'a> {
+    let Some(mut current) = deref_defs(context, context) else {
+        return NodeAt::Opaque;
+    };
+    for segment in dotted.split('.') {
+        let Some(props) = current.get("properties").and_then(Value::as_object) else {
+            return NodeAt::Opaque;
+        };
+        let Some(next) = props.get(segment) else {
+            return NodeAt::Missing;
+        };
+        let Some(next) = deref_defs(context, next) else {
+            return NodeAt::Opaque;
+        };
+        current = next;
+    }
+    NodeAt::Found(current)
+}
+
+fn is_orgu_capable(node: &Value) -> bool {
+    node.get("x-wf-kind")
+        .and_then(Value::as_str)
+        .is_some_and(|k| ORGU_CAPABLE_KINDS.contains(&k))
+}
+
+/// Dokümandaki TÜM `c_orgu` yerlerini toplar (yol, değer).
+///
+/// `env_references` ile aynı gerekçe: alan alan gezmek yerine serileştirilmiş doküman
+/// taranır. Bugün beş taşıyıcı var (`nodes.*.c_a`, `nodes.*.reassign`, `transitions[].c_a`,
+/// `listable[].c_a`, context şemasındaki `x-visibility`); altıncısı eklendiğinde bu kuralı
+/// güncellemeyi unutmak, kind denetimi olmadan yayınlanan bir belge demek olurdu.
+fn collect_c_orgu_sites<'a>(v: &'a Value, path: &str, out: &mut Vec<(String, &'a Value)>) {
+    match v {
+        Value::Object(m) => {
+            for (key, child) in m {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if key == "c_orgu" {
+                    out.push((child_path.clone(), child));
+                }
+                collect_c_orgu_sites(child, &child_path, out);
+            }
+        }
+        Value::Array(a) => {
+            for (i, item) in a.iter().enumerate() {
+                collect_c_orgu_sites(item, &format!("{path}[{i}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
+    let Ok(doc) = serde_json::to_value(wfd) else {
+        return; // serileştirme hatası başka kuralların işi
+    };
+    let mut sites = Vec::new();
+    collect_c_orgu_sites(&doc, "", &mut sites);
+
+    for (path, c_orgu) in sites {
+        // Yalnız ctx-anchor formu: `from` STRING. Selector formu düz string, wfah formunda
+        // `from` bir objedir — ikisi de bu kuralın dışında.
+        let Some(from) = c_orgu.get("from").and_then(Value::as_str) else {
+            continue;
+        };
+        // `$ctx.` öneki opsiyonel — `resolver::anchor_from_ctx` da onu soyup devam ediyor.
+        let bare = from.strip_prefix("$ctx.").unwrap_or(from);
+
+        match context_node_at(&wfd.context, bare) {
+            // Şema bu derinliği kısıtlamıyor (ör. `{"type":"object"}` alanının alt yolu).
+            // HATA değil — bu biçim meşru ve yaygın; ama SESSİZ de geçemez: sessizlik
+            // kuralı tümüyle atlatmanın yolu olurdu. Uyarı, tasarımcıyı alanı `orgu`
+            // tipiyle bildirmeye yönlendirir.
+            NodeAt::Opaque => report.warn(
+                "c_orgu_anchor_kind_unverifiable",
+                format!("{path}.from"),
+                format!(
+                    "c_orgu anchor'ı '{from}' şemanın kısıtlamadığı bir derinliğe düşüyor — \
+                     bu yolun bir ORGU tuttuğu doğrulanamıyor. Alanı Context Studio'da \
+                     `orgu` (ya da kişi tutuyorsa `user`) tipiyle bildirin; aksi halde \
+                     anchor runtime'da çözülemezse o node'da KİMSE yetkilenmez."
+                ),
+            ),
+            NodeAt::Missing => report.error(
+                "c_orgu_anchor_unknown_field",
+                format!("{path}.from"),
+                format!(
+                    "c_orgu anchor'ı '{from}' context şemasında olmayan bir alanı işaret ediyor. \
+                     Alanı Context Studio'da tanımlayın (tip: orgu) ya da anchor'ı var olan bir \
+                     alana çevirin."
+                ),
+            ),
+            NodeAt::Found(node) => {
+                if is_orgu_capable(node) {
+                    continue;
+                }
+                // Yol bir ORGU alt-alanını gösteriyorsa ebeveynin kind'ı yeter:
+                // `$ctx.talep_sahibi.orgu_id` ↔ `talep_sahibi` = user/orgu.
+                if let Some((parent, last)) = bare.rsplit_once('.') {
+                    if ORGU_CHILD_KEYS.contains(&last) {
+                        if let NodeAt::Found(p) = context_node_at(&wfd.context, parent) {
+                            if is_orgu_capable(p) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+                report.error(
+                    "c_orgu_anchor_not_orgu_kind",
+                    format!("{path}.from"),
+                    format!(
+                        "c_orgu anchor'ı '{from}' bir ORGU tutmayan alanı işaret ediyor. \
+                         Context Studio'da o alanın tipini `orgu` (ya da kişi tutuyorsa `user`) \
+                         yapın — anchor yalnız `x-wf-kind: orgu|user` bildirilmiş bir alandan \
+                         ya da onun orgu_id/orgu çocuğundan çözülebilir."
+                    ),
+                );
+            }
+        }
     }
 }
 

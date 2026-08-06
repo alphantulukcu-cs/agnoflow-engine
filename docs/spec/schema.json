@@ -422,6 +422,11 @@
         "else": true,
         "x-visibility": {
           "$ref": "#/$defs/visibility"
+        },
+        "x-wf-kind": {
+          "type": "string",
+          "enum": ["orgu", "user"],
+          "description": "Alanin ANLAMSAL tipi. 'orgu' = alan bir ORGU tutar ({orgu_id, name?}) ve c_orgu.from ile anchor olarak kullanilabilir. 'user' = alan bir KISIYI tutar ({user_id, orgu_id, role?, name?}); orgu'yu KAPSAR (icindeki orgu_id ile c_orgu.from'u da besler) ve ayrica c_u referanslarinin hedefi olur. Validator c_orgu.from'un kind'li bir yola isaret etmesini zorunlu kilar (c_orgu_anchor_not_orgu_kind)."
         }
       },
       "additionalProperties": true

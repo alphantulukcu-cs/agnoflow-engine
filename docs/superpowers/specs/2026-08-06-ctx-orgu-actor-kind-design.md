@@ -213,7 +213,7 @@ türetilir.
 
 `authorize`'ın 3. adımı `CuItem::Ref`'i ctx'ten çözer, sonra bugünkü UUID/ad
 karşılaştırmasını uygular. Değer çıkarımı `extract_orgu_uuid`'in simetriği olur
-(`extract_user_ident`): ham string, ya da obje içinde `user_id`/`actor`. Böylece
+(`resolve_cu_ident`): ham string, ya da obje içinde `user_id`/`user`. Böylece
 `{from:"$ctx.talep_sahibi"}` (son ek olmadan) da çalışır.
 
 **Çözülemeyen `Ref` → o kanal eşleşmez** (hata değil). `$ctx`'in "eksik = null" sözleşmesiyle
@@ -279,7 +279,79 @@ destekliyor" hatasının motor tarafında tekrarı olurdu.
 5. `cargo test --workspace` geçiyor; golden fixture değişmemiş.
 
 **Faz 2**
-6. `c_u: [{from:"$ctx.<user alanı>.user_id"}]` yazılabiliyor, matcher onu çözüyor, havuz
+6. `c_u: [{from:"$ctx.<actor alanı>.user_id"}]` yazılabiliyor, matcher onu çözüyor, havuz
    listelemesi kişiyi görüyor.
 7. `Literal` öğede `$` öneki ve `actor` kind'lı olmayan `Ref` publish'te hata veriyor.
 8. Eski düz-string `c_u` belgeleri değişmeden çalışıyor; node key'leri aynı kalıyor.
+
+---
+
+## 6. Gerçekleşme (2026-08-06 — uygulama sonrası)
+
+Her iki faz da tamamlandı ve push edildi. **8 kabul kriterinin hepsi karşılandı.**
+`cargo test --workspace` 23/23 paket · editör 173 dosya / 2628 test · golden fixture
+değişmedi.
+
+| commit | repo | içerik |
+|---|---|---|
+| `b49f518` | engine | bu tasarım dokümanı |
+| `3c264fc` | engine | `x-wf-kind` şeması + `$defs` çözümlemesi + 2 hata/1 uyarı + 14 test |
+| `b8b27f9` | engine | anchor fallback mantık hatası (§3.3) + `terminology.md` + 4 test |
+| `a45d641` | engine | `user` → `actor` adlandırma düzeltmesi |
+| `6f89238` | engine | dinamik `c_u` — `CuItem` + matcher + pipeline + `x-visibility` + 18 test |
+| `fb2f6ba` | frontend | kind altyapısı + Context Studio tipleri + `OrgCaModal` ctx modu + 2 bug |
+| `2fe106c` | frontend | `actor` rename |
+| `8fa4c29` | frontend | `CuItem` tipi + node key eşliği + `c_u` UI + 12 test |
+| `23e8e0a` | frontend | çalışma-anı şema kopyası senkronu + 8 test |
+| `656161f` | frontend | `OrgCaModal` `c_u` düşürmesi + `CaRuleEditor` aday listesi + 2 test |
+
+### 6.1 Tasarımdan sapmalar
+
+**`actor` kind'ı Faz 1'e alındı** (§3.7 onu Faz 2'ye bırakmıştı). Gerekçe: `actor` kind'lı
+alan `c_orgu.from`'u da besliyor (içindeki `orgu_id`), yani Faz 1'de hemen işe yarıyor;
+Faz 2'ye kalan yalnızca `c_u` tüketimiydi. Tip açılırında yarım bir seçenek göstermemek
+için ikisi birlikte eklendi.
+
+**Üçüncü validator kuralı eklendi** — `c_orgu_anchor_kind_unverifiable` (uyarı). Şemanın
+kısıtlamadığı derinlik (`{"type":"object"}` alanının alt yolu) hata olamaz (biçim meşru) ama
+sessiz de geçemez, yoksa kuralı atlatmanın yolu olurdu. `c_u` tarafında simetriği:
+`c_u_ref_kind_unverifiable`.
+
+**`Ref.from`'da `$ctx.` öneki ZORUNLU** (şema `pattern`). `c_orgu.from`'da opsiyonel kaldı —
+orada geriye uyumluluk gerekçesi var, `c_u`'nun `Ref`'i ise yeni bir yüzey.
+
+**`x-visibility.c_u` de `CuItem[]` oldu.** §4 bunu öngörmüyordu; `terminology.md` "şekli C_A
+ile aynıdır" dediği için yalnız `CandidateActor`'ı değiştirmek iki yüzeyi ayrıştırırdı.
+
+### 6.2 Uygulama sırasında bulunan ve düzeltilen hatalar
+
+Hiçbiri istenen işin parçası değildi; denetimlerde çıktılar.
+
+1. **Anchor fallback** (§3.3) — `traverse: "self"` ile yetki kısıtını tümüyle kaldırıyordu.
+2. **`OrgCaModal` ctx-anchor'ı düz stringe çeviriyordu** — `from`'un STRING dalı hiç tanınmıyordu.
+3. **`CaRuleEditor`'ın "Mutlak" kutusu wfah formunu bozuyordu** — `wfah:<ad>::<traverse>`
+   gösterimi geri okunamıyor, `from: "wfah:<ad>"` yazılıyordu.
+4. **`OrgCaModal` `c_u`'yu sessizce siliyordu** — okumuyor, `onChange`'de yazmıyordu; ayrıca
+   dinamik `c_u` node c_a'sında HİÇ yazılamıyordu (Faz 2'nin asıl kullanım yeri orası).
+   `canSave` de C_A'nın `anyOf` değişmezini uygulamıyordu (yalnız `c_r`'ye bakıyordu).
+5. **Editörün çalışma-anı şema kopyası 125 satır geride** (`src/schema/wfd.schema.json`,
+   `validateWfdSchema` ile import ediliyor) — editör kendi ürettiği `{from}` biçimini
+   reddedecekti. Tam senkronlandı; 8 test bundan sonra ayrışmayı yakalar.
+6. **`CaRuleEditor`'ın "Göreli" sekmesi motorun reddedeceği belge üretebiliyordu** — adayları
+   hâlâ `$actor` sezgisiyle buluyor, `$ctx.<alan>.orgu` yazıyordu. Kind sözleşmesine geçti.
+
+### 6.3 Açık kalan
+
+**Aday listesinde upstream kısıtı kalktı.** Kind temeline geçince liste doküman geneli oldu;
+downstream'de yazılan bir alan da görünüyor. O durumda anchor runtime'da çözülemez ve §3.3
+sayesinde node GÖRÜNÜR biçimde durur (sessiz yanlış yetkilendirme yok). Eski "yalnız
+upstream" kısıtı bu ayakta daha korumacıydı — geri istenirse `kind ∩ upstream` kesişimi
+olarak eklenir. Bunun için "hangi ctx yolları upstream'de yazılıyor" sorusunu `$actor` ile
+sınırlı olmayan biçimde yanıtlayan bir yardımcı gerekir.
+
+**Saf `user` kind'ı yok.** `{user_id, name}` — koltuksuz kişi (ör. bir REST'in döndürdüğü
+kullanıcı kimliği). İhtiyaç doğduğunda eklenir; yalnız `c_u`'yu besler, `c_orgu`'yu
+besleyemez. Gerekçe `terminology.md` §SCHEMA ANNOTATION UZANTILARI'nda yazılı.
+
+**`CaRuleModal` wrapper'ı ölü kod** — dosyada duruyor ama hiçbir yerden kullanılmıyor
+(`CaRuleEditor` doğrudan import ediliyor). Silinmesi ayrı bir temizlik.

@@ -1223,6 +1223,93 @@ fn nested_context_leaf_no_effect_writes_is_error() {
     );
 }
 
+// ---- effect_type_mismatch ----
+//
+// `$actor` motorda NESNE serileşir (`effects::resolve_dollar_string` →
+// `to_value(Actor)` = {orgu_id, user_id, role}). Motor yazmayı reddetmez — çalışma
+// anında context şeması zorlanmaz — dolayısıyla `string` bir alana yazıldığında hata
+// hiçbir yerde görünmez: o alanı okuyan koşullar sessizce hep-false olur.
+
+#[test]
+fn actor_written_into_string_field_is_error() {
+    let mut v = fixture_value();
+    // Golden'da `initiated_by` object'tir ve `$actor` oraya yazılır; tipi string'e
+    // çevirmek yazımı uyumsuz yapar.
+    v["context"]["properties"]["initiated_by"] = json!({"type": "string"});
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch" && e.message.contains("initiated_by")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn actor_written_into_object_field_is_clean() {
+    // Golden zaten `initiated_by: {type: object}` bildiriyor — kural sessiz kalmalı.
+    let report = validate(&Wfd::from_json(FIXTURE).unwrap());
+    assert!(
+        !report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn timestamp_written_into_number_field_is_error() {
+    let mut v = fixture_value();
+    // `analyst_approved_at` alanına `$timestamp` yazılıyor (metin); tipi number yapmak
+    // uyumsuzluk üretir.
+    v["context"]["properties"]["analyst_approved_at"] = json!({"type": "number"});
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch" && e.message.contains("analyst_approved_at")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn untyped_source_never_flags_effect_type_mismatch() {
+    let mut v = fixture_value();
+    // `manager_decision`ın TEK yazarı `$action.input.manager_decision`. Aksiyon girdisi
+    // TİPSİZDİR (yalnız yol listesi olarak bildirilir), autoexec/çağrı sonucu da öyle —
+    // hedefin tipi ne olursa olsun tahmine dayalı hata üretilmemeli.
+    v["context"]["properties"]["manager_decision"] = json!({"type": "boolean"});
+    // `credit_grade` yalnız `$exec.result.grade` ile yazılır — o da tipsizdir.
+    v["context"]["properties"]["credit_grade"] = json!({"type": "number"});
+    let report = validate_value(v);
+    assert!(
+        !report.errors.iter().any(|e| e.code == "effect_type_mismatch"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn literal_effect_value_type_is_checked() {
+    let mut v = fixture_value();
+    // Escalation düz metin yazıyor (`internal_notes`) — sabitin tipi de denetlenir.
+    v["context"]["properties"]["internal_notes"] = json!({"type": "boolean"});
+    let report = validate_value(v);
+    assert!(
+        report.errors.iter().any(|e| e.code == "effect_type_mismatch"
+            && e.path.contains("escalation")
+            && e.message.contains("internal_notes")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
 #[test]
 fn whole_object_effect_covers_nested_leaves() {
     // Golden'da `applicant` tek parça yazılıyor; name/tckid/income yaprakları

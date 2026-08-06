@@ -83,6 +83,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_context_required_removed(wfd, &mut report);
     check_context_field_writers(wfd, &mut report);
     check_action_input_consumed(wfd, &mut report);
+    check_effect_value_types(wfd, &mut report);
     check_optional_input_overwrites(wfd, &mut report);
     check_attachments(wfd, &mut report);
     check_effect_paths(wfd, &mut report);
@@ -1771,6 +1772,9 @@ fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
 //   3. Bir aksiyonun bildirdiği her input, o aksiyonu kullanan kuralın effects'inde
 //      `$action.input.<yol>` ile tüketilmeli (unused_action_input) — istekten alınan
 //      değer sessizce düşmesin.
+//   4. Effect'in yazdığı değerin tipi hedef alanın şemasıyla uyuşmalı
+//      (effect_type_mismatch) — `$actor` NESNEDİR, `string` bir alana yazılırsa o alanı
+//      okuyan koşullar sessizce hep-false olur.
 // Çalışma anında ctx doluluk denetimi YOKTUR; her şey tasarım zamanında yakalanır.
 
 /// Kural 1 — kaldırılan `required` bildirimleri hard reject.
@@ -1813,61 +1817,129 @@ fn paths_overlap(a: &str, b: &str) -> bool {
     a == b || a.starts_with(&format!("{b}.")) || b.starts_with(&format!("{a}."))
 }
 
-/// WFD'deki TÜM `wfes_effects.set` hedef yollarını toplar.
-fn collect_effect_targets(wfd: &Wfd) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |effects: &WfesEffects| out.extend(effects.set.keys().cloned());
+/// WFD'deki TÜM `wfes_effects` blokları, site yoluyla (hata mesajının konumu için).
+/// `collect_effect_targets` ve `check_effect_value_types` AYNI listeyi görür — iki ayrı
+/// yürüyüş, biri (örn. WFC-RETURN effects'i) sessizce kapsam dışında kalmaya açıktı.
+fn each_effects(wfd: &Wfd) -> Vec<(String, &WfesEffects)> {
+    let mut out: Vec<(String, &WfesEffects)> = Vec::new();
 
     for s in &wfd.start {
+        let path = format!("start[{}]", s.id);
         if let Some(e) = &s.wfes_effects {
-            push(e);
+            out.push((path.clone(), e));
         }
         for trig in &s.trigger {
             if let Some(c) = &trig.catch {
-                push(&c.wfes_effects);
+                out.push((format!("{path}.trigger[{}].catch", trig.use_), &c.wfes_effects));
             }
         }
     }
-    for t in &wfd.transitions {
+    for (i, t) in wfd.transitions.iter().enumerate() {
+        let path = format!("transitions[{i}]");
         if let Some(e) = &t.wfes_effects {
-            push(e);
+            out.push((path.clone(), e));
         }
         for trig in &t.trigger {
             if let Some(c) = &trig.catch {
-                push(&c.wfes_effects);
+                out.push((format!("{path}.trigger[{}].catch", trig.use_), &c.wfes_effects));
             }
         }
     }
-    for node in wfd.nodes.values() {
-        for esc in &node.escalation {
+    for (key, node) in &wfd.nodes {
+        for (i, esc) in node.escalation.iter().enumerate() {
             if let Some(e) = &esc.wfes_effects {
-                push(e);
+                out.push((format!("nodes[{key}].escalation[{i}]"), e));
             }
         }
         if let Some(ct) = &node.claim_timeout {
             if let Some(e) = &ct.wfes_effects {
-                push(e);
+                out.push((format!("nodes[{key}].claim_timeout"), e));
             }
         }
         // WFC-RETURN effects de bir yazardır — yoksa yalnız çağrı sonucundan dolan
         // alan `context_field_never_written` ile yanlışlıkla reddedilirdi.
         if let Some(call) = &node.call {
             if let Some(e) = &call.wfes_effects {
-                push(e);
+                out.push((format!("nodes[{key}].call"), e));
             }
         }
     }
     for t in &wfd.terminals {
         if let Some(e) = &t.wfes_effects {
-            push(e);
+            out.push((format!("terminals[{}]", t.id), e));
         }
     }
-    for ax in wfd.autoexec.values() {
+    for (key, ax) in &wfd.autoexec {
         if let Some(e) = &ax.wfes_effects {
-            push(e);
+            out.push((format!("autoexec[{key}]"), e));
         }
     }
     out
+}
+
+/// WFD'deki TÜM `wfes_effects.set` hedef yollarını toplar.
+fn collect_effect_targets(wfd: &Wfd) -> Vec<String> {
+    each_effects(wfd)
+        .into_iter()
+        .flat_map(|(_, e)| e.set.keys().cloned().collect::<Vec<_>>())
+        .collect()
+}
+
+/// Bir effect değerinin ÜRETTİĞİ JSON tipi — bilinmiyorsa `None` (kural sessiz kalır).
+///
+/// `$actor` bir NESNEDİR (`effects::resolve_dollar_string` → `serde_json::to_value(Actor)`
+/// = `{orgu_id, user_id, role}`); `$timestamp`/`$wfe_id`/`$node`/`$call.status`/
+/// `$call.wfe_id` metne serileşir. `$action.input.*` / `$exec.result.*` / `$call.result.*`
+/// TİPSİZDİR: aksiyon girdisi yalnız yol listesi olarak bildirilir, autoexec/çağrı
+/// sonucunun şeması WFD'de durmaz — tahmin etmek yanlış pozitif üretirdi.
+fn effect_value_type(raw: &Value, context: &Value) -> Option<String> {
+    let Some(s) = raw.as_str() else {
+        return json_literal_type(raw);
+    };
+    match s {
+        "$actor" => Some("object".into()),
+        "$timestamp" | "$wfe_id" | "$node" | "$call.status" | "$call.wfe_id" => {
+            Some("string".into())
+        }
+        _ => match s.strip_prefix("$ctx.") {
+            Some(path) => schema_type_at(context, path),
+            // Tanınmayan `$...` referansı tipsizdir; `$` ile başlamayan her şey metin sabiti.
+            None if s.starts_with('$') => None,
+            None => Some("string".into()),
+        },
+    }
+}
+
+/// Kural 4 — effect'in yazdığı değerin tipi hedef context alanının şemasıyla uyuşmalı.
+///
+/// Motor yazmayı REDDETMEZ (çalışma anında context şeması zorlanmaz), dolayısıyla hata
+/// yayında da görünmez: `$actor`'ü `string` bir alana yazan akışta o alanı okuyan her
+/// koşul (`$ctx.basvuran == "ali"`) bir objeyi metinle karşılaştırdığı için sessizce
+/// hep-false olur. Tek yakalama noktası tasarım-zamanı doğrulamasıdır. Aynı mekanizma
+/// çağrı girdilerinde zaten var (`call_input_type_mismatch`) — effects'te yoktu.
+fn check_effect_value_types(wfd: &Wfd, report: &mut ValidationReport) {
+    for (site, effects) in each_effects(wfd) {
+        for (target, raw) in &effects.set {
+            let Some(want) = schema_type_at(&wfd.context, target) else {
+                continue; // hedef şemasız/tipsiz — kıyaslanacak bir şey yok
+            };
+            let Some(got) = effect_value_type(raw, &wfd.context) else {
+                continue;
+            };
+            if types_compatible(&got, &want) {
+                continue;
+            }
+            report.error(
+                "effect_type_mismatch",
+                format!("{site}.wfes_effects.set[{target}]"),
+                format!(
+                    "context alanı '{target}' `{want}` tipinde ama effects ona `{got}` yazıyor \
+                     ({raw}) — alanın tipini düzeltin ya da başka bir kaynak seçin. \
+                     (`$actor` bir nesnedir: orgu_id, user_id, role)"
+                ),
+            );
+        }
+    }
 }
 
 /// Context şemasının yazılabilir yaprak yolları. Yaprak = altında `properties` olmayan

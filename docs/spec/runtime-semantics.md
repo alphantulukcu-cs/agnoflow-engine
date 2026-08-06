@@ -82,7 +82,7 @@ v2.1 ile aynı: input path'leri, readonly yasağı, `wfes_effects.set` path+tip 
 ### 6b. Context yazma sözleşmesi (WOR-70)
 
 `context.required` KALDIRILDI. Zorunluluk artık **tek yerde** bildirilir (`actions.<ad>.input.required`)
-ve doğruluğu üç **tasarım-zamanı** kuralıyla korunur — çalışma anında ayrı bir ctx doluluk
+ve doğruluğu dört **tasarım-zamanı** kuralıyla korunur — çalışma anında ayrı bir ctx doluluk
 denetimi YOKTUR:
 
 | Kod | Kural |
@@ -90,6 +90,7 @@ denetimi YOKTUR:
 | `context_required_removed` | `context.required` ya da `context.properties.*` altında `required` varsa WFD REDDEDİLİR (kökte de, iç içe de). Şema düzeyinde de yasak: `contextSchemaNode.not.required`. |
 | `context_field_never_written` | Her context **yaprağı** en az bir `wfes_effects.set` hedefi tarafından kapsanmalı. Kapsama iki yönlüdür: `applicant` yazımı `applicant.name`'i kapsar, `initiated_by.role` yazımı opak `initiated_by` yaprağını kapsar. Hiç yazılmayan alan = hiç dolmayacak alan → hata. |
 | `unused_action_input` | Bir kuralın (`start[]` / `transitions[]`) aksiyonunun bildirdiği her input yolu (`required ∪ optional` — opsiyonel olması muaf tutmaz), o kuralın effects'inde `$action.input.<yol>` ile tüketilmeli. Tüketici olarak kuralın kendi `wfes_effects`'i, `trigger[].catch.wfes_effects`'i ve tetiklediği `autoexec.<ad>.wfes_effects` sayılır. |
+| `effect_type_mismatch` | `wfes_effects.set` hedefinin şema tipi ile yazılan değerin tipi uyuşmalı. Kaynak tipi BİLİNEN değerler: `$actor` → **object** (`{orgu_id, user_id, role}`), `$timestamp`/`$wfe_id`/`$node`/`$call.status`/`$call.wfe_id` → string, `$ctx.<yol>` → o yolun şeması, sabitler → JSON tipi. `$action.input.*` / `$exec.result.*` / `$call.result.*` TİPSİZDİR (şema WFD'de durmaz) → kural sessiz kalır. Motor yazmayı reddetmediği için hata yayında görünmez: `$actor`'ü string alana yazan akışta o alanı okuyan koşullar sessizce hep-false olur. |
 | `optional_input_nulls_other_writer` *(UYARI)* | Bir alanı hem opsiyonel girdi hem başka bir yazar yazıyorsa: girdi gönderilmezse diğerinin değeri `null`'a döner. Yayını engellemez (§7.5a). |
 
 Taranan effect siteleri (yazar kümesi): `start[].wfes_effects`, `start[].trigger[].catch`,

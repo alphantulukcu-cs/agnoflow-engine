@@ -81,7 +81,7 @@ fn resolve_dollar_string(s: &str, ctx: &Value, env: &EffectEnv<'_>) -> Result<Va
     match s {
         "$actor" => serde_json::to_value(env.actor)
             .map_err(|e| EngineError::EffectValue(format!("$actor serileştirilemedi: {e}"))),
-        "$timestamp" => Ok(Value::from(env.now.to_rfc3339())),
+        "$timestamp" => Ok(Value::from(crate::timestamp::timestamp_string(env.now))),
         "$wfe_id" => Ok(Value::from(env.wfe_id.to_string())),
         "$node" => Ok(env.node.map(Value::from).unwrap_or(Value::Null)),
         _ => {
@@ -205,7 +205,10 @@ mod tests {
         assert_eq!(out["initiated_by"]["role"], json!("creditAnalyst"));
         assert_eq!(out["wfe"], json!(Uuid::nil().to_string()));
         assert_eq!(out["node"], json!("self__creditAnalyst"));
-        assert!(out["at"].as_str().unwrap().contains('T'));
+        // `$timestamp` = UTC `yyyyMMddHHmmss`, 14 rakam — ayırıcı YOK (bkz. crate::timestamp).
+        let at = out["at"].as_str().unwrap();
+        assert_eq!(at.len(), crate::timestamp::TIMESTAMP_LEN, "damga: {at}");
+        assert!(at.bytes().all(|c| c.is_ascii_digit()), "damga: {at}");
     }
 
     #[test]

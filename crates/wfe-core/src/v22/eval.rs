@@ -19,7 +19,7 @@ fn project_entry(e: &WfahEntry) -> Value {
         "action": e.action,
         "actor": e.actor,
         "input": e.input.clone().unwrap_or(Value::Null),
-        "at": e.applied_at.to_rfc3339(),
+        "at": crate::timestamp::timestamp_string(e.applied_at),
     })
 }
 
@@ -202,7 +202,7 @@ impl EvalEnv {
         );
         map.insert(
             "$timestamp".into(),
-            Value::from(chrono::Utc::now().to_rfc3339()),
+            Value::from(crate::timestamp::now_timestamp()),
         );
         // WOR-73: join bağlamı DIŞINDA `$branches` boş obje, `$arrived` boş dizidir —
         // `$call` ile aynı gerekçe: ifade patlamak yerine "hiç kol varmamış" okur.

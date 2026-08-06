@@ -326,7 +326,7 @@ Geçersiz: `$status` gibi top-level DynCtx, `$exec.response.*`, `$ctx.status` il
 | `action` | aksiyon adı |
 | `actor` | `{orgu_id, user_id, role}` |
 | `input` | aksiyonun ham girdisi — ctx'e yazılmamış olsa da geçmişte durur |
-| `at` | RFC3339 zaman damgası (`d(#.at)` ile tarihe çevrilir) |
+| `at` | Zaman damgası METNİ — UTC `yyyyMMddHHmmss`, 14 rakam (`"20260115103000"`). Karşılaştırmaları **string temellidir**, `d()` sarmalı yok: leksikografik sıra kronolojik sıraya eşit olduğu için `startsWith(#.at, "20260115")` = "o gün", `"202601"` = "o ay". Eşitlik TAM damga ister. Sıralama (`>` `<`) motorda metinde runtime hatası verir — `seq` kullanın. Aynı biçim `$timestamp` için de geçerlidir (`wfe-core/src/timestamp.rs` tek kaynak). |
 
 `$prev` = geçmişin **son** girdisi, `$first` = **ilk** girdi; aynı alan kümesini taşırlar.
 Geçmiş boşsa her alan `null` döner ve ifade **patlamaz** (`$call` ile aynı kabuk gerekçesi).

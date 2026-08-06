@@ -340,7 +340,7 @@ fn resolve_config_string(s: &str, env: &ExecEnv) -> Value {
         "$wfe_id" => Value::from(env.wfe_id.to_string()),
         "$actor" => serde_json::to_value(&env.actor).unwrap_or(Value::Null),
         "$node" => env.node.as_deref().map(Value::from).unwrap_or(Value::Null),
-        "$timestamp" => Value::from(chrono::Utc::now().to_rfc3339()),
+        "$timestamp" => Value::from(wfe_core::timestamp::now_timestamp()),
         _ => {
             if let Some(path) = s.strip_prefix("$ctx.") {
                 let mut current = &env.ctx;

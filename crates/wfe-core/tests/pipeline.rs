@@ -1678,7 +1678,10 @@ async fn claim_timeout_release_applies_wfes_effects() {
                 ctx["internal_notes"],
                 json!("Claim süresi doldu, iş havuza döndü.")
             );
-            assert_eq!(ctx["analyst_approved_at"], json!(now.to_rfc3339()));
+            assert_eq!(
+                ctx["analyst_approved_at"],
+                json!(wfe_core::timestamp::timestamp_string(now))
+            );
         }
         ClaimTimeoutOutcome::Move(_) => panic!("wft yokken Release bekleniyordu"),
     }

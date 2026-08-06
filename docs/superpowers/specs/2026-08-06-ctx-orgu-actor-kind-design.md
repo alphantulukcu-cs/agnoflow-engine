@@ -243,10 +243,20 @@ cache **çözülmüş** adayları tutuyor (`routes/portal/pool.rs`). Dinamik `c_
 
 ### 4.7 Validator (Faz 2)
 
-| kural | koşul |
-|---|---|
-| `c_u_literal_dollar_prefix` | `Literal` öğesi `$` ile başlıyor (yazım hatası kullanıcı adı sanılmasın) |
-| `c_u_ref_not_actor_kind` | `Ref.from` bir `actor` kind'lı alana ya da onun `user_id` çocuğuna çözülmüyor |
+| kural | seviye | koşul |
+|---|---|---|
+| `c_u_literal_dollar_prefix` | hata | `Literal` öğesi `$` ile başlıyor (yazım hatası kullanıcı adı sanılmasın) |
+| `c_u_ref_unknown_field` | hata | `Ref.from` context şemasında olmayan alanı işaret ediyor |
+| `c_u_ref_not_actor_kind` | hata | `Ref.from` bir `actor` kind'lı alana ya da onun `user_id`/`user` çocuğuna çözülmüyor. **`orgu` kind'ı YETMEZ** — içinde kişi yoktur; bu, `c_orgu`'nun tersi yöndeki asimetri (orada `actor` kabul edilir çünkü `orgu_id` taşır) |
+| `c_u_ref_kind_unverifiable` | uyarı | şema o derinliği kısıtlamıyor |
+
+Şemada `Ref.from` **`$ctx.` önekini ZORUNLU kılar** (`pattern`). `c_orgu.from`'da önek
+opsiyoneldir; orada geriye uyumluluk için gevşek bırakıldı, burada yeni bir yüzey olduğu için
+kanonik biçim baştan dayatıldı.
+
+**`x-visibility.c_u` de aynı şekli alır.** `terminology.md` "şekli C_A ile aynıdır" diyor;
+yalnız `CandidateActor`'ı değiştirmek, Faz 1'de editörde bulduğumuz "her yüzey şemanın yarısını
+destekliyor" hatasının motor tarafında tekrarı olurdu.
 
 ### 4.8 Editör (Faz 2)
 

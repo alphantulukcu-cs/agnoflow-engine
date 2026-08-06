@@ -181,6 +181,73 @@ pub struct EscalationStep {
     pub terminate: Option<bool>,
 }
 
+/// `c_u` listesinin bir öğesi: sabit kimlik ya da context referansı.
+///
+/// `COrgu`'nun aynası — o da `#[serde(untagged)]` bir birleşimdir
+/// (`Selector(String) | Anchor{from, traverse}`) ve aynı `from` anahtar adını kullanır.
+/// Düz string'ler AYNEN çalışır: eski belgeler `Literal`'a deserialize olur, migration
+/// gerekmez, node key'leri değişmez (bkz. `CandidateActor::slug`).
+///
+/// Neden sihirli önek (`"$ctx.x.user_id"` düz string olarak) DEĞİL: `c_u` büyüyecek bir
+/// alandır (aday havuzunu kişiyle daraltma birinci sınıf bir yetenek olacak). Büyüyecek
+/// bir alana önek konvansiyonu koymak her yeni yeteneği şemadan denetlenemez ve editör tip
+/// sistemine görünmez kılar — bu projenin defalarca temizlediği drift (C_A array'i,
+/// `terminal_when`, `x-wf-readonly`). Yeni yetenekler `Ref`'e alan eklenerek gelir,
+/// `COrgu::Anchor`'ın `occurrence` kazanması gibi.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(untagged)]
+pub enum CuItem {
+    /// Kullanıcı adı ya da UUID string'i — `matcher` ikisini de dener.
+    /// Validator `$` ile başlamasını YASAKLAR (`c_u_literal_dollar_prefix`): aksi halde
+    /// `$ctx.x` yazım hatası sessizce "böyle bir kullanıcı adı" sanılıp hiç eşleşmezdi.
+    Literal(String),
+    /// `{ "from": "$ctx.<yol>" }` — çalışma anında context'ten çözülen kişi.
+    /// Yol bir `actor` kind'lı alana (ya da onun `user_id`/`user` çocuğuna) işaret eder.
+    Ref { from: String },
+}
+
+impl CuItem {
+    /// Slug/canonical için kaynak metin. `sanitize()` `$` ve `.` karakterlerini attığı için
+    /// `Literal("$ctx.x.user_id")` ile `Ref{from:"$ctx.x.user_id"}` AYNI slug'ı üretir —
+    /// yani §2a node key'i bu birleşimden etkilenmez. (Belirsizlik doğmaz: `Literal`'ın
+    /// `$` ile başlaması validator tarafından yasaklıdır.)
+    pub fn slug_source(&self) -> &str {
+        match self {
+            CuItem::Literal(s) => s,
+            CuItem::Ref { from } => from,
+        }
+    }
+
+    /// Sabit kimlik (varsa) — `matcher`/`resolve_candidates` bunu doğrudan karşılaştırır.
+    pub fn literal(&self) -> Option<&str> {
+        match self {
+            CuItem::Literal(s) => Some(s),
+            CuItem::Ref { .. } => None,
+        }
+    }
+
+    /// Context yolu (varsa), `$ctx.` öneki soyulmadan.
+    pub fn ctx_ref(&self) -> Option<&str> {
+        match self {
+            CuItem::Literal(_) => None,
+            CuItem::Ref { from } => Some(from),
+        }
+    }
+}
+
+// Çıplak string DAİMA `Literal`dır — JSON'daki untagged davranışın aynısı.
+impl From<String> for CuItem {
+    fn from(s: String) -> Self {
+        CuItem::Literal(s)
+    }
+}
+
+impl From<&str> for CuItem {
+    fn from(s: &str) -> Self {
+        CuItem::Literal(s.to_string())
+    }
+}
+
 /// Tek C_A kuralı. match = resolved(c_orgu) AND (rol_match OR user_match).
 /// Verilmeyen alan o kanaldan match üretmez (yok = false, wildcard DEĞİL).
 /// c_u match'i rol-agnostiktir.
@@ -191,7 +258,7 @@ pub struct CandidateActor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c_r: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub c_u: Option<Vec<String>>,
+    pub c_u: Option<Vec<CuItem>>,
 }
 
 impl CandidateActor {
@@ -202,10 +269,12 @@ impl CandidateActor {
             .c_r
             .as_ref()
             .map_or(false, |r| r.iter().any(|x| x == actor_role));
+        // Yalnız SABİT kimlikler — `Ref` çözümü ctx ister, bu fonksiyon saf ve ctx'siz.
+        // Ctx-farkında yol `matcher::authorize`'dır.
         let user_hit = self
             .c_u
             .as_ref()
-            .map_or(false, |u| u.iter().any(|x| x == actor_user));
+            .map_or(false, |u| u.iter().any(|x| x.literal() == Some(actor_user)));
         role_hit || user_hit
     }
 
@@ -219,7 +288,9 @@ impl CandidateActor {
             parts.push(r.join("-"));
         }
         if let Some(u) = &self.c_u {
-            let mut u: Vec<String> = u.iter().map(|x| sanitize(x)).collect();
+            // `slug_source()` üzerinden: `Literal("x")` ve `Ref{from:"x"}` aynı slug'ı verir.
+            // Düz string c_u taşıyan ESKİ belgelerin node key'leri byte-byte aynı kalır.
+            let mut u: Vec<String> = u.iter().map(|x| sanitize(x.slug_source())).collect();
             u.sort();
             parts.push(format!("u_{}", u.join("-")));
         }
@@ -227,6 +298,11 @@ impl CandidateActor {
     }
 
     /// Uniqueness karşılaştırması için canonical form (rol/user sıraları normalize).
+    ///
+    /// `CuItem`'ın `Debug`'ı variant'ı ayırır (`Literal("x")` ≠ `Ref { from: "x" }`), yani
+    /// sabit kimlik ile aynı metni taşıyan bir referans aynı c_a sayılmaz. Bu form yalnız
+    /// doküman İÇİNDE karşılaştırılır, hiçbir yere yazılmaz — biçim değişikliği kalıcı
+    /// veriyi etkilemez (`slug` etkiler, o korundu).
     pub fn canonical(&self) -> String {
         let mut r = self.c_r.clone().unwrap_or_default();
         r.sort();

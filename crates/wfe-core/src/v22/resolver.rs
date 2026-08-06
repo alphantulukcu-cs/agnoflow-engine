@@ -123,6 +123,38 @@ fn extract_orgu_uuid(value: &Value, source: &str) -> Result<Option<Uuid>, Engine
     .transpose()
 }
 
+/// `c_u`'nun `Ref` öğesini context'ten bir KİŞİ kimliğine çözer.
+///
+/// `resolve_c_orgu`'nun anchor çözümünün simetriği; aynı iki kolaylığı taşır:
+/// `$ctx.` öneki opsiyoneldir ve yol yürünürken `<ad>_id` soneki denenir. Değer ya ham
+/// string (username veya UUID) ya da içinde `user_id`/`user` bulunan bir nesnedir — yani
+/// `{from: "$ctx.talep_sahibi"}` (son ek yazmadan) da çalışır, çünkü `actor` kind'lı alan
+/// `{user_id, orgu_id, role}` tutar.
+///
+/// **Çözülemezse `None` — HATA DEĞİL.** `$ctx`'in "eksik = null" sözleşmesiyle tutarlı;
+/// `$env`'in "eksik = hata" kuralı burada geçmez, çünkü sonuç bir domain/URL üretmiyor,
+/// yalnızca aday havuzunu daraltıyor. Kanal eşleşmez, o kadar. (`c_orgu` anchor'ından
+/// farklı: orada boş küme TÜM kuralı kapatır ve bu bilinçlidir; burada `c_r` kanalı
+/// bağımsız olarak hâlâ eşleşebilir.)
+pub fn resolve_cu_ident(path: &str, ctx: &Value) -> Option<String> {
+    let stripped = path.strip_prefix("$ctx.").unwrap_or(path);
+    let mut current = ctx;
+    for part in stripped.split('.') {
+        current = current
+            .get(part)
+            .or_else(|| current.get(format!("{part}_id")))?;
+    }
+    if let Some(s) = current.as_str() {
+        return Some(s.to_string());
+    }
+    current
+        .as_object()?
+        .get("user_id")
+        .or_else(|| current.get("user"))
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
 /// ORGTRVLANG traversal'ı "self" köküne bağlar ("parent" → "self.parent").
 fn normalize_traverse(traverse: &str) -> String {
     if traverse == "self" || traverse.starts_with("self.") {

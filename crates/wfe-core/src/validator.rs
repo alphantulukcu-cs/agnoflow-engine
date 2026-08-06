@@ -95,6 +95,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_sla(wfd, &mut report);
     check_env_references(wfd, &mut report);
     check_c_orgu_anchor_kinds(wfd, &mut report);
+    check_c_u_items(wfd, &mut report);
     report
 }
 
@@ -220,13 +221,18 @@ fn is_orgu_capable(node: &Value) -> bool {
         .is_some_and(|k| ORGU_CAPABLE_KINDS.contains(&k))
 }
 
-/// Dokümandaki TÜM `c_orgu` yerlerini toplar (yol, değer).
+/// Dokümandaki TÜM `<key_name>` yerlerini toplar (yol, değer) — `c_orgu` ve `c_u` ortak.
 ///
 /// `env_references` ile aynı gerekçe: alan alan gezmek yerine serileştirilmiş doküman
 /// taranır. Bugün beş taşıyıcı var (`nodes.*.c_a`, `nodes.*.reassign`, `transitions[].c_a`,
 /// `listable[].c_a`, context şemasındaki `x-visibility`); altıncısı eklendiğinde bu kuralı
 /// güncellemeyi unutmak, kind denetimi olmadan yayınlanan bir belge demek olurdu.
-fn collect_c_orgu_sites<'a>(v: &'a Value, path: &str, out: &mut Vec<(String, &'a Value)>) {
+fn collect_key_sites<'a>(
+    v: &'a Value,
+    key_name: &str,
+    path: &str,
+    out: &mut Vec<(String, &'a Value)>,
+) {
     match v {
         Value::Object(m) => {
             for (key, child) in m {
@@ -235,15 +241,15 @@ fn collect_c_orgu_sites<'a>(v: &'a Value, path: &str, out: &mut Vec<(String, &'a
                 } else {
                     format!("{path}.{key}")
                 };
-                if key == "c_orgu" {
+                if key == key_name {
                     out.push((child_path.clone(), child));
                 }
-                collect_c_orgu_sites(child, &child_path, out);
+                collect_key_sites(child, key_name, &child_path, out);
             }
         }
         Value::Array(a) => {
             for (i, item) in a.iter().enumerate() {
-                collect_c_orgu_sites(item, &format!("{path}[{i}]"), out);
+                collect_key_sites(item, key_name, &format!("{path}[{i}]"), out);
             }
         }
         _ => {}
@@ -255,7 +261,7 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
         return; // serileştirme hatası başka kuralların işi
     };
     let mut sites = Vec::new();
-    collect_c_orgu_sites(&doc, "", &mut sites);
+    collect_key_sites(&doc, "c_orgu", "", &mut sites);
 
     for (path, c_orgu) in sites {
         // Yalnız ctx-anchor formu: `from` STRING. Selector formu düz string, wfah formunda
@@ -315,6 +321,105 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
                          ya da onun orgu_id/orgu çocuğundan çözülebilir."
                     ),
                 );
+            }
+        }
+    }
+}
+
+// ---- c_u: sabit kimlik ile context referansının ayrımı ----
+//
+// `c_u` öğesi ya `Literal` (kullanıcı adı / UUID) ya `Ref { from: "$ctx..." }`dır. İki kural,
+// birleşimin iki ucundaki sessiz başarısızlıkları kapatır.
+
+/// `actor` kind'lı bir nesnenin içinde KİŞİ tutan alan adları
+/// (`resolver::resolve_cu_ident` bu iki anahtarı arar).
+const USER_CHILD_KEYS: [&str; 2] = ["user", "user_id"];
+
+fn is_actor_kind(node: &Value) -> bool {
+    node.get("x-wf-kind").and_then(Value::as_str) == Some("actor")
+}
+
+fn check_c_u_items(wfd: &Wfd, report: &mut ValidationReport) {
+    let Ok(doc) = serde_json::to_value(wfd) else {
+        return;
+    };
+    let mut sites = Vec::new();
+    collect_key_sites(&doc, "c_u", "", &mut sites);
+
+    for (path, c_u) in sites {
+        let Some(items) = c_u.as_array() else { continue };
+        for i in 0..items.len() {
+            let item = &items[i];
+            let item_path = format!("{path}[{i}]");
+
+            // (a) Sabit kimlik `$` ile başlayamaz. Başlarsa motor onu "böyle bir kullanıcı
+            //     adı" sanar ve kural sessizce HİÇ eşleşmez — `$ctx.x` yazım hatası, ya da
+            //     `Ref` yazmayı unutmuş bir tasarımcı. İkisi de publish'te durmalı.
+            if let Some(literal) = item.as_str() {
+                if literal.starts_with('$') {
+                    report.error(
+                        "c_u_literal_dollar_prefix",
+                        item_path.clone(),
+                        format!(
+                            "c_u öğesi '{literal}' bir KULLANICI ADI olarak yorumlanır ama `$` ile \
+                             başlıyor — böyle bir kullanıcı yoktur, kural hiç eşleşmez. Context'ten \
+                             kişi çözmek istiyorsanız referans biçimini kullanın: \
+                             {{\"from\": \"{literal}\"}}."
+                        ),
+                    );
+                }
+                continue;
+            }
+
+            // (b) Referansın hedefi `actor` kind'lı bir alan (ya da onun user_id/user
+            //     çocuğu) olmalı. Değilse runtime'da çözülemez ve o öğe aday üretmez —
+            //     yani havuz sessizce daralır.
+            let Some(from) = item.get("from").and_then(Value::as_str) else {
+                continue; // şema zorunlu kılıyor; buraya düşen şey şema hatasıdır
+            };
+            let bare = from.strip_prefix("$ctx.").unwrap_or(from);
+            match context_node_at(&wfd.context, bare) {
+                NodeAt::Opaque => report.warn(
+                    "c_u_ref_kind_unverifiable",
+                    format!("{item_path}.from"),
+                    format!(
+                        "c_u referansı '{from}' şemanın kısıtlamadığı bir derinliğe düşüyor — bu \
+                         yolun bir kişi tuttuğu doğrulanamıyor. Alanı Context Studio'da `actor` \
+                         tipiyle bildirin."
+                    ),
+                ),
+                NodeAt::Missing => report.error(
+                    "c_u_ref_unknown_field",
+                    format!("{item_path}.from"),
+                    format!(
+                        "c_u referansı '{from}' context şemasında olmayan bir alanı işaret ediyor."
+                    ),
+                ),
+                NodeAt::Found(node) => {
+                    if is_actor_kind(node) {
+                        continue;
+                    }
+                    // Yol `user_id`/`user` çocuğunu gösteriyorsa ebeveynin kind'ı yeter.
+                    if let Some((parent, last)) = bare.rsplit_once('.') {
+                        if USER_CHILD_KEYS.contains(&last) {
+                            if let NodeAt::Found(p) = context_node_at(&wfd.context, parent) {
+                                if is_actor_kind(p) {
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    report.error(
+                        "c_u_ref_not_actor_kind",
+                        format!("{item_path}.from"),
+                        format!(
+                            "c_u referansı '{from}' bir kişi tutmayan alanı işaret ediyor. Context \
+                             Studio'da o alanın tipini `actor` yapın — referans yalnız \
+                             `x-wf-kind: actor` bildirilmiş bir alandan ya da onun user_id/user \
+                             çocuğundan çözülebilir. (`orgu` kind'ı YETMEZ: içinde kişi yoktur.)"
+                        ),
+                    );
+                }
             }
         }
     }

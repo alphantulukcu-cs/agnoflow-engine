@@ -13,11 +13,11 @@
 use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::Actor;
-use crate::types::wfd_v22::{COrgu, CandidateActor, Wfd};
+use crate::types::wfd_v22::{COrgu, CandidateActor, CuItem, Wfd};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize_or_delegated, MatchEnv};
 use crate::v22::ports::{BranchStatus, Wfes};
-use crate::v22::resolver::resolve_c_orgu;
+use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -28,8 +28,11 @@ pub struct XVisibility {
     pub c_orgu: Option<COrgu>,
     #[serde(default)]
     pub c_r: Option<Vec<String>>,
+    /// Şekli C_A'nın `c_u`'suyla AYNIDIR (terminology.md: "şekli C_A ile aynıdır") —
+    /// sabit kimlik ya da `{from: "$ctx..."}` referansı. İki yüzeyin ayrışması, editörde
+    /// bulduğumuz "her yüzey şemanın yarısını destekliyor" hatasının aynısı olurdu.
     #[serde(default)]
-    pub c_u: Option<Vec<String>>,
+    pub c_u: Option<Vec<CuItem>>,
     #[serde(default)]
     pub c_a: Option<CandidateActor>,
 }
@@ -53,13 +56,24 @@ pub async fn visible(
         }
     }
     if let Some(c_u) = &vis.c_u {
+        // `matcher::authorize` 3. adımıyla aynı çözüm: referanslar ctx'ten okunur,
+        // çözülemeyen referans aday üretmez.
         let uuid_str = actor.user_id.to_string();
-        if c_u.iter().any(|u| u == &uuid_str) {
+        let wanted: Vec<String> = c_u
+            .iter()
+            .filter_map(|item| match item {
+                CuItem::Literal(s) => Some(s.clone()),
+                CuItem::Ref { from } => resolve_cu_ident(from, env.ctx),
+            })
+            .collect();
+        if wanted.iter().any(|u| u == &uuid_str) {
             return Ok(true);
         }
-        if let Some(ident) = org.user_ident(actor.user_id).await? {
-            if c_u.iter().any(|u| u == &ident) {
-                return Ok(true);
+        if !wanted.is_empty() {
+            if let Some(ident) = org.user_ident(actor.user_id).await? {
+                if wanted.iter().any(|u| u == &ident) {
+                    return Ok(true);
+                }
             }
         }
     }

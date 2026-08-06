@@ -2124,3 +2124,147 @@ fn selector_and_wfah_forms_are_untouched() {
         .iter()
         .any(|w| w.code == "c_orgu_anchor_kind_unverifiable"));
 }
+
+// ---- c_u: sabit kimlik ↔ context referansı ----
+//
+// `c_u` öğesi ya `Literal` (kullanıcı adı/UUID) ya `Ref {from: "$ctx..."}`. İki kural
+// birleşimin iki ucundaki SESSİZ başarısızlıkları kapatıyor: `$` ile başlayan bir sabit
+// kimlik motorda "böyle bir kullanıcı adı" sanılıp hiç eşleşmez; `actor` kind'lı olmayan
+// bir yola bakan referans runtime'da çözülemez ve havuz sessizce daralır.
+
+/// `c_u`'yu verilen öğelerle kuran bir listable kuralı (node c_a'sı DEĞİL — orada
+/// node key = slug(c_a) değişmezi ayrıca `slug` hatası üretir ve ölçüm bulanıklaşır).
+fn with_listable_cu(items: Value) -> Value {
+    let mut v = fixture_value();
+    v["listable"][0]["c_a"]["c_u"] = items;
+    v
+}
+
+/// `actor` kind'lı bir alan + onu yazan effect (WOR-70: her alanın bir yazarı olmalı).
+fn with_actor_field(mut v: Value, name: &str) -> Value {
+    v["context"]["properties"][name] = json!({
+        "type": "object",
+        "x-wf-kind": "actor",
+        "properties": {
+            "user_id": { "type": "string" },
+            "orgu_id": { "type": "string" },
+            "role": { "type": "string" },
+        },
+    });
+    v["transitions"][0]["wfes_effects"]["set"][name] = json!("$actor");
+    v
+}
+
+#[test]
+fn plain_string_c_u_still_valid() {
+    // Geriye uyumluluk: düz string listesi aynen çalışmalı (Literal'a deserialize olur).
+    let report = validate_value(with_listable_cu(json!(["ahmet.yilmaz"])));
+    assert!(!has_error(&report, "c_u_literal_dollar_prefix"));
+    assert!(!has_error(&report, "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn c_u_ref_to_actor_field_is_valid() {
+    let v = with_actor_field(
+        with_listable_cu(json!([{ "from": "$ctx.talep_sahibi.user_id" }])),
+        "talep_sahibi",
+    );
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "c_u_ref_not_actor_kind") && !has_error(&report, "c_u_ref_unknown_field"),
+        "actor kind'lı alanın user_id'sine bakan referans geçerli olmalı: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn c_u_ref_to_actor_object_itself_is_valid() {
+    // Son ek yazmadan: `resolve_cu_ident` nesne içinde user_id arar.
+    let v = with_actor_field(
+        with_listable_cu(json!([{ "from": "$ctx.talep_sahibi" }])),
+        "talep_sahibi",
+    );
+    assert!(!has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn c_u_ref_to_orgu_kinded_field_is_error() {
+    // `orgu` kind'ı YETMEZ — içinde kişi yoktur. Bu, `c_orgu`'nun tersi yöndeki kısıt:
+    // orada `actor` kabul edilir (orgu_id taşır), burada `orgu` KABUL EDİLMEZ.
+    let mut v = with_listable_cu(json!([{ "from": "$ctx.musteri_sube" }]));
+    v["context"]["properties"]["musteri_sube"] = json!({
+        "type": "object",
+        "x-wf-kind": "orgu",
+        "properties": { "orgu_id": { "type": "string" } },
+    });
+    v["transitions"][0]["wfes_effects"]["set"]["musteri_sube"] = json!("$actor");
+    assert!(has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn c_u_ref_to_plain_field_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!([{ "from": "$ctx.applicant" }]))),
+        "c_u_ref_not_actor_kind"
+    ));
+}
+
+#[test]
+fn c_u_ref_to_missing_field_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!([{ "from": "$ctx.hayalet" }]))),
+        "c_u_ref_unknown_field"
+    ));
+}
+
+#[test]
+fn c_u_literal_starting_with_dollar_is_error() {
+    // Asıl yakalanan hata: tasarımcı `Ref` yazmayı unutup düz string bırakmış.
+    // Motor bunu kullanıcı adı sanar ve kural HİÇ eşleşmez — sessiz, izsiz.
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!(["$ctx.talep_sahibi.user_id"]))),
+        "c_u_literal_dollar_prefix"
+    ));
+}
+
+#[test]
+fn c_u_literal_typo_prefix_is_error() {
+    // `$actor.user_id` de aynı tuzağa düşer — `$` ile başlayan HER sabit kimlik yakalanır.
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!(["$actor.user_id"]))),
+        "c_u_literal_dollar_prefix"
+    ));
+}
+
+#[test]
+fn c_u_ref_and_literal_can_mix() {
+    // Birleşimin amacı: aynı dizide statik ve dinamik öğeler yan yana durabilsin.
+    let v = with_actor_field(
+        with_listable_cu(json!(["ahmet.yilmaz", { "from": "$ctx.talep_sahibi.user_id" }])),
+        "talep_sahibi",
+    );
+    let report = validate_value(v);
+    assert!(report
+        .errors
+        .iter()
+        .all(|e| !e.code.starts_with("c_u_")), "karışık liste geçerli olmalı: {:#?}", report.errors);
+}
+
+#[test]
+fn x_visibility_c_u_is_checked_too() {
+    // x-visibility'nin c_u'su C_A'nınkiyle AYNI şekildedir (terminology.md) — gezinti
+    // serileştirilmiş doküman üzerinde olduğu için bu yüzey kendiliğinden kapsanır.
+    let mut v = fixture_value();
+    v["context"]["properties"]["credit_score"]["x-visibility"] =
+        json!({ "c_u": [{ "from": "$ctx.applicant" }] });
+    assert!(has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn node_key_unchanged_by_cu_item_union() {
+    // §2a: node key = slug(c_a) ve KALICIDIR (WFD'de + wfes.current_node'da). Düz string
+    // c_u taşıyan golden fixture'ın node key'leri birleşimden ETKİLENMEMELİ — bu test
+    // fixture'ın kendi slug kuralıyla doğrulanmasına dayanır (`check_slugs`).
+    let report = validate_value(fixture_value());
+    assert!(!has_error(&report, "slug"), "slug hatası: {:#?}", report.errors);
+}

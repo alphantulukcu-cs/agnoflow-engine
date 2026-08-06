@@ -14,8 +14,8 @@ use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfah::Wfah;
-use crate::types::wfd_v22::CandidateActor;
-use crate::v22::resolver::resolve_c_orgu;
+use crate::types::wfd_v22::{CandidateActor, CuItem};
+use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
@@ -59,15 +59,28 @@ pub async fn authorize(
         }
     }
 
-    // 3. Kullanıcı kanalı: rol-agnostik — username veya UUID string eşleşmesi
+    // 3. Kullanıcı kanalı: rol-agnostik — username veya UUID string eşleşmesi.
+    //    Öğeler sabit kimlik (`Literal`) ya da context referansı (`Ref`) olabilir; referans
+    //    çalışma anında çözülür. Çözülemeyen referans sessizce eşleşmez (hata değil) —
+    //    `$ctx`'in "eksik = null" sözleşmesi; `c_r` kanalı bundan etkilenmez.
     if let Some(c_u) = &rule.c_u {
         let uuid_str = actor.user_id.to_string();
-        if c_u.iter().any(|u| u == &uuid_str) {
+        let wanted: Vec<String> = c_u
+            .iter()
+            .filter_map(|item| match item {
+                CuItem::Literal(s) => Some(s.clone()),
+                CuItem::Ref { from } => resolve_cu_ident(from, env.ctx),
+            })
+            .collect();
+        if wanted.iter().any(|u| u == &uuid_str) {
             return Ok(true);
         }
-        if let Some(ident) = org.user_ident(actor.user_id).await? {
-            if c_u.iter().any(|u| u == &ident) {
-                return Ok(true);
+        // `user_ident` I/O'dur — yalnız UUID eşleşmesi tutmadıysa sorulur.
+        if !wanted.is_empty() {
+            if let Some(ident) = org.user_ident(actor.user_id).await? {
+                if wanted.iter().any(|u| u == &ident) {
+                    return Ok(true);
+                }
             }
         }
     }
@@ -199,7 +212,7 @@ mod tests {
         CandidateActor {
             c_orgu: COrgu::Selector("self".into()),
             c_r: c_r.map(|v| v.into_iter().map(String::from).collect()),
-            c_u: c_u.map(|v| v.into_iter().map(String::from).collect()),
+            c_u: c_u.map(|v| v.into_iter().map(|x| CuItem::Literal(x.into())).collect()),
         }
     }
 
@@ -312,7 +325,7 @@ mod tests {
         let r = CandidateActor {
             c_orgu: COrgu::Selector("self".into()),
             c_r: None,
-            c_u: Some(vec![uuid_str]),
+            c_u: Some(vec![CuItem::Literal(uuid_str)]),
         };
         assert!(authorize(&r, &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
             .await
@@ -443,5 +456,140 @@ mod tests {
             .unwrap(),
             "anchor birimi dışındaki müdür yetkilenmemeli"
         );
+    }
+
+    // ---- dinamik c_u: `Ref` öğesi context'ten çözülür ----
+
+    /// Verilen c_u öğeleriyle kural (`c_r` yok — kişi kanalı yalnız test edilsin).
+    fn cu_rule(items: Vec<CuItem>) -> CandidateActor {
+        CandidateActor {
+            c_orgu: COrgu::Selector("self".into()),
+            c_r: None,
+            c_u: Some(items),
+        }
+    }
+
+    fn cu_ref(path: &str) -> CuItem {
+        CuItem::Ref { from: path.into() }
+    }
+
+    #[tokio::test]
+    async fn cu_ref_matches_by_uuid_from_ctx() {
+        let orgu = Uuid::new_v4();
+        let a = actor(orgu, "clerk");
+        let ctx = json!({ "talep_sahibi": { "user_id": a.user_id.to_string() } });
+        let org = MockOrg { units: vec![unit(orgu)], role_assigned: false, ident: None };
+        assert!(authorize(
+            &cu_rule(vec![cu_ref("$ctx.talep_sahibi.user_id")]),
+            &a,
+            env(&ctx, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn cu_ref_matches_actor_object_without_suffix() {
+        // `resolve_cu_ident` nesne içinde user_id arar — `actor` kind'lı alanın kendisi yeter.
+        let orgu = Uuid::new_v4();
+        let a = actor(orgu, "clerk");
+        let ctx = json!({ "talep_sahibi": { "user_id": a.user_id.to_string(), "role": "clerk" } });
+        let org = MockOrg { units: vec![unit(orgu)], role_assigned: false, ident: None };
+        assert!(authorize(&cu_rule(vec![cu_ref("$ctx.talep_sahibi")]), &a, env(&ctx, &EMPTY_WFAH), &org)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn cu_ref_matches_by_username_from_ctx() {
+        let orgu = Uuid::new_v4();
+        let a = actor(orgu, "clerk");
+        let ctx = json!({ "talep_sahibi": "ahmet.yilmaz" });
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: false,
+            ident: Some("ahmet.yilmaz".into()),
+        };
+        assert!(authorize(&cu_rule(vec![cu_ref("$ctx.talep_sahibi")]), &a, env(&ctx, &EMPTY_WFAH), &org)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn unresolved_cu_ref_does_not_match() {
+        // Alan yazılmamış → o öğe aday üretmez. HATA DEĞİL, sadece eşleşme yok.
+        let orgu = Uuid::new_v4();
+        let a = actor(orgu, "clerk");
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: false,
+            ident: Some("ahmet.yilmaz".into()),
+        };
+        let result = authorize(
+            &cu_rule(vec![cu_ref("$ctx.hic_yazilmadi")]),
+            &a,
+            env(&EMPTY_CTX, &EMPTY_WFAH),
+            &org,
+        )
+        .await;
+        assert!(result.is_ok(), "çözülemeyen referans HATA üretmemeli");
+        assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn unresolved_cu_ref_does_not_break_role_channel() {
+        // İki kanal bağımsızdır: çözülemeyen bir kişi referansı rol kanalını kapatmamalı.
+        let orgu = Uuid::new_v4();
+        let a = actor(orgu, "subeMuduru");
+        let org = MockOrg { units: vec![unit(orgu)], role_assigned: true, ident: None };
+        let rule = CandidateActor {
+            c_orgu: COrgu::Selector("self".into()),
+            c_r: Some(vec!["subeMuduru".into()]),
+            c_u: Some(vec![cu_ref("$ctx.hic_yazilmadi")]),
+        };
+        assert!(authorize(&rule, &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn cu_literal_and_ref_mix() {
+        let orgu = Uuid::new_v4();
+        let a = actor(orgu, "clerk");
+        let ctx = json!({ "talep_sahibi": { "user_id": Uuid::new_v4().to_string() } });
+        let org = MockOrg {
+            units: vec![unit(orgu)],
+            role_assigned: false,
+            ident: Some("ahmet.yilmaz".into()),
+        };
+        // Referans BAŞKA birine çözülüyor; sabit kimlik bu aktörü tutuyor.
+        assert!(authorize(
+            &cu_rule(vec![CuItem::Literal("ahmet.yilmaz".into()), cu_ref("$ctx.talep_sahibi.user_id")]),
+            &a,
+            env(&ctx, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
+    }
+
+    #[tokio::test]
+    async fn cu_ref_outside_resolved_orgu_still_denied() {
+        // ORGU kapısı geçilmez: ctx doğru kişiyi verse bile aktörün birimi
+        // resolve(c_orgu) içinde değilse yetki YOKTUR (spec §3 erken çıkış).
+        let a = actor(Uuid::new_v4(), "clerk");
+        let ctx = json!({ "talep_sahibi": { "user_id": a.user_id.to_string() } });
+        let org = MockOrg {
+            units: vec![unit(Uuid::new_v4())], // BAŞKA bir birim
+            role_assigned: false,
+            ident: None,
+        };
+        assert!(!authorize(
+            &cu_rule(vec![cu_ref("$ctx.talep_sahibi.user_id")]),
+            &a,
+            env(&ctx, &EMPTY_WFAH),
+            &org
+        )
+        .await
+        .unwrap());
     }
 }

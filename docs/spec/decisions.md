@@ -634,6 +634,41 @@ istenmedi. Ek olarak: engine dış kaynaklara (S3/dosya sistemi) bağımlı OLMA
    grup içinde tekildir. Custom validator: item.id grup-içi tekil (`attachment_item_dup`),
    node referansı katalogda var olmalı (`attachment_ref`), node içinde grup tekrarı yok
    (`attachment_ref_dup`). Alan opsiyonel — golden fixture değişmeden geçerli.
+
+   **2026-08-07 — aksiyon kapsamı.** Referans girdisi artık iki biçimli: düz `"grup"`
+   (node'un TÜM aksiyonlarına kapı — eski biçim, eski dosyalar aynen çalışır) ya da
+   `{group, actions?}` (yalnız sayılan aksiyonlara kapı). Gerekçe: bir node'da "Onayla"
+   belge isterken "Reddet"in istememesi olağandır; tek listeyle bu ancak node'u ikiye
+   bölerek anlatılabiliyordu. `actions` **Option**'dır — `[]` (hiçbirini kapamaz,
+   opsiyonel yükleme) ile alanın hiç verilmemesi (tümü) ZIT anlamlıdır; `#[serde(default)]`
+   bir `Vec` ikisini aynı gösterirdi. İki biçim de "bu grup bu node'da TOPLANIR" der,
+   ayrıldıkları yer yalnız kapıdır. Validator: kapsamdaki aksiyon o node'dan çıkan bir
+   transition'da bulunmalı (`attachment_action_ref` — yoksa kapı hiç kapanmaz, dosya
+   zorunlu sanılır ve hiçbir submit'i durdurmaz), kapsam içi aksiyon tekrarı yok
+   (`attachment_action_dup`). Grup tekrarı denetimi biçimden bağımsızdır. Erişilebilirlik
+   `start[]` kurallarını DA sayar (M16: `start[].action` normal bir ACT'tir) — yalnız
+   transition'lara bakmak başlatma aksiyonuna konan kapıyı yanlışlıkla reddederdi.
+
+   **Başlatma aksiyonunda sıra TERSTİR: rezerve → yükle → başlat.** Dosya anahtarı
+   `attachments/{wfe_id}/…` ve `wfe_id` eskiden start'ın İÇİNDE doğardı — bu yüzden
+   başlatma kapısı sunucuda zorlanamıyordu. Çözüm id'yi başlatmadan önce üretir:
+
+   ```text
+   POST /wfe/reserve {wfd_id, version, environment?}  → { wfe_id }   (wf.wfe satırı YOK)
+   PUT  /wfe/{wfe_id}/attachments/{grup}/{item}       → dosyalar NİHAİ anahtarına
+   POST /wfe {…, wfe_id}                              → kapı → 422 ya da WFE o id ile doğar
+   ```
+
+   Taslak alan (`attachments/draft/…`) + kopyalama SEÇİLMEDİ: her başlatmada dosya taşımak
+   ve iki anahtar uzayı taşımak gerekirdi. Bedeli, başlatılmayan rezervasyonların sahipsiz
+   dosya bırakmasıdır — `wf.wfe_reservation` defteri + saatlik süpürücü (TTL 24 saat,
+   `server/src/reservation.rs`) bunu karşılar. Defter aynı zamanda yükleme rotasının
+   "bu id hangi WFD'nin katalogu" sorusunu cevaplar; yetki rezervasyonun SAHİBİYLE verilir
+   (o aşamada `executor.query` çağrılamaz — ortada durum yok). Kapı `start[]` kuralının
+   `from` node'u + aksiyonu üzerinden uygulanır; birden çok start kuralı varsa ve çağıran
+   aksiyon adı vermediyse kapı uygulanmaz (hangi kuralın koşacağı belli değildir).
+   Rezervasyonsuz gelen ve belge isteyen bir başlatma `422 attachment.reservation_required`
+   ile reddedilir — sessizce başlatmak kuralı delerdi.
 2. **Engine saf kalır; gate portal edge'inde.** wfe-core yalnız katalog + referansı
    METADATA olarak taşır, dosya I/O YAPMAZ. Varlık kontrolü ve yükleme server'ın portal
    katmanındadır: `AttachmentStore` (opendal; local fs default kök `../work-pool-portal/
@@ -643,8 +678,12 @@ istenmedi. Ek olarak: engine dış kaynaklara (S3/dosya sistemi) bağımlı OLMA
 
 **Akış.** "Hangi aksiyonlar alınabilir?" (`GET /wfe/:id/attachments`, direkt X-Actor
 ağacı) → aktörün gördüğü node(lar)ın referanslı gruplarının item bazlı yükleme durumu +
-`satisfied`. UI, `satisfied=false` iken submit'i disable eder. Zorlama server-side:
-`apply_action` (ve JWT `submit_action`) hedef node'un `required` dosyaları eksikse
+`satisfied`. Bu uç AKSİYON SORMADAN çağrılır: her grup `gates: true` döner ve kapsamı
+`actions` alanında taşır (`null` = tümü) — süzmeyi seçili aksiyona göre istemci yapar.
+JWT `/portal/wfe/:id` detayında ise durum AKSİYON BAŞINA hesaplanır; oradaki
+`attachments_satisfied` yalnız o aksiyonu kapayan grupları sayar. UI, submit'i seçili
+aksiyonun cevabına göre disable eder. Zorlama server-side: `apply_action` (ve JWT
+`submit_action`) submit edilen aksiyonu kapayan grupların `required` dosyaları eksikse
 engine'e HİÇ gitmeden `422 code: "attachment.missing"` döner (UI-only gating'e güvenilmez).
 Yükleme/indirme/silme: `PUT/GET/DELETE /wfe/:id/attachments/:group/:item` (ham gövde;
 upload'ta içerik tipi bir `formats` kuralına uymalı ve uyan kuralın `max_size_mb`'si
@@ -1451,3 +1490,33 @@ eskiden de kaydedilebiliyorlardı, çalışma anında "connection bulunamadı" i
 `server/src/routes/db.rs`, `server/src/routes/wfd.rs`, `wfd/src/repo.rs`; editör:
 `components/engine/DbConnections.tsx`, `components/engine/EngineSettings.tsx`,
 `components/shared/AutoexecConfigModal.tsx`, `api/engineApi.ts`.)
+
+
+---
+
+## Ek-belge deposu WFD BAŞINA (2026-08-07)
+
+**Sorun:** Depo tek bir deployment ayarıydı (`ATTACHMENT_STORAGE_*`) — tüm tenant'lar ve
+akışlar aynı bucket'a yazardı. Kurumsal gereksinim bunun tersi: bir akışın belgeleri
+müşterinin kendi S3'ünde durabilmeli, üstelik ortama göre (test/prod ayrı bucket).
+
+**Karar:** Konfigürasyon WFD DOKÜMANINA GİRMEZ, `$env`ten okunur (`wf.wfd_env_var`,
+sahiplik `(project_id, wfd_name)`). Gerekçe `$env`in var oluş gerekçesidir: doküman
+`(wfd_id, version)` bazında immutable'dır, prod bucket'ı değişince yeni versiyon
+yayınlamak gerekmemeli. Anahtar İSİMLERİ sözleşmedir:
+
+| Anahtar | Anlam |
+|---|---|
+| `ATTACHMENT_STORAGE_BACKEND` | `local` \| `s3`. Yoksa/tanınmazsa deployment varsayılanı |
+| `ATTACHMENT_STORAGE_PATH` | local kök |
+| `ATTACHMENT_STORAGE_S3_BUCKET` / `_S3_REGION` / `_S3_ENDPOINT` | S3 hedefi |
+| `ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID` / `_S3_SECRET_ACCESS_KEY` | kimlik (secret girilir) |
+
+Secret'lar yalnız bu katmanda çözülür (`RunEnv::full()`); ZEN/effects onları göremez.
+Tanınmayan `BACKEND` değeri sessizce local'a düşmez — yanlış yazılmış bir değer yüzünden
+belgelerin müşterinin bucket'ı yerine sunucu diskine yazılması fark edilmesi en zor hata
+sınıfıdır; konfigürasyon yok sayılır ve deployment varsayılanına dönülür.
+
+Operator ÖNBELLEKLENİR (anahtar = çözülmüş konfigürasyonun kendisi): S3 istemcisi kurmak
+her istekte yapılacak iş değildir, konfigürasyon değişince anahtar da değişir.
+(`server/src/attachment_store.rs`; tüm attachment rotaları ve gate'ler bu çözücüden geçer.)

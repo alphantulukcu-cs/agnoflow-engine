@@ -78,12 +78,32 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
 ## Attachments (ek-belge) sözleşmesi
 
 - WFD şeması: root `attachments` katalogu (adlandırılmış gruplar → `items[]`) + `nodes.<key>.attachments`
-  (grup key referansları). Engine core dosya I/O YAPMAZ — yalnız katalog+referansı metadata tutar.
+  (grup referansları). Engine core dosya I/O YAPMAZ — yalnız katalog+referansı metadata tutar.
+- **Referans iki biçimlidir** (`AttachmentRef`, 2026-08-07): düz `"grup"` = node'un TÜM aksiyonlarına
+  kapı (eski biçim, eski dosyalar aynen çalışır); `{group, actions?}` = yalnız sayılan aksiyonlara kapı.
+  `actions` **Option**'dır: `[]` hiçbirini kapamaz (opsiyonel yükleme), alan HİÇ verilmezse tümü —
+  `#[serde(default)]` bir `Vec` bu iki zıt anlamı aynı gösterirdi. İki biçim de "bu grup burada
+  TOPLANIR" der; fark yalnız kapıdır. Validator: kapsamdaki aksiyon o node'dan çıkan bir transition'da
+  bulunmalı (`attachment_action_ref`), kapsam içi tekrar yok (`attachment_action_dup`).
 - Varlık kontrolü + yükleme server portal edge'inde: `AttachmentStore` (opendal), storage anahtarı
   `attachments/{wfe_id}/{grup}/{item}`. Rotalar hem direkt `/wfe/*` (X-Actor, portal bunu kullanır) hem
   JWT `/portal/wfe/*` ağacında: `GET /wfe/:id/attachments` (durum), `PUT/GET/DELETE .../:group/:item`.
-- Gate server-side: `apply_action`/`submit_action` hedef node'un `required` dosyaları eksikse
-  `422 code:"attachment.missing"` döner. Detay: `docs/spec/decisions.md` Madde 8.
+- **Depo WFD BAŞINA çözülür** (2026-08-07): `$env`teki `ATTACHMENT_STORAGE_BACKEND` /
+  `_PATH` / `_S3_BUCKET` / `_S3_REGION` / `_S3_ENDPOINT` / `_S3_ACCESS_KEY_ID` /
+  `_S3_SECRET_ACCESS_KEY` anahtarları okunur (`server/src/attachment_store.rs`, Operator
+  önbellekli). Tanımlı değilse deployment varsayılanına (`ATTACHMENT_STORAGE_*` env)
+  düşülür. Secret'lar yalnız bu katmanda çözülür.
+- **Başlatma aksiyonu için REZERVASYON**: `POST /wfe/reserve` → wfe_id (DB'de wfe satırı
+  yok, `wf.wfe_reservation` defterinde kayıt var) → dosyalar o id'nin altına yüklenir →
+  `POST /wfe {…, wfe_id}` kapıyı kontrol eder, eksikse WFE HİÇ oluşmaz. Yükleme rotaları
+  rezerve edilmiş id'yi de kabul eder (yetki: rezervasyonun sahibi). Başlatılmayan
+  rezervasyonlar saatlik süpürücüyle dosyalarıyla silinir (TTL 24 saat,
+  `server/src/reservation.rs`). Belge istemeyen akışta rezervasyon gerekmez.
+- Gate server-side ve AKSİYON BAZLI: `apply_action`/`submit_action` submit edilen aksiyonu KAPAYAN
+  grupların `required` dosyaları eksikse `422 code:"attachment.missing"` döner
+  (`status_for_node(..., Some(action))` → `gates` alanı → `satisfied`/`missing_required` yalnız
+  kapayanları sayar). `GET /wfe/:id/attachments` aksiyon sormaz: her grup `gates: true` + kapsamı
+  `actions` ile döner, süzme istemcidedir. Detay: `docs/spec/decisions.md` Madde 8.
 
 ## DB bağlantı kapsamı (global / lokal)
 

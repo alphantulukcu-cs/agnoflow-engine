@@ -1947,3 +1947,17 @@ fn env_interpolation_is_not_an_unknown_ref() {
 fn golden_fixture_has_no_unknown_dollar_refs() {
     assert!(!has_error(&validate_value(fixture_value()), "unknown_dollar_ref"));
 }
+
+/// SLA bağlamında bir ÇAĞRI DÖNÜŞÜ de yoktur: escalation'ı timer tetikler, `$call.*`
+/// sessizce `null` yazardı — `$action.input.*` / `$exec.result.*` ile aynı gerekçe.
+#[test]
+fn sla_effects_reject_call_namespace() {
+    let mut v = fixture_value();
+    let node = v["nodes"].as_object().unwrap().keys().next().unwrap().clone();
+    v["nodes"][&node]["escalation"] = json!([{
+        "after": "PT1H",
+        "wft": { "terminal": "terminal_rejected" },
+        "wfes_effects": { "set": { "internal_notes": "$call.status" } }
+    }]);
+    assert!(has_error(&validate_value(v), "sla_effect_namespace"));
+}

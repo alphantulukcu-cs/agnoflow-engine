@@ -2608,19 +2608,20 @@ fn wft_form_name(wft: &Wft) -> &'static str {
     }
 }
 
-/// SLA bağlamında `$action.input.*` ve `$exec.result.*` YOKTUR (tetikleyici system
-/// aktörü; ne aksiyon girdisi ne autoexec sonucu vardır) — sessizce `null` yazmak
-/// yerine WFD reddedilir. `$ctx.*`, `$actor`, `$node`, `$timestamp`, `$wfe_id` geçerli.
+/// SLA bağlamında `$action.input.*`, `$exec.result.*` ve `$call.*` YOKTUR (tetikleyici
+/// system aktörü; ne aksiyon girdisi, ne autoexec sonucu, ne de bir çağrı dönüşü vardır)
+/// — sessizce `null` yazmak yerine WFD reddedilir. `$ctx.*`, `$actor`, `$node`,
+/// `$timestamp`, `$wfe_id`, `$env.*` geçerli.
 fn check_sla_effect_namespaces(effects: &WfesEffects, path: &str, report: &mut ValidationReport) {
     for (target, raw) in &effects.set {
         walk_strings(raw, &format!("{path}.set[{target}]"), &mut |s, p| {
-            for bad in ["$action.input.", "$exec.result."] {
+            for bad in ["$action.input.", "$exec.result.", "$call."] {
                 if s.contains(bad) {
                     report.error(
                         "sla_effect_namespace",
                         p.to_string(),
                         format!(
-                            "SLA effects'inde '{bad}*' kullanılamaz (system tetikler — aksiyon girdisi/autoexec sonucu yok): '{s}'"
+                            "SLA effects'inde '{bad}*' kullanılamaz (system tetikler — aksiyon girdisi, autoexec sonucu ya da çağrı dönüşü yok): '{s}'"
                         ),
                     );
                 }

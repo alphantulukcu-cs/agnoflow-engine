@@ -200,3 +200,119 @@ async fn call_return_without_a_waiting_call_fails_the_scenario() {
     assert!(!res.ok);
     assert!(res.failures[0].contains("çağrı"), "{:?}", res.failures);
 }
+
+// ── paralel kol ve WFC çağrı dönüşü ─────────────────────────────────────────
+
+const PARALLEL: &str = include_str!("../../wfe-core/tests/fixtures/paralel-onay.json");
+const CALLER: &str = include_str!("../../wfe-core/tests/fixtures/akis-cagrisi.json");
+
+fn parallel_scenario() -> Scenario {
+    let mut s = base_scenario();
+    s.start_actor = Some(sc_actor("requester"));
+    s.start_input = json!({"request": {"title": "Sunucu alımı", "amount": 150000}});
+    s
+}
+
+/// Paralel kolda adım, `node` ile hangi kola uygulandığını söyleyebilmeli.
+#[tokio::test]
+async fn parallel_branch_step_targets_its_branch_via_node() {
+    let wfd = Wfd::from_json(PARALLEL).unwrap();
+    let json_doc: serde_json::Value = serde_json::from_str(PARALLEL).unwrap();
+    let mut s = parallel_scenario();
+    s.steps = vec![
+        ScenarioStep::Action {
+            action: "start_review".into(),
+            actor: Some(sc_actor("coordinator")),
+            input: json!({}),
+            node: None,
+        },
+        ScenarioStep::Action {
+            action: "approve".into(),
+            actor: Some(sc_actor("financeApprover")),
+            input: json!({}),
+            node: Some("self__financeApprover".into()),
+        },
+    ];
+    let res = run(&engine(), &wfd, &json_doc, &s, None).await;
+    assert!(res.ok, "{:?}", res.failures);
+    assert_eq!(res.steps_executed, 2);
+}
+
+/// `node` verilmezse paralel modda aynı adım belirsizdir ve senaryo kalır —
+/// koşucunun kol seçimini gerçekten ilettiğinin kanıtı.
+#[tokio::test]
+async fn parallel_branch_step_without_node_fails() {
+    let wfd = Wfd::from_json(PARALLEL).unwrap();
+    let json_doc: serde_json::Value = serde_json::from_str(PARALLEL).unwrap();
+    let mut s = parallel_scenario();
+    s.steps = vec![
+        ScenarioStep::Action {
+            action: "start_review".into(),
+            actor: Some(sc_actor("coordinator")),
+            input: json!({}),
+            node: None,
+        },
+        ScenarioStep::Action {
+            action: "approve".into(),
+            actor: Some(sc_actor("financeApprover")),
+            input: json!({}),
+            node: None,
+        },
+    ];
+    let res = run(&engine(), &wfd, &json_doc, &s, None).await;
+    assert!(!res.ok, "node'suz kol adımı geçmemeliydi");
+    assert_eq!(res.steps_executed, 1, "ilk adım geçti, ikincisi kaldı");
+}
+
+/// WFC durağı: `self__creditAnalyst` bir `mode: wait` çağrı node'udur; akış
+/// çağrı dönüşü verilene kadar ilerlemez. `call_return` adımı onu çözer ve
+/// skor >= 700 dalı `self__branchManager`'a götürür, oradan terminale.
+#[tokio::test]
+async fn call_return_step_resumes_a_waiting_call_through_to_terminal() {
+    let wfd = Wfd::from_json(CALLER).unwrap();
+    let json_doc: serde_json::Value = serde_json::from_str(CALLER).unwrap();
+    let mut s = base_scenario();
+    s.start_input = json!({"basvuru": {"musteri_no": "M1", "tutar": 50000}});
+    s.steps = vec![
+        ScenarioStep::CallReturn {
+            call_return: wf_wfe::scenario::CallReturn {
+                status: "completed".into(),
+                result: Some(json!({ "skor": 750, "karar": "olumlu" })),
+            },
+        },
+        ScenarioStep::Action {
+            action: "manager_decide".into(),
+            actor: Some(sc_actor("branchManager")),
+            input: json!({ "kullandirim_tutari": 50000 }),
+            node: None,
+        },
+    ];
+    s.expect = Some(Expect {
+        terminal: None,
+        context_contains: Some(json!({ "skor": 750 })),
+    });
+    let res = run(&engine(), &wfd, &json_doc, &s, None).await;
+    assert!(res.ok, "{:?}", res.failures);
+    assert_eq!(res.steps_executed, 2);
+    assert!(res.terminal, "manager_decide sonrası terminale ulaşılmalı");
+}
+
+/// Başarısız çağrı dönüşü akışı `terminal_rejected`'a götürür — `status`
+/// alanının koşucudan motora gerçekten geçtiğinin kanıtı.
+#[tokio::test]
+async fn failed_call_return_status_reaches_the_engine() {
+    let wfd = Wfd::from_json(CALLER).unwrap();
+    let json_doc: serde_json::Value = serde_json::from_str(CALLER).unwrap();
+    let mut s = base_scenario();
+    s.start_input = json!({"basvuru": {"musteri_no": "M1", "tutar": 50000}});
+    s.steps = vec![ScenarioStep::CallReturn {
+        call_return: wf_wfe::scenario::CallReturn {
+            status: "failed".into(),
+            result: None,
+        },
+    }];
+    let res = run(&engine(), &wfd, &json_doc, &s, None).await;
+    assert!(res.ok, "{:?}", res.failures);
+    assert!(res.terminal, "başarısız çağrı akışı terminale götürür");
+    assert_eq!(res.steps_executed, 1);
+}

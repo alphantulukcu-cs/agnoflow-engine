@@ -86,6 +86,17 @@ pub fn layout_key(orgtnt_id: uuid::Uuid, wfd_id: uuid::Uuid, version: i32) -> St
     format!("{orgtnt_id}/wfd/{wfd_id}/{version}.layout.json")
 }
 
+/// Senaryo sidecar'ının storage anahtarı — kaydedilmiş simülasyon koşuları
+/// (`{version}.scenarios.json`). Layout ile aynı gerekçe: doküman
+/// `additionalProperties:false` ve `(wfd_id, version)` immutable olduğundan
+/// senaryolar gövdeye giremez, dokümanın YANINDA durur.
+///
+/// Layout'un aksine legacy (tenant-öncesi) karşılığı YOKTUR — bu anahtar tenant
+/// prefix'i yerleştikten sonra doğdu.
+pub fn scenarios_key(orgtnt_id: uuid::Uuid, wfd_id: uuid::Uuid, version: i32) -> String {
+    format!("{orgtnt_id}/wfd/{wfd_id}/{version}.scenarios.json")
+}
+
 /// Tenant-öncesi (eski, tek-tenant) layout anahtarı. Layout anahtarı DB'de
 /// SAKLANMADIĞINDAN türetilir; tenant prefix'ine geçişte eski bloblar bu
 /// anahtarda kalır. `fetch_layout` yeni anahtar bulunamazsa buna düşer.
@@ -105,6 +116,23 @@ pub fn tenant_asset_key(orgtnt_id: uuid::Uuid, slot: &str, ext: &str) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scenarios_key_sits_next_to_the_document() {
+        let t = uuid::Uuid::nil();
+        let w = uuid::Uuid::nil();
+        assert_eq!(
+            scenarios_key(t, w, 3),
+            "00000000-0000-0000-0000-000000000000/wfd/00000000-0000-0000-0000-000000000000/3.scenarios.json"
+        );
+        // Layout ile aynı dizinde, aynı versiyon önekinde.
+        let layout = layout_key(t, w, 3);
+        let scenarios = scenarios_key(t, w, 3);
+        assert_eq!(
+            layout.rsplit_once('/').unwrap().0,
+            scenarios.rsplit_once('/').unwrap().0
+        );
+    }
 
     #[test]
     fn tenant_asset_lives_under_tenant_logo_dir() {

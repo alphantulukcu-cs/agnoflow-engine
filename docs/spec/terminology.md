@@ -191,15 +191,25 @@ wft         = tek routing authority; hedef node id veya terminal id
 |---|---:|---|
 | `c_orgu` | Evet | Scope çapası: ORGTRVLANG token, static selector veya anchor object |
 | `c_r` | c_r/c_u'dan en az biri | Rol kanalı |
-| `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni) |
+| `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni). Öğeleri **sabit kimlik** ya da **context referansı** — aşağı bkz. |
+
+**Anchor biçimi çözülemezse `resolve(c_orgu)` BOŞ kümedir** — aktörün kendi birimine
+DÜŞMEZ. `{from: "$ctx.<yol>", traverse}` "o alandaki birim" demektir; alan yazılmamışsa
+cevap "bilinmiyor"dur, "soranın birimi" değil. Aktörün birimine düşmek `traverse: "self"`
+durumunda kapıyı `actor.orgu ∈ {actor.orgu}` sorusuna, yani daima-doğruya çevirir ve kısıt
+tümüyle kalkar. Boş küme ile node görünür biçimde durur; `claim_timeout`/`escalation`
+bunun için vardır. `default_anchor` yalnız **static selector** biçiminin `self` köküdür.
+
+Anchor'ın işaret ettiği alan, context şemasında `x-wf-kind: orgu|actor` ile bildirilmek
+zorundadır (validator `c_orgu_anchor_not_orgu_kind`); bkz. **SCHEMA ANNOTATION UZANTILARI**.
 
 **Eşleşme semantiği (kanonik):**
 
 ```text
 match = (actor.orgu ∈ resolve(c_orgu)) AND (rol_match OR user_match)
 
-rol_match  = c_r varsa actor.role ∈ c_r,  yoksa false
-user_match = c_u varsa actor.user ∈ c_u,  yoksa false
+rol_match  = c_r varsa actor.role ∈ c_r,          yoksa false
+user_match = c_u varsa actor.user ∈ resolve(c_u), yoksa false
 ```
 
 Kritik kurallar:
@@ -208,6 +218,26 @@ Kritik kurallar:
 - **`c_orgu` her zaman AND'lenen çapadır.** Rol ve kişi, çapadan asla kopmaz (Actor exact tuple felsefesi).
 - **`c_u` match'i rol-agnostiktir.** Kişi, anchor ORGU'daki herhangi bir rol kaydıyla havuza girer; ACT yine somut `(ORGU,(U,R))` tuple'ıyla uygulanır ve WFAH'a o tuple yazılır.
 - **Sadece-kişi havuzu:** `{ "c_orgu": "self", "c_u": ["user_ayse"] }` — c_r hiç yazılmaz.
+- **`c_u` öğesi iki biçimdedir** (`#/$defs/cuItem`) — `c_orgu`'nun "selector ya da anchor"
+  ikiliğinin aynısı, aynı `from` anahtar adıyla:
+
+  | biçim | örnek | anlamı |
+  |---|---|---|
+  | **sabit kimlik** (string) | `"ahmet.yilmaz"` · `"<uuid>"` | kullanıcı adı VEYA UUID; matcher ikisini de dener |
+  | **context referansı** (obje) | `{ "from": "$ctx.talep_sahibi.user_id" }` | çalışma anında ctx'ten çözülen kişi |
+
+  Referansın yolu `x-wf-kind: actor` bildirilmiş bir field'a ya da onun `user_id`/`user`
+  çocuğuna işaret etmelidir (validator `c_u_ref_not_actor_kind`); `orgu` kind'ı YETMEZ,
+  içinde kişi yoktur. **Çözülemeyen referans o öğeyi düşürür — hata DEĞİLDİR** (`$ctx`'in
+  "eksik = null" sözleşmesi); `c_r` kanalı bundan etkilenmez. Bu, `c_orgu` anchor'ından
+  bilinçli olarak FARKLIDIR: orada çözülemeyen çapa TÜM kuralı kapatır (bkz. yukarıda),
+  çünkü çapa AND'lenen kısıttır.
+
+  Sabit kimlik `$` ile **başlayamaz** (`c_u_literal_dollar_prefix`): motor onu kullanıcı adı
+  sanardı ve `{from}` yazmayı unutan tasarımcının kuralı sessizce hiç eşleşmezdi.
+
+  Node key etkilenmez: `slug()` her iki biçimde de aynı metni sanitize eder (`$` ve `.`
+  düştüğü için `"$ctx.x.user_id"` ile `{from:"$ctx.x.user_id"}` aynı slug'ı verir).
 - **Alternatif havuz ("analist VEYA üst müdür")** tek kuralla İFADE EDİLEMEZ; iki ayrı node veya `listable` kaydı olarak modellenir. Bu bilinçli bir kısıttır: bir c_a = bir node.
 
 ---
@@ -403,6 +433,33 @@ field'lar WFD'ye özel bir uzantı taşıyabilir.
 aynıdır (`c_orgu` / `c_r` / `c_u`). Kriterler **bağımsızdır ve aralarında OR
 vardır**; kural sağlanmazsa Actor field'ı DynCtx'te göremez. Listable erişimi
 olan Actor için de geçerlidir. Ayrıntı: **VISIBILITY / V** bölümü.
+
+**`x-wf-kind`** *(enum: `orgu` | `actor`)* — field'ın **anlamsal** tipi. `type`'a
+ORTOGONALDİR: kind'lı field her zaman `type: "object"`tir; kind onun İÇİNDE ne
+durduğunu söyler.
+
+| kind | kanonik şekil | ne yapar |
+|---|---|---|
+| `orgu` | `{orgu_id, name?}` | bir ORGU tutar |
+| `actor` | `{user_id, orgu_id, role?, name?}` | bir **ACTOR** — yani `(ORGU,(U,R))` üçlüsü; `$actor` effect'inin yazdığı şekil |
+
+`actor`, `orgu`'yu **KAPSAR**: içindeki `orgu_id` anchor'a yeter, dolayısıyla bir
+`actor` field'ı hem `c_orgu.from`'u hem kişi referanslarını (`c_u`) besleyebilir.
+Tersi geçerli değil — `orgu` field'ında kişi yoktur (ör. bir autoexec'in döndürdüğü
+birim kimliği).
+
+Neden gerekli: "bu field bir ORGU tutar" bilgisi WFD'den **türetilemez** (bir REST
+sonucunun içindeki birim kimliğinde `$actor` izi yoktur), o yüzden açıkça bildirilir.
+Validator `c_orgu.from`'un kind'lı bir yola işaret etmesini ZORUNLU kılar
+(`c_orgu_anchor_not_orgu_kind`); şemanın kısıtlamadığı derinliğe düşen yol
+`c_orgu_anchor_kind_unverifiable` uyarısı üretir. Motor `$ref`'i yalnız burada,
+`#/$defs/<Ad>` biçimiyle sınırlı olarak çözer.
+
+> **Saf `user` kind'ı YOKTUR.** Sözlükte **User (U)** koltuksuz kişidir (birden fazla
+> ORGU'ya bağlı olabilir), **Actor** ise `(ORGU,(U,R))` üçlüsüdür. Context'e yazılan
+> şey pratikte daima üçlüdür (`$actor`), o yüzden kind `actor` adını taşır. Salt kişi
+> tutan bir field ihtiyacı doğarsa ayrı bir `user` kind'ı eklenir — o yalnız `c_u`'yu
+> besleyebilir, `c_orgu`'yu besleyemez.
 
 > **`x-wf-readonly` KALDIRILDI (WOR-71).** "Bu alanı yalnız engine yazar" artık
 > ayrı bir flag ile değil, WFD'nin kendisinden okunur: alan hiçbir

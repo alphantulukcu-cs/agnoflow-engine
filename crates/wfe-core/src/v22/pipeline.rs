@@ -21,7 +21,7 @@ use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{
-    ActionDef, AutoexecDef, CallMode, CandidateActor, EscalationStep, JoinRule, StartAs,
+    ActionDef, AutoexecDef, CallMode, CandidateActor, CuItem, EscalationStep, JoinRule, StartAs,
     Transition, TriggerInvocation, Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
@@ -34,7 +34,7 @@ use crate::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallSite, CommitOutcome, ExecEnv, ExecFailure,
     NewWfe, StagedCall, TransitionCommit, Wfes,
 };
-use crate::v22::resolver::resolve_c_orgu;
+use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -2408,8 +2408,20 @@ impl<'a> Engine<'a> {
             }
         }
         if let Some(users) = &rule.c_u {
+            // `Ref` öğeleri BURADA çözülür: bu fonksiyon node'a girişte, ctx bilinirken
+            // koşuyor ve çıktısı denormalize `current_c_a` cache'ine yazılıyor. Havuz
+            // listelemesi (portal/pool.rs) o cache'i jsonb containment ile sorguladığı için
+            // SQL tarafı değişmez — cache zaten "çözülmüş adaylar" tutuyor.
+            // Çözülemeyen referans aday üretmez (matcher'la aynı: eksik = eşleşme yok).
+            let idents: Vec<String> = users
+                .iter()
+                .filter_map(|item| match item {
+                    CuItem::Literal(s) => Some(s.clone()),
+                    CuItem::Ref { from } => resolve_cu_ident(from, ctx),
+                })
+                .collect();
             for unit in &units {
-                for u in users {
+                for u in &idents {
                     let (user_id, user_ident) = match Uuid::parse_str(u) {
                         Ok(uuid) => (Some(uuid), None),
                         Err(_) => (None, Some(u.clone())),
@@ -2945,7 +2957,7 @@ mod tests {
         CandidateActor {
             c_orgu: COrgu::Selector("self".into()),
             c_r: c_r.map(|v| v.into_iter().map(String::from).collect()),
-            c_u: c_u.map(|v| v.into_iter().map(String::from).collect()),
+            c_u: c_u.map(|v| v.into_iter().map(|x| CuItem::Literal(x.into())).collect()),
         }
     }
 

@@ -1910,6 +1910,52 @@ fn unknown_dollar_ref_in_effects_is_error() {
     );
 }
 
+// ---- x-wf-kind: c_orgu anchor'ının context alanına bağlanması ----
+//
+// Anchor formu (`{from: "$ctx.<yol>", traverse}`) bir context alanından ORGU çözer. O alanın
+// gerçekten ORGU tuttuğu tasarım-zamanında bilinmelidir: runtime'da çözülemeyen anchor'da
+// KİMSE yetkilenmez, yani akış sessizce kilitlenir.
+//
+// Mutasyonlar `listable[0]` / `transitions[0].c_a` / `x-visibility` üzerinde yapılır —
+// node `c_a`'sı değiştirilirse node key = slug(c_a) değişmezi ayrıca `slug` hatası üretir
+// ve testin ölçtüğü şey bulanıklaşır.
+
+/// Anchor'ı verilen yola bağlanmış bir `listable` kuralı kurar.
+fn with_listable_anchor(from: &str) -> Value {
+    let mut v = fixture_value();
+    v["listable"][0]["c_a"]["c_orgu"] = json!({ "from": from, "traverse": "self" });
+    v
+}
+
+/// Context şemasına `x-wf-kind` bildirilmiş bir alan ekler ve onu yazan bir effect verir
+/// (WOR-70: her alanın en az bir yazarı olmalı, yoksa `context_field_never_written`).
+fn with_kinded_field(mut v: Value, name: &str, kind: &str, props: Value) -> Value {
+    v["context"]["properties"][name] = json!({
+        "type": "object",
+        "x-wf-kind": kind,
+        "properties": props,
+    });
+    v["transitions"][0]["wfes_effects"]["set"][name] = json!("$actor");
+    v
+}
+
+#[test]
+fn anchor_to_orgu_kinded_field_is_valid() {
+    let v = with_kinded_field(
+        with_listable_anchor("$ctx.musteri_sube"),
+        "musteri_sube",
+        "orgu",
+        json!({ "orgu_id": { "type": "string" }, "name": { "type": "string" } }),
+    );
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "c_orgu_anchor_not_orgu_kind")
+            && !has_error(&report, "c_orgu_anchor_unknown_field"),
+        "orgu kind'lı alana bağlı anchor geçerli olmalı: {:#?}",
+        report.errors
+    );
+}
+
 /// Motor obje/dizi değerleri RECURSIVE çözer — içerideki yazım hatası da yakalanmalı.
 #[test]
 fn unknown_dollar_ref_inside_object_value_is_error() {
@@ -1960,4 +2006,340 @@ fn sla_effects_reject_call_namespace() {
         "wfes_effects": { "set": { "internal_notes": "$call.status" } }
     }]);
     assert!(has_error(&validate_value(v), "sla_effect_namespace"));
+}
+
+#[test]
+fn anchor_to_actor_kinded_field_is_valid() {
+    // `actor` ORGU'yu KAPSAR: içindeki orgu_id anchor'a yeter.
+    let v = with_kinded_field(
+        with_listable_anchor("$ctx.talep_sahibi"),
+        "talep_sahibi",
+        "actor",
+        json!({ "user_id": { "type": "string" }, "orgu_id": { "type": "string" } }),
+    );
+    assert!(!has_error(
+        &validate_value(v),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn anchor_to_orgu_id_child_of_kinded_field_is_valid() {
+    // `$ctx.talep_sahibi.orgu_id` — ebeveynin kind'ı yeter.
+    let v = with_kinded_field(
+        with_listable_anchor("$ctx.talep_sahibi.orgu_id"),
+        "talep_sahibi",
+        "actor",
+        json!({ "user_id": { "type": "string" }, "orgu_id": { "type": "string" } }),
+    );
+    assert!(!has_error(
+        &validate_value(v),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn anchor_to_unkinded_field_is_error() {
+    // `applicant` bildirilmiş bir nesne ama kind'ı yok → ORGU tuttuğu iddia edilemez.
+    assert!(has_error(
+        &validate_value(with_listable_anchor("$ctx.applicant")),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn anchor_to_scalar_field_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_anchor("$ctx.credit_score")),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn anchor_to_missing_field_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_anchor("$ctx.hayalet_alan")),
+        "c_orgu_anchor_unknown_field"
+    ));
+}
+
+#[test]
+fn ctx_prefix_is_optional_in_anchor() {
+    // `anchor_from_ctx` `$ctx.` önekini soyup devam ediyor — validator de aynı normalizasyonu
+    // yapmalı, yoksa önek yazılmayan belge denetimden kaçar.
+    assert!(has_error(
+        &validate_value(with_listable_anchor("hayalet_alan")),
+        "c_orgu_anchor_unknown_field"
+    ));
+}
+
+#[test]
+fn anchor_under_schemaless_object_is_warning_not_error() {
+    // `initiated_by: {"type":"object"}` — alt yolu şema kısıtlamıyor. Meşru biçim, hata
+    // değil; ama sessiz de geçmez (sessizlik kuralı atlatmanın yolu olurdu).
+    let report = validate_value(with_listable_anchor("$ctx.initiated_by.orgu"));
+    assert!(!has_error(&report, "c_orgu_anchor_not_orgu_kind"));
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == "c_orgu_anchor_kind_unverifiable"),
+        "doğrulanamayan derinlik uyarı üretmeli: {:#?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn kind_behind_defs_ref_is_resolved() {
+    // Motor `$ref`'i başka yerde çözmüyor ama editör `{"$ref":"#/$defs/..."}` üretebiliyor.
+    // Çözülmezse MEŞRU bir belge reddedilirdi.
+    let mut v = with_listable_anchor("$ctx.musteri.sube");
+    v["context"]["$defs"] = json!({
+        "Musteri": {
+            "type": "object",
+            "properties": {
+                "sube": {
+                    "type": "object",
+                    "x-wf-kind": "orgu",
+                    "properties": { "orgu_id": { "type": "string" } },
+                },
+            },
+        },
+    });
+    v["context"]["properties"]["musteri"] = json!({ "$ref": "#/$defs/Musteri" });
+    v["transitions"][0]["wfes_effects"]["set"]["musteri.sube"] = json!("$actor");
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "c_orgu_anchor_not_orgu_kind")
+            && !has_error(&report, "c_orgu_anchor_unknown_field"),
+        "$defs arkasındaki kind çözülmeli: {:#?}",
+        report.errors
+    );
+    // Uyarının da OLMAMASI kritik: `$defs` çözülmeseydi yol `Opaque`'a düşer ve bu test
+    // yalnız hata yokluğuna baktığı için sessizce geçerdi. Uyarısızlık, düğümün gerçekten
+    // `Found(kind: orgu)` olarak çözüldüğünün kanıtı.
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.code == "c_orgu_anchor_kind_unverifiable"),
+        "$defs çözümlenmiş olmalı — 'doğrulanamadı' uyarısı beklenmiyor: {:#?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn cyclic_defs_ref_does_not_hang() {
+    let mut v = with_listable_anchor("$ctx.dongu");
+    v["context"]["$defs"] = json!({
+        "A": { "$ref": "#/$defs/B" },
+        "B": { "$ref": "#/$defs/A" },
+    });
+    v["context"]["properties"]["dongu"] = json!({ "$ref": "#/$defs/A" });
+    v["transitions"][0]["wfes_effects"]["set"]["dongu"] = json!("$actor");
+    // Dönmemesi yeter; döngü çözülemediği için kind doğrulanamaz → uyarı.
+    let report = validate_value(v);
+    assert!(!has_error(&report, "c_orgu_anchor_not_orgu_kind"));
+}
+
+#[test]
+fn transition_c_a_anchor_is_checked() {
+    let mut v = fixture_value();
+    v["transitions"][0]["c_a"] = json!({
+        "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
+        "c_r": ["creditAnalyst"],
+    });
+    assert!(has_error(
+        &validate_value(v),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn x_visibility_c_orgu_anchor_is_checked() {
+    // Context şemasının İÇİNDEKİ c_orgu da aynı kurala tabidir — gezinti serileştirilmiş
+    // doküman üzerinde olduğu için bu yüzey kendiliğinden kapsanır.
+    let mut v = fixture_value();
+    v["context"]["properties"]["credit_score"]["x-visibility"] = json!({
+        "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
+        "c_r": ["creditAnalyst"],
+    });
+    assert!(has_error(
+        &validate_value(v),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn node_reassign_anchor_is_checked() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["reassign"] = json!({
+        "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
+        "c_r": ["branchManager"],
+    });
+    assert!(has_error(
+        &validate_value(v),
+        "c_orgu_anchor_not_orgu_kind"
+    ));
+}
+
+#[test]
+fn selector_and_wfah_forms_are_untouched() {
+    // Selector düz string; wfah formunda `from` OBJEDİR — ikisi de bu kuralın dışında.
+    let mut v = fixture_value();
+    v["listable"][0]["c_a"]["c_orgu"] = json!({
+        "from": { "wfah": "analyst_approve", "field": "actor.orgu" },
+        "traverse": "self.parent",
+    });
+    let report = validate_value(v);
+    assert!(!has_error(&report, "c_orgu_anchor_not_orgu_kind"));
+    assert!(!has_error(&report, "c_orgu_anchor_unknown_field"));
+    assert!(!report
+        .warnings
+        .iter()
+        .any(|w| w.code == "c_orgu_anchor_kind_unverifiable"));
+}
+
+// ---- c_u: sabit kimlik ↔ context referansı ----
+//
+// `c_u` öğesi ya `Literal` (kullanıcı adı/UUID) ya `Ref {from: "$ctx..."}`. İki kural
+// birleşimin iki ucundaki SESSİZ başarısızlıkları kapatıyor: `$` ile başlayan bir sabit
+// kimlik motorda "böyle bir kullanıcı adı" sanılıp hiç eşleşmez; `actor` kind'lı olmayan
+// bir yola bakan referans runtime'da çözülemez ve havuz sessizce daralır.
+
+/// `c_u`'yu verilen öğelerle kuran bir listable kuralı (node c_a'sı DEĞİL — orada
+/// node key = slug(c_a) değişmezi ayrıca `slug` hatası üretir ve ölçüm bulanıklaşır).
+fn with_listable_cu(items: Value) -> Value {
+    let mut v = fixture_value();
+    v["listable"][0]["c_a"]["c_u"] = items;
+    v
+}
+
+/// `actor` kind'lı bir alan + onu yazan effect (WOR-70: her alanın bir yazarı olmalı).
+fn with_actor_field(mut v: Value, name: &str) -> Value {
+    v["context"]["properties"][name] = json!({
+        "type": "object",
+        "x-wf-kind": "actor",
+        "properties": {
+            "user_id": { "type": "string" },
+            "orgu_id": { "type": "string" },
+            "role": { "type": "string" },
+        },
+    });
+    v["transitions"][0]["wfes_effects"]["set"][name] = json!("$actor");
+    v
+}
+
+#[test]
+fn plain_string_c_u_still_valid() {
+    // Geriye uyumluluk: düz string listesi aynen çalışmalı (Literal'a deserialize olur).
+    let report = validate_value(with_listable_cu(json!(["ahmet.yilmaz"])));
+    assert!(!has_error(&report, "c_u_literal_dollar_prefix"));
+    assert!(!has_error(&report, "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn c_u_ref_to_actor_field_is_valid() {
+    let v = with_actor_field(
+        with_listable_cu(json!([{ "from": "$ctx.talep_sahibi.user_id" }])),
+        "talep_sahibi",
+    );
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "c_u_ref_not_actor_kind") && !has_error(&report, "c_u_ref_unknown_field"),
+        "actor kind'lı alanın user_id'sine bakan referans geçerli olmalı: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn c_u_ref_to_actor_object_itself_is_valid() {
+    // Son ek yazmadan: `resolve_cu_ident` nesne içinde user_id arar.
+    let v = with_actor_field(
+        with_listable_cu(json!([{ "from": "$ctx.talep_sahibi" }])),
+        "talep_sahibi",
+    );
+    assert!(!has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn c_u_ref_to_orgu_kinded_field_is_error() {
+    // `orgu` kind'ı YETMEZ — içinde kişi yoktur. Bu, `c_orgu`'nun tersi yöndeki kısıt:
+    // orada `actor` kabul edilir (orgu_id taşır), burada `orgu` KABUL EDİLMEZ.
+    let mut v = with_listable_cu(json!([{ "from": "$ctx.musteri_sube" }]));
+    v["context"]["properties"]["musteri_sube"] = json!({
+        "type": "object",
+        "x-wf-kind": "orgu",
+        "properties": { "orgu_id": { "type": "string" } },
+    });
+    v["transitions"][0]["wfes_effects"]["set"]["musteri_sube"] = json!("$actor");
+    assert!(has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn c_u_ref_to_plain_field_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!([{ "from": "$ctx.applicant" }]))),
+        "c_u_ref_not_actor_kind"
+    ));
+}
+
+#[test]
+fn c_u_ref_to_missing_field_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!([{ "from": "$ctx.hayalet" }]))),
+        "c_u_ref_unknown_field"
+    ));
+}
+
+#[test]
+fn c_u_literal_starting_with_dollar_is_error() {
+    // Asıl yakalanan hata: tasarımcı `Ref` yazmayı unutup düz string bırakmış.
+    // Motor bunu kullanıcı adı sanar ve kural HİÇ eşleşmez — sessiz, izsiz.
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!(["$ctx.talep_sahibi.user_id"]))),
+        "c_u_literal_dollar_prefix"
+    ));
+}
+
+#[test]
+fn c_u_literal_typo_prefix_is_error() {
+    // `$actor.user_id` de aynı tuzağa düşer — `$` ile başlayan HER sabit kimlik yakalanır.
+    assert!(has_error(
+        &validate_value(with_listable_cu(json!(["$actor.user_id"]))),
+        "c_u_literal_dollar_prefix"
+    ));
+}
+
+#[test]
+fn c_u_ref_and_literal_can_mix() {
+    // Birleşimin amacı: aynı dizide statik ve dinamik öğeler yan yana durabilsin.
+    let v = with_actor_field(
+        with_listable_cu(json!(["ahmet.yilmaz", { "from": "$ctx.talep_sahibi.user_id" }])),
+        "talep_sahibi",
+    );
+    let report = validate_value(v);
+    assert!(report
+        .errors
+        .iter()
+        .all(|e| !e.code.starts_with("c_u_")), "karışık liste geçerli olmalı: {:#?}", report.errors);
+}
+
+#[test]
+fn x_visibility_c_u_is_checked_too() {
+    // x-visibility'nin c_u'su C_A'nınkiyle AYNI şekildedir (terminology.md) — gezinti
+    // serileştirilmiş doküman üzerinde olduğu için bu yüzey kendiliğinden kapsanır.
+    let mut v = fixture_value();
+    v["context"]["properties"]["credit_score"]["x-visibility"] =
+        json!({ "c_u": [{ "from": "$ctx.applicant" }] });
+    assert!(has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
+}
+
+#[test]
+fn node_key_unchanged_by_cu_item_union() {
+    // §2a: node key = slug(c_a) ve KALICIDIR (WFD'de + wfes.current_node'da). Düz string
+    // c_u taşıyan golden fixture'ın node key'leri birleşimden ETKİLENMEMELİ — bu test
+    // fixture'ın kendi slug kuralıyla doğrulanmasına dayanır (`check_slugs`).
+    let report = validate_value(fixture_value());
+    assert!(!has_error(&report, "slug"), "slug hatası: {:#?}", report.errors);
 }

@@ -422,6 +422,11 @@
         "else": true,
         "x-visibility": {
           "$ref": "#/$defs/visibility"
+        },
+        "x-wf-kind": {
+          "type": "string",
+          "enum": ["orgu", "actor"],
+          "description": "Alanin ANLAMSAL tipi (bkz. terminology.md USER/ROLE/ACTOR). 'orgu' = alan bir ORGU tutar ({orgu_id, name?}). 'actor' = alan bir ACTOR ucluSU tutar ({user_id, orgu_id, role?, name?}) — yani (ORGU,(U,R)); `$actor` effect'inin yazdigi sekil. ACTOR orgu'yu KAPSAR (icindeki orgu_id ile c_orgu.from'u da besler) ve ayrica kisi referanslarinin (c_u) hedefi olur. NOT: salt kisi tutan (koltuksuz) bir alan icin ayri bir 'user' kind'i YOKTUR — ihtiyac dogdugunda eklenir. Validator c_orgu.from'un kind'li bir yola isaret etmesini zorunlu kilar (c_orgu_anchor_not_orgu_kind)."
         }
       },
       "additionalProperties": true
@@ -447,8 +452,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/$defs/cuItem"
           }
         },
         "c_a": {
@@ -517,6 +521,29 @@
         }
       ]
     },
+    "cuItem": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "description": "Sabit kimlik: kullanici adi ya da UUID string'i (matcher ikisini de dener). '$' ile BASLAYAMAZ - validator c_u_literal_dollar_prefix ile reddeder; aksi halde '$ctx.x' yazim hatasi sessizce 'boyle bir kullanici adi' sanilip hic eslesmezdi."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from"],
+          "properties": {
+            "from": {
+              "type": "string",
+              "minLength": 1,
+              "pattern": "^\\$ctx\\.",
+              "description": "Calisma aninda context'ten cozulen KISI. Yol bir x-wf-kind:actor alanina ya da onun user_id/user cocuguna isaret etmelidir (validator c_u_ref_not_actor_kind). Cozulemezse o oge aday uretmez - HATA DEGIL ($ctx'in 'eksik = null' sozlesmesi); c_r kanali bundan etkilenmez."
+            }
+          }
+        }
+      ],
+      "description": "c_u listesinin bir ogesi. cOrgu'nun aynasi: untagged birlesim, ayni 'from' anahtar adi. Duz string'ler AYNEN calisir (eski belgeler icin migration YOK, node key'leri degismez - sanitize() '$' ve '.' karakterlerini attigi icin Literal ve Ref ayni slug'i uretir)."
+    },
     "candidateActor": {
       "type": "object",
       "additionalProperties": false,
@@ -541,8 +568,7 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/$defs/cuItem"
           }
         }
       },

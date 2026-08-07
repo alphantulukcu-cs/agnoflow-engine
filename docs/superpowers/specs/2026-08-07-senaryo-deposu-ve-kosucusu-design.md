@@ -269,6 +269,33 @@ değil düz metin döner (editör bugün `i18n.t` ile üretiyor — bu tur metin
 - **WFD'ler arası paylaşılan senaryo.**
 - **`GET /layout`'un kimlik doğrulamasız oluşu.** Not edildi, dokunulmuyor.
 
+## 6.1 Sonradan eklenen: editörde WFC çağrı durağı (2026-08-07, aynı gün)
+
+`call_return` adımı §3.2'de tanımlandı ve motor koşucusu onu çalıştırıyor, ama
+uygulama sonrası şu çıktı: **editörde o adımı ÜRETECEK yol yoktu.** Alt akış
+çağıran akışlar interaktif simülatörde çağrı node'unda takılıyordu — motorda
+`/wfe/simulate/call-return` vardı, editörde onu çağıran kod yoktu; `SimState`
+tipinde `pending_calls` alanı bile yoktu. Yani `call_return`'e ancak JSON elle
+yazılarak ulaşılabiliyordu.
+
+Kapatıldı (`agnoflow-frontend` `df41e2e`):
+
+- `SimState.pending_calls` tipe eklendi; `simulateCallReturn` ve
+  `simulatePossibleActions` istemcileri yazıldı.
+- Bekleyen çağrı (`mode: wait`) için kart: çağrılana gidecek **çözülmüş girdi**
+  salt-okunur (motor `SimCall.input`'ta zaten gönderiyordu), durum açılırı,
+  sonuç JSON kutusu. Bloklamayan çağrılar (`detached`/`terminal`) bilgi satırı.
+- **Dönüşten sonra aksiyon listesi ayrıca sorulur.** Motor `call-return`'de
+  bilerek boş `possible_actions` döner (WFC-RETURN'ü aktör tetiklemez, "hangi
+  aktörün gözünden" sorusunun cevabı yok); sorulmasaydı akış görünürde tıkanırdı.
+- Çağrı dönüşü koşu kaydına `call_return` adımı olarak yazılır → WFC'li akışlar
+  da senaryolaşır.
+
+Sonuç girdisi **serbest JSON** olarak alındı; çağrılanın `terminals[].wfe_end_response`
+şemasından form türetmek değerlendirildi ve ertelendi — çağrılanın birden çok
+terminali varsa hangi şeklin kullanılacağı (birleşim mi, terminal seçtirme mi)
+kendi başına ayrı bir tasarım sorusu.
+
 ## 7. Kabul kriterleri
 
 1. Senaryolar sunucuda saklanır; başka tarayıcıdan aynı WFD açıldığında görünür.

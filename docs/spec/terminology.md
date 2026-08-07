@@ -191,7 +191,7 @@ wft         = tek routing authority; hedef node id veya terminal id
 |---|---:|---|
 | `c_orgu` | Evet | Scope çapası: ORGTRVLANG token, static selector veya anchor object |
 | `c_r` | c_r/c_u'dan en az biri | Rol kanalı |
-| `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni) |
+| `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni). Öğeleri **sabit kimlik** ya da **context referansı** — aşağı bkz. |
 
 **Anchor biçimi çözülemezse `resolve(c_orgu)` BOŞ kümedir** — aktörün kendi birimine
 DÜŞMEZ. `{from: "$ctx.<yol>", traverse}` "o alandaki birim" demektir; alan yazılmamışsa
@@ -208,8 +208,8 @@ zorundadır (validator `c_orgu_anchor_not_orgu_kind`); bkz. **SCHEMA ANNOTATION 
 ```text
 match = (actor.orgu ∈ resolve(c_orgu)) AND (rol_match OR user_match)
 
-rol_match  = c_r varsa actor.role ∈ c_r,  yoksa false
-user_match = c_u varsa actor.user ∈ c_u,  yoksa false
+rol_match  = c_r varsa actor.role ∈ c_r,          yoksa false
+user_match = c_u varsa actor.user ∈ resolve(c_u), yoksa false
 ```
 
 Kritik kurallar:
@@ -218,6 +218,26 @@ Kritik kurallar:
 - **`c_orgu` her zaman AND'lenen çapadır.** Rol ve kişi, çapadan asla kopmaz (Actor exact tuple felsefesi).
 - **`c_u` match'i rol-agnostiktir.** Kişi, anchor ORGU'daki herhangi bir rol kaydıyla havuza girer; ACT yine somut `(ORGU,(U,R))` tuple'ıyla uygulanır ve WFAH'a o tuple yazılır.
 - **Sadece-kişi havuzu:** `{ "c_orgu": "self", "c_u": ["user_ayse"] }` — c_r hiç yazılmaz.
+- **`c_u` öğesi iki biçimdedir** (`#/$defs/cuItem`) — `c_orgu`'nun "selector ya da anchor"
+  ikiliğinin aynısı, aynı `from` anahtar adıyla:
+
+  | biçim | örnek | anlamı |
+  |---|---|---|
+  | **sabit kimlik** (string) | `"ahmet.yilmaz"` · `"<uuid>"` | kullanıcı adı VEYA UUID; matcher ikisini de dener |
+  | **context referansı** (obje) | `{ "from": "$ctx.talep_sahibi.user_id" }` | çalışma anında ctx'ten çözülen kişi |
+
+  Referansın yolu `x-wf-kind: actor` bildirilmiş bir field'a ya da onun `user_id`/`user`
+  çocuğuna işaret etmelidir (validator `c_u_ref_not_actor_kind`); `orgu` kind'ı YETMEZ,
+  içinde kişi yoktur. **Çözülemeyen referans o öğeyi düşürür — hata DEĞİLDİR** (`$ctx`'in
+  "eksik = null" sözleşmesi); `c_r` kanalı bundan etkilenmez. Bu, `c_orgu` anchor'ından
+  bilinçli olarak FARKLIDIR: orada çözülemeyen çapa TÜM kuralı kapatır (bkz. yukarıda),
+  çünkü çapa AND'lenen kısıttır.
+
+  Sabit kimlik `$` ile **başlayamaz** (`c_u_literal_dollar_prefix`): motor onu kullanıcı adı
+  sanardı ve `{from}` yazmayı unutan tasarımcının kuralı sessizce hiç eşleşmezdi.
+
+  Node key etkilenmez: `slug()` her iki biçimde de aynı metni sanitize eder (`$` ve `.`
+  düştüğü için `"$ctx.x.user_id"` ile `{from:"$ctx.x.user_id"}` aynı slug'ı verir).
 - **Alternatif havuz ("analist VEYA üst müdür")** tek kuralla İFADE EDİLEMEZ; iki ayrı node veya `listable` kaydı olarak modellenir. Bu bilinçli bir kısıttır: bir c_a = bir node.
 
 ---

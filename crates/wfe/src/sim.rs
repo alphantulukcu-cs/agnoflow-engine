@@ -332,3 +332,96 @@ fn outcome_parts(
         CommitOutcome::CollapseTo { node, .. } => (WfeStatus::Active, Some(node.clone()), None),
     }
 }
+
+/// Bir adımın motor tarafı — `routes/simulate.rs` ve `scenario::run` ORTAK kullanır.
+/// Ayrı yazılsalardı simülasyonda geçen bir senaryo koşucuda kalabilirdi.
+pub mod step {
+    use super::SimState;
+    use serde_json::Value;
+    use uuid::Uuid;
+    use wfe_core::types::actor::Actor;
+    use wfe_core::types::wfd_v22::Wfd;
+    use wfe_core::types::wfe::WfeStatus;
+    use wfe_core::v22::pipeline::Engine;
+    use wfe_core::EngineError;
+
+    /// WFE'nin bittiğini söyleyen tek yer — iki durum da "artık adım atılamaz".
+    pub fn is_terminal(state: &SimState) -> bool {
+        matches!(state.status, WfeStatus::Terminal | WfeStatus::Terminated)
+    }
+
+    /// `POST /wfe/simulate/start` gövdesi.
+    pub async fn start(
+        engine: &Engine<'_>,
+        wfd: &Wfd,
+        actor: &Actor,
+        orgtnt_id: Uuid,
+        action: Option<&str>,
+        input: &Value,
+    ) -> Result<SimState, EngineError> {
+        let new = engine
+            .start(wfd, actor, orgtnt_id, action, input, Uuid::new_v4(), None)
+            .await?;
+        Ok(SimState::from_new_wfe(&new))
+    }
+
+    /// `POST /wfe/simulate/apply` gövdesi — claim YAZILMAZ ama uygunluk
+    /// çağıranın sorumluluğundadır (route `sim_eligible` ile denetler).
+    pub async fn apply(
+        engine: &Engine<'_>,
+        wfd: &Wfd,
+        state: &mut SimState,
+        actor: &Actor,
+        action: &str,
+        input: &Value,
+        node: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let wfes = state.to_wfes(Some(actor.user_id));
+        let commit = engine.apply(wfd, &wfes, actor, action, input, node).await?;
+        state.apply_commit(&commit);
+        Ok(())
+    }
+
+    /// `call_return`'ün iki ayrık başarısızlığı. `EngineError`'a katlanamaz:
+    /// "bekleyen çağrı yok" route'ta **409** döner ve `EngineError`'ın hiçbir
+    /// varyantı bu eşlemeyi vermiyor (`Conflict` `String` değil `ConflictKind`
+    /// alıyor, `CallNotFound` 404'e düşerdi) — davranışı korumak için ayrı tip.
+    #[derive(Debug)]
+    pub enum CallReturnError {
+        NoAwaitedCall,
+        Engine(EngineError),
+    }
+
+    impl std::fmt::Display for CallReturnError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::NoAwaitedCall => {
+                    write!(f, "bu adımda çözülmeyi bekleyen bir iş akışı çağrısı yok")
+                }
+                Self::Engine(e) => write!(f, "{e}"),
+            }
+        }
+    }
+
+    /// `POST /wfe/simulate/call-return` gövdesi.
+    pub async fn call_return(
+        engine: &Engine<'_>,
+        wfd: &Wfd,
+        state: &mut SimState,
+        status: &str,
+        result: Option<&Value>,
+    ) -> Result<(), CallReturnError> {
+        let awaited = state
+            .awaited_call()
+            .cloned()
+            .ok_or(CallReturnError::NoAwaitedCall)?;
+        let wfes = state.to_wfes(None);
+        let commit = engine
+            .fire_call_return(wfd, &wfes, status, None, result, &[], chrono::Utc::now())
+            .await
+            .map_err(CallReturnError::Engine)?;
+        state.apply_commit(&commit);
+        state.clear_awaited_call(&awaited.site_key);
+        Ok(())
+    }
+}

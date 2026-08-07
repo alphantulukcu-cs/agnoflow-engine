@@ -7,7 +7,7 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::routes;
@@ -37,6 +37,7 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(new_draft))
         .routes(routes!(wfe_usage))
         .routes(routes!(get_layout, put_layout))
+        .routes(routes!(get_scenarios, put_scenarios))
         .with_state(state)
 }
 
@@ -787,6 +788,55 @@ async fn put_layout(
     require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .save_layout(id, ver, &layout)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(map_wfd_err)
+}
+
+// ── Senaryolar (kaydedilmiş simülasyon koşuları) ─────────────────────────────
+//
+// Layout ile aynı desende bir sidecar: doküman `additionalProperties:false` ve
+// `(wfd_id, version)` immutable olduğundan senaryolar gövdeye giremez.
+
+#[utoipa::path(get, path = "/{id}/{version}/scenarios", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "Senaryo seti (blob yoksa boş set)", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
+async fn get_scenarios(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<Value>, AppError> {
+    // Layout'un aksine GET de yetki ister: senaryolar aktör kimlikleri ve iş
+    // girdileri taşır.
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    let set = s.wfd.fetch_scenarios(id, ver).await.map_err(map_wfd_err)?;
+    Ok(Json(set.unwrap_or_else(
+        || json!({ "scenarios_version": "1", "scenarios": [] }),
+    )))
+}
+
+#[utoipa::path(put, path = "/{id}/{version}/scenarios", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    request_body = serde_json::Value,
+    responses((status = 204, description = "Kaydedildi")),
+    security(("bearer_jwt" = [])))]
+async fn put_scenarios(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+    Json(body): Json<Value>,
+) -> Result<StatusCode, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    // Şekli burada doğrula ki bozuk set koşu anına kadar saklanmasın.
+    serde_json::from_value::<wf_wfe::scenario::ScenarioSet>(body.clone()).map_err(|e| {
+        AppError(
+            format!("senaryo seti geçersiz: {e}"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        )
+    })?;
+    s.wfd
+        .save_scenarios(id, ver, &body)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(map_wfd_err)

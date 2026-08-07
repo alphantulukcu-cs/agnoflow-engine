@@ -756,30 +756,50 @@ pub mod step {
         Ok(())
     }
 
-    /// `POST /wfe/simulate/call-return` gövdesi. Bekleyen çağrı yoksa
-    /// `EngineError::InvalidState` döner (route bunu 409'a çevirir).
+    /// `call_return`'ün iki ayrık başarısızlığı. `EngineError`'a katlanamaz:
+    /// "bekleyen çağrı yok" route'ta **409** döner ve `EngineError`'ın hiçbir
+    /// varyantı bu eşlemeyi vermiyor (`Conflict` `String` değil `ConflictKind`
+    /// alıyor, `CallNotFound` 404'e düşerdi) — davranışı korumak için ayrı tip.
+    #[derive(Debug)]
+    pub enum CallReturnError {
+        NoAwaitedCall,
+        Engine(EngineError),
+    }
+
+    impl std::fmt::Display for CallReturnError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::NoAwaitedCall => {
+                    write!(f, "bu adımda çözülmeyi bekleyen bir iş akışı çağrısı yok")
+                }
+                Self::Engine(e) => write!(f, "{e}"),
+            }
+        }
+    }
+
+    /// `POST /wfe/simulate/call-return` gövdesi.
     pub async fn call_return(
         engine: &Engine<'_>,
         wfd: &Wfd,
         state: &mut SimState,
         status: &str,
         result: Option<&Value>,
-    ) -> Result<(), EngineError> {
-        let awaited = state.awaited_call().cloned().ok_or_else(|| {
-            EngineError::InvalidState("bu adımda çözülmeyi bekleyen bir iş akışı çağrısı yok".into())
-        })?;
+    ) -> Result<(), CallReturnError> {
+        let awaited = state
+            .awaited_call()
+            .cloned()
+            .ok_or(CallReturnError::NoAwaitedCall)?;
         let wfes = state.to_wfes(None);
         let commit = engine
             .fire_call_return(wfd, &wfes, status, None, result, &[], chrono::Utc::now())
-            .await?;
+            .await
+            .map_err(CallReturnError::Engine)?;
         state.apply_commit(&commit);
         state.clear_awaited_call(&awaited.site_key);
         Ok(())
     }
 }
 ```
-
-> **Not:** `EngineError::InvalidState` yoksa `crates/wfe-core/src/error.rs`'te mevcut olan en yakın varyantı kullan (ör. `EngineError::Conflict`). Varyant adını `grep -n "pub enum EngineError" -A 40 crates/wfe-core/src/error.rs` ile doğrula ve route'taki eşlemeyi ona göre yaz.
 
 - [ ] **Step 2: Route'ları yardımcıya bağla**
 
@@ -805,14 +825,18 @@ pub mod step {
     .map_err(AppError::from)?;
 ```
 
-`sim_call_return` içinde `awaited` çözümünden `clear_awaited_call`'a kadarki bloğu:
+`sim_call_return` içinde `awaited` çözümünden `clear_awaited_call`'a kadarki bloğu. Eşleme bugünkü davranışı **birebir** korur — bekleyen çağrı yoksa 409, motor hatası ise `AppError::from(EngineError)`:
 
 ```rust
+    use wf_wfe::sim::step::CallReturnError;
     wf_wfe::sim::step::call_return(
         &engine, &wfd, &mut sim_state, &body.status, body.result.as_ref(),
     )
     .await
-    .map_err(AppError::from)?;
+    .map_err(|e| match e {
+        CallReturnError::NoAwaitedCall => AppError(e.to_string(), StatusCode::CONFLICT),
+        CallReturnError::Engine(inner) => AppError::from(inner),
+    })?;
 ```
 
 Üç yerdeki `let terminal = matches!(sim_state.status, ...)` satırlarını da `wf_wfe::sim::step::is_terminal(&sim_state)` ile değiştir.
@@ -1040,6 +1064,8 @@ pub async fn run(
                         .map_err(|e| format!("Adım {} (\"{action}\"): {e}", i + 1)),
                 }
             }
+            // Her iki başarısızlık da (bekleyen çağrı yok / motor hatası) senaryoyu
+            // kaldırır — koşucu için ikisi arasında fark yok, HTTP durumu yok.
             ScenarioStep::CallReturn { call_return } => step::call_return(
                 engine, wfd, &mut state, &call_return.status, call_return.result.as_ref(),
             )
@@ -1070,7 +1096,7 @@ pub async fn run(
 }
 ```
 
-> **Not:** `state.dynctx`'in tipi `Value` değilse (`sim.rs`'te doğrula: `grep -n "dynctx" crates/wfe/src/sim.rs`), `serde_json::to_value(...)` ile çevir.
+`SimState.dynctx` zaten `serde_json::Value` — çevirme gerekmiyor (`crates/wfe/src/sim.rs:23`).
 
 - [ ] **Step 4: Testlerin GEÇTİĞİNİ gör**
 

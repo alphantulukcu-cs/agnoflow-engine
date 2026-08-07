@@ -99,21 +99,35 @@ pub struct AttachmentGroupStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     pub items: Vec<AttachmentItemStatus>,
+    /// Bu grup SORULAN aksiyonu kapıyor mu? Aksiyon verilmeden sorulan node geneli
+    /// listede daima `true`'dur — orada "hangi aksiyon" sorusunun cevabı `actions`tır.
+    /// `false` grup toplanır ama o aksiyonu bloklamaz (yükleme opsiyoneldir).
+    pub gates: bool,
+    /// Grubun kapı olduğu aksiyonlar; `None` = node'un tüm aksiyonları. İstemci node
+    /// geneli listeyi seçili aksiyona göre kendisi süzebilsin diye taşınır.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
 }
 
 /// Verilen node'un referansladığı tüm grupların item bazlı yükleme durumu.
 /// Node yoksa ya da attachment referansı yoksa boş döner.
+///
+/// `action`: hangi aksiyon submit edilmek üzere sorulduğu. `Some(a)` verilirse her
+/// grubun `gates` alanı o aksiyona göre hesaplanır (kapsam dışı gruplar `false`);
+/// `None` (node geneli durum listesi) hepsini `gates: true` bırakır — süzme istemcide.
 pub async fn status_for_node(
     store: &AttachmentStore,
     wfd: &Wfd,
     wfe_id: Uuid,
     node_key: &str,
+    action: Option<&str>,
 ) -> Result<Vec<AttachmentGroupStatus>, opendal::Error> {
     let Some(node) = wfd.nodes.get(node_key) else {
         return Ok(vec![]);
     };
     let mut out = Vec::new();
-    for group_ref in &node.attachments {
+    for aref in &node.attachments {
+        let group_ref = aref.group();
         let Some(group) = wfd.attachments.get(group_ref) else {
             continue; // validator zaten yakalar; runtime'da sessiz atla
         };
@@ -129,18 +143,22 @@ pub async fn status_for_node(
             });
         }
         out.push(AttachmentGroupStatus {
-            group: group_ref.clone(),
+            group: group_ref.to_string(),
             label: group.label.clone(),
             items,
+            gates: aref.gates_action(action),
+            actions: aref.actions().map(|a| a.to_vec()),
         });
     }
     Ok(out)
 }
 
-/// Gate koşulu: node'un tüm `required` dosyaları yüklü mü?
+/// Gate koşulu: sorulan aksiyonu KAPAYAN grupların tüm `required` dosyaları yüklü mü?
+/// Kapamayan gruplar (aksiyon kapsamı dışı) eksik olsa da engellemez.
 pub fn satisfied(groups: &[AttachmentGroupStatus]) -> bool {
     groups
         .iter()
+        .filter(|g| g.gates)
         .all(|g| g.items.iter().all(|i| !i.required || i.uploaded))
 }
 
@@ -148,6 +166,7 @@ pub fn satisfied(groups: &[AttachmentGroupStatus]) -> bool {
 pub fn missing_required(groups: &[AttachmentGroupStatus]) -> Vec<String> {
     groups
         .iter()
+        .filter(|g| g.gates)
         .flat_map(|g| {
             g.items
                 .iter()

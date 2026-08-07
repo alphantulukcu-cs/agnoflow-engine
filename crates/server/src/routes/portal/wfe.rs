@@ -150,6 +150,8 @@ async fn get_wfe_detail(
     // WOR-31 T4: paralel modda aynı aksiyon adı birden fazla kolda tekrar edebilir
     // (ör. üç kolun da `approve`'u) — her tekrar kendi `node`'uyla ayrı satırdır,
     // istemci hangi kolu onayladığını `node`'u geri göndererek belirtir.
+    // Depo WFD başına çözülür ($env) — döngü başına değil, bir kez.
+    let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
     let mut available_actions: Vec<AvailableAction> = Vec::with_capacity(possible.len());
     for pa in &possible {
         let Some(def) = wfd.actions.get(&pa.action) else {
@@ -158,8 +160,16 @@ async fn get_wfe_detail(
         // Aksiyonun kaynak node'u: paralelde kol node'u, aksi halde current_node.
         let src_node = pa.node.clone().or_else(|| view.current_node.clone());
         let attachments = match &src_node {
-            Some(n) => super::attachments::status_for_node(&s.attachments, &wfd, wfe_id, n)
-                .await
+            // Durum AKSIYON BAŞINA sorulur: aynı node'da "Onayla" belge isterken
+            // "Reddet" istemeyebilir — `attachments_satisfied` o aksiyonun cevabıdır.
+            Some(n) => super::attachments::status_for_node(
+                &store,
+                &wfd,
+                wfe_id,
+                n,
+                Some(pa.action.as_str()),
+            )
+            .await
                 .map_err(|e| {
                     AppError(
                         format!("attachment durum sorgusu başarısız: {e}"),
@@ -243,9 +253,16 @@ async fn submit_action(
     // Paralelde current_node None'dur; kol seçimi body.node ile gelir.
     let target_node = body.node.clone().or(view.current_node.clone());
     if let Some(node) = &target_node {
+        let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
         let groups =
-            super::attachments::status_for_node(&s.attachments, &wfd, wfe_id, node)
-                .await
+            super::attachments::status_for_node(
+                &store,
+                &wfd,
+                wfe_id,
+                node,
+                Some(body.action.as_str()),
+            )
+            .await
                 .map_err(|e| {
                     AppError(
                         format!("attachment durum sorgusu başarısız: {e}"),

@@ -2744,8 +2744,9 @@ fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
     // Node referansları: katalogda var olmalı; aynı grup bir node'da tekrar edilmemeli.
     for (node_key, node) in &wfd.nodes {
         let mut seen_refs = HashSet::new();
-        for group_ref in &node.attachments {
-            if !seen_refs.insert(group_ref.clone()) {
+        for aref in &node.attachments {
+            let group_ref = aref.group();
+            if !seen_refs.insert(group_ref.to_string()) {
                 report.error(
                     "attachment_ref_dup",
                     format!("nodes[{node_key}].attachments"),
@@ -2758,6 +2759,39 @@ fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
                     format!("nodes[{node_key}].attachments"),
                     format!("attachment grubu '{group_ref}' root attachments katalogunda yok"),
                 );
+            }
+            // Aksiyon kapsamı: sayılan her aksiyon bu node'dan GERÇEKTEN çıkabilmeli.
+            // Yoksa kapı hiç kapanmaz — dosya zorunlu sanılır, hiçbir submit'i durdurmaz.
+            let Some(scoped) = aref.actions() else { continue };
+            let mut seen_actions = HashSet::new();
+            for action in scoped {
+                if !seen_actions.insert(action.clone()) {
+                    report.error(
+                        "attachment_action_dup",
+                        format!("nodes[{node_key}].attachments[{group_ref}].actions"),
+                        format!("aksiyon '{action}' bu kapsamda birden fazla sayılmış"),
+                    );
+                }
+                // Start bloğu da bir aksiyondur (M16: `start[].action` actions{} içinde
+                // normal bir ACT'tir) — yalnız transition'lara bakmak, başlatma
+                // aksiyonuna konan belge kapısını "ulaşılmaz" sanıp reddederdi.
+                let reachable = wfd
+                    .transitions
+                    .iter()
+                    .any(|t| t.action == *action && t.from.contains(node_key))
+                    || wfd
+                        .start
+                        .iter()
+                        .any(|s| s.action == *action && s.from == *node_key);
+                if !reachable {
+                    report.error(
+                        "attachment_action_ref",
+                        format!("nodes[{node_key}].attachments[{group_ref}].actions"),
+                        format!(
+                            "aksiyon '{action}' bu node'dan çıkmıyor — kapsam hiçbir zaman uygulanmaz"
+                        ),
+                    );
+                }
             }
         }
     }

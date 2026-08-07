@@ -129,10 +129,13 @@ async fn status(
     let actor = super::wfe::extract_actor(&headers)?;
     let nodes = authorized_nodes(&s, &actor, wfe_id).await?;
     let wfd = load_wfd(&s, wfe_id).await?;
+    let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
 
     let mut map = BTreeMap::new();
     for node in nodes {
-        let groups = status_for_node(&s.attachments, &wfd, wfe_id, &node)
+        // Node geneli liste — aksiyon sorulmadı; kapsam süzmesini istemci `actions`
+        // alanından yapar (`satisfied` burada "hiçbir aksiyon engelli değil" demektir).
+        let groups = status_for_node(&store, &wfd, wfe_id, &node, None)
             .await
             .map_err(|e| {
                 AppError(

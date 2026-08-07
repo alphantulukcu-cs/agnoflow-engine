@@ -130,7 +130,7 @@
     },
     "self__branchManager": {
       "label": "Şube Müdürü Havuzu",
-      "description": "Nihai karar için şube müdürü havuzu. Başvuru + onay belgeleri yüklü olmadan karar submit edilemez.",
+      "description": "Nihai karar için şube müdürü havuzu. Başvuru belgeleri her aksiyon için, onay belgeleri yalnız 'manager_decide' için kapıdır.",
       "c_a": {
         "c_orgu": "self",
         "c_r": [
@@ -139,7 +139,12 @@
       },
       "attachments": [
         "basvuru_belgeleri",
-        "onay_belgeleri"
+        {
+          "group": "onay_belgeleri",
+          "actions": [
+            "manager_decide"
+          ]
+        }
       ]
     }
   },

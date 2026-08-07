@@ -919,6 +919,97 @@ fn attachment_ref_to_unknown_group_is_error() {
 }
 
 #[test]
+fn attachment_scoped_ref_to_unknown_action_is_error() {
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    // `analyst_approve` bu node'dan değil, analist node'undan çıkar — kapsam hiç uygulanmaz.
+    v["nodes"]["self__branchManager"]["attachments"] = json!([
+        { "group": "onay_belgeleri", "actions": ["analyst_approve"] }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "attachment_action_ref"),
+        "node'dan çıkmayan aksiyona kapsam hata vermeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn attachment_scoped_ref_duplicate_action_is_error() {
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    v["nodes"]["self__branchManager"]["attachments"] = json!([
+        { "group": "onay_belgeleri", "actions": ["manager_decide", "manager_decide"] }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "attachment_action_dup"),
+        "kapsamda tekrar eden aksiyon hata vermeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn attachment_scoped_ref_with_empty_actions_is_clean() {
+    // `actions: []` = hiçbir aksiyonu kapamaz (opsiyonel yükleme) — geçerli bir bildirim.
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    v["nodes"]["self__branchManager"]["attachments"] = json!([
+        { "group": "onay_belgeleri", "actions": [] }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .all(|e| !e.code.starts_with("attachment_")),
+        "boş kapsam hata üretmemeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn attachment_scope_on_start_action_is_clean() {
+    // Başlatma aksiyonu da belge isteyebilir; `start[].action` bir transition DEĞİLDİR,
+    // yalnız transition'lara bakan bir erişilebilirlik kontrolü bunu yanlışlıkla reddederdi.
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    v["nodes"]["type_branch__branchClerk"]["attachments"] = json!([
+        { "group": "basvuru_belgeleri", "actions": ["create_application"] }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .all(|e| !e.code.starts_with("attachment_")),
+        "start aksiyonuna konan kapsam hata üretmemeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn attachment_scoped_ref_duplicate_group_is_error() {
+    // Kapsam biçimi tekrar denetimini atlatmamalı: aynı grup iki kez, biri scoped.
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    v["nodes"]["self__branchManager"]["attachments"] = json!([
+        "onay_belgeleri",
+        { "group": "onay_belgeleri", "actions": ["manager_decide"] }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "attachment_ref_dup"),
+        "aynı grup iki referansta hata vermeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
 fn attachment_duplicate_item_id_is_error() {
     let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
     v["attachments"]["basvuru_belgeleri"]["items"] = json!([
@@ -2342,4 +2433,68 @@ fn node_key_unchanged_by_cu_item_union() {
     // fixture'ın kendi slug kuralıyla doğrulanmasına dayanır (`check_slugs`).
     let report = validate_value(fixture_value());
     assert!(!has_error(&report, "slug"), "slug hatası: {:#?}", report.errors);
+}
+
+// ─── Sayısal agregat (sum/avg/min/max/median/mode) ────────────────
+//
+// Regresyon: `type_of` fonksiyon sonucunu bilerek `Unknown` sayar, dolayısıyla
+// `avg(map($wfah, #.action)) > 0` HİÇBİR kurala takılmıyordu — editörün toplama satırı
+// bunu üretebiliyor, yayın kapısı "temiz" diyor, koşul çalışma anında
+// "Expected a number array" ile patlıyordu.
+
+#[test]
+fn numeric_agg_over_text_field_is_error() {
+    assert!(
+        errors_for_when("avg(map($wfah, #.action)) > 0").contains(&"zen_agg_not_numeric".to_string()),
+        "metin alanında ortalama reddedilmeli"
+    );
+    for fnname in ["sum", "avg", "min", "max", "median", "mode"] {
+        assert!(
+            errors_for_when(&format!("{fnname}(map($wfah, #.actor.role)) > 0"))
+                .contains(&"zen_agg_not_numeric".to_string()),
+            "{fnname} metin dizisinde reddedilmeli"
+        );
+    }
+}
+
+#[test]
+fn numeric_agg_over_object_field_is_error() {
+    // `#.actor` bir nesnedir — dizi elemanı olarak da sayı değildir.
+    assert!(errors_for_when("sum(map($wfah, #.actor)) > 0")
+        .contains(&"zen_agg_not_numeric".to_string()));
+}
+
+#[test]
+fn numeric_agg_over_number_field_is_clean() {
+    let report = validate_value(fixture_with_when("sum(map($wfah, #.seq)) > 0"));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn numeric_agg_over_filtered_history_is_clean() {
+    let report = validate_value(fixture_with_when(
+        r#"sum(map(filter($wfah, #.action == "analyst_approve"), #.seq)) > 0"#,
+    ));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn unguarded_avg_over_whole_history_warns_but_publishes() {
+    // Boş geçmişte `avg([])` patlar — ama koşulun konulduğu yerde geçmişin dolu olduğu
+    // garanti olabilir, o yüzden UYARI (yayını engellemez).
+    let report = validate_value(fixture_with_when("avg(map($wfah, #.seq)) > 0"));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+    let codes: Vec<String> = report.warnings.into_iter().map(|w| w.code).collect();
+    assert!(
+        codes.contains(&"zen_agg_empty_history".to_string()),
+        "süzgeçsiz avg uyarı vermeli, uyarılar: {codes:#?}"
+    );
+}
+
+#[test]
+fn sum_over_whole_history_does_not_warn() {
+    // `sum([])` sıfırdır — boş geçmiş riski YOK.
+    let report = validate_value(fixture_with_when("sum(map($wfah, #.seq)) > 0"));
+    let codes: Vec<String> = report.warnings.into_iter().map(|w| w.code).collect();
+    assert!(!codes.contains(&"zen_agg_empty_history".to_string()), "uyarılar: {codes:#?}");
 }

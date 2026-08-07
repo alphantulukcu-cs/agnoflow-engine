@@ -157,6 +157,36 @@
     }
   },
   "$defs": {
+    "attachmentRef": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/idName",
+          "description": "Duz grup key'i - grup bu node'da toplanir ve node'un TUM aksiyonlarina kapidir."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "group"
+          ],
+          "properties": {
+            "group": {
+              "$ref": "#/$defs/idName",
+              "description": "Root attachments katalogundaki grup key'i."
+            },
+            "actions": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "$ref": "#/$defs/idName"
+              },
+              "description": "Bu grubun KAPI oldugu aksiyonlar - yalniz bunlar yukleme olmadan submit edilemez, node'un diger aksiyonlari serbesttir. Sayilan her aksiyon bu node'dan cikan bir transition'da bulunmalidir (validator attachment_action_ref). BOS dizi = hicbir aksiyonu kapamaz (opsiyonel yukleme). Alan HIC verilmezse duz string ile ayni: tum aksiyonlar. 'verilmedi' ile 'bos verildi' ZIT anlamlidir."
+            }
+          }
+        }
+      ],
+      "description": "Bir node'un ek-belge referansi. Iki bicim de 'bu grup bu node'da toplanir' der; ayrildiklari yer KAPIDIR (hangi aksiyon dosya yuklenmeden submit edilemez)."
+    },
     "attachmentGroup": {
       "type": "object",
       "additionalProperties": false,
@@ -854,9 +884,9 @@
           "minItems": 1,
           "uniqueItems": true,
           "items": {
-            "$ref": "#/$defs/idName"
+            "$ref": "#/$defs/attachmentRef"
           },
-          "description": "Root 'attachments' katalogundaki grup key'lerine referans. WFE bu node'da beklerken, listelenen gruplarin 'required' dosyalari yuklenmeden bu node'dan HICBIR aksiyon submit edilemez (portal katmani opendal exists ile dogrular; engine core dosya I/O yapmaz - yalniz metadata tasir). Ayni grup birden fazla node'dan referanslanabilir; dosyalar wfe_id+grup+item ile saklandigindan tekrar yuklenmesi gerekmez."
+          "description": "Root 'attachments' katalogundaki grup key'lerine referans - bu node'da hangi dosyalarin TOPLANDIGI. Duz string bicimi grubu node'un TUM aksiyonlarina kapi yapar (yuklenmeden hicbir aksiyon submit edilemez); {group, actions} bicimi yalniz sayilan aksiyonlara kapi yapar. Portal katmani opendal exists ile dogrular; engine core dosya I/O yapmaz - yalniz metadata tasir. Ayni grup birden fazla node'dan referanslanabilir; dosyalar wfe_id+grup+item ile saklandigindan tekrar yuklenmesi gerekmez."
         },
         "call": {
           "$ref": "#/$defs/callRef",

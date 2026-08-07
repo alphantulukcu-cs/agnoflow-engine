@@ -56,7 +56,27 @@ pub struct NodeDef {
     #[serde(default)]
     pub claim_timeout: Option<ClaimTimeout>, // SLA-1: claim eden aktor zamaninda aksiyon almazsa
     #[serde(default)]
-    pub attachments: Vec<String>,     // root attachments katalogundaki grup key referanslari
+    pub attachments: Vec<AttachmentRef>, // root attachments katalogundaki grup referanslari
+}
+
+/// Node'un ek-belge referansi. Iki bicim de "bu grup burada TOPLANIR" der; fark KAPIDIR.
+/// - `"grup"`                                -> node'un TUM aksiyonlarina kapi
+/// - `{"group":"grup","actions":["onayla"]}` -> yalniz sayilan aksiyonlara kapi
+/// - `{"group":"grup","actions":[]}`         -> hicbir aksiyonu kapamaz (opsiyonel yukleme)
+/// `actions` Option'dir: "verilmedi" (tumu) ile "bos verildi" (hicbiri) zit anlamlidir.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum AttachmentRef {
+    Group(String),
+    Scoped(ScopedAttachmentRef),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedAttachmentRef {
+    pub group: String,
+    #[serde(default)]
+    pub actions: Option<Vec<String>>, // None = tum aksiyonlar
 }
 
 /// SLA-1. Sure claim anindan itibaren olculur. `wft` verilmezse claim temizlenir

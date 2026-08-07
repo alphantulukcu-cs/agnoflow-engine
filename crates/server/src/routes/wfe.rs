@@ -180,8 +180,15 @@ async fn apply_action(
         // Paralelde current_node None'dur; kol seçimi body.node ile gelir.
         let target_node = body.node.clone().or(view.current_node.clone());
         if let Some(node) = &target_node {
+            let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
             let groups =
-                crate::attachments::status_for_node(&s.attachments, &wfd, wfe_id, node)
+                crate::attachments::status_for_node(
+                    &store,
+                    &wfd,
+                    wfe_id,
+                    node,
+                    Some(body.action.as_str()),
+                )
                     .await
                     .map_err(|e| {
                         AppError(

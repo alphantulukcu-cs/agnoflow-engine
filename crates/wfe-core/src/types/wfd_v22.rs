@@ -107,12 +107,13 @@ pub struct NodeDef {
     /// SLA-1 (2026-07-16): claim eden aktör `after` içinde aksiyon almazsa tetiklenir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim_timeout: Option<ClaimTimeout>,
-    /// Root `attachments` katalogundaki grup key'lerine referans. WFE bu node'da
-    /// beklerken listelenen grupların `required` dosyaları yüklenmeden bu node'dan
-    /// hiçbir aksiyon submit edilemez (gate portal katmanındadır; engine core dosya
-    /// I/O yapmaz, yalnız referansı taşır ve validator ile katalogda var olduğunu doğrular).
+    /// Root `attachments` katalogundaki grup key'lerine referans — bu node'da hangi
+    /// dosyaların TOPLANDIĞI. Düz string biçimi grubu o node'un TÜM aksiyonlarına kapı
+    /// yapar; `{group, actions}` biçimi yalnız sayılan aksiyonlara (bkz. `AttachmentRef`).
+    /// Gate portal katmanındadır; engine core dosya I/O yapmaz, yalnız referansı taşır ve
+    /// validator ile katalogda var olduğunu doğrular.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attachments: Vec<String>,
+    pub attachments: Vec<AttachmentRef>,
     /// WFC — alt akış çağrısı (`mode: wait | detached`). Bu bloğu taşıyan node bir
     /// **WFC node**'udur: insan ACT'i alınamaz, çıkışı `call.wft`'dir. Bekleme bir
     /// DURUMdur; bu yüzden çağrı transition'da değil node'da durur.
@@ -377,6 +378,63 @@ pub struct ActionDef {
 pub struct InputDef {
     pub required: Vec<String>,
     pub optional: Vec<String>,
+}
+
+/// Bir node'un ek-belge referansı. İki biçim de "bu grup bu node'da TOPLANIR" der;
+/// ayrıldıkları yer KAPIDIR (hangi aksiyon yükleme olmadan submit edilemez):
+/// - `"grup"` — node'un TÜM aksiyonlarına kapı (v2.2'nin ilk biçimi; eski dosyalar aynen çalışır).
+/// - `{"group":"grup","actions":["onayla"]}` — yalnız sayılan aksiyonlara kapı; diğer
+///   aksiyonlar dosya yüklenmeden submit edilebilir.
+/// - `{"group":"grup","actions":[]}` — hiçbir aksiyonu kapamaz (opsiyonel yükleme).
+/// - `{"group":"grup"}` (`actions` yok) — düz string ile aynı: tüm aksiyonlar.
+///
+/// `actions` bir `Vec` DEĞİL `Option<Vec>`tir: "verilmedi" (tümü) ile "boş verildi"
+/// (hiçbiri) zıt anlamlıdır, `#[serde(default)]` bir Vec bu ikisini aynı gösterirdi.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AttachmentRef {
+    /// Düz grup key'i — tüm aksiyonlara kapı.
+    Group(String),
+    /// Aksiyon kapsamlı referans.
+    Scoped(ScopedAttachmentRef),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScopedAttachmentRef {
+    pub group: String,
+    /// `None` = tüm aksiyonlar; `Some([])` = hiçbiri; `Some([a, b])` = yalnız a ve b.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<String>>,
+}
+
+impl AttachmentRef {
+    /// Referans edilen katalog grubunun key'i.
+    pub fn group(&self) -> &str {
+        match self {
+            AttachmentRef::Group(g) => g,
+            AttachmentRef::Scoped(s) => &s.group,
+        }
+    }
+
+    /// Kapsam listesi — `None` ise tüm aksiyonlar kapılıdır.
+    pub fn actions(&self) -> Option<&[String]> {
+        match self {
+            AttachmentRef::Group(_) => None,
+            AttachmentRef::Scoped(s) => s.actions.as_deref(),
+        }
+    }
+
+    /// Bu referans verilen aksiyonu kapıyor mu? `action` bilinmiyorsa (`None` — node
+    /// geneli durum sorgusu) kapsam gözetilmeden `true`: durum listesi her şeyi gösterir,
+    /// hangi satırın gerçekten kapı olduğunu istemci `actions` alanından okur.
+    pub fn gates_action(&self, action: Option<&str>) -> bool {
+        match (self.actions(), action) {
+            (None, _) => true,
+            (Some(_), None) => true,
+            (Some(list), Some(a)) => list.iter().any(|x| x == a),
+        }
+    }
 }
 
 /// Ek-belge katalog grubu. Bir veya daha fazla dosya slotu (item) içerir.

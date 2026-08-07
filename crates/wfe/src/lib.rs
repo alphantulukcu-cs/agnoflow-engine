@@ -7,6 +7,7 @@ pub mod org_adapter;
 pub mod priority;
 pub mod repo;
 pub mod runner;
+pub mod scenario;
 pub mod sim;
 pub mod timer;
 pub mod wfe_adapter;

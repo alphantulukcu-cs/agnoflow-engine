@@ -431,6 +431,11 @@ impl WfdAdapter {
         if let Ok(Some(layout)) = self.fetch_layout(src_id, src_version).await {
             let _ = self.save_layout(created.0, created.1, &layout).await;
         }
+        // Senaryolar (kaydedilmiş simülasyon koşuları) da yeni drafta taşınır:
+        // yeni versiyon eskinin regresyon testleriyle karşılanmalı (best-effort).
+        if let Ok(Some(scenarios)) = self.fetch_scenarios(src_id, src_version).await {
+            let _ = self.save_scenarios(created.0, created.1, &scenarios).await;
+        }
         Ok(created)
     }
 
@@ -481,6 +486,66 @@ impl WfdAdapter {
         }
     }
 
+    /// Versiyonun HAM JSON'unu döner — status'e bakmaz. `fetch_draft_json`
+    /// yalnız draft'a izin verir, `fetch` ise parse edilmiş `Wfd` döner;
+    /// senaryo koşucusuna ise `terminals[]` kataloğunu okuyabilmek için ham
+    /// belge lazım (bkz. `wf_wfe::scenario::infer_terminal_id`).
+    pub async fn fetch_json_any(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<Value, crate::error::WfdError> {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        let bytes = self
+            .storage
+            .read(&meta.s3_key)
+            .await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?
+            .to_bytes();
+        serde_json::from_slice(&bytes)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))
+    }
+
+    /// Senaryo sidecar'ını (opaque JSON) yazar. Şema-VALID doküman DEĞİLDİR;
+    /// parse/validate YOK — şekli `wf_wfe::scenario::ScenarioSet` tarafında
+    /// doğrulanır. Versiyonun var olduğunu doğrular (herhangi status: yayınlanmış
+    /// akışa test eklemek akışı değiştirmez).
+    pub async fn save_scenarios(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        scenarios: &Value,
+    ) -> Result<(), crate::error::WfdError> {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        let key = storage::scenarios_key(meta.orgtnt_id, wfd_id, version);
+        let bytes = serde_json::to_vec(scenarios)
+            .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
+        self.storage
+            .write(&key, bytes)
+            .await
+            .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Senaryo sidecar'ını döner; blob yoksa None (hata değil — henüz senaryo
+    /// yazılmamış WFD'ler bu yoldan geçer).
+    pub async fn fetch_scenarios(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+    ) -> Result<Option<Value>, crate::error::WfdError> {
+        let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
+        let key = storage::scenarios_key(meta.orgtnt_id, wfd_id, version);
+        match self.storage.read(&key).await {
+            Ok(buf) => Ok(Some(
+                serde_json::from_slice(&buf.to_bytes())
+                    .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?,
+            )),
+            Err(e) if e.kind() == opendal::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(crate::error::WfdError::Storage(e.to_string())),
+        }
+    }
+
     /// Draft'ı iskarta eder (JSON + satır). Published dokunulmaz.
     pub async fn delete_draft(
         &self,
@@ -497,6 +562,17 @@ impl WfdAdapter {
         // storage'ı best-effort temizle. Eşzamanlı publish JSON'u korur.
         repo::delete_draft(&self.pool, wfd_id, version).await?;
         let _ = self.storage.delete(&meta.s3_key).await;
+        // Sidecar'lar da gider — aksi halde storage'da öksüz blob birikir.
+        // (Layout bugüne kadar temizlenmiyordu; senaryo sidecar'ını eklerken
+        // yanına ikinci bir öksüz bırakmak anlamsız olurdu.)
+        let _ = self
+            .storage
+            .delete(&storage::layout_key(meta.orgtnt_id, wfd_id, version))
+            .await;
+        let _ = self
+            .storage
+            .delete(&storage::scenarios_key(meta.orgtnt_id, wfd_id, version))
+            .await;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
     }

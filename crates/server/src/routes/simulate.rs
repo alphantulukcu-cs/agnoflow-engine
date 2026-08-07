@@ -13,7 +13,6 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
-use uuid::Uuid;
 use wf_wfe::{
     executor::{active_branch_nodes, PossibleAction},
     sim::SimState,
@@ -172,19 +171,19 @@ async fn sim_start(
         .await
         .map_err(AppError::from)?;
 
-    let new = engine
-        .start(
-            &wfd,
-            &body.actor,
-            orgtnt_id,
-            body.action.as_deref(),
-            &body.input,
-            Uuid::new_v4(),
-            None, // simülasyonda SLA-3 deadline izlenmez
-        )
-        .await
-        .map_err(AppError::from)?;
-    let sim_state = SimState::from_new_wfe(&new);
+    // Adım mantığı `wf_wfe::sim::step`'te — senaryo koşucusu ile ORTAK
+    // (ayrı yazılsalardı simülasyonda geçen bir senaryo koşucuda kalabilirdi).
+    // Simülasyonda SLA-3 deadline izlenmez; yardımcı da `None` geçer.
+    let sim_state = wf_wfe::sim::step::start(
+        &engine,
+        &wfd,
+        &body.actor,
+        orgtnt_id,
+        body.action.as_deref(),
+        &body.input,
+    )
+    .await
+    .map_err(AppError::from)?;
 
     let possible_actions = sim_actions_for(&engine, &wfd, &sim_state, &body.actor).await?;
 
@@ -258,26 +257,20 @@ async fn sim_apply(
         ));
     }
 
-    // simülasyon claim'i atlar — state uygulanmadan önce aktöre atanır
-    let wfes = sim_state.to_wfes(Some(body.actor.user_id));
+    // simülasyon claim'i atlar — yardımcı state'i uygulamadan önce aktöre atar
+    wf_wfe::sim::step::apply(
+        &engine,
+        &wfd,
+        &mut sim_state,
+        &body.actor,
+        &body.action,
+        &body.input,
+        body.node.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
 
-    let commit = engine
-        .apply(
-            &wfd,
-            &wfes,
-            &body.actor,
-            &body.action,
-            &body.input,
-            body.node.as_deref(),
-        )
-        .await
-        .map_err(AppError::from)?;
-    sim_state.apply_commit(&commit);
-
-    let terminal = matches!(
-        sim_state.status,
-        wfe_core::types::wfe::WfeStatus::Terminal | wfe_core::types::wfe::WfeStatus::Terminated
-    );
+    let terminal = wf_wfe::sim::step::is_terminal(&sim_state);
     let possible_actions = if terminal {
         vec![]
     } else {
@@ -355,37 +348,26 @@ async fn sim_call_return(
     };
 
     let mut sim_state = body.sim_state;
-    let awaited = sim_state.awaited_call().cloned().ok_or_else(|| {
-        AppError(
-            "bu adımda çözülmeyi bekleyen bir iş akışı çağrısı yok".into(),
-            StatusCode::CONFLICT,
-        )
-    })?;
 
     // WFC-RETURN'ü system tetikler; simülasyonda claim bypass'ı gibi aktör de
     // engine tarafından üretilir (fire_call_return kendi system aktörünü kurar).
-    let wfes = sim_state.to_wfes(None);
-    let commit = engine
-        .fire_call_return(
-            &wfd,
-            &wfes,
-            &body.status,
-            None, // simülasyonda gerçek bir çağrılan WFE yoktur
-            body.result.as_ref(),
-            // Simülasyonda gerçek bir çağrılan WFE yok — işlenecek geçmiş de yok.
-            &[],
-            chrono::Utc::now(),
-        )
-        .await
-        .map_err(AppError::from)?;
+    // Simülasyonda gerçek bir çağrılan WFE yok — işlenecek geçmiş de yok.
+    wf_wfe::sim::step::call_return(
+        &engine,
+        &wfd,
+        &mut sim_state,
+        &body.status,
+        body.result.as_ref(),
+    )
+    .await
+    .map_err(|e| match e {
+        wf_wfe::sim::step::CallReturnError::NoAwaitedCall => {
+            AppError(e.to_string(), StatusCode::CONFLICT)
+        }
+        wf_wfe::sim::step::CallReturnError::Engine(inner) => AppError::from(inner),
+    })?;
 
-    sim_state.apply_commit(&commit);
-    sim_state.clear_awaited_call(&awaited.site_key);
-
-    let terminal = matches!(
-        sim_state.status,
-        wfe_core::types::wfe::WfeStatus::Terminal | wfe_core::types::wfe::WfeStatus::Terminated
-    );
+    let terminal = wf_wfe::sim::step::is_terminal(&sim_state);
     // Dönüşten sonra sıradaki aksiyonlar SORULAMAZ: WFC-RETURN'ü bir aktör tetiklemez,
     // dolayısıyla "hangi aktörün gözünden" sorusunun cevabı yok. Editör bir sonraki
     // /possible-actions çağrısında kendi seçtiği aktörle sorar.

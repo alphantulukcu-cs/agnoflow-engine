@@ -9,6 +9,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::routes;
 use uuid::Uuid;
@@ -38,6 +39,8 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(wfe_usage))
         .routes(routes!(get_layout, put_layout))
         .routes(routes!(get_scenarios, put_scenarios))
+        .routes(routes!(run_scenarios))
+        .routes(routes!(run_one_scenario))
         .with_state(state)
 }
 
@@ -840,6 +843,145 @@ async fn put_scenarios(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(map_wfd_err)
+}
+
+#[derive(Deserialize, ToSchema)]
+struct RunScenariosBody {
+    /// Verilirse BU doküman koşar (editördeki kaydedilmemiş hâl); verilmezse
+    /// depodaki `(id, version)` dokümanı.
+    #[serde(default)]
+    wfd: Option<Value>,
+    /// Senaryo/adım aktörü eksikse kullanılacak yedek aktör.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    fallback_actor: Option<wfe_core::types::actor::Actor>,
+    /// Yalnız bu yol önekindeki senaryolar koşar (`"Onaylar"` → `"Onaylar/..."` dahil).
+    #[serde(default)]
+    path_prefix: Option<String>,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+struct RunScenariosResponse {
+    #[schema(value_type = Vec<Object>)]
+    results: Vec<wf_wfe::scenario::ScenarioResult>,
+}
+
+/// Setten senaryoları yükler, dokümanı çözer ve koşar. `only` verilirse yalnız
+/// o id'li senaryo koşar (tek-senaryo ucu bunu kullanır).
+///
+/// Koşu HİÇBİR ŞEY YAZMAZ: `sim` durumsuzdur, WFE yaratılmaz, WFAH'a iz düşmez.
+async fn run_scenarios_inner(
+    s: &AppState,
+    auth: &AppAuth,
+    id: Uuid,
+    ver: i32,
+    body: RunScenariosBody,
+    only: Option<&str>,
+) -> Result<Json<RunScenariosResponse>, AppError> {
+    require_design_on_wfd(s, auth, id, ver).await?;
+
+    // Doküman: gövdeden ya da depodan. İki yol da AYNI kapıdan geçer.
+    let wfd_json = match body.wfd {
+        Some(v) => v,
+        None => s.wfd.fetch_json_any(id, ver).await.map_err(map_wfd_err)?,
+    };
+    let wfd = wfe_core::types::wfd_v22::Wfd::from_value(wfd_json.clone())
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    let report = wfe_core::validator::validate(&wfd);
+    if !report.is_valid() {
+        let summary = report
+            .errors
+            .iter()
+            .map(|e| format!("[{}] {}: {}", e.code, e.path, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError(
+            format!("WFD geçersiz: {summary}"),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+
+    let raw = s.wfd.fetch_scenarios(id, ver).await.map_err(map_wfd_err)?;
+    let set: wf_wfe::scenario::ScenarioSet = match raw {
+        Some(v) => serde_json::from_value(v).map_err(|e| {
+            AppError(
+                format!("senaryo seti geçersiz: {e}"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            )
+        })?,
+        None => Default::default(),
+    };
+
+    let selected: Vec<_> = set
+        .scenarios
+        .iter()
+        .filter(|sc| only.is_none_or(|o| sc.id == o))
+        .filter(|sc| {
+            body.path_prefix
+                .as_ref()
+                .is_none_or(|p| sc.path == *p || sc.path.starts_with(&format!("{p}/")))
+        })
+        .collect();
+
+    if let Some(o) = only {
+        if selected.is_empty() {
+            return Err(AppError(
+                format!("senaryo bulunamadı: {o}"),
+                StatusCode::NOT_FOUND,
+            ));
+        }
+    }
+
+    let org = Arc::new(wf_wfe::OrgAdapter::new(s.pool.clone()));
+    let runner = wf_wfe::LiveAutoexecRunner::new(Some(s.pool.clone()));
+    let mut results = Vec::with_capacity(selected.len());
+    for sc in selected {
+        // $env senaryo başına çözülür — her senaryo kendi ortamını söyleyebilir.
+        let engine = wfe_core::v22::pipeline::Engine {
+            org: &*org,
+            exec: &runner,
+            env: crate::routes::env::resolve_run_env(
+                &s.pool,
+                Some(auth.orgtnt_id),
+                Some(id),
+                sc.environment.as_deref(),
+            )
+            .await?,
+        };
+        results.push(
+            wf_wfe::scenario::run(&engine, &wfd, &wfd_json, sc, body.fallback_actor.as_ref()).await,
+        );
+    }
+    Ok(Json(RunScenariosResponse { results }))
+}
+
+#[utoipa::path(post, path = "/{id}/{version}/scenarios/run", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    request_body = RunScenariosBody,
+    responses((status = 200, description = "Her senaryo için sonuç", body = RunScenariosResponse)),
+    security(("bearer_jwt" = [])))]
+async fn run_scenarios(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+    Json(body): Json<RunScenariosBody>,
+) -> Result<Json<RunScenariosResponse>, AppError> {
+    run_scenarios_inner(&s, &auth, id, ver, body, None).await
+}
+
+#[utoipa::path(post, path = "/{id}/{version}/scenarios/{sid}/run", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon"),
+           ("sid" = String, Path, description = "Senaryo id")),
+    request_body = RunScenariosBody,
+    responses((status = 200, description = "Tek senaryonun sonucu", body = RunScenariosResponse)),
+    security(("bearer_jwt" = [])))]
+async fn run_one_scenario(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver, sid)): Path<(Uuid, i32, String)>,
+    Json(body): Json<RunScenariosBody>,
+) -> Result<Json<RunScenariosResponse>, AppError> {
+    run_scenarios_inner(&s, &auth, id, ver, body, Some(&sid)).await
 }
 
 #[derive(Deserialize, ToSchema)]

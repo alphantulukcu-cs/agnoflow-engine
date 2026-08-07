@@ -393,6 +393,18 @@ mod validate_expression_tests {
         assert_eq!(expression_report(&owned, Some(&draft))["typed"], false);
     }
 
+    /// Editörün TOPLAMA satırının ürettiği ifade de bu rotadan geçer (kurucu artık ZEN
+    /// kutusundaki metnin TAMAMINI gönderiyor, satır türüne bakmıyor). `#.action` bir
+    /// metindir; `avg` sayı dizisi ister — satır yazılırken reddedilmeli, Yayınla'ya
+    /// kalmamalı.
+    #[test]
+    fn numeric_agg_over_text_field_is_rejected_by_the_route() {
+        let wfd = golden();
+        let out = report_with(&["avg(map($wfah, #.action)) > 0"], Some(&wfd));
+        assert_eq!(out[0]["ok"], false, "{:?}", out[0]);
+        assert_eq!(out[0]["errors"][0]["code"], "zen_agg_not_numeric");
+    }
+
     #[test]
     fn valid_expression_stays_clean_with_the_document() {
         let wfd = golden();

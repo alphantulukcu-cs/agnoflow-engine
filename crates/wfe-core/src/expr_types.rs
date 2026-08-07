@@ -62,6 +62,20 @@ const WFAH_TIMESTAMP_FIELDS: &[&str] = &["at"];
 /// (`contains` sayıda `Err`, `startsWith` sayıda sessizce yanlış).
 const TEXT_OPS: &[&str] = &["contains", "startsWith", "endsWith", "matches"];
 
+/// Sayısal AGREGAT fonksiyonları — editörün `ZEN_AGG_FUNCTIONS`'ı ile AYNI küme.
+///
+/// Altısının da motordaki imzası `Number[] -> Number`dır
+/// (`zen-expression::functions::internal`; `min`/`max` ek olarak `Date[]` kabul eder ama
+/// bu modelde tarih tipi YOK — `#.at` bir `string`dir, `Date[]` imzasına da uymaz).
+/// Çalışma anında eleman sayı değilse `as_number()` `None` döner ve fonksiyon
+/// `"Expected a number array"` ile patlar → geçiş değerlendirmesinde HTTP 500.
+const NUMERIC_AGGS: &[&str] = &["sum", "avg", "min", "max", "median", "mode"];
+
+/// Boş dizide PATLAYAN agregatlar. `sum([])` 0 döner (zararsız), ama `avg`/`median`/
+/// `mode`/`min`/`max` boş dizide `"Empty array"` / "Index out of bounds" hatası verir —
+/// yani geçmişi boş bir WFE'de koşul `false` OKUMAZ, değerlendirme patlar.
+const EMPTY_UNSAFE_AGGS: &[&str] = &["avg", "min", "max", "median", "mode"];
+
 /// Zaman damgası sabiti geçerli mi. `exact` = TAM damga şart (`==`/`!=`/`in`) yoksa geçerli
 /// bir ÖNEK yeterli (`startsWith`). Önek uzunlukları anlamlı sınırlardır: yıl(4) · ay(6) ·
 /// gün(8) · saat(10) · dakika(12) · saniye(14) — `2026011` yarım bir alandır, hiçbir şey
@@ -557,6 +571,106 @@ impl<'e, 'a> Checker<'e, 'a> {
         }
     }
 
+    /// Bir altağaçtaki TÜM fonksiyon çağrılarına çağrı kurallarını uygular.
+    ///
+    /// `visit`in `FunctionCall` dalı yalnız çağrı bir DEYİM konumundayken çalışır; bir
+    /// karşılaştırmanın operandı olarak duran çağrıya (`avg(...) > 0`, `len(...) == 2`)
+    /// hiç uğramaz. Bu yürüyüş o boşluğu kapatır — kapı durumu taşımaz, çünkü operandın
+    /// içinde aksiyon kapısı diye bir şey yoktur.
+    fn check_calls<'n>(&mut self, node: &'n Node<'n>) {
+        match node {
+            Node::FunctionCall { kind, arguments } => {
+                let fname = kind.to_string();
+                self.check_text_op(&fname, arguments);
+                self.check_numeric_agg(&fname, arguments);
+                for a in *arguments {
+                    self.check_calls(a);
+                }
+            }
+            Node::MethodCall { this, arguments, .. } => {
+                self.check_calls(this);
+                for a in *arguments {
+                    self.check_calls(a);
+                }
+            }
+            Node::Parenthesized(inner) => self.check_calls(inner),
+            Node::Unary { node, .. } => self.check_calls(node),
+            Node::Closure { body, .. } => self.check_calls(body),
+            Node::Binary { left, right, .. } => {
+                self.check_calls(left);
+                self.check_calls(right);
+            }
+            _ => {}
+        }
+    }
+
+    /// Sayısal agregatın (`sum`/`avg`/`min`/`max`/`median`/`mode`) topladığı elemanlar
+    /// SAYI mı — ve dizi boş kalabiliyor mu.
+    ///
+    /// Neden ayrı bir kural: `type_of` fonksiyon sonucunu bilerek `Unknown` sayar
+    /// (`d(#.at) > d($ctx.son)` gibi meşru çağrılar yanlış yere hata almasın), dolayısıyla
+    /// `avg(map($wfah, #.action)) > 0` HİÇBİR kurala takılmıyordu: `Compare`ın sol tarafı
+    /// `Unknown`dır, sağ tarafı sayıdır, ifade "temiz" görünüp yayınlanıyordu. Oysa
+    /// `#.action` bir metindir; koşul çalışma anında patlar. Kuralın kapsamı DAR:
+    /// yalnızca `map(<kaynak>, <projeksiyon>)` biçiminde çözülebilen eleman tipine bakar.
+    fn check_numeric_agg<'n>(&mut self, name: &str, arguments: &'n [&'n Node<'n>]) {
+        if !NUMERIC_AGGS.contains(&name) || arguments.len() != 1 {
+            return;
+        }
+        let mut arg = arguments[0];
+        while let Node::Parenthesized(inner) = arg {
+            arg = inner;
+        }
+        let Node::FunctionCall {
+            kind: inner_kind,
+            arguments: map_args,
+        } = arg
+        else {
+            return;
+        };
+        if inner_kind.to_string() != "map" || map_args.len() != 2 {
+            return;
+        }
+        // `map`in ikinci argümanı bir kapanıştır (`#.action`); ayrıştırıcı kimi biçimde
+        // gövdeyi çıplak da verebilir — iki şekli de kabul et.
+        let projection = match map_args[1] {
+            Node::Closure { body, .. } => body,
+            other => other,
+        };
+        let et = type_of(projection, self.env);
+        if matches!(et, Ty::Str | Ty::Bool | Ty::Obj | Ty::Arr) {
+            self.out.push((
+                "zen_agg_not_numeric",
+                true,
+                format!(
+                    "'{}' {} tipinde — '{name}' yalnız SAYI dizisi toplar, motor \
+                     çalışma anında \"Expected a number array\" ile patlar. Sayısal bir \
+                     alan seçin",
+                    describe(projection),
+                    et.label()
+                ),
+            ));
+            return;
+        }
+        // Boş dizi riski: `$wfah` doğrudan toplanıyorsa (yordam/filtre YOK) geçmişi boş
+        // bir WFE'de dizi boştur. Hata DEĞİL uyarı: koşulun konulduğu yerde geçmişin dolu
+        // olduğu garanti olabilir (ilk adımdan sonraki bir geçiş) — bunu ifade metninden
+        // bilemeyiz. `sum` listede yok, boş dizide 0 döner.
+        if EMPTY_UNSAFE_AGGS.contains(&name)
+            && matches!(flatten_path(map_args[0]), Some((Root::Known(Ty::Arr), p)) if p.is_empty())
+        {
+            self.out.push((
+                "zen_agg_empty_history",
+                false,
+                format!(
+                    "'{name}' boş dizide hata verir ve `$wfah` süzgeçsiz toplanıyor — \
+                     geçmişi boş bir WFE'de koşul false OKUMAZ, değerlendirme patlar. \
+                     Toplamayı bir yordamla daraltın ya da `len($wfah) > 0` ile kapılayın"
+                ),
+            ));
+        }
+    }
+
     /// Bir karşılaştırmanın iki tarafını denetler.
     fn check_comparison<'n>(
         &mut self,
@@ -730,6 +844,14 @@ impl<'e, 'a> Checker<'e, 'a> {
                 right,
             } => {
                 self.check_comparison(left, *op, right, gated);
+                // Karşılaştırmanın OPERANDLARINDAKİ fonksiyon çağrıları da denetlenir.
+                // `collect_fields` yalnız `$wfah` alan adlarını toplar; `visit`in
+                // `FunctionCall` dalına hiç girilmediği için `avg(map($wfah, #.action)) > 0`
+                // gibi bir ifadede sol taraftaki çağrı hiçbir kurala takılmıyordu.
+                // `visit` çağırmak yerine ayrı bir yürüyüş: operand bir karşılaştırma
+                // ALTAĞACI değildir, kapı (`gated`) durumunu yeniden yorumlamamalı.
+                self.check_calls(left);
+                self.check_calls(right);
                 self.collect_fields(left);
                 self.collect_fields(right);
             }
@@ -743,7 +865,9 @@ impl<'e, 'a> Checker<'e, 'a> {
             Node::FunctionCall { kind, arguments } => {
                 // Metin fonksiyonu biçimli OPERATÖR mü (`startsWith(#.at, …)`) — editör
                 // bunları düz operatör gibi gösterir, kural seti de öyle davranmalı.
-                self.check_text_op(&kind.to_string(), arguments);
+                let fname = kind.to_string();
+                self.check_text_op(&fname, arguments);
+                self.check_numeric_agg(&fname, arguments);
                 for a in *arguments {
                     self.visit(a, gated);
                 }

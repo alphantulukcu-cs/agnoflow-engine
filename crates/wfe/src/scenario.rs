@@ -6,10 +6,13 @@
 //! Alan adları editörün bugünkü `WfdScenario`'suyla AYNIDIR (camelCase aktör
 //! dahil) — mevcut localStorage blob'ları dönüştürmesiz yüklenebilsin diye.
 
+use crate::sim::step;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
+use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::v22::pipeline::Engine;
 
 fn default_set_version() -> String {
     "1".into()
@@ -259,6 +262,133 @@ pub fn infer_terminal_id(wfd_json: &Value, dynctx: &Value) -> Option<String> {
         }
     }
     hit
+}
+
+/// Senaryoyu uçtan uca koşar. **Hiçbir şey yazmaz** — `sim` durumsuzdur, WFE
+/// yaratılmaz, WFAH'a iz düşmez.
+///
+/// `wfd_json` beklenti çözümü içindir (`infer_terminal_id` `terminals[]`
+/// kataloğuna bakar); `wfd` motorun parse edilmiş hâlidir. İkisi AYNI belgeden
+/// gelmelidir — çağıran ikisini de aynı gövdeden üretir.
+///
+/// `fallback_actor`: senaryo/adım aktörü eksikse kullanılır (editörün bugünkü
+/// `readStoredEngineConfig` davranışının sunucu karşılığı).
+///
+/// Motor hatası senaryoyu KALDIRIR, koşuyu patlatmaz: bir senaryonun kalması
+/// normal bir sonuçtur, `Err` değil. Hata anında kalan adımlar atlanır.
+pub async fn run(
+    engine: &Engine<'_>,
+    wfd: &Wfd,
+    wfd_json: &Value,
+    scenario: &Scenario,
+    fallback_actor: Option<&Actor>,
+) -> ScenarioResult {
+    let resolve = |a: &Option<ScenarioActor>| -> Option<Actor> {
+        a.as_ref()
+            .map(|x| x.to_actor())
+            .or_else(|| fallback_actor.cloned())
+    };
+
+    let fail = |failures: Vec<String>, steps_executed: usize| ScenarioResult {
+        id: scenario.id.clone(),
+        name: scenario.name.clone(),
+        ok: false,
+        failures,
+        steps_executed,
+        terminal: false,
+        terminal_id: None,
+        dynctx: Value::Null,
+    };
+
+    let Some(start_actor) = resolve(&scenario.start_actor) else {
+        return fail(
+            vec!["başlangıç aktörü çözülemedi (senaryoda yok, yedek aktör de verilmedi)".into()],
+            0,
+        );
+    };
+
+    let orgtnt_id =
+        match wfe_core::ports::OrgPort::orgtnt_for_orgu(engine.org, start_actor.orgu_id).await {
+            Ok(id) => id,
+            Err(e) => return fail(vec![format!("aktörün tenant'ı çözülemedi: {e}")], 0),
+        };
+
+    let mut state = match step::start(
+        engine,
+        wfd,
+        &start_actor,
+        orgtnt_id,
+        scenario.start_action.as_deref(),
+        &scenario.start_input,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => return fail(vec![format!("start: {e}")], 0),
+    };
+
+    let mut steps_executed = 0usize;
+    for (i, s) in scenario.steps.iter().enumerate() {
+        if step::is_terminal(&state) {
+            break; // terminale ulaşıldı — kalan adımlar sessizce atlanır
+        }
+        let outcome = match s {
+            ScenarioStep::Action {
+                action,
+                actor,
+                input,
+                node,
+            } => match resolve(actor) {
+                None => Err(format!(
+                    "Adım {} (\"{action}\") için aktör çözülemedi",
+                    i + 1
+                )),
+                Some(a) => step::apply(engine, wfd, &mut state, &a, action, input, node.as_deref())
+                    .await
+                    .map_err(|e| format!("Adım {} (\"{action}\"): {e}", i + 1)),
+            },
+            // Her iki başarısızlık da (bekleyen çağrı yok / motor hatası) senaryoyu
+            // kaldırır — koşucu için ikisi arasında fark yok, HTTP durumu yok.
+            ScenarioStep::CallReturn { call_return } => step::call_return(
+                engine,
+                wfd,
+                &mut state,
+                &call_return.status,
+                call_return.result.as_ref(),
+            )
+            .await
+            .map_err(|e| format!("Adım {} (çağrı dönüşü): {e}", i + 1)),
+        };
+        if let Err(msg) = outcome {
+            return fail(vec![msg], steps_executed);
+        }
+        steps_executed += 1;
+    }
+
+    let terminal = step::is_terminal(&state);
+    let dynctx = state.dynctx.clone();
+    let terminal_id = if terminal {
+        infer_terminal_id(wfd_json, &dynctx)
+    } else {
+        None
+    };
+    let failures = check_expectations(
+        scenario.expect.as_ref(),
+        terminal,
+        terminal_id.as_deref(),
+        &dynctx,
+    );
+
+    ScenarioResult {
+        id: scenario.id.clone(),
+        name: scenario.name.clone(),
+        ok: failures.is_empty(),
+        failures,
+        steps_executed,
+        terminal,
+        terminal_id,
+        dynctx,
+    }
 }
 
 #[cfg(test)]

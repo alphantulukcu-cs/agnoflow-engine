@@ -1,6 +1,7 @@
 //! WFD v2.2 runtime — Named Nodes, Single-Rule C_A.
 //! Spec: docs/spec/runtime-semantics.md §3, §4, §7, §8.
 
+pub mod dollar;
 pub mod duration;
 pub mod effects;
 pub mod env;

@@ -1886,3 +1886,64 @@ fn malformed_env_reference_blocks_publish() {
     v["autoexec"]["kredi_skoru_getir"]["config"]["url"] = json!("https://x/$env.score_api");
     assert!(has_error(&validate_value(v), "env_reference_malformed"));
 }
+
+// ---- unknown_dollar_ref — motorun DÜZ METİN yazdığı sessiz yazım hataları ----
+//
+// `resolve_dollar_string` tanımadığı `$`-string'i hata saymaz, metin sabiti olarak yazar
+// (son satır: `Ok(Value::from(s))`). Yani `$actor.role` yazan bir effect alana
+// `"$actor.role"` METNİNİ koyar; çalışma anında hata yok, log yok, o alanı okuyan
+// koşullar sessizce hep-false. Tek yakalama noktası tasarım zamanıdır.
+
+#[test]
+fn unknown_dollar_ref_in_effects_is_error() {
+    let mut v = fixture_value();
+    // `$actor` çıplak haliyle vardır; ALT YOLU yoktur (nesnedir, effects onu bütün yazar).
+    v["transitions"][0]["wfes_effects"]["set"]["internal_notes"] = json!("$actor.role");
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "unknown_dollar_ref" && e.message.contains("$actor.role")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Motor obje/dizi değerleri RECURSIVE çözer — içerideki yazım hatası da yakalanmalı.
+#[test]
+fn unknown_dollar_ref_inside_object_value_is_error() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wfes_effects"]["set"]["internal_notes"] =
+        json!({ "rol": "$actor.role", "ok": "$ctx.credit_score" });
+    assert!(has_error(&validate_value(v), "unknown_dollar_ref"));
+}
+
+/// Autoexec config'i de aynı gramerle çözülür (`runner::resolve_config_string`).
+#[test]
+fn unknown_dollar_ref_in_autoexec_config_is_error() {
+    let mut v = fixture_value();
+    v["autoexec"]["kredi_skoru_getir"]["config"]["url"] = json!("$ctxx.base_url");
+    assert!(has_error(&validate_value(v), "unknown_dollar_ref"));
+}
+
+/// `$` ile başlayan her metin referans DEĞİLDİR — meşru sabitler yayından düşmemeli.
+#[test]
+fn dollar_prefixed_plain_text_is_not_flagged() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wfes_effects"]["set"]["internal_notes"] = json!("$100 ödendi");
+    assert!(!has_error(&validate_value(v), "unknown_dollar_ref"));
+}
+
+/// `$env` ara-değer çözülen tek namespace'tir; biçimi kendi kuralına aittir.
+#[test]
+fn env_interpolation_is_not_an_unknown_ref() {
+    let mut v = fixture_value();
+    v["autoexec"]["kredi_skoru_getir"]["config"]["url"] = json!("$env.SCORE_API/v1/score");
+    assert!(!has_error(&validate_value(v), "unknown_dollar_ref"));
+}
+
+#[test]
+fn golden_fixture_has_no_unknown_dollar_refs() {
+    assert!(!has_error(&validate_value(fixture_value()), "unknown_dollar_ref"));
+}

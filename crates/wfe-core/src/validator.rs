@@ -2,12 +2,13 @@
 //! Spec: docs/spec/runtime-semantics.md §1, §2b, §5, §6.
 //! Linear: WOR-32 (cross-ref, slug/uniqueness), WOR-33 (graf), WOR-34 (context/expression/retry).
 
+use crate::error::EngineError;
+use crate::expr_types::{self, ExprEnv};
 use crate::types::wfd_v22::{
     AutoexecType, CallMode, CallRef, JoinMode, ParallelSpec, StartAs, Wfd, WfesEffects, Wft,
     WftCondition, WftTarget,
 };
-use crate::error::EngineError;
-use crate::expr_types::{self, ExprEnv};
+use crate::v22::dollar::{self, DollarForm};
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::env;
 use serde_json::Value;
@@ -87,6 +88,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_context_field_writers(wfd, &mut report);
     check_action_input_consumed(wfd, &mut report);
     check_effect_value_types(wfd, &mut report);
+    check_dollar_refs(wfd, &mut report);
     check_optional_input_overwrites(wfd, &mut report);
     check_attachments(wfd, &mut report);
     check_effect_paths(wfd, &mut report);
@@ -1928,7 +1930,10 @@ fn each_effects(wfd: &Wfd) -> Vec<(String, &WfesEffects)> {
         }
         for trig in &s.trigger {
             if let Some(c) = &trig.catch {
-                out.push((format!("{path}.trigger[{}].catch", trig.use_), &c.wfes_effects));
+                out.push((
+                    format!("{path}.trigger[{}].catch", trig.use_),
+                    &c.wfes_effects,
+                ));
             }
         }
     }
@@ -1939,7 +1944,10 @@ fn each_effects(wfd: &Wfd) -> Vec<(String, &WfesEffects)> {
         }
         for trig in &t.trigger {
             if let Some(c) = &trig.catch {
-                out.push((format!("{path}.trigger[{}].catch", trig.use_), &c.wfes_effects));
+                out.push((
+                    format!("{path}.trigger[{}].catch", trig.use_),
+                    &c.wfes_effects,
+                ));
             }
         }
     }
@@ -2037,6 +2045,69 @@ fn check_effect_value_types(wfd: &Wfd, report: &mut ValidationReport) {
                 ),
             );
         }
+    }
+}
+
+/// Bir DEĞER ağacındaki `$`-string'leri denetler. Obje/dizi de gezilir: motor effect
+/// değerlerini recursive çözer (`effects::resolve_value`), yani `{"rol": "$actor.role"}`
+/// içindeki yazım hatası da yayına sızardı.
+fn check_dollar_value(raw: &Value, site: &str, report: &mut ValidationReport) {
+    match raw {
+        Value::String(s) => {
+            if dollar::classify(s) == DollarForm::Unknown {
+                report.error(
+                    "unknown_dollar_ref",
+                    site.to_string(),
+                    format!(
+                        "'{s}' motorun tanıdığı bir referans DEĞİL — çözülmez, alana bu METİN \
+                         yazılır ve hata hiçbir yerde görünmez. Tanınan biçimler: $actor · \
+                         $timestamp · $wfe_id · $node · $call.status · $call.wfe_id · $ctx.<yol> · \
+                         $action.input.<yol> · $exec.result.<yol> · $call.result.<yol> · \
+                         $env.ANAHTAR. (`$actor` bir NESNEDİR; alt alanı `$actor.role` diye \
+                         okunamaz — önce effects ile bir context alanına yazın.)"
+                    ),
+                );
+            }
+        }
+        Value::Object(map) => {
+            for (k, v) in map {
+                check_dollar_value(v, &format!("{site}.{k}"), report);
+            }
+        }
+        Value::Array(arr) => {
+            for (i, v) in arr.iter().enumerate() {
+                check_dollar_value(v, &format!("{site}[{i}]"), report);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Tanınmayan `$` referansları — motorun DÜZ METİN yazdığı sessiz yazım hataları.
+///
+/// Denetlenen yerler, çözücülerin bulunduğu yerlerdir (bkz. `v22::dollar` modül dokümanı):
+/// `wfes_effects.set`, WFC `call.input`, terminal `wfe_end_response`, autoexec `config`.
+/// `when` / `calc` gibi ZEN İFADELERİ buraya GİRMEZ: onların namespace kümesi ayrıdır
+/// (`$wfah`, `$prev`, `$first`…) ve kendi kuralları vardır (`expression_issues`).
+fn check_dollar_refs(wfd: &Wfd, report: &mut ValidationReport) {
+    for (site, effects) in each_effects(wfd) {
+        for (target, raw) in &effects.set {
+            check_dollar_value(raw, &format!("{site}.wfes_effects.set[{target}]"), report);
+        }
+    }
+    // WFC-IN: girdi eşlemesi katalogdadır (`calls`), yerleşimde (`CallRef`) değil.
+    for (key, def) in &wfd.calls {
+        for (k, raw) in &def.input {
+            check_dollar_value(raw, &format!("calls[{key}].input[{k}]"), report);
+        }
+    }
+    for t in &wfd.terminals {
+        for (k, raw) in &t.wfe_end_response {
+            check_dollar_value(raw, &format!("terminals[{}].wfe_end_response[{k}]", t.id), report);
+        }
+    }
+    for (key, ax) in &wfd.autoexec {
+        check_dollar_value(&ax.config, &format!("autoexec[{key}].config"), report);
     }
 }
 

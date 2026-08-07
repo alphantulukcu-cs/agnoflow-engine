@@ -131,7 +131,8 @@ async fn upload(
         }
     }
 
-    s.attachments
+    crate::attachment_store::store_for_wfe(&s, wfe_id)
+        .await?
         .write(wfe_id, &group, &item, body.to_vec())
         .await
         .map_err(|e| {
@@ -164,8 +165,8 @@ async fn download(
     let wfd = load_wfd_for_wfe(&s, wfe_id, actor.orgtnt_id).await?;
     find_item(&wfd, &group, &item)?;
 
-    let bytes = s
-        .attachments
+    let bytes = crate::attachment_store::store_for_wfe(&s, wfe_id)
+        .await?
         .read(wfe_id, &group, &item)
         .await
         .map_err(|_| AppError("dosya bulunamadı".into(), StatusCode::NOT_FOUND))?;
@@ -194,7 +195,8 @@ async fn remove(
     let wfd = load_wfd_for_wfe(&s, wfe_id, actor.orgtnt_id).await?;
     find_item(&wfd, &group, &item)?;
 
-    s.attachments
+    crate::attachment_store::store_for_wfe(&s, wfe_id)
+        .await?
         .delete(wfe_id, &group, &item)
         .await
         .map_err(|e| {

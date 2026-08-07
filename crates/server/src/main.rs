@@ -1,3 +1,4 @@
+mod attachment_store;
 mod attachments;
 mod branding;
 mod config;

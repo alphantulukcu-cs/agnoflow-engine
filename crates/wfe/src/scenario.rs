@@ -147,6 +147,120 @@ pub struct ScenarioResult {
     pub dynctx: Value,
 }
 
+/// `expected`'in `actual` içinde ALT KÜME olarak var olup olmadığını derinlemesine
+/// denetler. Sözleşme editördeki `deepContains` ile birebirdir: **nesneler alt
+/// küme** (recursive), **diziler ve skalerler tam eşleşme**.
+fn deep_contains(expected: &Value, actual: Option<&Value>, path: &str, failures: &mut Vec<String>) {
+    let label = if path.is_empty() { "context" } else { path };
+    match expected {
+        Value::Object(exp) => {
+            let Some(Value::Object(act)) = actual else {
+                failures.push(format!(
+                    "{label}: beklenen {expected}, gelen {}",
+                    actual.unwrap_or(&Value::Null)
+                ));
+                return;
+            };
+            for (k, v) in exp {
+                let next = if path.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{path}.{k}")
+                };
+                match act.get(k) {
+                    None => failures.push(format!("{next} alanı yok — beklenen {v}")),
+                    Some(a) => deep_contains(v, Some(a), &next, failures),
+                }
+            }
+        }
+        _ => {
+            if actual != Some(expected) {
+                failures.push(format!(
+                    "{label}: beklenen {expected}, gelen {}",
+                    actual.unwrap_or(&Value::Null)
+                ));
+            }
+        }
+    }
+}
+
+/// Beklentiyi koşu sonucuyla karşılaştırır; boş dönüş = geçti.
+/// `expect` yoksa (veya iki alanı da boşsa) HER ZAMAN geçer.
+pub fn check_expectations(
+    expect: Option<&Expect>,
+    terminal: bool,
+    terminal_id: Option<&str>,
+    dynctx: &Value,
+) -> Vec<String> {
+    let Some(e) = expect else {
+        return Vec::new();
+    };
+    if e.terminal.is_none() && e.context_contains.is_none() {
+        return Vec::new();
+    }
+    let mut failures = Vec::new();
+
+    if let Some(want) = &e.terminal {
+        if !terminal {
+            failures.push(format!("terminal beklendi (\"{want}\") ama WFE hâlâ aktif"));
+        } else {
+            match terminal_id {
+                None => failures.push(format!(
+                    "terminal \"{want}\" beklendi ama ulaşılan terminal belirlenemedi"
+                )),
+                Some(got) if got != want => {
+                    failures.push(format!("terminal beklendi \"{want}\", gelen \"{got}\""))
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    if let Some(want) = &e.context_contains {
+        deep_contains(want, Some(dynctx), "", &mut failures);
+    }
+
+    failures
+}
+
+/// Ulaşılan terminali dynctx'ten best-effort çözer. Sözleşme editördeki
+/// `inferTerminalId` ile aynıdır: `terminals[].wfes_effects.set` etkileri
+/// dynctx'in alt kümesi olan TEK aday varsa onun id'si; 0 veya >1 eşleşmede
+/// `None` (belirsizlik sessizce yanlış pozitife dönüşmesin).
+///
+/// Etkisi BOŞ olan aday hiçbir zaman eşleşmez — her dynctx'e uyardı.
+pub fn infer_terminal_id(wfd_json: &Value, dynctx: &Value) -> Option<String> {
+    let terminals = wfd_json.get("terminals")?.as_array()?;
+    let mut hit: Option<String> = None;
+    for t in terminals {
+        let Some(id) = t.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let effects = t
+            .get("wfes_effects")
+            .and_then(|w| w.get("set"))
+            .and_then(|s| s.as_object());
+        let Some(effects) = effects else { continue };
+        if effects.is_empty() {
+            continue;
+        }
+        let mut failures = Vec::new();
+        deep_contains(
+            &Value::Object(effects.clone()),
+            Some(dynctx),
+            "",
+            &mut failures,
+        );
+        if failures.is_empty() {
+            if hit.is_some() {
+                return None; // birden çok aday — belirsiz
+            }
+            hit = Some(id.to_string());
+        }
+    }
+    hit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +321,137 @@ mod tests {
             role: "mudur".into(),
         };
         assert_eq!(a.to_actor().role, "mudur");
+    }
+
+    // ── beklenti denetimi ───────────────────────────────────────────────────
+
+    fn dynctx(v: serde_json::Value) -> serde_json::Value {
+        v
+    }
+
+    #[test]
+    fn no_expectation_always_passes() {
+        let f = check_expectations(None, true, Some("x"), &dynctx(serde_json::json!({})));
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn object_expectation_is_a_subset_match() {
+        let e = Expect {
+            terminal: None,
+            context_contains: Some(serde_json::json!({ "musteri": { "ad": "Ay" } })),
+        };
+        // Fazladan alan sorun değil — alt küme yeterli.
+        let ok = check_expectations(
+            Some(&e),
+            false,
+            None,
+            &dynctx(serde_json::json!({ "musteri": { "ad": "Ay", "yas": 30 }, "x": 1 })),
+        );
+        assert!(ok.is_empty(), "{ok:?}");
+
+        let bad = check_expectations(
+            Some(&e),
+            false,
+            None,
+            &dynctx(serde_json::json!({ "musteri": { "ad": "Bora" } })),
+        );
+        assert_eq!(bad.len(), 1);
+        assert!(bad[0].contains("musteri.ad"), "{bad:?}");
+    }
+
+    #[test]
+    fn arrays_must_match_exactly_not_as_subset() {
+        let e = Expect {
+            terminal: None,
+            context_contains: Some(serde_json::json!({ "l": [1, 2] })),
+        };
+        assert!(
+            check_expectations(Some(&e), false, None, &dynctx(serde_json::json!({ "l": [1, 2] })))
+                .is_empty()
+        );
+        assert_eq!(
+            check_expectations(
+                Some(&e),
+                false,
+                None,
+                &dynctx(serde_json::json!({ "l": [1, 2, 3] }))
+            )
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_field_is_reported_with_its_path() {
+        let e = Expect {
+            terminal: None,
+            context_contains: Some(serde_json::json!({ "a": { "b": 1 } })),
+        };
+        let f = check_expectations(Some(&e), false, None, &dynctx(serde_json::json!({ "a": {} })));
+        assert_eq!(f.len(), 1);
+        assert!(f[0].contains("a.b"), "{f:?}");
+    }
+
+    #[test]
+    fn terminal_expectation_needs_a_reached_terminal() {
+        let e = Expect {
+            terminal: Some("onaylandi".into()),
+            context_contains: None,
+        };
+        let still_active = check_expectations(Some(&e), false, None, &dynctx(serde_json::json!({})));
+        assert_eq!(still_active.len(), 1);
+        assert!(still_active[0].contains("aktif"), "{still_active:?}");
+
+        let wrong = check_expectations(
+            Some(&e),
+            true,
+            Some("reddedildi"),
+            &dynctx(serde_json::json!({})),
+        );
+        assert_eq!(wrong.len(), 1);
+        assert!(wrong[0].contains("reddedildi"));
+
+        assert!(check_expectations(
+            Some(&e),
+            true,
+            Some("onaylandi"),
+            &dynctx(serde_json::json!({}))
+        )
+        .is_empty());
+    }
+
+    /// TS `inferTerminalId` sözleşmesi: etkileri dynctx'in alt kümesi olan TEK
+    /// aday varsa o; 0 veya >1 ise None (sessiz yanlış pozitif üretmez).
+    #[test]
+    fn terminal_id_is_inferred_only_when_exactly_one_candidate_matches() {
+        let wfd = serde_json::json!({ "terminals": [
+            { "id": "Onaylandı", "wfes_effects": { "set": { "durum": "onaylandi" } } },
+            { "id": "Reddedildi", "wfes_effects": { "set": { "durum": "reddedildi" } } },
+            { "id": "Etkisiz",    "wfes_effects": { "set": {} } }
+        ]});
+        assert_eq!(
+            infer_terminal_id(&wfd, &serde_json::json!({ "durum": "onaylandi", "x": 1 })),
+            Some("Onaylandı".to_string())
+        );
+        assert_eq!(
+            infer_terminal_id(&wfd, &serde_json::json!({ "durum": "beklemede" })),
+            None
+        );
+        // Etkisiz aday (boş set) hiçbir zaman eşleşmez — yoksa her dynctx'e uyardı.
+        assert_eq!(infer_terminal_id(&wfd, &serde_json::json!({})), None);
+    }
+
+    /// Birden çok aday eşleşirse belirsizdir — None döner, biri seçilmez.
+    #[test]
+    fn ambiguous_terminal_candidates_resolve_to_none() {
+        let wfd = serde_json::json!({ "terminals": [
+            { "id": "A", "wfes_effects": { "set": { "durum": "bitti" } } },
+            { "id": "B", "wfes_effects": { "set": { "durum": "bitti" } } }
+        ]});
+        assert_eq!(
+            infer_terminal_id(&wfd, &serde_json::json!({ "durum": "bitti" })),
+            None
+        );
     }
 }

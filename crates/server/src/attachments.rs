@@ -67,6 +67,12 @@ impl AttachmentStore {
             .to_vec())
     }
 
+    /// Bir WFE'nin (ya da başlatılmamış rezervasyonun) TÜM dosyalarını siler.
+    /// Süpürücü kullanır: süresi geçen rezervasyonun dosyaları sahipsiz kalır.
+    pub async fn remove_all(&self, wfe_id: Uuid) -> Result<(), opendal::Error> {
+        self.op.remove_all(&format!("attachments/{wfe_id}/")).await
+    }
+
     /// Silme (idempotent — yoksa da hata vermez opendal semantiğinde).
     pub async fn delete(
         &self,

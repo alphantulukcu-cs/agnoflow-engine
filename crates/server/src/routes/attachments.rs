@@ -71,6 +71,48 @@ pub(crate) async fn load_wfd(s: &AppState, wfe_id: Uuid) -> Result<Wfd, AppError
         .map_err(AppError::from)
 }
 
+/// Yükleme/indirme/silme için ortak çözüm: WFE VAR MI, yoksa REZERVE Mİ EDİLMİŞ?
+///
+/// Başlatma öncesi belgeler henüz var olmayan bir WFE'nin id'sine yazılır (bkz.
+/// `crate::reservation`). O aşamada `executor.query` çağrılamaz — ortada durum yok;
+/// yetki rezervasyonun sahipliğiyle verilir. WFE gerçekten varsa eski yol işler
+/// (görünürlük + katalog).
+///
+/// Döner: (doğrulanacak WFD, o WFE/rezervasyon için çözülmüş depo).
+async fn resolve_target(
+    s: &AppState,
+    actor: &Actor,
+    wfe_id: Uuid,
+) -> Result<(Wfd, std::sync::Arc<crate::attachments::AttachmentStore>), AppError> {
+    if let Some(r) = crate::reservation::get(&s.pool, wfe_id).await? {
+        let orgtnt_id = s
+            .executor
+            .org
+            .orgtnt_for_orgu(actor.orgu_id)
+            .await
+            .map_err(AppError::from)?;
+        if !crate::reservation::owned_by(&r, orgtnt_id, actor) {
+            return Err(AppError(
+                "bu rezervasyon size ait değil".into(),
+                StatusCode::FORBIDDEN,
+            ));
+        }
+        let wfd = s
+            .wfd
+            .fetch(r.wfd_id, r.wfd_version)
+            .await
+            .map_err(AppError::from)?;
+        let store =
+            crate::attachment_store::store_for_wfd(s, r.wfd_id, orgtnt_id, r.environment_id)
+                .await?;
+        return Ok((wfd, store));
+    }
+    authorized_nodes(s, actor, wfe_id).await?;
+    let wfd = load_wfd(s, wfe_id).await?;
+    let store = crate::attachment_store::store_for_wfe(s, wfe_id).await?;
+    Ok((wfd, store))
+}
+
 /// Aktörün bu WFE'yi görebildiğini doğrular (executor.query authz), aktif node
 /// listesini döndürür (tek-node → current_node; paralel → kol node'ları).
 async fn authorized_nodes(
@@ -173,9 +215,8 @@ async fn upload(
     body: Bytes,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let actor = super::wfe::extract_actor(&headers)?;
-    // Yetki: aktör WFE'yi görebilmeli.
-    authorized_nodes(&s, &actor, wfe_id).await?;
-    let wfd = load_wfd(&s, wfe_id).await?;
+    // Yetki: aktör WFE'yi görebilmeli — ya da bu id'yi kendisi rezerve etmiş olmalı.
+    let (wfd, store) = resolve_target(&s, &actor, wfe_id).await?;
     let def = find_item(&wfd, &group, &item)?;
 
     if body.is_empty() {
@@ -190,7 +231,7 @@ async fn upload(
         .map(|v| v.split(';').next().unwrap_or("").trim());
     validate_upload(def, ct, body.len())?;
 
-    s.attachments
+    store
         .write(wfe_id, &group, &item, body.to_vec())
         .await
         .map_err(|e| {
@@ -219,12 +260,10 @@ async fn download(
     Path((wfe_id, group, item)): Path<(Uuid, String, String)>,
 ) -> Result<(StatusCode, HeaderMap, Bytes), AppError> {
     let actor = super::wfe::extract_actor(&headers)?;
-    authorized_nodes(&s, &actor, wfe_id).await?;
-    let wfd = load_wfd(&s, wfe_id).await?;
+    let (wfd, store) = resolve_target(&s, &actor, wfe_id).await?;
     find_item(&wfd, &group, &item)?;
 
-    let bytes = s
-        .attachments
+    let bytes = store
         .read(wfe_id, &group, &item)
         .await
         .map_err(|_| AppError("dosya bulunamadı".into(), StatusCode::NOT_FOUND))?;
@@ -251,11 +290,10 @@ async fn remove(
     Path((wfe_id, group, item)): Path<(Uuid, String, String)>,
 ) -> Result<StatusCode, AppError> {
     let actor = super::wfe::extract_actor(&headers)?;
-    authorized_nodes(&s, &actor, wfe_id).await?;
-    let wfd = load_wfd(&s, wfe_id).await?;
+    let (wfd, store) = resolve_target(&s, &actor, wfe_id).await?;
     find_item(&wfd, &group, &item)?;
 
-    s.attachments
+    store
         .delete(wfe_id, &group, &item)
         .await
         .map_err(|e| {

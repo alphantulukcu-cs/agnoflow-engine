@@ -4,6 +4,7 @@ mod branding;
 mod config;
 mod error;
 mod openapi;
+mod reservation;
 mod routes;
 mod state;
 
@@ -77,6 +78,9 @@ async fn main() {
         attachments: Arc::new(attachment_storage),
         cfg: cfg.clone(),
     };
+
+    // Başlatma öncesi rezerve edilip kullanılmayan wfe_id'ler + dosyaları (2026-08-07).
+    reservation::spawn_sweeper(state.clone());
 
     // WOR-10: /org ve /db admin API'leri anahtar korumalı — ADMIN_API_KEY set
     // edilmemişse yalnızca dev için açık kalır ve yüksek sesle uyarılır.

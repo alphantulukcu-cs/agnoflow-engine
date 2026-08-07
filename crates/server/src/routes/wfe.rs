@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::routes;
@@ -42,6 +42,7 @@ async fn resolve_environment_id(
 pub fn router(state: AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(start_wfe, list_wfe))
+        .routes(routes!(reserve_wfe))
         .routes(routes!(apply_action))
         .routes(routes!(query_wfe))
         .routes(routes!(claim_wfe))
@@ -102,6 +103,69 @@ struct StartBody {
     /// Örnek ömrü boyunca SABİTLENİR. Çağıran yalnız adı seçer, değerleri değil.
     #[serde(default)]
     environment: Option<String>,
+    /// `POST /wfe/reserve` ile alınmış wfe_id (2026-08-07). Başlatma aksiyonu ek-belge
+    /// istiyorsa ZORUNLUDUR: dosyalar bu id'nin altına önceden yüklenir, burada kapı
+    /// kontrol edilir ve WFE ancak belgeler tamsa O id ile oluşturulur. Verilmezse
+    /// bugünkü davranış (id start'ta üretilir) — belge isteyen bir başlatmada 422.
+    #[serde(default)]
+    wfe_id: Option<Uuid>,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct ReserveBody {
+    wfd_id: Uuid,
+    version: i32,
+    #[serde(default)]
+    environment: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct ReserveResult {
+    /// Başlatmada geri gönderilecek id. Dosyalar `PUT /wfe/{wfe_id}/attachments/...`
+    /// ile bu id'nin altına yüklenir.
+    wfe_id: Uuid,
+}
+
+/// Başlatma öncesi belge yüklemesi için wfe_id rezerve eder. DB'de WFE satırı OLUŞMAZ —
+/// yalnız `wf.wfe_reservation` defterine bir kayıt düşer (bkz. crate::reservation).
+/// Başlatılmayan rezervasyonlar süpürücü tarafından dosyalarıyla birlikte silinir.
+#[utoipa::path(post, path = "/reserve", tag = "wfe",
+    request_body = ReserveBody,
+    responses((status = 200, description = "Rezerve edilen wfe_id", body = ReserveResult)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn reserve_wfe(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ReserveBody>,
+) -> Result<Json<ReserveResult>, AppError> {
+    let actor = extract_actor(&headers)?;
+    let orgtnt_id = s
+        .executor
+        .org
+        .orgtnt_for_orgu(actor.orgu_id)
+        .await
+        .map_err(AppError::from)?;
+    // WFD gerçekten var mı (ve bu sürüm çekilebiliyor mu) — rezervasyon uydurma bir
+    // dokümana bağlanmasın; yükleme rotası katalog doğrulamasını buradan yapacak.
+    s.wfd
+        .fetch(body.wfd_id, body.version)
+        .await
+        .map_err(AppError::from)?;
+    let environment_id = resolve_environment_id(&s, &actor, body.environment.as_deref()).await?;
+
+    let reservation = crate::reservation::Reservation {
+        wfe_id: Uuid::new_v4(),
+        orgtnt_id,
+        wfd_id: body.wfd_id,
+        wfd_version: body.version,
+        environment_id,
+        actor_orgu_id: actor.orgu_id,
+        actor_user_id: actor.user_id,
+    };
+    crate::reservation::create(&s.pool, &reservation).await?;
+    Ok(Json(ReserveResult {
+        wfe_id: reservation.wfe_id,
+    }))
 }
 
 #[utoipa::path(post, path = "/", tag = "wfe",
@@ -114,9 +178,94 @@ async fn start_wfe(
     Json(body): Json<StartBody>,
 ) -> Result<Json<wf_wfe::executor::WfeStartResult>, AppError> {
     let actor = extract_actor(&headers)?;
-    let environment_id = resolve_environment_id(&s, &actor, body.environment.as_deref()).await?;
-    s.executor
-        .start_in(
+    let orgtnt_id = s
+        .executor
+        .org
+        .orgtnt_for_orgu(actor.orgu_id)
+        .await
+        .map_err(AppError::from)?;
+
+    // Rezervasyon: dosyalar bu id'nin altına ÖNCEDEN yüklendi. Ortam da rezervasyonla
+    // sabitlendi — yükleme hangi depoya yapıldıysa kapı da orada aranmalı, gövdeden
+    // gelen farklı bir ortam adı dosyaları başka bir bucket'ta aratırdı.
+    let reservation = match body.wfe_id {
+        Some(id) => {
+            let r = crate::reservation::get(&s.pool, id).await?.ok_or_else(|| {
+                AppError(
+                    "rezervasyon bulunamadı (süresi dolmuş olabilir)".into(),
+                    StatusCode::NOT_FOUND,
+                )
+            })?;
+            if !crate::reservation::owned_by(&r, orgtnt_id, &actor) {
+                return Err(AppError(
+                    "bu rezervasyon size ait değil".into(),
+                    StatusCode::FORBIDDEN,
+                ));
+            }
+            if r.wfd_id != body.wfd_id || r.wfd_version != body.version {
+                return Err(AppError(
+                    "rezervasyon başka bir WFD/versiyon için alınmış".into(),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ));
+            }
+            Some(r)
+        }
+        None => None,
+    };
+    let environment_id = match &reservation {
+        Some(r) => r.environment_id,
+        None => resolve_environment_id(&s, &actor, body.environment.as_deref()).await?,
+    };
+
+    // Başlatma aksiyonunun ek-belge kapısı. Engine'e GİTMEDEN kontrol edilir: eksikse
+    // WFE hiç oluşmaz (rezervasyon durur, kullanıcı eksiği yükleyip tekrar dener).
+    let wfd = s
+        .wfd
+        .fetch(body.wfd_id, body.version)
+        .await
+        .map_err(AppError::from)?;
+    if let Some((node, action)) = start_gate_target(&wfd, body.action.as_deref()) {
+        let gated = wfd
+            .nodes
+            .get(&node)
+            .map(|n| n.attachments.iter().any(|a| a.gates_action(Some(&action))))
+            .unwrap_or(false);
+        if gated {
+            // Kapı var ama id rezerve edilmemiş: dosyaların yükleneceği bir anahtar
+            // yoktu, yani belgeler olamaz. Sessizce başlatmak kuralı delerdi.
+            let Some(r) = &reservation else {
+                return Err(AppError {
+                    message: "bu akış başlatma için belge istiyor: önce POST /wfe/reserve ile wfe_id alıp belgeleri yükleyin".into(),
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: Some("attachment.reservation_required"),
+                });
+            };
+            let store =
+                crate::attachment_store::store_for_wfd(&s, body.wfd_id, orgtnt_id, environment_id)
+                    .await?;
+            let groups =
+                crate::attachments::status_for_node(&store, &wfd, r.wfe_id, &node, Some(&action))
+                    .await
+                    .map_err(|e| {
+                        AppError(
+                            format!("attachment durum sorgusu başarısız: {e}"),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                        )
+                    })?;
+            let missing = crate::attachments::missing_required(&groups);
+            if !missing.is_empty() {
+                return Err(AppError {
+                    message: format!("Eksik zorunlu belgeler: {}", missing.join(", ")),
+                    status: StatusCode::UNPROCESSABLE_ENTITY,
+                    code: Some("attachment.missing"),
+                });
+            }
+        }
+    }
+
+    let result = s
+        .executor
+        .start_reserved(
             body.wfd_id,
             body.version,
             &actor,
@@ -124,10 +273,34 @@ async fn start_wfe(
             &body.input,
             body.deadline.as_deref(),
             environment_id,
+            reservation.as_ref().map(|r| r.wfe_id),
         )
         .await
-        .map(Json)
-        .map_err(AppError::from)
+        .map_err(AppError::from)?;
+
+    // WFE artık gerçek — defter kaydı silinir, dosyalar zaten nihai anahtarında.
+    if let Some(r) = &reservation {
+        crate::reservation::delete(&s.pool, r.wfe_id).await?;
+    }
+    Ok(Json(result))
+}
+
+/// Kapının uygulanacağı (node, aksiyon) çifti. Aksiyon verilmişse onu taşıyan start
+/// kuralı; verilmemişse TEK start kuralı varsa o. Birden çok kural arasından seçim
+/// yapılmaz: hangisinin koşacağını engine belirler, yanlış kuralın kapısını uygulamak
+/// olmayan bir belgeyi istemek ya da olan bir kapıyı atlamak olurdu.
+fn start_gate_target(
+    wfd: &wfe_core::types::wfd_v22::Wfd,
+    action: Option<&str>,
+) -> Option<(String, String)> {
+    let rule = match action {
+        Some(a) => wfd.start.iter().find(|r| r.action == a)?,
+        None => match wfd.start.as_slice() {
+            [only] => only,
+            _ => return None,
+        },
+    };
+    Some((rule.from.clone(), rule.action.clone()))
 }
 
 #[derive(Deserialize, ToSchema)]

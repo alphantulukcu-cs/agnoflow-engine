@@ -383,6 +383,38 @@ impl WfeExecutor {
         deadline: Option<&str>,
         environment_id: Option<Uuid>,
     ) -> Result<WfeStartResult, EngineError> {
+        self.start_reserved(
+            wfd_id,
+            version,
+            actor,
+            action,
+            input,
+            deadline,
+            environment_id,
+            None,
+        )
+        .await
+    }
+
+    /// `reserved_wfe_id`: başlatmadan ÖNCE üretilmiş id (2026-08-07). Başlatma
+    /// aksiyonunun ek-belge kapısı için gerekir: dosya anahtarı `attachments/{wfe_id}/…`
+    /// olduğundan belgeler ancak id BELLİYSE yüklenebilir. Portal id'yi
+    /// `POST /wfe/reserve` ile alır, dosyaları yükler, sonra bu id ile başlatır —
+    /// böylece kapı sunucuda kalır ve eksik belgede WFE hiç oluşmaz.
+    ///
+    /// `None` = bugünkü davranış (id burada üretilir).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_reserved(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        actor: &Actor,
+        action: Option<&str>,
+        input: &Value,
+        deadline: Option<&str>,
+        environment_id: Option<Uuid>,
+        reserved_wfe_id: Option<Uuid>,
+    ) -> Result<WfeStartResult, EngineError> {
         let wfd = self.wfd.fetch(wfd_id, version).await?;
         let orgtnt_id = self.org.orgtnt_for_orgu(actor.orgu_id).await?;
 
@@ -397,8 +429,9 @@ impl WfeExecutor {
             env: run_env,
         };
 
-        // wfe_id ÖNCE üretilir; $wfe_id effects gerçek id ile çözülür (WOR-6)
-        let wfe_id = Uuid::new_v4();
+        // wfe_id ÖNCE üretilir; $wfe_id effects gerçek id ile çözülür (WOR-6).
+        // Rezerve edilmişse o id kullanılır — dosyalar zaten o anahtarın altında.
+        let wfe_id = reserved_wfe_id.unwrap_or_else(Uuid::new_v4);
         let mut new = engine
             .start(&wfd, actor, orgtnt_id, action, input, wfe_id, deadline)
             .await?;

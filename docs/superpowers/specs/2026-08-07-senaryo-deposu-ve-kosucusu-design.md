@@ -102,11 +102,11 @@ Anahtar: `{orgtnt_id}/wfd/{wfd_id}/{version}.scenarios.json`
       "path": "Onaylar/Müdür",
       "description": "150k üstü başvuruda müdür onayı zorunlu",
       "environment": "test",
-      "startActor": { "orgu_id": "…", "user_id": "…", "role": "musteriTemsilcisi" },
+      "startActor": { "orguId": "…", "userId": "…", "role": "musteriTemsilcisi" },
       "startAction": "basvur",
       "startInput": { "tutar": 150000 },
       "steps": [
-        { "action": "onayla", "actor": { "orgu_id": "…", "user_id": "…", "role": "mudur" }, "input": {}, "node": null }
+        { "action": "onayla", "actor": { "orguId": "…", "userId": "…", "role": "mudur" }, "input": {}, "node": null }
       ],
       "expect": { "terminal": "onaylandi", "contextContains": { "durum": "onaylı" } }
     }
@@ -116,7 +116,14 @@ Anahtar: `{orgtnt_id}/wfd/{wfd_id}/{version}.scenarios.json`
 
 **Alan adları bugünkü `WfdScenario` ile aynı tutulur** (`startInput`, `startActor`,
 `steps`, `expect`) — mevcut localStorage dizisi `{scenarios_version:"1", scenarios: <dizi>}`
-sarmalayıcısına konunca dönüştürmesiz yüklenir.
+sarmalayıcısına konunca dönüştürmesiz yüklenir. Aktör de depolandığı gibi **camelCase**
+kalır (`{orguId, userId, role}`); motorun snake_case `Actor`'una çevirme bugün editörde
+olduğu gibi (`scenarioActorToSimActor`) koşu anında yapılır, artık Rust tarafında.
+
+**Aktörsüz adım** bugünkü davranışı korur: senaryo/adım aktörü eksikse çağıranın verdiği
+yedek aktöre düşülür (editör bunu `readStoredEngineConfig`'ten alıyor). Koşu uçlarının
+gövdesinde bu yüzden opsiyonel `fallback_actor` bulunur; o da yoksa senaryo
+`"adım N için aktör çözülemedi"` ile kalır (hata değil, başarısız senaryo).
 
 Eklenen alanlar:
 

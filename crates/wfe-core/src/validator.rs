@@ -84,6 +84,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_parallel(wfd, &mut report);
     check_expressions(wfd, &mut report);
     check_action_inputs(wfd, &mut report);
+    check_input_required_optional_overlap(wfd, &mut report);
     check_context_required_removed(wfd, &mut report);
     check_context_field_writers(wfd, &mut report);
     check_action_input_consumed(wfd, &mut report);
@@ -2177,6 +2178,37 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
 
 // ---- §6: action input yolları ----
 
+/// Aynı yol HEM `input.required` HEM `input.optional` listesinde olamaz.
+///
+/// İki liste ÇELİŞİR: `required` "gönderilmek zorunda ve null olamaz" (pipeline
+/// `validate_action_input` reddeder), `optional` "gönderilmeyebilir, gönderilmezse ctx'e
+/// `null` yazılır" (WOR-70b) demektir. Aynı yol için ikisi birden bildirildiğinde motor
+/// `required` gibi davranır ve `optional` bildirimi ölü kalır — tasarımcı ise alanı
+/// atlanabilir sanır. Şema bunu YAKALAYAMAZ: `uniqueItems` her diziye tek tek bakar,
+/// JSON Schema iki dizinin ayrık olmasını ifade edemez. Bu yüzden kural validator'da.
+///
+/// Ata/torun bildirimi (`user` + `user.boy`) HATA DEĞİLDİR ve burada aranmaz: pipeline
+/// sözleşmesi null denetiminin yalnız bildirilen yola baktığını, iç alanın da dolu olması
+/// istenirse ayrıca `required`'a yazılacağını söyler (`validate_action_input` doc'u).
+fn check_input_required_optional_overlap(wfd: &Wfd, report: &mut ValidationReport) {
+    for (name, action) in &wfd.actions {
+        let required: BTreeSet<&String> = action.input.required.iter().collect();
+        for path in &action.input.optional {
+            if required.contains(path) {
+                report.error(
+                    "input_required_and_optional",
+                    format!("actions[{name}].input.optional"),
+                    format!(
+                        "input yolu '{path}' hem `required` hem `optional` listesinde — \
+                         ikisi çelişir (`required` null olamaz, `optional` gönderilmezse \
+                         null yazılır). Yolu tek listede bırakın."
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
     for (name, action) in &wfd.actions {
         for path in action.input.required.iter().chain(&action.input.optional) {
@@ -2338,9 +2370,18 @@ fn effect_value_type(raw: &Value, context: &Value) -> Option<String> {
         }
         _ => match s.strip_prefix("$ctx.") {
             Some(path) => schema_type_at(context, path),
-            // Tanınmayan `$...` referansı tipsizdir; `$` ile başlamayan her şey metin sabiti.
-            None if s.starts_with('$') => None,
-            None => Some("string".into()),
+            // WOR-70: aksiyon girdisi yolları CONTEXT yollarıdır — `check_action_inputs`
+            // her bildirilen `input.required/optional` yolunu context şemasında arar
+            // (`input_path`). Dolayısıyla `$action.input.<yol>`un tipi de aynı şemadan
+            // okunur. Bu olmadan girdi kaynaklı yazımlar tip denetiminin DIŞINDA kalıyordu:
+            // `"user.yas": "$action.input.user"` (number alana TÜM obje) sessizce geçiyordu.
+            // Şemada olmayan/çözülemeyen yol → None, yani kıyas yapılmaz (eski davranış).
+            None => match s.strip_prefix("$action.input.") {
+                Some(path) => schema_type_at(context, path),
+                // Tanınmayan `$...` referansı tipsizdir; `$` ile başlamayan her şey metin sabiti.
+                None if s.starts_with('$') => None,
+                None => Some("string".into()),
+            },
         },
     }
 }

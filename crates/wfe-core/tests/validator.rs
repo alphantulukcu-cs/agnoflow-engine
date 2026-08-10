@@ -1372,12 +1372,47 @@ fn timestamp_written_into_number_field_is_error() {
 #[test]
 fn untyped_source_never_flags_effect_type_mismatch() {
     let mut v = fixture_value();
-    // `manager_decision`ın TEK yazarı `$action.input.manager_decision`. Aksiyon girdisi
-    // TİPSİZDİR (yalnız yol listesi olarak bildirilir), autoexec/çağrı sonucu da öyle —
-    // hedefin tipi ne olursa olsun tahmine dayalı hata üretilmemeli.
+    // `manager_decision`ın TEK yazarı `$action.input.manager_decision`: girdi yolu ile
+    // hedef alan AYNI şema düğümüdür, dolayısıyla tip her zaman uyar — hedefin tipi ne
+    // olursa olsun hata üretilmemeli. (Girdi kaynaklı yazımlar 2026-08-10'dan beri
+    // context şemasından TİPLENİR; kural yalnız yol ile hedef AYRIŞTIĞINDA konuşur.)
     v["context"]["properties"]["manager_decision"] = json!({"type": "boolean"});
     // `credit_grade` yalnız `$exec.result.grade` ile yazılır — o da tipsizdir.
     v["context"]["properties"]["credit_grade"] = json!({"type": "number"});
+    let report = validate_value(v);
+    assert!(
+        !report.errors.iter().any(|e| e.code == "effect_type_mismatch"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Girdi kaynaklı yazımın tipi context şemasından okunur: yol ile hedef ayrışırsa
+/// uyumsuzluk yakalanır. Gerçek vaka (`vki` WFD'si): `"user.yas": "$action.input.user"`
+/// — number bir alana TÜM obje yazılıyordu ve hiçbir kural konuşmuyordu.
+#[test]
+fn action_input_object_written_into_scalar_field_is_error() {
+    let mut v = fixture_value();
+    v["transitions"][0]["wfes_effects"]["set"]["credit_info.amount_requested"] =
+        json!("$action.input.applicant");
+    let report = validate_value(v);
+    assert!(
+        report.errors.iter().any(|e| e.code == "effect_type_mismatch"
+            && e.message.contains("credit_info.amount_requested")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Aynı yolu kendi alanına yazmak (olağan durum) hata ÜRETMEZ — yol ile hedef aynı şema
+/// düğümüdür. Kuralın yanlış pozitif üretmediğinin çıpası.
+#[test]
+fn action_input_written_into_its_own_field_is_clean() {
+    let mut v = fixture_value();
+    v["context"]["properties"]["credit_info"]["properties"]["amount_requested"] =
+        json!({"type": "number"});
+    v["transitions"][0]["wfes_effects"]["set"]["credit_info.amount_requested"] =
+        json!("$action.input.credit_info.amount_requested");
     let report = validate_value(v);
     assert!(
         !report.errors.iter().any(|e| e.code == "effect_type_mismatch"),
@@ -1429,6 +1464,36 @@ fn declared_input_not_consumed_by_effects_is_error() {
     assert!(
         has_error(&report, "unused_action_input"),
         "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn same_path_in_required_and_optional_is_error() {
+    let mut v = fixture_value();
+    // `credit_info.amount_requested` analyst_approve'un ZORUNLU girdisi; aynı yolu
+    // optional'a da yazmak çelişkidir (null olamaz ↔ gönderilmezse null yazılır).
+    v["actions"]["analyst_approve"]["input"]["optional"] =
+        json!(["internal_notes", "credit_info.amount_requested"]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "input_required_and_optional"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Ata + torun aynı listede REDDEDİLMEZ: pipeline sözleşmesi null denetimini yalnız
+/// bildirilen yola uygular, iç alanın da dolu olması istenirse ayrıca bildirilir.
+#[test]
+fn ancestor_and_leaf_in_the_same_required_list_is_allowed() {
+    let mut v = fixture_value();
+    v["actions"]["create_application"]["input"]["required"] =
+        json!(["applicant", "credit_info", "credit_info.amount_requested"]);
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "input_required_and_optional"),
+        "ata/torun bildirimi bu kuralın kapsamında değil: {:#?}",
         report.errors
     );
 }

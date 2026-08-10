@@ -49,6 +49,7 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(reassign_wfe))
         .routes(routes!(possible_actions))
         .merge(super::attachments::routes())
+        .merge(super::notes::routes())
         .with_state(state)
 }
 
@@ -324,19 +325,36 @@ struct ApplyBody {
     /// aynı yerde, aynı tipte, tek bir sözleşmede durur.
     #[serde(default)]
     expected_rev: Option<u32>,
+    /// K5 (2026-08-10, WFE not tasarımı): apply BAŞARILI olduktan SONRA bu
+    /// draft notu yayınlar (`wfah_seq`/`node` commit'in ürettiği geçişten
+    /// türetilir — bkz. `publish_note_after_apply`). Göndermeyen istemci için
+    /// davranış HİÇ değişmez.
+    #[serde(default)]
+    note_id: Option<Uuid>,
+}
+
+/// `WfeApplyResult` (`wf_wfe::executor`) ALAN EKLEMEDEN sarılır — o tipe alan
+/// eklemek başka bir işin sözleşmesini değiştirirdi. `note_error` yalnız
+/// `note_id` gönderilip yayınlama başarısız olduğunda dolar (K5).
+#[derive(Serialize)]
+struct ApplyResultWithNote {
+    #[serde(flatten)]
+    result: wf_wfe::executor::WfeApplyResult,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note_error: Option<String>,
 }
 
 #[utoipa::path(post, path = "/{id}/actions", tag = "wfe",
     params(("id" = Uuid, Path, description = "WFE id")),
     request_body = ApplyBody,
-    responses((status = 200, description = "Uygulanan aksiyon sonucu (WfeApplyResult)", body = serde_json::Value)),
+    responses((status = 200, description = "Uygulanan aksiyon sonucu (WfeApplyResult + opsiyonel note_error)", body = serde_json::Value)),
     security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn apply_action(
     State(s): State<AppState>,
     headers: HeaderMap,
     Path(wfe_id): Path<Uuid>,
     Json(body): Json<ApplyBody>,
-) -> Result<Json<wf_wfe::executor::WfeApplyResult>, AppError> {
+) -> Result<Json<ApplyResultWithNote>, AppError> {
     let actor = extract_actor(&headers)?;
 
     // Attachment gate: hedef node'un `required` dosyaları yüklenmeden engine'e HİÇ
@@ -380,7 +398,8 @@ async fn apply_action(
         }
     }
 
-    s.executor
+    let result = s
+        .executor
         .apply(
             wfe_id,
             &actor,
@@ -390,8 +409,20 @@ async fn apply_action(
             body.expected_rev,
         )
         .await
-        .map(Json)
-        .map_err(AppError::from)
+        .map_err(AppError::from)?;
+
+    // Not, apply BAŞARILI olduktan SONRA yayınlanır (K5) — geçiş zaten
+    // gerçekleşti; not yayınlama hatası apply sonucunu YUTMAZ, `note_error`
+    // olarak taşınır ve not draft kalır (kullanıcı tekrar dener).
+    let note_error = match body.note_id {
+        Some(note_id) => crate::notes::publish_after_apply(&s.pool, wfe_id, note_id, &actor)
+            .await
+            .err()
+            .map(|e| e.message),
+        None => None,
+    };
+
+    Ok(Json(ApplyResultWithNote { result, note_error }))
 }
 
 /// WOR-31 T4: gövde opsiyonel — hiç body/`{}` gönderilirse `node = None` (eski
@@ -546,6 +577,15 @@ struct WfeListItem {
     /// Paralel değilken (join_target NULL) BOŞ dizi — liste tüketicisi kol-başına
     /// satır fan-out'u için bunu okur (current_node paralel modda NULL'dır).
     branches: Vec<BranchState>,
+    /// WFE not tasarımı Faz 1 (K9): görünür (published + gizlenmemiş + bu
+    /// aktöre `audience` açık) not sayısı — TEK toplu sorgu
+    /// (`notes::count_by_wfe`), N+1 yok. `WfeView`'a DOKUNULMAZ; sayaç yalnız
+    /// liste görünümündedir.
+    note_count: i64,
+    /// Faz 3 (K9 okundu takibi): bu aktör için OKUNMAMIŞ not sayısı — havuz
+    /// rozeti "kaç not var" değil "kaç YENİ not var" göstersin diye
+    /// `note_count`'un YANINA eklendi, onu YERİNE geçmedi.
+    unread_note_count: i64,
 }
 
 /// WOR-31 T4: liste kol satırı (`BranchListRow`) → API görünümü (`BranchState`,
@@ -602,6 +642,10 @@ async fn list_wfe(
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
+    // WFE not tasarımı Faz 1/3: not sayaçları da TEK toplu sorguda (N+1 yok).
+    let note_counts = crate::notes::count_by_wfe(&s.pool, &wfe_ids, &actor).await?;
+    let unread_counts = crate::notes::unread_count_by_wfe(&s.pool, &wfe_ids, &actor).await?;
+
     // WOR-31 T4: paralel WFE'lerin aktif kolları — TEK toplu sorgu, `wfe_id`'ye
     // göre grupla. Yalnız `join_target` dolu (paralel) satırları sorgula: tek-kol
     // WFE'ler için gereksiz yük olmasın.
@@ -655,11 +699,15 @@ async fn list_wfe(
         };
         let rev = revs.get(&row.wfe_id).copied().unwrap_or(0);
         let branches = branches_by_wfe.remove(&row.wfe_id).unwrap_or_default();
+        let note_count = note_counts.get(&row.wfe_id).copied().unwrap_or(0);
+        let unread_note_count = unread_counts.get(&row.wfe_id).copied().unwrap_or(0);
         out.push(WfeListItem {
             priority,
             claim_deadline,
             rev,
             branches,
+            note_count,
+            unread_note_count,
             row,
         });
     }

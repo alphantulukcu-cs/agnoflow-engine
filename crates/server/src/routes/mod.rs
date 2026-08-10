@@ -4,6 +4,7 @@ pub mod autoexec;
 pub mod db;
 pub mod delegation;
 pub mod env;
+pub mod notes;
 pub mod org;
 pub mod org_branding;
 pub mod portal;

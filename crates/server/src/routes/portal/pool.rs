@@ -91,6 +91,13 @@ pub struct PoolTask {
     /// **WFE-seviyesidir:** aynı paralel WFE'nin farklı kolları için üretilen
     /// satırlar AYNI `rev`'i taşır (kol-bazlı revizyon yoktur).
     pub rev: i32,
+    /// WFE not tasarımı Faz 1 (K9): görünür (published + gizlenmemiş + bu
+    /// aktöre `audience` açık) not sayısı — `rev` gibi TEK toplu sorguyla, kol
+    /// satırları için de aynı WFE değerini taşır.
+    pub note_count: i64,
+    /// Faz 3 (K9 okundu takibi): bu aktör için OKUNMAMIŞ not sayısı —
+    /// `note_count`'un YANINA eklendi, onu YERİNE geçmedi.
+    pub unread_note_count: i64,
 }
 
 #[utoipa::path(get, path = "/", tag = "portal",
@@ -228,6 +235,8 @@ async fn list_pool(
             priority,
             node: None,
             rev: 0, // WOR-65: iki döngü de bittikten sonra tek toplu sorguyla doldurulur
+            note_count: 0, // aşağıda doldurulur
+            unread_note_count: 0, // aşağıda doldurulur
         });
     }
 
@@ -348,14 +357,17 @@ async fn list_pool(
             claim_deadline,
             priority,
             node: Some(row.branch_node),
-            rev: 0, // aşağıda doldurulur
+            rev: 0,         // aşağıda doldurulur
+            note_count: 0,  // aşağıda doldurulur
+            unread_note_count: 0, // aşağıda doldurulur
         });
     }
 
     // WOR-65: revizyon token'ları TEK toplu sorguda — iki döngü de aynı WFE'yi
     // (paralel modda kol başına bir satır) üretebildiği için doldurma işlemi
     // döngülerin İÇİNDE değil, birleşik liste üzerinde yapılır; böylece ne N+1
-    // sorgu ne de aynı WFE için tekrarlanan sorgu olur.
+    // sorgu ne de aynı WFE için tekrarlanan sorgu olur. Not sayaçları (Faz 1)
+    // AYNI id kümesini kullanır — aynı gerekçe, ikinci toplu sorgu.
     let rev_ids: Vec<Uuid> = {
         let mut ids: Vec<Uuid> = tasks.iter().map(|t| t.id).collect();
         ids.sort_unstable();
@@ -365,8 +377,13 @@ async fn list_pool(
     let revs = wf_wfe::repo::wfah::max_seq_by_wfe(&s.pool, &rev_ids)
         .await
         .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    let note_counts = crate::notes::count_by_wfe(&s.pool, &rev_ids, &portal_as_actor).await?;
+    let unread_counts =
+        crate::notes::unread_count_by_wfe(&s.pool, &rev_ids, &portal_as_actor).await?;
     for task in &mut tasks {
         task.rev = revs.get(&task.id).copied().unwrap_or(0);
+        task.note_count = note_counts.get(&task.id).copied().unwrap_or(0);
+        task.unread_note_count = unread_counts.get(&task.id).copied().unwrap_or(0);
     }
 
     // priority DESC, deadline ASC NULLS LAST, created_at ASC (sözleşme sırası).

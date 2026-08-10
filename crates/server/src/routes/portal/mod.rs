@@ -2,6 +2,7 @@ pub mod attachments;
 pub mod auth;
 pub mod branding;
 pub mod jwt;
+pub mod notes;
 pub mod pool;
 pub mod wfd;
 pub mod wfe;

@@ -131,6 +131,17 @@ pub async fn sweep(state: &crate::state::AppState) -> usize {
         }
         swept += 1;
     }
+
+    // WFE not defteri (K5): yetim draft'lar — kullanıcı yayınlamadan/silmeden
+    // vazgeçtiği taslaklar. TTL 24 saat; Faz 2'den beri dosyaları da silinir
+    // (bkz. `notes::sweep_expired_drafts`). Rezervasyon süpürmesinin sonucunu
+    // (swept) ETKİLEMEZ.
+    match crate::notes::sweep_expired_drafts(state).await {
+        Ok(n) if n > 0 => tracing::info!("{n} süresi geçmiş taslak not temizlendi"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("taslak not süpürmesi başarısız: {}", e.message),
+    }
+
     swept
 }
 

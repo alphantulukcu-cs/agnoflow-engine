@@ -9,6 +9,12 @@
 //! Storage anahtarı: `attachments/{wfe_id}/{grup}/{item}` — grup+item WFD
 //! katalogundan gelir; wfe_id sayesinde her instance kendi dosyalarını izole tutar
 //! ve aynı grubu referanslayan farklı node'lar dosyayı tekrar istemez.
+//!
+//! **Ad-hoc not dosyaları AYRI bir anahtar ailesindedir:** `notes/{wfe_id}/{file_id}`
+//! (`docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md`, "Storage
+//! anahtarı"). Bu dosyaların katalogda (grup/item, format kuralı) karşılığı yoktur;
+//! aynı ağaca (`attachments/...`) karıştırmak `status_for_node` ve gate mantığını
+//! yanıltırdı — bu yüzden kökten ayrı bir prefiks (`notes/...`) kullanılır.
 
 use opendal::Operator;
 use serde::Serialize;
@@ -27,6 +33,12 @@ impl AttachmentStore {
 
     fn key(wfe_id: Uuid, group: &str, item: &str) -> String {
         format!("attachments/{wfe_id}/{group}/{item}")
+    }
+
+    /// Ad-hoc not dosyası anahtarı — katalog anahtarından (`key`) kasıtlı olarak ayrı
+    /// bir kök (`notes/`) kullanır; bkz. modül başlığı.
+    fn note_key(wfe_id: Uuid, file_id: Uuid) -> String {
+        format!("notes/{wfe_id}/{file_id}")
     }
 
     /// Dosya slotu yüklenmiş mi? Gate ve UI durum sorgusu bunu kullanır.
@@ -67,10 +79,13 @@ impl AttachmentStore {
             .to_vec())
     }
 
-    /// Bir WFE'nin (ya da başlatılmamış rezervasyonun) TÜM dosyalarını siler.
-    /// Süpürücü kullanır: süresi geçen rezervasyonun dosyaları sahipsiz kalır.
+    /// Bir WFE'nin (ya da başlatılmamış rezervasyonun) TÜM dosyalarını siler — hem
+    /// katalog attachment'larını (`attachments/{wfe_id}/`) hem ad-hoc not dosyalarını
+    /// (`notes/{wfe_id}/`). Süpürücü kullanır: süresi geçen rezervasyonun dosyaları
+    /// sahipsiz kalır; WFE silinince iki ağaç da birlikte temizlenir.
     pub async fn remove_all(&self, wfe_id: Uuid) -> Result<(), opendal::Error> {
-        self.op.remove_all(&format!("attachments/{wfe_id}/")).await
+        self.op.remove_all(&format!("attachments/{wfe_id}/")).await?;
+        self.op.remove_all(&format!("notes/{wfe_id}/")).await
     }
 
     /// Silme (idempotent — yoksa da hata vermez opendal semantiğinde).
@@ -81,6 +96,36 @@ impl AttachmentStore {
         item: &str,
     ) -> Result<(), opendal::Error> {
         self.op.delete(&Self::key(wfe_id, group, item)).await
+    }
+
+    // ---- ad-hoc not dosyaları (`notes/{wfe_id}/{file_id}`) ----
+
+    /// Not dosyası slotu yüklenmiş mi?
+    pub async fn note_exists(&self, wfe_id: Uuid, file_id: Uuid) -> Result<bool, opendal::Error> {
+        self.op.exists(&Self::note_key(wfe_id, file_id)).await
+    }
+
+    /// Not dosyası yükleme.
+    pub async fn note_write(
+        &self,
+        wfe_id: Uuid,
+        file_id: Uuid,
+        bytes: Vec<u8>,
+    ) -> Result<(), opendal::Error> {
+        self.op
+            .write(&Self::note_key(wfe_id, file_id), bytes)
+            .await
+            .map(|_| ())
+    }
+
+    /// Not dosyası indirme.
+    pub async fn note_read(&self, wfe_id: Uuid, file_id: Uuid) -> Result<Vec<u8>, opendal::Error> {
+        Ok(self.op.read(&Self::note_key(wfe_id, file_id)).await?.to_vec())
+    }
+
+    /// Not dosyası silme (idempotent — yoksa da hata vermez opendal semantiğinde).
+    pub async fn note_delete(&self, wfe_id: Uuid, file_id: Uuid) -> Result<(), opendal::Error> {
+        self.op.delete(&Self::note_key(wfe_id, file_id)).await
     }
 }
 

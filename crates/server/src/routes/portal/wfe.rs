@@ -25,6 +25,7 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(get_wfe_detail))
         .routes(routes!(submit_action))
         .merge(super::attachments::routes())
+        .merge(super::notes::routes())
         .with_state(state)
 }
 
@@ -220,6 +221,11 @@ struct ActionRequest {
     /// üretilmeden 409 + `code: "conflict.stale_revision"`.
     #[serde(default)]
     expected_rev: Option<u32>,
+    /// K5 (2026-08-10, WFE not tasarımı): apply BAŞARILI olduktan SONRA bu
+    /// draft notu yayınlar (bkz. `crate::notes::publish_after_apply`).
+    /// Göndermeyen istemci için davranış HİÇ değişmez.
+    #[serde(default)]
+    note_id: Option<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -228,6 +234,10 @@ struct ActionResponse {
     current_node: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     end_response: Option<Value>,
+    /// K5: yalnız `note_id` gönderilip yayınlama başarısız olduğunda dolar —
+    /// apply BAŞARILI olduysa sonuç yine döner, not draft kalır.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    note_error: Option<String>,
 }
 
 #[utoipa::path(post, path = "/{wfe_id}/action", tag = "portal",
@@ -294,6 +304,19 @@ async fn submit_action(
         .await
         .map_err(AppError::from)?;
 
+    // Not, apply BAŞARILI olduktan SONRA yayınlanır (K5) — geçiş zaten
+    // gerçekleşti; yayınlama hatası apply sonucunu YUTMAZ, `note_error` olarak
+    // taşınır ve not draft kalır (kullanıcı tekrar dener).
+    let note_error = match body.note_id {
+        Some(note_id) => {
+            crate::notes::publish_after_apply(&s.pool, wfe_id, note_id, &to_actor(&actor))
+                .await
+                .err()
+                .map(|e| e.message)
+        }
+        None => None,
+    };
+
     Ok(Json(ActionResponse {
         wfe_status: if result.terminal {
             "terminal".into()
@@ -302,5 +325,6 @@ async fn submit_action(
         },
         current_node: result.current_node,
         end_response: result.end_response,
+        note_error,
     }))
 }

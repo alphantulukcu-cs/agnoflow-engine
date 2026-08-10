@@ -29,6 +29,26 @@
 //! **Operator önbelleklenir.** S3 istemcisi kurmak her istekte yapılacak bir iş değildir;
 //! anahtar, çözülmüş konfigürasyonun kendisidir (aynı config → aynı Operator). Konfigürasyon
 //! değişince anahtar da değişir, eski girdi kullanılmaz kalır.
+//!
+//! ## Fallback'siz çözüm (ad-hoc not dosyası, 2026-08-10)
+//!
+//! Yukarıdaki `store_for_wfd`/`store_for_wfe` katalog attachment'ları için var: fallback
+//! kasıtlıdır, çünkü sessiz düşüş publish kapısıyla (`assert_attachment_storage_env`)
+//! önceden engellenmiştir — belge toplamayan akış bu kapıya hiç çarpmaz.
+//!
+//! Ad-hoc not dosyası (`docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md`,
+//! K4) o kapıdan geçmez: not ekleme WFD tasarımında öngörülemeyen, HER akışta ve HER adımda
+//! açık bir yetenektir. Belge iliştirmeyen yüzlerce akışı "attachment storage tanımla ki
+//! yayınlanabilesin" diye zorlamak yanlış olurdu (K4, reddedilen alternatifler). Bu yüzden
+//! kapı publish zamanına değil, **runtime'a ve yalnız not-dosyası rotasına** taşınır:
+//! `store_for_wfd_strict`/`store_for_wfe_strict` fallback'e hiç düşmez, `$env`'de gerekli
+//! anahtarlar DEĞER olarak tanımlı değilse `422 code:"attachment_storage.missing_env"`
+//! döner. Gerekçe aynı: müşterinin notuna eklediği belge, sessizce bizim sunucu diskine
+//! yazılmamalı — katalokta bu güvence publish kapısıyla veriliyor, ad-hoc dosyada güvence
+//! her çağrıda tazelenir çünkü publish anında hiçbir WFD bunu öngöremez.
+//!
+//! Ortak DB/`$env` çözümleme mantığı TEKRARLANMAZ: `store_for_wfd_impl`/`store_for_wfe_impl`
+//! bir `strict: bool` alır, dört genel fonksiyon bunun üzerine ince kabuk olarak oturur.
 
 use crate::{attachments::AttachmentStore, error::AppError, state::AppState};
 use axum::http::StatusCode;
@@ -147,13 +167,46 @@ fn config_from_env(env: &RunEnv, fallback_path: &str) -> Option<StorageConfig> {
     })
 }
 
-/// `(wfd_id, environment)` için depoyu çözer. WFD'nin `$env`inde depo tanımlı değilse
-/// deployment varsayılanı (`AppState.attachments`) döner.
-pub async fn store_for_wfd(
+/// Ad-hoc not dosyası rotasının fallback'siz kapısı — `$env`'de backend değeri ya da
+/// backend'in gerektirdiği anahtarlardan biri DEĞER olarak tanımlı değilse `422
+/// code:"attachment_storage.missing_env"`. Sıra: önce `KEY_BACKEND` (yoksa/tanınmıyorsa
+/// diğer anahtarlar hiç aranmaz — hangi kümenin gerekli olduğu backend'den türer), sonra
+/// backend'in kümesindeki eksik anahtarlar, TÜMÜ birden mesaja yazılır.
+fn missing_required_env_keys(env: &RunEnv) -> Vec<&'static str> {
+    let Some(backend) = env_str(env, KEY_BACKEND) else {
+        return vec![KEY_BACKEND];
+    };
+    let Some(keys) = required_env_keys(&backend) else {
+        return vec![KEY_BACKEND];
+    };
+    keys.iter()
+        .copied()
+        .filter(|k| env_str(env, k).is_none())
+        .collect()
+}
+
+/// `store_for_*_strict` için tek üretici: 422 + Türkçe mesaj + makine-okunur kod.
+fn missing_env_error(missing: &[&str]) -> AppError {
+    AppError {
+        message: format!(
+            "attachment_storage.missing_env — nota belge iliştirilemedi: $env'de eksik anahtar(lar): {}",
+            missing.join(", ")
+        ),
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: Some("attachment_storage.missing_env"),
+    }
+}
+
+/// `store_for_wfd`/`store_for_wfd_strict`in paylaştığı çözümleme. `strict = false`
+/// (katalog davranışı, DEĞİŞMEDİ): `$env`de depo tanımsızsa deployment varsayılanına
+/// sessizce düşer. `strict = true` (ad-hoc not dosyası, K4): aynı düşüşler yerine
+/// `missing_env_error` döner — hiçbir dalda `s.attachments` varsayılanına geçilmez.
+async fn store_for_wfd_impl(
     s: &AppState,
     wfd_id: Uuid,
     orgtnt_id: Uuid,
     environment_id: Option<Uuid>,
+    strict: bool,
 ) -> Result<Arc<AttachmentStore>, AppError> {
     let owner = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT project_id, name FROM wf.wfd_meta WHERE wfd_id = $1",
@@ -163,6 +216,13 @@ pub async fn store_for_wfd(
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     let Some((project_id, wfd_name)) = owner else {
+        // Projesi olmayan (eski/serbest) WFD'nin `$env` sahipliği yoktur. Katalog
+        // davranışında (strict=false) varsayılana düşülür (mevcut davranış). Strict'te
+        // düşülecek bir "belirli ayar" yok — yine de fallback'e izin VERİLMEZ: backend
+        // hiç çözülemediği için eksik sayılır.
+        if strict {
+            return Err(missing_env_error(&[KEY_BACKEND]));
+        }
         return Ok(s.attachments.clone());
     };
 
@@ -180,7 +240,19 @@ pub async fn store_for_wfd(
             .await
             .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
 
+    if strict {
+        let missing = missing_required_env_keys(&run_env);
+        if !missing.is_empty() {
+            return Err(missing_env_error(&missing));
+        }
+    }
+
     let Some(cfg) = config_from_env(&run_env, &s.cfg.attachment_storage.path) else {
+        // strict=true buraya düşmez (yukarıdaki kontrol zaten backend'i doğruladı);
+        // savunma amaçlı aynı hatayı üretir, sessiz varsayılana asla geçmez.
+        if strict {
+            return Err(missing_env_error(&[KEY_BACKEND]));
+        }
         return Ok(s.attachments.clone());
     };
 
@@ -202,8 +274,36 @@ pub async fn store_for_wfd(
     Ok(store)
 }
 
-/// Var olan bir WFE'nin deposu — WFD'si ve ortamı satırdan okunur.
-pub async fn store_for_wfe(s: &AppState, wfe_id: Uuid) -> Result<Arc<AttachmentStore>, AppError> {
+/// `(wfd_id, environment)` için depoyu çözer. WFD'nin `$env`inde depo tanımlı değilse
+/// deployment varsayılanı (`AppState.attachments`) döner. Katalog attachment rotalarının
+/// kullandığı davranış — DEĞİŞMEDİ.
+pub async fn store_for_wfd(
+    s: &AppState,
+    wfd_id: Uuid,
+    orgtnt_id: Uuid,
+    environment_id: Option<Uuid>,
+) -> Result<Arc<AttachmentStore>, AppError> {
+    store_for_wfd_impl(s, wfd_id, orgtnt_id, environment_id, false).await
+}
+
+/// `store_for_wfd`in fallback'siz varyantı — ad-hoc not dosyası rotası içindir (K4).
+/// `$env`de gerekli anahtarlar DEĞER olarak tanımlı değilse deployment varsayılanına
+/// asla düşmez, `422 code:"attachment_storage.missing_env"` döner.
+pub async fn store_for_wfd_strict(
+    s: &AppState,
+    wfd_id: Uuid,
+    orgtnt_id: Uuid,
+    environment_id: Option<Uuid>,
+) -> Result<Arc<AttachmentStore>, AppError> {
+    store_for_wfd_impl(s, wfd_id, orgtnt_id, environment_id, true).await
+}
+
+/// `store_for_wfe`/`store_for_wfe_strict`in paylaştığı çözümleme — bkz. `store_for_wfd_impl`.
+async fn store_for_wfe_impl(
+    s: &AppState,
+    wfe_id: Uuid,
+    strict: bool,
+) -> Result<Arc<AttachmentStore>, AppError> {
     let row = sqlx::query_as::<_, (Uuid, Uuid, Option<Uuid>)>(
         "SELECT wfd_id, orgtnt_id, environment_id FROM wf.wfe WHERE wfe_id = $1",
     )
@@ -212,11 +312,36 @@ pub async fn store_for_wfe(s: &AppState, wfe_id: Uuid) -> Result<Arc<AttachmentS
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
     match row {
-        Some((wfd_id, orgtnt_id, env_id)) => store_for_wfd(s, wfd_id, orgtnt_id, env_id).await,
-        // WFE yoksa (silinmiş/başlamamış) varsayılan depo: çağıranlar zaten kendi
-        // 404'lerini üretir, burada ikinci bir hata yolu açmıyoruz.
-        None => Ok(s.attachments.clone()),
+        Some((wfd_id, orgtnt_id, env_id)) => {
+            store_for_wfd_impl(s, wfd_id, orgtnt_id, env_id, strict).await
+        }
+        // WFE yoksa (silinmiş/başlamamış): katalog davranışında (strict=false) varsayılan
+        // depo döner — çağıranlar zaten kendi 404'lerini üretir, burada ikinci bir hata
+        // yolu açmıyoruz. Strict'te aynı gerekçeyle fallback'e izin verilmez: WFE'si
+        // bulunamayan bir isteğe sessizce deployment deposu vermek K4'ün önlediği şeydir.
+        None => {
+            if strict {
+                Err(missing_env_error(&[KEY_BACKEND]))
+            } else {
+                Ok(s.attachments.clone())
+            }
+        }
     }
+}
+
+/// Var olan bir WFE'nin deposu — WFD'si ve ortamı satırdan okunur. Katalog attachment
+/// rotalarının kullandığı davranış — DEĞİŞMEDİ.
+pub async fn store_for_wfe(s: &AppState, wfe_id: Uuid) -> Result<Arc<AttachmentStore>, AppError> {
+    store_for_wfe_impl(s, wfe_id, false).await
+}
+
+/// `store_for_wfe`in fallback'siz varyantı — ad-hoc not dosyası rotası içindir (K4).
+/// Bkz. `store_for_wfd_strict` doc yorumu.
+pub async fn store_for_wfe_strict(
+    s: &AppState,
+    wfe_id: Uuid,
+) -> Result<Arc<AttachmentStore>, AppError> {
+    store_for_wfe_impl(s, wfe_id, true).await
 }
 
 #[cfg(test)]

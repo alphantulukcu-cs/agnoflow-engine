@@ -33,7 +33,10 @@ pub fn router(state: AppState) -> OpenApiRouter {
 }
 
 fn parse_and_validate(wfd_json: Value) -> Result<Wfd, AppError> {
-    let wfd = Wfd::from_value(wfd_json)
+    // Simülasyon da tam validator'dan geçiyor (aşağıda) → şema kapısı da burada geçerli:
+    // editörde koşan belge ile yayınlanacak belge AYNI kapıdan geçmeli, yoksa simülasyonda
+    // yeşil görünen bir doküman publish'te 422'ye düşerdi.
+    let wfd = Wfd::from_value_checked(wfd_json)
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
     let report = validator::validate(&wfd);
     if !report.is_valid() {

@@ -63,7 +63,7 @@ impl WfdAdapter {
         project_id: Option<Uuid>,
         wfd_json: &Value,
     ) -> Result<(Uuid, i32), crate::error::WfdError> {
-        let wfd = Wfd::from_value(wfd_json.clone())
+        let wfd = Wfd::from_value_checked(wfd_json.clone())
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
 
         // WFC cross-WFD kuralları (girdi kümesi, tip uyumu, `$call.result.*` anahtarları,
@@ -330,7 +330,7 @@ impl WfdAdapter {
         version: i32,
     ) -> Result<(), crate::error::WfdError> {
         let json = self.fetch_draft_json(wfd_id, version).await?;
-        let wfd = Wfd::from_value(json)
+        let wfd = Wfd::from_value_checked(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.validate_for_release(wfd_id, version, &wfd).await?;
         repo::set_published(&self.pool, wfd_id, version).await?;
@@ -347,7 +347,7 @@ impl WfdAdapter {
         submitted_by: &str,
     ) -> Result<(), crate::error::WfdError> {
         let json = self.fetch_draft_json(wfd_id, version).await?;
-        let wfd = Wfd::from_value(json)
+        let wfd = Wfd::from_value_checked(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.validate_for_release(wfd_id, version, &wfd).await?;
         repo::set_pending(&self.pool, wfd_id, version, submitted_by).await
@@ -375,7 +375,7 @@ impl WfdAdapter {
             .to_bytes();
         let json: Value = serde_json::from_slice(&bytes)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
-        let wfd = Wfd::from_value(json)
+        let wfd = Wfd::from_value_checked(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         // Onay yolu da aynı kapıdan geçer: pending JSON immutable olsa bile
         // ÇAĞRILAN akışlar bu arada değişmiş/silinmiş olabilir.
@@ -610,7 +610,7 @@ impl WfdStore for WfdAdapter {
         let text = std::str::from_utf8(&bytes)
             .map_err(|e| EngineError::InvalidWfd(format!("utf8: {e}")))?;
         // M14: wfd_version kapısı fetch'te de uygulanır — eski format çalıştırılamaz
-        let wfd = Wfd::from_json(text)?;
+        let wfd = Wfd::from_json_checked(text)?;
 
         let mut cache = self.cache.write().await;
         if cache.len() >= CACHE_CAP {

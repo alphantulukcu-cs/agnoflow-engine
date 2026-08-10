@@ -69,6 +69,11 @@ pub struct Wfd {
 impl Wfd {
     /// Yükleme kapısı (M14): tanınmayan `wfd_version` = red; root'ta bilinmeyen alan = red.
     pub fn from_value(v: Value) -> Result<Wfd, EngineError> {
+        Self::check_version(&v)?;
+        serde_json::from_value(v).map_err(|e| EngineError::InvalidWfd(e.to_string()))
+    }
+
+    fn check_version(v: &Value) -> Result<(), EngineError> {
         let version = v
             .get("wfd_version")
             .and_then(Value::as_str)
@@ -78,13 +83,44 @@ impl Wfd {
         if version != SUPPORTED_WFD_VERSION {
             return Err(EngineError::UnsupportedWfdVersion(version.to_string()));
         }
-        serde_json::from_value(v).map_err(|e| EngineError::InvalidWfd(e.to_string()))
+        Ok(())
     }
 
     pub fn from_json(s: &str) -> Result<Wfd, EngineError> {
         let v: Value =
             serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
         Wfd::from_value(v)
+    }
+
+    /// `from_value` + **kanonik JSON Schema kapısı** (`crate::schema`).
+    ///
+    /// Serde tek başına şemayı karşılamaz: `#[serde(default)]`li alanları eksik kabul eder,
+    /// `minItems`/`uniqueItems`/`pattern` gibi kısıtları bilmez. Yani `"c_r": []` gibi şemanın
+    /// yasakladığı bir belge serde'den geçip motorda "rol kanalı kapalı" olarak çalışıyordu.
+    /// Elle yazılıp API'ye POST edilen JSON'un kapısı budur.
+    ///
+    /// Ham `from_value` KASITLI olarak açık kalır: taslak kaydı (`save_draft`) yarım belgeyi
+    /// saklayabilmeli ve testler tek kuralı sınamak için iskelet belge kurabilmeli.
+    pub fn from_value_checked(v: Value) -> Result<Wfd, EngineError> {
+        // Sürüm kapısı ÖNCE koşar (M14): eski formatın cevabı "desteklenmeyen sürüm"dür,
+        // "şema ihlali" değil — 2.1 belgesi 2.2 şemasına karşı onlarca ihlal üretir ve
+        // gerçek sebep o gürültünün içinde kaybolur.
+        Self::check_version(&v)?;
+        if let Err(errors) = crate::schema::validate_document(&v) {
+            return Err(EngineError::InvalidWfd(format!(
+                "şema ihlali ({} sorun): {}",
+                errors.len(),
+                errors.join("; ")
+            )));
+        }
+        Wfd::from_value(v)
+    }
+
+    /// `from_json` + şema kapısı — bkz. `from_value_checked`.
+    pub fn from_json_checked(s: &str) -> Result<Wfd, EngineError> {
+        let v: Value =
+            serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
+        Wfd::from_value_checked(v)
     }
 }
 

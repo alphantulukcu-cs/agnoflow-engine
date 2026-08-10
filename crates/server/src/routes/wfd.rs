@@ -186,21 +186,36 @@ async fn upload_wfd(
     request_body = serde_json::Value,
     responses((status = 200, description = "valid/errors/warnings", body = serde_json::Value)))]
 async fn validate_wfd(Json(wfd_json): Json<Value>) -> Result<Json<Value>, AppError> {
+    // Şema ihlalleri AYRI kod (`schema`) ile ve tek tek raporlanır — yayın kapısı (upload/
+    // publish) aynı şemayı reddederek durdurur, editör de aynı listeyi burada görür.
+    // Parse hatası şemayı gölgelemesin diye şema ÖNCE koşar: serde `"c_r": []`'i sessizce
+    // kabul ettiği için parse'a bakarak şema ihlalini hiç öğrenemezdik.
+    let schema_errors: Vec<Value> = match wfe_core::schema::validate_document(&wfd_json) {
+        Ok(()) => Vec::new(),
+        Err(errs) => errs
+            .iter()
+            .map(|m| serde_json::json!({"code": "schema", "path": "$", "message": m}))
+            .collect(),
+    };
     let wfd = match wfe_core::types::wfd_v22::Wfd::from_value(wfd_json) {
         Ok(w) => w,
         Err(e) => {
+            let mut errors = schema_errors;
+            errors.push(serde_json::json!({"code": "parse", "path": "$", "message": e.to_string()}));
             return Ok(Json(serde_json::json!({
                 "valid": false,
-                "errors": [{"code": "parse", "path": "$", "message": e.to_string()}],
+                "errors": errors,
                 "warnings": [],
-            })))
+            })));
         }
     };
     let report = wfe_core::validator::validate(&wfd);
     let issue = |i: &wfe_core::validator::ValidationIssue| serde_json::json!({"code": i.code, "path": i.path, "message": i.message});
+    let mut errors = schema_errors;
+    errors.extend(report.errors.iter().map(issue));
     Ok(Json(serde_json::json!({
-        "valid": report.is_valid(),
-        "errors": report.errors.iter().map(issue).collect::<Vec<_>>(),
+        "valid": errors.is_empty(),
+        "errors": errors,
         "warnings": report.warnings.iter().map(issue).collect::<Vec<_>>(),
     })))
 }
@@ -897,7 +912,7 @@ async fn run_scenarios_inner(
         Some(v) => v,
         None => s.wfd.fetch_json_any(id, ver).await.map_err(map_wfd_err)?,
     };
-    let wfd = wfe_core::types::wfd_v22::Wfd::from_value(wfd_json.clone())
+    let wfd = wfe_core::types::wfd_v22::Wfd::from_value_checked(wfd_json.clone())
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
     let report = wfe_core::validator::validate(&wfd);
     if !report.is_valid() {

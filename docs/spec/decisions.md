@@ -1520,3 +1520,64 @@ sınıfıdır; konfigürasyon yok sayılır ve deployment varsayılanına dönü
 Operator ÖNBELLEKLENİR (anahtar = çözülmüş konfigürasyonun kendisi): S3 istemcisi kurmak
 her istekte yapılacak iş değildir, konfigürasyon değişince anahtar da değişir.
 (`server/src/attachment_store.rs`; tüm attachment rotaları ve gate'ler bu çözücüden geçer.)
+
+---
+
+## Şema kapısı motorda + çapasız C_A (2026-08-07)
+
+İki karar, tek yerde: ikisi de "elle yazılan JSON kafaya göre olmasın" ekseninde.
+
+### 1. `docs/spec/schema.json` artık RUNTIME kapısıdır
+
+**Sorun:** Şema kanonik dosyaydı ama hiçbir yerde koşmuyordu. Backend'in kapısı
+`wfd_version` + serde + `validator`'dı; serde `#[serde(default)]`li alanları eksik kabul
+eder, `minItems`/`uniqueItems`/`pattern` gibi kısıtları hiç bilmez. Tek zorlayıcı ajv ile
+EDİTÖRdü. Sonuç: editörü atlayıp API'ye POST edilen bir belge şemayı ihlal ettiği halde
+kabul ediliyordu — ör. `"c_r": []` şemada `minItems: 1` ile yasak, serde için `Some([])`,
+motor için "rol kanalı kapalı". Belge geçersizdi ve çalışıyordu.
+
+**Karar:** Şema `include_str!` ile motora GÖMÜLÜR (`wfe_core::schema`) — binary ile spec
+ayrı düşemez. Kapı `Wfd::from_value_checked` / `from_json_checked`'te; koştuğu yerler:
+upload, publish, submit, approve, **fetch (okuma)**, `/wfd/validate`, `/wfe/simulate`,
+senaryo koşumu. Sürüm kapısı şemadan ÖNCE koşar: 2.1 belgesi 2.2 şemasına karşı onlarca
+ihlal üretir, gerçek sebep o gürültüde kaybolur.
+
+Okuma da doğrulanır (bilinçli, kullanıcı kararı): depodaki her belge şemaya uygun olmak
+zorunda. Riski kabul edildi — şemayı ihlal eden yayınlanmış bir belge varsa o akış 422'ye
+düşer ve yeniden yayınlanması gerekir. Editör bugüne kadar `c_r: []` üretiyordu ama kendi
+ajv kapısı o belgeyi zaten reddediyordu (`serializeAndValidate`), yani depoda olması
+beklenmez; elle POST edilmiş belgeler taranmalıdır.
+
+Taslak KAYDI (`save_draft`) kapsam DIŞI: yarım belge kaydedilebilir, yayınlanamaz. Ham
+`from_value` de kasıtlı olarak açık kalır (testler iskelet belge kurar).
+
+### 2. `c_orgu` opsiyonel — çapasız C_A (yalnız `c_u`)
+
+**Sorun:** "Şu kişi, hangi birimde olursa olsun bu node'u yapabilsin" ifade edilemiyordu.
+`{ "c_orgu": "self", "c_u": ["ayse"] }` yaklaşımı TUTARSIZ çalışıyordu: `authorize`
+`self`'i claimant'ın kendi birimine çözdüğü için claim kapısı daima açılır, ama havuz
+listesi denormalize `current_c_a` cache'inden okunur ve o cache node'a GİRİŞTEKİ aktörün
+birimiyle donar → kişi başka birimdeyse görevi listede hiç görmez, ama wfe_id'yi bilse
+claim edebilir.
+
+**Karar:** `c_orgu` HİÇ verilmeyebilir. O zaman orgu kanalı kısıtsızdır ve kural
+`match = user_match`'e indirgenir. Bu biçimde **`c_u` zorunlu, `c_r` YASAK**:
+
+- Kişi kanalı adı adı sayılmış bir istisna listesidir; çapasız hali de sayılabilir kalır.
+- Rol kanalının çapasız hali ("tenant'taki tüm müdürler") kurulabilecek en geniş kapıdır ve
+  `c_orgu` yazmayı unutan tasarımcının kazara ürettiği şey tam olarak odur. Ayrıca aday
+  cache'i ORGU × rol satırı üretirdi (sınırsız).
+
+Üç katman reddeder: şema (`candidateActor.oneOf`), validator (`c_a_anchorless_role`,
+`c_a_anchorless_needs_user` — `reassign` dahil), matcher (çapasız kuralda rol kanalını hiç
+sormaz). Tek noktaya güvenilmiyor çünkü ikisi de belgeyi başka bir yoldan girmiş olabilir.
+
+**Aday cache:** çapasız kural kişi başına TEK girdi yazar — `orgu_id` YOK, `any_orgu: true`
+(`types::actor::CandidateActor`). Tenant'taki her ORGU için satır üretmek hem sınırsız hem
+yanlış olurdu (küme org ağacı değiştikçe değişir, cache node'a girişte donar). Havuz sorgusu
+(`portal/pool.rs`) bu girdiler için AYRI containment filtreleri koşar. İşaret açıktır
+(`any_orgu`) çünkü çıplak `[{"user_id": U}]` sorgusu aynı kişinin BAŞKA bir birimdeki
+scope'lu grantını da kapsardı — jsonb `@>` alt küme sorar.
+
+**Node key:** orgu parçası `any` (`ANCHORLESS_SLUG`) → `{ "c_u": ["ayse"] }` = `any__u_ayse`.
+Çakışma imkânsız: ORGTRVLANG ifadesi `self` ya da `*:` ile başlamak zorundadır.

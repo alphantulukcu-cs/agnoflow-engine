@@ -24,12 +24,26 @@ pub struct OrgUnit {
 /// non-UUID identifier, mirrored from matcher.rs's identity channel). Claim
 /// eligibility is always re-verified with the runtime matcher — this cache is
 /// only for over-inclusive VIEW visibility.
+///
+/// **Anchorless entries** (`c_orgu` absent in the rule) carry `any_orgu: true` and NO
+/// `orgu_id`: the person matches from any unit, so materialising one row per tenant ORGU
+/// would be both wrong (the set changes as the org tree changes) and unbounded. Pool
+/// listing has a dedicated containment filter for these (`portal/pool.rs`). The marker is
+/// explicit rather than "orgu_id missing" so that `@> [{"user_id": U}]` can never
+/// accidentally match a SCOPED entry for the same person in a different unit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CandidateActor {
-    pub orgu_id: Uuid,
+    /// `None` yalnız `any_orgu = true` girdilerde — çapalı girdilerde daima yazılır
+    /// (eski satırların JSON'u birebir aynı kalır).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub orgu_id: Option<Uuid>,
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub user_ident: Option<String>,
+    /// Çapasız kural girdisi: birim kısıtı YOK. `false` iken serileştirilmez — mevcut
+    /// `current_c_a` satırlarının biçimi değişmez.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub any_orgu: bool,
 }

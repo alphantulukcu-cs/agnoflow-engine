@@ -1142,7 +1142,7 @@ async fn escalation_resolves_anchored_listable_via_wfah_actor() {
     assert!(commit
         .resolved_c_a
         .iter()
-        .any(|c| c.orgu_id == human_orgu));
+        .any(|c| c.orgu_id == Some(human_orgu)));
     // Audit izi DEĞİŞMEZ: marker yine nil-orgu'lu saf `system` aktörüdür.
     assert_eq!(commit.wfah_entries[0].actor.role, "system");
     assert!(commit.wfah_entries[0].actor.orgu_id.is_nil());
@@ -1172,7 +1172,7 @@ async fn claim_timeout_move_resolves_anchored_listable_via_wfah_actor() {
             assert!(commit
                 .resolved_c_a
                 .iter()
-                .any(|c| c.orgu_id == human_orgu));
+                .any(|c| c.orgu_id == Some(human_orgu)));
             assert_eq!(commit.wfah_entries[0].actor.role, "system");
             assert!(commit.wfah_entries[0].actor.orgu_id.is_nil());
         }
@@ -3252,7 +3252,7 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
 fn golden_with_reassign() -> Wfd {
     let mut wfd = golden();
     wfd.nodes.get_mut("self__creditAnalyst").unwrap().reassign = Some(CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: Some(vec!["branchManager".into()]),
         c_u: None,
     });

@@ -34,22 +34,23 @@ pub async fn authorize(
     env: MatchEnv<'_>,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
-    // 1. ORGU kanalı: actor.orgu resolve edilen kümede olmalı
-    let resolved = resolve_c_orgu(
-        &rule.c_orgu,
-        actor.orgu_id,
-        env.ctx,
-        env.wfah,
-        env.orgtnt_id,
-        org,
-    )
-    .await?;
-    if !resolved.iter().any(|u| u.orgu_id == actor.orgu_id) {
-        return Ok(false);
+    // 1. ORGU kanalı: actor.orgu resolve edilen kümede olmalı.
+    //    `c_orgu` HİÇ verilmemişse (çapasız biçim) bu kanal kısıtsızdır — kural yalnız
+    //    kişi kanalıyla yaşar (aşağıda 3), kapı "şu kişi, hangi birimde olursa olsun".
+    if let Some(c_orgu) = &rule.c_orgu {
+        let resolved =
+            resolve_c_orgu(c_orgu, actor.orgu_id, env.ctx, env.wfah, env.orgtnt_id, org).await?;
+        if !resolved.iter().any(|u| u.orgu_id == actor.orgu_id) {
+            return Ok(false);
+        }
     }
 
-    // 2. Rol kanalı: c_r listesinde VE gerçekten atanmış
-    if let Some(c_r) = &rule.c_r {
+    // 2. Rol kanalı: c_r listesinde VE gerçekten atanmış.
+    //    ÇAPASIZ kuralda rol kanalı HİÇ sorulmaz: çapasız bir rol grantı ("tenant'taki tüm
+    //    müdürler") kazara kurulabilecek en geniş kapıdır. Şema ve validator o belgeyi
+    //    reddeder; matcher ayrıca reddeder ki elle yazılmış/eski bir kayıt bir yolla
+    //    sızarsa kapı yine açılmasın (savunma katmanı, tek noktaya güvenmiyoruz).
+    if let (Some(c_r), true) = (&rule.c_r, rule.c_orgu.is_some()) {
         if c_r.iter().any(|r| r == &actor.role)
             && org
                 .check_user_role(actor.user_id, actor.orgu_id, &actor.role)
@@ -210,7 +211,7 @@ mod tests {
 
     fn rule(c_r: Option<Vec<&str>>, c_u: Option<Vec<&str>>) -> CandidateActor {
         CandidateActor {
-            c_orgu: COrgu::Selector("self".into()),
+            c_orgu: Some(COrgu::Selector("self".into())),
             c_r: c_r.map(|v| v.into_iter().map(String::from).collect()),
             c_u: c_u.map(|v| v.into_iter().map(|x| CuItem::Literal(x.into())).collect()),
         }
@@ -273,6 +274,55 @@ mod tests {
         .unwrap());
     }
 
+    /// Çapasız kural (`c_orgu` yok): kişi HANGİ birimden gelirse gelsin eşleşir.
+    /// `MockOrg.units` boş — yani `resolve_c_orgu` çağrılmış olsaydı kimse geçemezdi;
+    /// test bu yüzden aynı zamanda "orgu kanalı hiç sorulmadı" iddiasını da sabitler.
+    #[tokio::test]
+    async fn anchorless_c_u_matches_from_any_orgu() {
+        let org = MockOrg {
+            units: vec![],
+            role_assigned: false,
+            ident: Some("ayse".into()),
+        };
+        let rule = CandidateActor {
+            c_orgu: None,
+            c_r: None,
+            c_u: Some(vec![CuItem::Literal("ayse".into())]),
+        };
+        for orgu in [Uuid::new_v4(), Uuid::new_v4()] {
+            let a = actor(orgu, "herhangiRol");
+            assert!(
+                authorize(&rule, &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
+                    .await
+                    .unwrap(),
+                "çapasız c_u kuralı {orgu} biriminden de eşleşmeli"
+            );
+        }
+    }
+
+    /// Çapasız kuralda rol kanalı KAPALIDIR. Şema ve validator `c_r`li çapasız belgeyi
+    /// reddeder; bu test matcher'ın da reddettiğini sabitler — belge bir yolla sızarsa
+    /// (elle yazılmış eski kayıt, başka bir istemci) kapı yine açılmasın.
+    #[tokio::test]
+    async fn anchorless_role_channel_is_closed() {
+        let org = MockOrg {
+            units: vec![],
+            role_assigned: true,
+            ident: None,
+        };
+        let smuggled = CandidateActor {
+            c_orgu: None,
+            c_r: Some(vec!["mudur".into()]),
+            c_u: None,
+        };
+        let a = actor(Uuid::new_v4(), "mudur");
+        assert!(
+            !authorize(&smuggled, &a, env(&EMPTY_CTX, &EMPTY_WFAH), &org)
+                .await
+                .unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn actor_outside_resolved_orgu_fails_even_with_role() {
         let orgu = Uuid::new_v4();
@@ -323,7 +373,7 @@ mod tests {
         let a = actor(orgu, "x");
         let uuid_str = a.user_id.to_string();
         let r = CandidateActor {
-            c_orgu: COrgu::Selector("self".into()),
+            c_orgu: Some(COrgu::Selector("self".into())),
             c_r: None,
             c_u: Some(vec![CuItem::Literal(uuid_str)]),
         };
@@ -401,10 +451,10 @@ mod tests {
 
     fn ctx_anchored_rule(path: &str) -> CandidateActor {
         CandidateActor {
-            c_orgu: COrgu::Anchor {
+            c_orgu: Some(COrgu::Anchor {
                 from: crate::types::wfd_v22::AnchorFrom::Ctx(path.into()),
                 traverse: "self".into(),
-            },
+            }),
             c_r: Some(vec!["subeMuduru".into()]),
             c_u: None,
         }
@@ -463,7 +513,7 @@ mod tests {
     /// Verilen c_u öğeleriyle kural (`c_r` yok — kişi kanalı yalnız test edilsin).
     fn cu_rule(items: Vec<CuItem>) -> CandidateActor {
         CandidateActor {
-            c_orgu: COrgu::Selector("self".into()),
+            c_orgu: Some(COrgu::Selector("self".into())),
             c_r: None,
             c_u: Some(items),
         }
@@ -544,7 +594,7 @@ mod tests {
         let a = actor(orgu, "subeMuduru");
         let org = MockOrg { units: vec![unit(orgu)], role_assigned: true, ident: None };
         let rule = CandidateActor {
-            c_orgu: COrgu::Selector("self".into()),
+            c_orgu: Some(COrgu::Selector("self".into())),
             c_r: Some(vec!["subeMuduru".into()]),
             c_u: Some(vec![cu_ref("$ctx.hic_yazilmadi")]),
         };

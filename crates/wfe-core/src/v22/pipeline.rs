@@ -2392,17 +2392,27 @@ impl<'a> Engine<'a> {
         actor: &Actor,
         orgtnt_id: Uuid,
     ) -> Result<Vec<ResolvedCandidate>, EngineError> {
-        let units =
-            resolve_c_orgu(&rule.c_orgu, actor.orgu_id, ctx, wfah, orgtnt_id, self.org).await?;
+        // Çapasız kural (c_orgu yok): birim kümesi YOK — aday tek satır, `any_orgu` işaretli
+        // (bkz. `types::actor::CandidateActor`). Tenant'taki her ORGU için satır üretmek
+        // hem sınırsız hem de yanlış olurdu: küme org ağacı değiştikçe değişir, cache ise
+        // node'a girişte donar.
+        let units = match &rule.c_orgu {
+            Some(c_orgu) => {
+                Some(resolve_c_orgu(c_orgu, actor.orgu_id, ctx, wfah, orgtnt_id, self.org).await?)
+            }
+            None => None,
+        };
         let mut out = Vec::new();
-        if let Some(roles) = &rule.c_r {
-            for unit in &units {
+        // Rol kanalı yalnız ÇAPALI kuralda vardır (matcher ile aynı kısıt).
+        if let (Some(roles), Some(units)) = (&rule.c_r, units.as_ref()) {
+            for unit in units {
                 for role in roles {
                     out.push(ResolvedCandidate {
-                        orgu_id: unit.orgu_id,
+                        orgu_id: Some(unit.orgu_id),
                         role: role.clone(),
                         user_id: None,
                         user_ident: None,
+                        any_orgu: false,
                     });
                 }
             }
@@ -2420,18 +2430,31 @@ impl<'a> Engine<'a> {
                     CuItem::Ref { from } => resolve_cu_ident(from, ctx),
                 })
                 .collect();
-            for unit in &units {
-                for u in &idents {
-                    let (user_id, user_ident) = match Uuid::parse_str(u) {
-                        Ok(uuid) => (Some(uuid), None),
-                        Err(_) => (None, Some(u.clone())),
-                    };
-                    out.push(ResolvedCandidate {
-                        orgu_id: unit.orgu_id,
+            for u in &idents {
+                let (user_id, user_ident) = match Uuid::parse_str(u) {
+                    Ok(uuid) => (Some(uuid), None),
+                    Err(_) => (None, Some(u.clone())),
+                };
+                match units.as_ref() {
+                    Some(units) => {
+                        for unit in units {
+                            out.push(ResolvedCandidate {
+                                orgu_id: Some(unit.orgu_id),
+                                role: String::new(),
+                                user_id,
+                                user_ident: user_ident.clone(),
+                                any_orgu: false,
+                            });
+                        }
+                    }
+                    // Çapasız: kişi başına TEK girdi, birim yazılmaz.
+                    None => out.push(ResolvedCandidate {
+                        orgu_id: None,
                         role: String::new(),
                         user_id,
-                        user_ident,
-                    });
+                        user_ident: user_ident.clone(),
+                        any_orgu: true,
+                    }),
                 }
             }
         }
@@ -2955,10 +2978,50 @@ mod tests {
 
     fn rule(c_r: Option<Vec<&str>>, c_u: Option<Vec<&str>>) -> CandidateActor {
         CandidateActor {
-            c_orgu: COrgu::Selector("self".into()),
+            c_orgu: Some(COrgu::Selector("self".into())),
             c_r: c_r.map(|v| v.into_iter().map(String::from).collect()),
             c_u: c_u.map(|v| v.into_iter().map(|x| CuItem::Literal(x.into())).collect()),
         }
+    }
+
+    /// Çapasız kural: aday cache'ine kişi başına TEK girdi yazılır — birim YOK,
+    /// `any_orgu: true`. Tenant'taki her ORGU için satır üretmek hem sınırsız olurdu hem
+    /// de org ağacı değişince yanlışa düşerdi (cache node'a girişte donar).
+    #[tokio::test]
+    async fn resolve_candidates_anchorless_emits_single_any_orgu_entry() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = Engine {
+            org: &org,
+            exec: &runner,
+            env: Default::default(),
+        };
+        let actor = Actor {
+            orgu_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: "clerk".into(),
+        };
+        let wfah = Wfah::empty();
+        let anchorless = CandidateActor {
+            c_orgu: None,
+            c_r: None,
+            c_u: Some(vec![CuItem::Literal("ayse".into())]),
+        };
+
+        let out = engine
+            .resolve_candidates(&anchorless, &json!({}), &wfah, &actor, Uuid::nil())
+            .await
+            .unwrap();
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].orgu_id, None);
+        assert!(out[0].any_orgu);
+        assert_eq!(out[0].user_ident.as_deref(), Some("ayse"));
+        // Havuz sorgusunun containment filtresi tam bu biçime bakıyor (portal/pool.rs).
+        assert_eq!(
+            serde_json::to_value(&out[0]).unwrap(),
+            json!({ "role": "", "user_ident": "ayse", "any_orgu": true })
+        );
     }
 
     #[tokio::test]
@@ -2989,7 +3052,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].orgu_id, actor.orgu_id);
+        assert_eq!(out[0].orgu_id, Some(actor.orgu_id));
         assert_eq!(out[0].role, "branchClerk");
         assert_eq!(out[0].user_id, None);
         assert_eq!(out[0].user_ident, None);
@@ -3025,7 +3088,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].orgu_id, actor.orgu_id);
+        assert_eq!(out[0].orgu_id, Some(actor.orgu_id));
         assert_eq!(out[0].role, "");
         assert_eq!(out[0].user_id, Some(target_user));
         assert_eq!(out[0].user_ident, None);

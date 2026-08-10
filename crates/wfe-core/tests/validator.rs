@@ -2498,3 +2498,72 @@ fn sum_over_whole_history_does_not_warn() {
     let codes: Vec<String> = report.warnings.into_iter().map(|w| w.code).collect();
     assert!(!codes.contains(&"zen_agg_empty_history".to_string()), "uyarılar: {codes:#?}");
 }
+
+// ---- Çapasız C_A (c_orgu yok) — biçim kuralları -------------------------------------
+
+/// Golden fixture'ın bir node'unu çapasız (yalnız c_u) biçime çevirir. Node key de
+/// yeniden yazılır (`slug` çapasız kuralda `any__u_...` üretir), yoksa `node_key_slug`
+/// kuralı bu testlerin ölçtüğü şeyi gölgeler.
+fn fixture_with_anchorless_node(c_a: Value) -> Value {
+    let mut v = fixture_value();
+    let nodes = v["nodes"].as_object_mut().unwrap();
+    let old_key = nodes.keys().next().unwrap().clone();
+    let mut node = nodes.remove(&old_key).unwrap();
+    node["c_a"] = c_a;
+    let new_key = "any__u_ayse".to_string();
+    nodes.insert(new_key.clone(), node);
+    // Node key dokümanın her yerinden referanslanır (start.from, transitions.from,
+    // wft.node, escalation[].wft, listable[]...) — tek tek gezmek yerine TÜM string'ler
+    // yeniden yazılır. Test fixture'ında bu metin başka bir anlamda kullanılmıyor.
+    rename_strings(&mut v, &old_key, &new_key);
+    v
+}
+
+fn rename_strings(v: &mut Value, from: &str, to: &str) {
+    match v {
+        Value::String(s) => {
+            if s == from {
+                *s = to.to_string();
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| rename_strings(x, from, to)),
+        Value::Object(m) => m.iter_mut().for_each(|(_, x)| rename_strings(x, from, to)),
+        _ => {}
+    }
+}
+
+#[test]
+fn anchorless_c_u_only_node_is_valid() {
+    let report = validate_value(fixture_with_anchorless_node(json!({ "c_u": ["ayse"] })));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn anchorless_with_c_r_is_error() {
+    let report = validate_value(fixture_with_anchorless_node(
+        json!({ "c_u": ["ayse"], "c_r": ["mudur"] }),
+    ));
+    assert!(has_error(&report, "c_a_anchorless_role"), "{:#?}", report.errors);
+}
+
+#[test]
+fn anchorless_without_c_u_is_error() {
+    let report = validate_value(fixture_with_anchorless_node(json!({})));
+    assert!(
+        has_error(&report, "c_a_anchorless_needs_user"),
+        "{:#?}",
+        report.errors
+    );
+}
+
+/// `reassign` de C_A şeklindedir — aynı kısıt orada da geçerli olmalı, yoksa çapasız
+/// rol kanalı devir yetkisi üzerinden geri sızardı.
+#[test]
+fn anchorless_reassign_with_c_r_is_error() {
+    let mut v = fixture_value();
+    let nodes = v["nodes"].as_object_mut().unwrap();
+    let key = nodes.keys().next().unwrap().clone();
+    nodes[&key]["reassign"] = json!({ "c_r": ["mudur"] });
+    let report = validate_value(v);
+    assert!(has_error(&report, "c_a_anchorless_role"), "{:#?}", report.errors);
+}

@@ -305,7 +305,7 @@ mod tests {
         };
         let vis = XVisibility {
             c_a: Some(CandidateActor {
-                c_orgu: COrgu::Selector("self".into()),
+                c_orgu: Some(COrgu::Selector("self".into())),
                 c_r: Some(vec!["auditor".into()]),
                 c_u: None,
             }),

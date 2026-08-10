@@ -114,18 +114,34 @@ async fn list_pool(
     }]);
     // c_u can also be a non-UUID identifier (username) — mirror matcher.rs's
     // identity channel by resolving the actor's own ident, if any exists.
-    let ident_filter = s
+    let ident = s
         .executor
         .org
         .user_ident(actor.user_id)
         .await
-        .map_err(AppError::from)?
-        .map(|ident| {
-            serde_json::json!([{
-                "orgu_id":    actor.orgu_id.to_string(),
-                "user_ident": ident
-            }])
-        });
+        .map_err(AppError::from)?;
+    let ident_filter = ident.as_ref().map(|ident| {
+        serde_json::json!([{
+            "orgu_id":    actor.orgu_id.to_string(),
+            "user_ident": ident
+        }])
+    });
+    // Çapasız (c_orgu'suz) kural girdileri birim TAŞIMAZ ve `any_orgu: true` ile
+    // işaretlidir — bu yüzden orgu'lu filtreler onları YAKALAMAZ, ayrı containment gerekir.
+    // Aksi halde havuz listesi ile claim kapısı ayrı düşerdi: kişi başka birimdeyken
+    // matcher onu yetkilendirir ama görev listesinde hiç görünmezdi.
+    // `any_orgu` işareti filtreye DAHİL: çıplak `[{"user_id": U}]` sorgusu aynı kişinin
+    // BAŞKA bir birimdeki scope'lu grantını da kapsardı (jsonb containment alt küme sorar).
+    let any_orgu_user_filter = serde_json::json!([{
+        "any_orgu": true,
+        "user_id":  actor.user_id.to_string()
+    }]);
+    let any_orgu_ident_filter = ident.as_ref().map(|ident| {
+        serde_json::json!([{
+            "any_orgu":   true,
+            "user_ident": ident
+        }])
+    });
     let owner_filter = serde_json::json!({ "user_id": actor.user_id.to_string() });
 
     let rows = sqlx::query_as::<_, PoolRow>(
@@ -150,6 +166,8 @@ async fn list_pool(
               OR e.current_c_a @> $3::jsonb
               OR ($4::jsonb IS NOT NULL AND e.current_c_a @> $4::jsonb)
               OR e.claimed_by @> $5::jsonb
+              OR e.current_c_a @> $6::jsonb
+              OR ($7::jsonb IS NOT NULL AND e.current_c_a @> $7::jsonb)
            )
          ORDER BY e.created_at ASC",
     )
@@ -158,6 +176,8 @@ async fn list_pool(
     .bind(user_filter)
     .bind(ident_filter)
     .bind(owner_filter)
+    .bind(any_orgu_user_filter)
+    .bind(any_orgu_ident_filter)
     .fetch_all(&s.pool)
     .await
     .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;

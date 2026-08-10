@@ -116,21 +116,21 @@ fn legacy_inline_c_a_start_is_rejected() {
 fn slug_algorithm_matches_spec_examples() {
     // runtime-semantics §2a örnekleri
     let simple = CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: Some(vec!["creditAnalyst".into()]),
         c_u: None,
     };
     assert_eq!(simple.slug(), "self__creditAnalyst");
 
     let typed = CandidateActor {
-        c_orgu: COrgu::Selector("*:[type:branch]".into()),
+        c_orgu: Some(COrgu::Selector("*:[type:branch]".into())),
         c_r: Some(vec!["branchClerk".into()]),
         c_u: None,
     };
     assert_eq!(typed.slug(), "type_branch__branchClerk");
 
     let cu_only = CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: None,
         c_u: Some(vec!["user_ayse".into()]),
     };
@@ -138,17 +138,28 @@ fn slug_algorithm_matches_spec_examples() {
 
     // roller sıralanır, deterministiktir
     let two_roles = CandidateActor {
-        c_orgu: COrgu::Selector("parent".into()),
+        c_orgu: Some(COrgu::Selector("parent".into())),
         c_r: Some(vec!["zeta".into(), "alpha".into()]),
         c_u: None,
     };
     assert_eq!(two_roles.slug(), "parent__alpha-zeta");
+
+    // Çapasız biçim: orgu parçası `ANCHORLESS_SLUG`. Bir ORGTRVLANG ifadesi bu metni
+    // üretemez (`self`/`*:` ile başlamak zorunda), yani çakışma imkânsız.
+    let anchorless = CandidateActor {
+        c_orgu: None,
+        c_r: None,
+        c_u: Some(vec!["user_ayse".into()]),
+    };
+    assert_eq!(anchorless.slug(), "any__u_user_ayse");
+    // ...ve çapalı eşdeğeriyle AYNI c_a sayılmaz (uniqueness ayrı node'lara izin verir).
+    assert_ne!(anchorless.canonical(), cu_only.canonical());
 }
 
 #[test]
 fn c_u_match_is_role_agnostic_and_missing_field_is_false() {
     let cu_rule = CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: None,
         c_u: Some(vec!["user_ayse".into()]),
     };
@@ -159,7 +170,7 @@ fn c_u_match_is_role_agnostic_and_missing_field_is_false() {
 
     // c_r verilmemişse rol kanalı match üretmez (wildcard DEĞİL)
     let r_rule = CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: Some(vec!["creditAnalyst".into()]),
         c_u: None,
     };

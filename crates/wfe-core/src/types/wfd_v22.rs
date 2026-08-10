@@ -249,13 +249,24 @@ impl From<&str> for CuItem {
     }
 }
 
-/// Tek C_A kuralı. match = resolved(c_orgu) AND (rol_match OR user_match).
+/// Tek C_A kuralı — İKİ biçim.
+///
+/// **Çapalı** (`c_orgu` verilir): match = resolved(c_orgu) AND (rol_match OR user_match).
 /// Verilmeyen alan o kanaldan match üretmez (yok = false, wildcard DEĞİL).
-/// c_u match'i rol-agnostiktir.
+///
+/// **Çapasız** (`c_orgu` HİÇ verilmez): match = user_match. Kişi tenant genelinde, hangi
+/// ORGU'da olursa olsun eşleşir. Bu biçimde `c_u` ZORUNLU, `c_r` YASAKtır (şema + validator
+/// `c_a_anchorless_role`): çapasız bir ROL kanalı ("tenant'taki tüm müdürler") kazara
+/// kurulabilecek en geniş kapıdır, kişi kanalı ise adı adı sayılmış bir istisna listesidir.
+/// `matcher` çapasız kuralda rol kanalını hiç sormaz — belge bir yolla sızsa bile.
+///
+/// c_u match'i her iki biçimde de rol-agnostiktir.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateActor {
-    pub c_orgu: COrgu,
+    /// `None` = çapasız biçim (orgu kanalı kısıtsız). Bkz. tip dokümantasyonu.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_orgu: Option<COrgu>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub c_r: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,8 +292,15 @@ impl CandidateActor {
 
     /// Canonical node slug (runtime-semantics §2a):
     /// orgu_slug [+ "__" + sıralı_roller] [+ "__u_" + sıralı_userlar]
+    ///
+    /// Çapasız kuralda orgu parçası `ANCHORLESS_SLUG`'dır. Bir Selector bu metni ÜRETEMEZ:
+    /// ORGTRVLANG ifadesi `self` ya da `*:` ile başlamak zorundadır (`ParseError::MissingSelf`),
+    /// yani çapasız slug hiçbir çapalı kuralla çakışmaz.
     pub fn slug(&self) -> String {
-        let mut parts = vec![self.c_orgu.slug()];
+        let mut parts = vec![match &self.c_orgu {
+            Some(c) => c.slug(),
+            None => ANCHORLESS_SLUG.to_string(),
+        }];
         if let Some(r) = &self.c_r {
             let mut r: Vec<String> = r.iter().map(|x| sanitize(x)).collect();
             r.sort();
@@ -309,9 +327,18 @@ impl CandidateActor {
         r.sort();
         let mut u = self.c_u.clone().unwrap_or_default();
         u.sort();
-        format!("{:?}|r:{:?}|u:{:?}", self.c_orgu.slug(), r, u)
+        // `Option`'ın Debug'ı çapasızı ayırır: `None` ≠ `Some("...")`.
+        format!(
+            "{:?}|r:{:?}|u:{:?}",
+            self.c_orgu.as_ref().map(COrgu::slug),
+            r,
+            u
+        )
     }
 }
+
+/// Çapasız (`c_orgu` yok) kuralın node key parçası — bkz. `CandidateActor::slug`.
+pub const ANCHORLESS_SLUG: &str = "any";
 
 /// §2a sanitize: [A-Za-z0-9] korunur, diğerleri '_', ardışık '_' tekilleştirilir,
 /// baş/son '_' kırpılır. Case korunur.

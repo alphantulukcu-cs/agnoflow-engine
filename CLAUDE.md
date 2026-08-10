@@ -17,7 +17,7 @@ Alınan tasarım kararları: `docs/spec/decisions.md`.
 
 ## Değişmezler (spec'ten)
 
-- C_A **TEK KURALDIR**: `{c_orgu, c_r?, c_u?}`; match = `resolved(c_orgu) AND (rol OR c_u)`; verilmeyen alan **false** (wildcard değil); c_u rol-agnostik.
+- C_A **TEK KURALDIR**, iki biçim: **çapalı** `{c_orgu, c_r?, c_u?}` → match = `resolved(c_orgu) AND (rol OR c_u)`; **çapasız** `{c_u}` (c_orgu HİÇ yok) → match = `c_u`, kişi tenant genelinde eşleşir. Çapasızda `c_u` zorunlu, **`c_r` YASAK** (şema `oneOf` + validator `c_a_anchorless_role` + matcher rol kanalını hiç sormaz). Verilmeyen alan **false** (wildcard değil); c_u rol-agnostik. Çapasız aday cache girdisi birim taşımaz (`any_orgu: true`), havuz sorgusunda ayrı filtre.
 - Node key = `slug(c_a)` (§2a); aynı canonical c_a ikinci node'da OLAMAZ.
 - Transition: `from` + `action`; aynı (node, action) için array sırasında İLK when-match.
 - wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`.

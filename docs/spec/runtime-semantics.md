@@ -26,6 +26,7 @@ sanitize(s):  [A-Za-z0-9] korunur, diger karakterler '_' olur,
               ardisik '_' tekillestirilir, bas/son '_' kirpilir. Case korunur.
 
 orgu_slug(c_orgu):
+  YOK (capasiz bicim)         -> "any"                  # bkz. §3 "Capasiz C_A"
   string ise                  -> sanitize(s)            # "self", "*:[type:branch]" -> "type_branch"
   {from: "$ctx...", traverse} -> sanitize(from) + "_" + sanitize(traverse)
   {from: {wfah}, traverse}    -> "wfah_" + sanitize(wfah) + "_" + sanitize(traverse)
@@ -36,6 +37,10 @@ slug(c_a):
   c_u varsa: parts += [ "u_" + sirali(sanitize(user)).join("-") ]
   slug = parts.join("__")
 ```
+
+`any` token'ı bir ORGTRVLANG ifadesinden ASLA türetilemez (ifade `self` ya da `*:` ile
+başlamak zorundadır — `ParseError::MissingSelf`), yani çapasız slug hiçbir çapalı kuralın
+slug'ıyla çakışmaz. `{ "c_u": ["ayse"] }` → `any__u_ayse`.
 
 `u_` öneki rol/user ad çakışmasını ayırır. Sanitize sonrası iki FARKLI canonical c_a aynı slug'a düşerse (collision) editör ikinciye `_<fnv1a16(canonical)>` hex son eki ekler; validator collision'ı hata sayar, hash'li key'i kabul eder.
 
@@ -50,12 +55,29 @@ slug(c_a):
 
 ```text
 match(rule, actor, wfe) :=
-  actor.orgu ∈ resolve(rule.c_orgu, wfe)
-  AND ( (rule.c_r var ve actor.role ∈ rule.c_r)
+  (rule.c_orgu YOK  OR  actor.orgu ∈ resolve(rule.c_orgu, wfe))     # capasiz: kisitsiz
+  AND ( (rule.c_orgu VAR ve rule.c_r var ve actor.role ∈ rule.c_r)  # rol kanali capa ISTER
         OR (rule.c_u var ve actor.user ∈ rule.c_u) )
 ```
 
 - Verilmeyen alan false'dur (wildcard değil). Şema c_r/c_u'dan en az birini zorunlu kılar.
+
+### Çapasız C_A (`c_orgu` yok)
+
+`c_orgu` HİÇ yazılmazsa orgu kanalı kısıtsızdır: kural "şu kişi, tenant içinde hangi
+birimde olursa olsun" demektir. Bu biçimde **`c_u` zorunlu, `c_r` YASAK**tır (şema
+`candidateActor.oneOf`, validator `c_a_anchorless_role` / `c_a_anchorless_needs_user`,
+ayrıca matcher çapasız kuralda rol kanalını hiç sormaz — üç katman).
+
+Gerekçe: kişi kanalı adı adı sayılmış bir istisna listesidir, çapasız hali de sayılabilir
+kalır. Rol kanalının çapasız hali ("tenant'taki tüm müdürler") kurulabilecek en geniş
+kapıdır ve `c_orgu` yazmayı unutan bir tasarımcının kazara ürettiği şey tam olarak odur.
+
+`c_orgu: "self"` ile karıştırılmamalı: `self` Selector'ü aktörün KENDİ birimine çözülür,
+yani claim kapısında daima doğrudur ama aday cache'i (`current_c_a`) node'a GİRİŞTEKİ
+aktörün birimiyle donar — kişi başka birimdeyse görevi havuz listesinde göremez. Çapasız
+biçim bu ikiliği ortadan kaldırır: cache girdisi birim taşımaz (`any_orgu: true`) ve havuz
+sorgusu onu ayrı bir containment filtresiyle bulur.
 - c_u match'i rol-agnostiktir; ACT yine exact `(ORGU,(U,R))` tuple ile kaydedilir.
 - Bu matcher node `c_a` (start node dahil — bkz. §"Symmetric start"), transition ek-kısıt `c_a` ve `listable[].c_a` için AYNIDIR.
 

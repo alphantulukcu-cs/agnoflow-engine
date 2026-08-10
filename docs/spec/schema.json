@@ -577,9 +577,6 @@
     "candidateActor": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "c_orgu"
-      ],
       "properties": {
         "c_orgu": {
           "$ref": "#/$defs/cOrgu"
@@ -602,19 +599,51 @@
           }
         }
       },
-      "anyOf": [
+      "oneOf": [
         {
+          "title": "capali (c_orgu var)",
           "required": [
-            "c_r"
+            "c_orgu"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "c_r"
+              ]
+            },
+            {
+              "required": [
+                "c_u"
+              ]
+            }
           ]
         },
         {
-          "required": [
-            "c_u"
+          "title": "capasiz (yalniz c_u)",
+          "allOf": [
+            {
+              "not": {
+                "required": [
+                  "c_orgu"
+                ]
+              }
+            },
+            {
+              "required": [
+                "c_u"
+              ]
+            },
+            {
+              "not": {
+                "required": [
+                  "c_r"
+                ]
+              }
+            }
           ]
         }
       ],
-      "description": "Tek C_A kurali. match = resolved(c_orgu) AND (rol_match OR user_match). c_r/c_u'dan en az biri zorunludur; verilmeyen alan o kanaldan match uretmez (yok = false, wildcard degil). c_u match'i rol-agnostiktir: kisi, anchor ORGU'daki herhangi bir rol kaydiyla havuza girer; ACT yine exact (ORGU,(U,R)) tuple ile uygulanir ve WFAH'a o tuple yazilir."
+      "description": "Tek C_A kurali. IKI bicimi var. (1) CAPALI: c_orgu verilir, match = resolved(c_orgu) AND (rol_match OR user_match); c_r/c_u'dan en az biri zorunludur, verilmeyen alan o kanaldan match uretmez (yok = false, wildcard degil). (2) CAPASIZ: c_orgu HIC verilmez, c_u zorunlu, c_r YASAK; match = user_match, kisi tenant genelinde hangi ORGU'da olursa olsun eslesir. Capasiz bicim BILINCLI olarak yalniz kisi kanalina aciktir: capasiz bir rol kanali ('tenant'taki tum mudurler') kazara kurulabilecek en genis kapidir. c_u match'i her iki bicimde de rol-agnostiktir; ACT yine exact (ORGU,(U,R)) tuple ile uygulanir ve WFAH'a o tuple yazilir."
     },
     "inputDef": {
       "type": "object",

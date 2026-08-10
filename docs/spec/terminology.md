@@ -189,9 +189,9 @@ wft         = tek routing authority; hedef node id veya terminal id
 
 | Alan | Zorunlu | Anlam |
 |---|---:|---|
-| `c_orgu` | Evet | Scope çapası: ORGTRVLANG token, static selector veya anchor object |
-| `c_r` | c_r/c_u'dan en az biri | Rol kanalı |
-| `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni). Öğeleri **sabit kimlik** ya da **context referansı** — aşağı bkz. |
+| `c_orgu` | Çapalı biçimde evet | Scope çapası: ORGTRVLANG token, static selector veya anchor object. HİÇ verilmezse **çapasız biçim** (aşağı bkz.) |
+| `c_r` | c_r/c_u'dan en az biri | Rol kanalı. **Çapasız biçimde YASAK** |
+| `c_u` | c_r/c_u'dan en az biri | Kişi kanalı (istisna izni). Öğeleri **sabit kimlik** ya da **context referansı** — aşağı bkz. Çapasız biçimde ZORUNLU |
 
 **Anchor biçimi çözülemezse `resolve(c_orgu)` BOŞ kümedir** — aktörün kendi birimine
 DÜŞMEZ. `{from: "$ctx.<yol>", traverse}` "o alandaki birim" demektir; alan yazılmamışsa
@@ -206,10 +206,11 @@ zorundadır (validator `c_orgu_anchor_not_orgu_kind`); bkz. **SCHEMA ANNOTATION 
 **Eşleşme semantiği (kanonik):**
 
 ```text
-match = (actor.orgu ∈ resolve(c_orgu)) AND (rol_match OR user_match)
+match = orgu_match AND (rol_match OR user_match)
 
-rol_match  = c_r varsa actor.role ∈ c_r,          yoksa false
-user_match = c_u varsa actor.user ∈ resolve(c_u), yoksa false
+orgu_match = c_orgu varsa actor.orgu ∈ resolve(c_orgu), yoksa TRUE   # capasiz = kisitsiz
+rol_match  = c_orgu VE c_r varsa actor.role ∈ c_r,      yoksa false  # rol kanali capa ISTER
+user_match = c_u varsa actor.user ∈ resolve(c_u),       yoksa false
 ```
 
 Kritik kurallar:
@@ -218,6 +219,17 @@ Kritik kurallar:
 - **`c_orgu` her zaman AND'lenen çapadır.** Rol ve kişi, çapadan asla kopmaz (Actor exact tuple felsefesi).
 - **`c_u` match'i rol-agnostiktir.** Kişi, anchor ORGU'daki herhangi bir rol kaydıyla havuza girer; ACT yine somut `(ORGU,(U,R))` tuple'ıyla uygulanır ve WFAH'a o tuple yazılır.
 - **Sadece-kişi havuzu:** `{ "c_orgu": "self", "c_u": ["user_ayse"] }` — c_r hiç yazılmaz.
+- **Çapasız kişi havuzu:** `{ "c_u": ["user_ayse"] }` — `c_orgu` HİÇ yazılmaz, kural "Ayşe,
+  tenant içinde hangi birimde olursa olsun" demektir. Bu biçimde `c_u` ZORUNLU, `c_r`
+  YASAKtır: kişi kanalı adı adı sayılmış bir istisna listesidir, çapasız rol kanalı ise
+  ("tenant'taki tüm müdürler") kurulabilecek en geniş kapıdır — ve `c_orgu` yazmayı unutan
+  tasarımcının kazara ürettiği şey tam olarak odur. Üç katman reddeder: şema
+  (`candidateActor.oneOf`), validator (`c_a_anchorless_role`), matcher (çapasız kuralda rol
+  kanalını hiç sormaz). Node key = `any__u_user_ayse` (bkz. runtime-semantics §2a).
+  **`c_orgu: "self"` ile aynı şey DEĞİLDİR:** `self` claim kapısında daima doğrudur ama aday
+  cache'i (`current_c_a`) node'a girişteki aktörün birimiyle donar → kişi başka birimdeyse
+  görevi havuz listesinde görmez. Çapasız biçimde cache girdisi birim taşımaz
+  (`any_orgu: true`) ve havuz sorgusu onu ayrı containment filtresiyle bulur.
 - **`c_u` öğesi iki biçimdedir** (`#/$defs/cuItem`) — `c_orgu`'nun "selector ya da anchor"
   ikiliğinin aynısı, aynı `from` anahtar adıyla:
 

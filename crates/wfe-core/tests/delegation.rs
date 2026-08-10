@@ -141,7 +141,7 @@ fn grant(delegator: Uuid, seat_orgu: Uuid, grantee: CandidateActor) -> Delegatio
 
 fn person_grantee(username: &str) -> CandidateActor {
     CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: None,
         c_u: Some(vec![username.into()]),
     }
@@ -149,7 +149,7 @@ fn person_grantee(username: &str) -> CandidateActor {
 
 fn pool_grantee(role: &str) -> CandidateActor {
     CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: Some(vec![role.into()]),
         c_u: None,
     }

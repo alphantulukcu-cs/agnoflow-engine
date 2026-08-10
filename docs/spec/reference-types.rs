@@ -140,12 +140,16 @@ pub struct EscalationStep {
     pub terminate: Option<bool>,
 }
 
-/// Tek C_A kurali. match = resolved(c_orgu) AND (rol_match OR user_match).
+/// Tek C_A kurali — IKI bicim. CAPALI: c_orgu verilir, match = resolved(c_orgu) AND
+/// (rol_match OR user_match). CAPASIZ: c_orgu HIC verilmez, c_u zorunlu / c_r yasak,
+/// match = user_match (kisi tenant genelinde eslesir).
 /// Verilmeyen alan o kanaldan match uretmez (yok = false). c_u match'i rol-agnostiktir.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateActor {
-    pub c_orgu: COrgu,
+    /// None = capasiz bicim (orgu kanali kisitsiz).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c_orgu: Option<COrgu>,
     #[serde(default)]
     pub c_r: Option<Vec<String>>,
     #[serde(default)]
@@ -163,7 +167,10 @@ impl CandidateActor {
 
     /// Canonical node slug: orgu_slug [+ "__" + sirali_roller] [+ "__u_" + sirali_userlar]
     pub fn slug(&self) -> String {
-        let mut parts = vec![self.c_orgu.slug()];
+        let mut parts = vec![match &self.c_orgu {
+            Some(c) => c.slug(),
+            None => "any".to_string(),
+        }];
         if let Some(r) = &self.c_r {
             let mut r: Vec<String> = r.iter().map(|x| sanitize(x)).collect();
             r.sort();
@@ -181,7 +188,7 @@ impl CandidateActor {
     pub fn canonical(&self) -> String {
         let mut r = self.c_r.clone().unwrap_or_default(); r.sort();
         let mut u = self.c_u.clone().unwrap_or_default(); u.sort();
-        format!("{:?}|r:{:?}|u:{:?}", self.c_orgu.slug(), r, u)
+        format!("{:?}|r:{:?}|u:{:?}", self.c_orgu.as_ref().map(COrgu::slug), r, u)
     }
 }
 
@@ -458,7 +465,7 @@ fn main() {
 
     // matcher smoke test: c_u rol-agnostik
     let rule = CandidateActor {
-        c_orgu: COrgu::Selector("self".into()),
+        c_orgu: Some(COrgu::Selector("self".into())),
         c_r: None, c_u: Some(vec!["user_ayse".into()]),
     };
     println!("4) c_u-only matcher: analist-ayse={} memur-ayse={} mehmet={}",

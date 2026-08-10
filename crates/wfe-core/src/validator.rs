@@ -98,7 +98,60 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_env_references(wfd, &mut report);
     check_c_orgu_anchor_kinds(wfd, &mut report);
     check_c_u_items(wfd, &mut report);
+    check_c_a_shape(wfd, &mut report);
     report
+}
+
+/// C_A'nın iki biçiminden hangisinde olduğumuzu ve o biçimin kısıtlarını denetler.
+///
+/// **Çapasız** (`c_orgu` yok) biçim yalnız KİŞİ kanalına açıktır: `c_u` zorunlu, `c_r`
+/// yasak. Şema da aynı kısıtı koyar; kural BURADA da durur çünkü validator elle yazılmış
+/// JSON'un (şema kapısını bir yolla atlatan bir istemcinin) son savunma hattıdır ve
+/// mesajı tasarımcıya dönük olandır. `matcher` üçüncü katman: çapasız kuralda rol
+/// kanalını hiç sormaz.
+///
+/// Yürüyüş ANAHTAR bazlıdır (`c_a` / `reassign`) — `x-visibility` objeleri de
+/// `c_orgu`/`c_r`/`c_u` taşır ama SEMANTİĞİ farklıdır (kriterler arası OR, scope'suz
+/// rol/kişi meşru), o yüzden bu kuralın dışında kalmaları gerekir.
+fn check_c_a_shape(wfd: &Wfd, report: &mut ValidationReport) {
+    let Ok(doc) = serde_json::to_value(wfd) else {
+        return;
+    };
+    let mut sites = Vec::new();
+    collect_key_sites(&doc, "c_a", "", &mut sites);
+    collect_key_sites(&doc, "reassign", "", &mut sites);
+
+    for (path, rule) in sites {
+        let Some(obj) = rule.as_object() else { continue };
+        if obj.contains_key("c_orgu") {
+            continue; // çapalı biçim — kısıtları şema + diğer kurallar taşıyor
+        }
+        let has_users = obj
+            .get("c_u")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+
+        if obj.contains_key("c_r") {
+            report.error(
+                "c_a_anchorless_role",
+                path.clone(),
+                "c_orgu verilmeyen (çapasız) bir C_A'da c_r YAZILAMAZ: çapasız bir rol kanalı \
+                 'tenant'taki bu role sahip herkes' demektir ve kurulabilecek en geniş kapıdır. \
+                 Rol havuzu istiyorsanız c_orgu ile bir çapa verin (ör. \"self\"); kapıyı belirli \
+                 kişilere açmak istiyorsanız yalnız c_u kullanın."
+                    .into(),
+            );
+        }
+        if !has_users {
+            report.error(
+                "c_a_anchorless_needs_user",
+                path.clone(),
+                "C_A ne c_orgu ne de c_u taşıyor — bu kural HİÇ KİMSEYLE eşleşmez ve node \
+                 kalıcı olarak durur. Bir çapa verin (c_orgu) ya da kişileri sayın (c_u)."
+                    .into(),
+            );
+        }
+    }
 }
 
 /// Dokümandaki TÜM `$env.*` referanslarını toplar.

@@ -606,6 +606,27 @@ async fn publish_draft(
         .map_err(map_wfd_err)
 }
 
+/// Yayın kapılarının doküman okuma yolu — `WfdStore::fetch` DEĞİL.
+///
+/// `fetch` yalnız `status='published' AND is_active` satırı görür (`repo::get_meta`);
+/// kapılar ise publish/submit/approve'un ÖNÜNDE, satır hâlâ `draft` ya da
+/// `pending_approval` iken koşar → her çağrı `wfd port error: wfd not found: <id> v<n>`
+/// ile 422 dönüyordu. Ham JSON status'e bakmadan okunur ve aynı şema kapısından
+/// (`from_value_checked`) geçirilir: kapı, yayınlanacak belgenin ta kendisini görür.
+async fn fetch_wfd_for_gate(
+    s: &AppState,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<wfe_core::types::wfd_v22::Wfd, AppError> {
+    let json = s
+        .wfd
+        .fetch_json_any(wfd_id, version)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    wfe_core::types::wfd_v22::Wfd::from_value_checked(json)
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))
+}
+
 /// Yayın kapısı: dokümandaki her `$env.X` referansı, WFD'nin SATIRI OLAN her ortamda
 /// tanımlı olmalı.
 ///
@@ -617,11 +638,7 @@ async fn publish_draft(
 /// Hiç satırı olmayan ortam SESSİZ geçilir — bir WFD'nin her ortamda koşması zorunlu
 /// değildir; zorunlu tutmak yeni bir ortam açan herkesin tüm WFD'lerini bozardı.
 async fn assert_env_keys_defined(s: &AppState, wfd_id: Uuid, version: i32) -> Result<(), AppError> {
-    let wfd = s
-        .wfd
-        .fetch(wfd_id, version)
-        .await
-        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    let wfd = fetch_wfd_for_gate(s, wfd_id, version).await?;
     let refs = wfe_core::validator::env_references(&wfd)
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
     if refs.is_empty() {
@@ -710,11 +727,7 @@ async fn assert_attachment_storage_env(
     wfd_id: Uuid,
     version: i32,
 ) -> Result<(), AppError> {
-    let wfd = s
-        .wfd
-        .fetch(wfd_id, version)
-        .await
-        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    let wfd = fetch_wfd_for_gate(s, wfd_id, version).await?;
     if !crate::attachment_store::collects_attachments(&wfd) {
         return Ok(());
     }

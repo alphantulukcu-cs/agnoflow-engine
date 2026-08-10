@@ -26,7 +26,7 @@ pub async fn max_seq_by_wfe(
 
 pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<WfahRow>, WfeError> {
     sqlx::query_as::<_, WfahRow>(
-        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at
+        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at, from_node, to_node
          FROM wf.wfah WHERE wfe_id = $1 ORDER BY seq ASC",
     )
     .bind(wfe_id)

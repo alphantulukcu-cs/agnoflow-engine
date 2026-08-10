@@ -69,4 +69,10 @@ pub struct WfahRow {
     pub actor: serde_json::Value,
     pub input: Option<serde_json::Value>,
     pub applied_at: DateTime<Utc>,
+    /// K7 (Faz 0, 2026-08-10): bu WFAH satırının geçişten ÖNCEki node'u.
+    /// NULL = start (öncesi yok) veya sütun eklenmeden önceki eski satır.
+    pub from_node: Option<String>,
+    /// K7: geçişin hedef node'u. NULL = terminal/failed/terminated veya
+    /// çok-hedefli fork (hedefler `wf.wfe_branch`'te satır satır durur).
+    pub to_node: Option<String>,
 }

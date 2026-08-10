@@ -63,16 +63,22 @@ fn insert_err(e: sqlx::Error) -> EngineError {
     EngineError::WfePort(e.to_string())
 }
 
+/// K7 (WFE not tasarımı Faz 0, 2026-08-10): bu commit'te yazılan WFAH satırının
+/// akış izi. Bir commit'te birden çok `WfahEntry` varsa (trigger marker'ları,
+/// `_branch_cancelled`, `_join` vb.) HEPSİ aynı from/to alır — hepsi TEK bir
+/// geçişin parçasıdır.
 async fn insert_wfah_entries(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     wfe_id: Uuid,
     entries: &[WfahEntry],
+    from_node: Option<&str>,
+    to_node: Option<&str>,
 ) -> Result<(), EngineError> {
     for entry in entries {
         let actor_json = serde_json::to_value(&entry.actor).map_err(db_err)?;
         sqlx::query(
-            "INSERT INTO wf.wfah (wfe_id, seq, action, actor, input, applied_at)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+            "INSERT INTO wf.wfah (wfe_id, seq, action, actor, input, applied_at, from_node, to_node)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(wfe_id)
         .bind(entry.seq as i32)
@@ -80,12 +86,51 @@ async fn insert_wfah_entries(
         .bind(&actor_json)
         .bind(entry.input.as_ref())
         .bind(entry.applied_at)
+        .bind(from_node)
+        .bind(to_node)
         .execute(&mut **tx)
         .await
         // WOR-65: seq çakışması = eşzamanlı commit (bkz. `insert_err`).
         .map_err(insert_err)?;
     }
     Ok(())
+}
+
+/// K7: commit'in WFAH satırına yazılacak "nereye gidildi" bilgisi.
+/// `ForkTo` birden çok hedefe dağılır (kol satırları `wf.wfe_branch`'te zaten
+/// satır satır var) → `None`. `JoinComplete` kendi hedefini taşımaz, gerçek
+/// hedef içteki `next` outcome'undadır → recursive.
+fn outcome_to_node(outcome: &CommitOutcome) -> Option<String> {
+    match outcome {
+        CommitOutcome::MoveTo { node } => Some(node.clone()),
+        CommitOutcome::BranchMoveTo { node, .. } => Some(node.clone()),
+        CommitOutcome::CollapseTo { node, .. } => Some(node.clone()),
+        CommitOutcome::JoinComplete { next, .. } => outcome_to_node(next),
+        CommitOutcome::ForkTo { .. }
+        | CommitOutcome::Terminal { .. }
+        | CommitOutcome::Failed { .. }
+        | CommitOutcome::Terminated { .. }
+        | CommitOutcome::BranchArrived { .. } => None,
+    }
+}
+
+/// K7: commit'in WFAH satırına yazılacak "nereden gidildi" bilgisi. Outcome
+/// varyantı zaten taşıyorsa (`BranchMoveTo`/`BranchArrived`/`JoinComplete`/
+/// `CollapseTo`) onu kullanır. `MoveTo`/`ForkTo`/`Terminal`/`Failed`/
+/// `Terminated`'da böyle bir alan YOK — çağıran bu durumda commit tx'i İÇİNDE,
+/// UPDATE'ten ÖNCE `wfe.current_node`'u okumalıdır (bkz. `commit`).
+fn outcome_from_node(outcome: &CommitOutcome) -> Option<String> {
+    match outcome {
+        CommitOutcome::BranchMoveTo { from_node, .. }
+        | CommitOutcome::BranchArrived { from_node, .. }
+        | CommitOutcome::JoinComplete { from_node, .. }
+        | CommitOutcome::CollapseTo { from_node, .. } => Some(from_node.clone()),
+        CommitOutcome::MoveTo { .. }
+        | CommitOutcome::ForkTo { .. }
+        | CommitOutcome::Terminal { .. }
+        | CommitOutcome::Failed { .. }
+        | CommitOutcome::Terminated { .. } => None,
+    }
 }
 
 /// WOR-59: kol claim'ini düşüren TEK SET fragmanı. `cancel_active_branches`,
@@ -405,7 +450,9 @@ impl WfeStore for WfeAdapter {
             .await
             .map_err(db_err)?;
 
-        insert_wfah_entries(&mut tx, new.wfe_id, &new.wfah_entries).await?;
+        // K7: start yolunda from_node YOK (öncesi yok); to_node yukarıda zaten
+        // outcome'dan çözülmüş `current_node`'un aynısı.
+        insert_wfah_entries(&mut tx, new.wfe_id, &new.wfah_entries, None, current_node).await?;
 
         // WFC outbox — start pipeline'ında stage edilen çağrılar AYNI tx'te yazılır:
         // "çağrı yapılacak" niyeti, çağıranın durumu ile atomik olur.
@@ -428,6 +475,26 @@ impl WfeStore for WfeAdapter {
     async fn commit(&self, commit: &TransitionCommit) -> Result<(), EngineError> {
         let mut tx = self.pool.begin().await.map_err(db_err)?;
 
+        // K7 (Faz 0): bu commit'in WFAH akış izi. `to_node` outcome'dan
+        // türetilir (bkz. `outcome_to_node`). `from_node` outcome'da varsa
+        // (paralel varyantlar) ondan, yoksa (MoveTo/ForkTo/Terminal/Failed/
+        // Terminated) bu tx İÇİNDE, aşağıdaki UPDATE'ler `wfe.current_node`'u
+        // DEĞİŞTİRMEDEN ÖNCE okunur — geçişten önceki node budur.
+        // `wfah_` önekli: aşağıdaki `match &commit.outcome` kolları kendi
+        // `from_node`/`node` pattern-bağlı değişkenlerini taşıyor (BranchMoveTo,
+        // CollapseTo, JoinComplete...) — isim çakışmasın diye ayrı adlandırıldı.
+        let wfah_to_node = outcome_to_node(&commit.outcome);
+        let wfah_from_node = match outcome_from_node(&commit.outcome) {
+            Some(n) => Some(n),
+            None => sqlx::query_scalar::<_, Option<String>>(
+                "SELECT current_node FROM wf.wfe WHERE wfe_id = $1",
+            )
+            .bind(commit.wfe_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(db_err)?,
+        };
+
         let dynctx_seq = commit
             .wfah_entries
             .last()
@@ -442,7 +509,14 @@ impl WfeStore for WfeAdapter {
             // WOR-65: seq çakışması = eşzamanlı commit (bkz. `insert_err`).
             .map_err(insert_err)?;
 
-        insert_wfah_entries(&mut tx, commit.wfe_id, &commit.wfah_entries).await?;
+        insert_wfah_entries(
+            &mut tx,
+            commit.wfe_id,
+            &commit.wfah_entries,
+            wfah_from_node.as_deref(),
+            wfah_to_node.as_deref(),
+        )
+        .await?;
 
         match &commit.outcome {
             CommitOutcome::MoveTo { node } => {
@@ -658,8 +732,15 @@ impl WfeStore for WfeAdapter {
                     input: None,
                     applied_at: chrono::Utc::now(),
                 };
-                insert_wfah_entries(&mut tx, commit.wfe_id, std::slice::from_ref(&join_entry))
-                    .await?;
+                // K7: `_join` marker'ı aynı geçişin parçasıdır — aynı from/to.
+                insert_wfah_entries(
+                    &mut tx,
+                    commit.wfe_id,
+                    std::slice::from_ref(&join_entry),
+                    wfah_from_node.as_deref(),
+                    wfah_to_node.as_deref(),
+                )
+                .await?;
 
                 // WOR-31: AND-join'de kol satırları silinir (audit WFAH'ta durur).
                 // WOR-72: quorum join'de SİLİNMEZ — iptal edilen kolların satırı
@@ -921,7 +1002,10 @@ impl WfeStore for WfeAdapter {
         let won = result.rows_affected() == 1;
         if won {
             if let Some(entry) = marker {
-                insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(entry)).await?;
+                // K7: vekaleten claim marker'ı node DEĞİŞTİRMEZ — CommitOutcome
+                // yok, from/to NULL (yalnız gerçek geçişlerde doldurulur).
+                insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(entry), None, None)
+                    .await?;
             }
         }
         tx.commit().await.map_err(db_err)?;
@@ -981,7 +1065,8 @@ impl WfeStore for WfeAdapter {
                 .map_err(insert_err)?;
         }
 
-        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
+        // K7: release_claim node DEĞİŞTİRMEZ — from/to NULL.
+        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry), None, None).await?;
 
         tx.commit().await.map_err(db_err)
     }
@@ -1038,7 +1123,8 @@ impl WfeStore for WfeAdapter {
             }
         }
 
-        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
+        // K7: reassign node DEĞİŞTİRMEZ (sahiplik devri) — from/to NULL.
+        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry), None, None).await?;
 
         tx.commit().await.map_err(db_err)
     }
@@ -1066,4 +1152,30 @@ async fn caller_depths(
             )
         })
         .unwrap_or((0, 0)))
+}
+
+/// K7 (Faz 0): `crate::executor::WfahPathSource` — `wf.wfah.from_node`/
+/// `to_node` kolonlarından okur. `WfeStore::load`'ın döndürdüğü core
+/// `Wfes.wfah` (değişmeyen `WfahEntry`) ile KARIŞTIRILMAZ; ayrı bir okuma
+/// yoludur, çekirdek `Wfes`/`WfahEntry` tiplerine hiç dokunmaz.
+#[async_trait]
+impl crate::executor::WfahPathSource for WfeAdapter {
+    async fn load_wfah_path(
+        &self,
+        wfe_id: Uuid,
+    ) -> Result<Vec<crate::executor::PathStep>, EngineError> {
+        let rows = repo::wfah::load_all(&self.pool, wfe_id)
+            .await
+            .map_err(db_err)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| crate::executor::PathStep {
+                seq: r.seq as u32,
+                action: r.action,
+                from_node: r.from_node,
+                to_node: r.to_node,
+                at: r.applied_at,
+            })
+            .collect())
+    }
 }

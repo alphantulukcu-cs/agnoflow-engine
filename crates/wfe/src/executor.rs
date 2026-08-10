@@ -145,6 +145,9 @@ pub struct WfeExecutor {
     pub runner: Arc<dyn AutoexecRunner>,
     /// Ortam konfigürasyonu (`$env`) kaynağı. `NoEnv` = $env kullanılmıyor.
     pub env: Arc<dyn EnvPort>,
+    /// K7 (Faz 0): WFAH akış izi kaynağı. `NoWfahPath` = path her zaman boş
+    /// (bkz. `WfahPathSource`) — store'suz unit testler/sim bunu etkilemez.
+    pub wfah_path: Arc<dyn WfahPathSource>,
     /// Event-driven SLA timer sinyali (bkz. `crate::timer`): create/commit/claim
     /// sonrası dürtülür; timer servisi next-due'yu yeniden hesaplar. `notify_one`
     /// permit biriktirdiği için sweep sırasında gelen sinyal KAYBOLMAZ.
@@ -220,6 +223,10 @@ pub struct WfeView {
     /// WFC: bu WFE'yi başlatan çağrı — "bu iş şu akıştan geldi". Kök WFE'de `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caller: Option<CallView>,
+    /// K7 (Faz 0): WFAH akış izi — `wfah`'ın aksine `from_node`/`to_node` taşır
+    /// (bkz. `PathStep`). `$wfah` izdüşümüne DEĞİL, yalnız bu görünüme eklenir.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<PathStep>,
 }
 
 /// GET /wfe/:id kol görünümü: kalıcı `BranchState` alanları (`#[serde(flatten)]` ile
@@ -290,6 +297,41 @@ pub struct ReassignOutcome {
     pub reason: Option<String>,
 }
 
+/// K7 (WFE not tasarımı, Faz 0, 2026-08-10): `wf.wfah` satırının akış izi —
+/// hangi aksiyon hangi node'dan hangi node'a gitti. `wf.wfah.from_node`/
+/// `to_node` kolonlarından okunur (bkz. `crate::wfe_adapter::WfeAdapter`'ın
+/// `insert_wfah_entries` türetimi). Motor tipine (`WfahEntry`) BİLEREK
+/// eklenmedi — o tip `project_entry` ile `$wfah`'a akıyor ve golden fixture'da
+/// serileşiyor; bu yalnız kayıt/ekran amaçlıdır, ZEN izdüşümünü etkilemez.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PathStep {
+    pub seq: u32,
+    pub action: String,
+    pub from_node: Option<String>,
+    pub to_node: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// K7: path verisi kaynağı — bilerek core `WfeStore` (`wfe-core::v22::ports`)
+/// trait'inin DIŞINDA: `from_node`/`to_node` core `Wfes`/`WfahEntry` tiplerine
+/// HİÇ girmez, dolayısıyla o trait'e yeni metot eklemek gerekmez (K7 kararı).
+/// `WfeAdapter` bunu implemente eder; store'suz kurulumlar (unit testler, sim)
+/// `NoWfahPath` ile boş döner — mevcut `$wfah` testleri etkilenmez.
+#[async_trait::async_trait]
+pub trait WfahPathSource: Send + Sync {
+    async fn load_wfah_path(&self, wfe_id: Uuid) -> Result<Vec<PathStep>, EngineError>;
+}
+
+/// Path kaynağı bağlanmamış kurulumlar için boş kapı (bkz. `NoEnv` deseni).
+pub struct NoWfahPath;
+
+#[async_trait::async_trait]
+impl WfahPathSource for NoWfahPath {
+    async fn load_wfah_path(&self, _wfe_id: Uuid) -> Result<Vec<PathStep>, EngineError> {
+        Ok(Vec::new())
+    }
+}
+
 impl WfeExecutor {
     /// `$env` kullanmayan kurulum (testler, sim). Ortam gerekiyorsa `with_env`.
     pub fn new(
@@ -304,6 +346,7 @@ impl WfeExecutor {
             wfe,
             runner,
             env: Arc::new(NoEnv),
+            wfah_path: Arc::new(NoWfahPath),
             timer_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -311,6 +354,12 @@ impl WfeExecutor {
     /// Ortam konfigürasyonu kaynağını bağlar (`crate::env_adapter::EnvAdapter`).
     pub fn with_env(mut self, env: Arc<dyn EnvPort>) -> Self {
         self.env = env;
+        self
+    }
+
+    /// K7 (Faz 0): WFAH akış izi kaynağını bağlar (`crate::wfe_adapter::WfeAdapter`).
+    pub fn with_wfah_path(mut self, src: Arc<dyn WfahPathSource>) -> Self {
+        self.wfah_path = src;
         self
     }
 
@@ -756,6 +805,10 @@ impl WfeExecutor {
         let calls = self.wfe.calls_of_caller(wfe_id).await?;
         let caller = self.wfe.caller_of(wfe_id).await?;
 
+        // K7 (Faz 0): WFAH akış izi — store bunu desteklemiyorsa (`NoWfahPath`)
+        // boş döner, alan hiç yazılmaz (calls/caller ile aynı davranış deseni).
+        let path = self.wfah_path.load_wfah_path(wfe_id).await?;
+
         Ok(WfeView {
             wfe_id,
             status: wfes.status,
@@ -786,6 +839,7 @@ impl WfeExecutor {
             claim_as,
             calls,
             caller,
+            path,
         })
     }
 

@@ -3,6 +3,7 @@ mod attachments;
 mod branding;
 mod config;
 mod error;
+mod notes;
 mod openapi;
 mod reservation;
 mod routes;
@@ -56,10 +57,13 @@ async fn main() {
         WfeExecutor::new(
             org_adapter.clone(),
             wfd_adapter.clone(),
-            wfe_adapter,
+            wfe_adapter.clone(),
             runner,
         )
-        .with_env(Arc::new(wf_wfe::env_adapter::EnvAdapter::new(pool.clone()))),
+        .with_env(Arc::new(wf_wfe::env_adapter::EnvAdapter::new(pool.clone())))
+        // K7 (Faz 0, WFE not tasarımı): WFAH akış izi (`from_node`/`to_node`)
+        // aynı adaptörden okunur — ayrı bağlantı/pool gerekmez.
+        .with_wfah_path(wfe_adapter),
     );
 
     // M5/M6 — escalation & root-timeout süpürücüsü (WOR-46/47).

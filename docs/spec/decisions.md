@@ -1581,3 +1581,40 @@ scope'lu grantını da kapsardı — jsonb `@>` alt küme sorar.
 
 **Node key:** orgu parçası `any` (`ANCHORLESS_SLUG`) → `{ "c_u": ["ayse"] }` = `any__u_ayse`.
 Çakışma imkânsız: ORGTRVLANG ifadesi `self` ya da `*:` ile başlamak zorundadır.
+
+---
+
+## WFE not defteri: motorun dışında ÜÇÜNCÜ katman, `$notes` namespace'i yok (2026-08-10)
+
+**Sorun:** İş elden ele geçerken tasarım anında öngörülemeyen insan-insana mesaj/belge
+paylaşımı gerekiyor ("kredi miktarını yükselt, öyle yolla"). Bunu WFD'ye node alanı olarak
+eklemek tam da öngörülemeyeni öngörmeyi ister ve her seferinde yeni versiyon publish
+gerektirir. Konuşmayı nereye yazmalı: `$ctx` mi, `$wfah` mı, ayrı bir yer mi?
+
+**Karar:** Ne `$ctx` ne `$wfah` — ayrı, şemasız, örnek (WFE) bazlı bir defter
+(`wf.wfe_note`), engine core bundan tamamen habersiz. İki adayın elenme gerekçesi kalıcı
+bir sınır çiziyor:
+
+- **`$ctx` değil:** context'e tek yazma yolu `wfes_effects`'tir ve alan tipleri
+  `collectActionInputCtxMap` üzerinden çıkarılıp `expr_types.rs` ile denetlenir. Ad-hoc,
+  şemasız bir not bu çıkarımı bozar; ayrıca "kim, ne zaman yazdı" bilgisini context zaten
+  taşıyamaz (context bir değer kutusu, bir kayıt defteri değil).
+- **`$wfah` değil:** yayınlanmış akışlar bu defteri `count($wfah, #.action == "x") >= n`
+  gibi **sayarak** okuyor. Araya bir sistem-notu satırı koymak (`__note` aksiyonu gibi) bu
+  sayımı, `$prev`/`$first` kısayollarının anlamını ve `project_entry` izdüşümünü kaydırır —
+  motorun resmi defterine insan yorumu karışmaz.
+
+Bu ikisi elenince kalan tek tutarlı seçenek üçüncü bir katmandı; `attachments`'ın zaten
+kurduğu düzenin (metadata DB'de, dosya I/O'su portal edge'inde, engine dışarıda) aynısı not
+için de tekrarlandı.
+
+**`$notes` diye bir ZEN namespace'i BİLEREK yoktur.** Sınır "motoru okur mu" sorusuyla
+çizilir: bir içerik akışın KARARINI etkileyecekse artık ad-hoc değildir, tasarım verisidir
+ve doğru yer WFD'de tanımlı bir action input alanıdır — not defteri bunun kaçış yolu
+olmamalı. `$notes` eklemek bu sınırı bulanıklaştırır: tasarımcı "yükselt" notunu okuyup
+koşul yazmaya başladığı an not, denetlenmeyen bir ikinci `$ctx`'e dönüşür. İleride gerçek
+bir talep gelirse `v22/dollar.rs` (`EXACT`/`PREFIXES`) + `expr_types.rs` genişletilerek
+salt-okunur bir namespace açılabilir — bu tasarım o kapıyı kapatmaz, sadece bugün açmaz.
+
+Detay (K1–K9, veri modeli, API yüzeyi, fazlar): `docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md`.
+Sözleşme özeti: CLAUDE.md "WFE not defteri (ad-hoc not + belge)".

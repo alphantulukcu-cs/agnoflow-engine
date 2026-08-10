@@ -121,6 +121,79 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
   kapayanları sayar). `GET /wfe/:id/attachments` aksiyon sormaz: her grup `gates: true` + kapsamı
   `actions` ile döner, süzme istemcidedir. Detay: `docs/spec/decisions.md` Madde 8.
 
+## WFE not defteri (ad-hoc not + belge)
+
+Tasarım: `docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md` (K1–K9).
+Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/notes.rs` /
+`routes/portal/notes.rs` (iki ince kabuk, aynı ortak mantık).
+
+- **Motor bu katmandan HABERSİZDİR**: not ne `$ctx`'e ne `$wfah`'a girer, `$notes` diye bir
+  ZEN namespace'i YOKTUR (K1/K2). Neden: yayınlanmış akışlar `$wfah`'ı **sayarak** karar
+  veriyor (`count($wfah, #.action == "x") >= n`); araya insan-üretimi bir not satırı koymak
+  bu sayımı ve `$prev`/`$first` kısayollarını kaydırır. Akışın kararını etkileyen her şey
+  hâlâ WFD `actions[].input` → `wfes_effects` → `$ctx` yolundan gider.
+- **4 tablo**: `wf.wfe_note` / `wf.wfe_note_file` / `wf.wfe_note_read` (Faz 1/2/3) +
+  `wf.wfah`'a eklenen `from_node`/`to_node` (Faz 0, K7).
+- `from_node`/`to_node` YALNIZ KAYIT VE EKRAN içindir; `$wfah` izdüşümü (`{seq, action,
+  actor, input, at}`) DEĞİŞMEDİ. `WfahEntry` core tipine alan eklenmedi (golden fixture'ı
+  bozardı) — bilgi `WfeAdapter` seviyesinde türetilir (`commit`'in zaten bildiği
+  `to_node`/`current_node`'dan), `GET /wfe/:id` cevabına `WfeView.path` (`Vec<PathStep>`)
+  ile sunulur; seam `crates/wfe/src/executor.rs`'deki `WfahPathSource` trait'i + boş
+  dönen `NoWfahPath` (store'suz testleri etkilemesin diye).
+- **draft → (dosya) → publish** deseni (K5): `POST /wfe/:id/notes` draft yaratır (yalnız
+  yazarı görür) → istenirse `PUT .../notes/:note_id/files` ile dosya → yayınlama iki
+  yoldan: aksiyonla (`POST /wfe/:id/actions` gövdesinde `note_id`, `ApplyBody.note_id`) ya
+  da serbest (`POST .../notes/:note_id/publish`). Aksiyonla yayınlamada çapa apply'ın
+  ÜRETTİĞİ `wfah_seq`'dir, `node` geçişin `from_node`'udur (notun yazıldığı adım). Apply
+  BAŞARILI ama not yayınlanamazsa cevaba `note_error` eklenir, **aksiyon geri alınmaz** —
+  not draft kalır, kullanıcı tekrar yayınlar (`routes/wfe.rs::apply_action`).
+- **Değişmezlik (K3)**: yayınlanmış not `body` üzerinde UPDATE edilmez. Silme yerine
+  gizleme: `hidden_at`/`hidden_by` dolar, gövde DB'de kalır, API `{hidden:true}` döner.
+  Gizleme YALNIZ yazarı yapabilir (WFE'yi görebilen herkes değil — aksi halde karar delili
+  hedefi tarafından ekrandan kaldırılabilirdi). Gizli notta gövde VE dosyalar API'den
+  SIZMAZ (dosyalar notun içeriğinin parçasıdır).
+- **Kapsam/IDOR**: `find_note` DAİMA `wfe_id`+`note_id` ile arar (yol parametresi +
+  mutasyon hedefi bağlanmazsa bir WFE'yi görebilen aktör başka WFE'nin notunu
+  düzenleyebilirdi); dosyalar `(wfe_id, note_id, file_id)` üçlüsüyle. Kapsam dışı = `404`
+  (varlığı da sızmaz).
+- **Depo**: anahtar `notes/{wfe_id}/{file_id}`, katalog `attachments/{wfe_id}/{grup}/{item}`
+  prefiksinden AYRI (ad-hoc dosyanın katalog karşılığı yok, aynı ağaca karışsa
+  `status_for_node`/gate mantığını yanıltırdı). `AttachmentStore::remove_all` artık İKİ
+  prefiksi de süpürür. Not dosyası DAİMA `attachment_store::store_for_wfe_strict` ile
+  çözülür — deployment varsayılanına DÜŞMEZ, `$env`'de depo eksikse `422
+  code:"attachment_storage.missing_env"`. Katalog tarafındaki publish kapısı (`assert_
+  attachment_storage_env`) buraya UYGULANMAZ: belge iliştirmeyen yüzlerce akışı
+  yayınlanamaz hale getirmemek için kapı publish'te değil, yalnız not-dosyası RUNTIME
+  rotasındadır (K4).
+- Limitler + sanitizasyon + indirme: dosya başı boyut, not başı dosya sayısı, WFE başı
+  toplam kota, çalıştırılabilir MIME blocklist, `sanitize_filename` (yol ayracı/`..`/kontrol
+  karakteri temizliği), indirmede `Content-Disposition: attachment` + `X-Content-Type-
+  Options: nosniff` (`crate::branding`'in SVG servis deseninin aynısı).
+- **Dosya adı çözümü SUNUCUDADIR** (`notes::decode_filename`, `sanitize_filename`'den ÖNCE
+  koşar): HTTP başlığı ISO-8859-1 dışına çıkamadığı için istemci `X-Filename`'i yüzde-kodlu
+  yollar. Çözümü istemciye bırakmak sözleşmeyi istemci geleneğine indirirdi — kodlayanın
+  yüklediği adı kodlamayan bozuk görür, DB'de gerçek ad yerine `%C3%B6` yığını kalırdı.
+  DB'de daima GERÇEK ad durur; `filename` doğrudan gösterilir, istemcide decode YOKTUR.
+  Kodlanmamış ad bozulmadan geçer, geçersiz UTF-8'de ham metne düşülür.
+- **`audience`** (`{"kind":"all"}` | `{"kind":"users","ids":[...]}`, K9) hem `list_visible`
+  hem `count_by_wfe`/`unread_count_by_wfe` hem çocuk-WFE not sorgusunda AYNI SQL parçasıyla
+  (`audience_sql`) süzer; yazar her koşulda kendi notunu görür. Okundu takibi
+  `wf.wfe_note_read` — kendi yazdığın not daima okunmuş sayılır. Liste uçlarında (`GET
+  /wfe`, portal pool) satır başına `note_count` + `unread_note_count`, N+1 yok
+  (`repo::wfah::max_seq_by_wfe` deseniyle TEK sorgu).
+- **WFC görünürlüğü (K8)**: `callRef.notes_visible_to_caller` (varsayılan `false`) —
+  açıksa çocuğun **published** notları `from_call` (çağrı key'i) etiketiyle çağıranın
+  `GET .../notes` listesine girer; draft'lar hiçbir koşulda sızmaz. İKİ SINIR: (1) yalnız
+  TEK seviye derinlik (çocuğun kendi çağrıları izlenmez, "torun" notu kapsam dışı), (2)
+  çocuk WFE için AYRI `executor.query` koşulmaz — bayrağın kendisi yetkidir (tasarımcı
+  bilinçli olarak açtığı bir kapı, çocuğu göremeyen ama ebeveyni gören aktöre de görünür).
+- **Süpürücü**: 24 saatlik yetim draft + dosyaları mevcut saatlik süpürücüye
+  (`server/src/reservation.rs` → `notes::sweep_expired_drafts`) eklendi; bir WFE'nin deposu
+  artık çözülemiyorsa (örn. `$env` sonradan eksildi) o WFE'nin dosyaları warn ile atlanır,
+  süpürücü durmaz.
+- Detay/reddedilen alternatifler için spec dosyasına bak; kod ile spec çeliştiğinde KOD
+  esastır.
+
 ## DB bağlantı kapsamı (global / lokal)
 
 - `wf.db_connection.scope`: `global` = tenant genelinde, HER projedeki her WFD'de görünür

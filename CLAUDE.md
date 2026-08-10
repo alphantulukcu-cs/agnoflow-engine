@@ -92,8 +92,23 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
 - **Depo WFD BAŞINA çözülür** (2026-08-07): `$env`teki `ATTACHMENT_STORAGE_BACKEND` /
   `_PATH` / `_S3_BUCKET` / `_S3_REGION` / `_S3_ENDPOINT` / `_S3_ACCESS_KEY_ID` /
   `_S3_SECRET_ACCESS_KEY` anahtarları okunur (`server/src/attachment_store.rs`, Operator
-  önbellekli). Tanımlı değilse deployment varsayılanına (`ATTACHMENT_STORAGE_*` env)
-  düşülür. Secret'lar yalnız bu katmanda çözülür.
+  önbellekli). Tanımlı değilse RUNTIME'da deployment varsayılanına (`ATTACHMENT_STORAGE_*`
+  env) düşülür. Secret'lar yalnız bu katmanda çözülür.
+- **Belge TOPLAYAN akış depo ayarı olmadan YAYINLANAMAZ** (2026-08-10,
+  `routes::wfd::assert_attachment_storage_env`; publish + submit + approve'un HEPSİNDE).
+  Kapı `attachment_storage.missing_env` ile 422 döner. `assert_env_keys_defined`den iki
+  farkı var: (1) anahtarlar dokümanda GEÇMEZ, `$env.X` taraması onları hiç görmez —
+  ayrı kapı olmak zorunda; (2) varlık değil **DEĞER** aranır ve satırı olmayan ortam
+  SESSİZ GEÇİLMEZ, çünkü eksik ayar hata vermez: deployment varsayılanına düşer ve belgeler
+  müşterinin bucket'ı yerine sunucu diskine yazılır. Zorunlu küme backend'den türer
+  (`attachment_store::required_env_keys`: local → `_PATH`; s3 → `_S3_BUCKET`/`_S3_REGION`/
+  `_S3_ENDPOINT`/`_S3_ACCESS_KEY_ID`/`_S3_SECRET_ACCESS_KEY`). **`_S3_ENDPOINT` zorunludur:**
+  `build_operator` endpoint'i yalnız verildiğinde uygular ve `disable_config_load()`/
+  `disable_ec2_metadata()`'yı da o zaman çağırır → boş endpoint sessizce AWS'e konuşur ve
+  ambient AWS credential'larını kullanabilir. AWS kullanan akış adresi açıkça yazar.
+  "Belge topluyor" = bir node'un referans verdiği ve İÇİNDE `items` olan katalog grubu
+  (`attachment_store::collects_attachments`); editör tarafındaki aynası
+  `utils/attachmentStorageEnv.wfdCollectsAttachments` — İKİSİ AYNI SORUYU SORAR.
 - **Başlatma aksiyonu için REZERVASYON**: `POST /wfe/reserve` → wfe_id (DB'de wfe satırı
   yok, `wf.wfe_reservation` defterinde kayıt var) → dosyalar o id'nin altına yüklenir →
   `POST /wfe {…, wfe_id}` kapıyı kontrol eder, eksikse WFE HİÇ oluşmaz. Yükleme rotaları

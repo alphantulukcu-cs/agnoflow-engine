@@ -598,6 +598,7 @@ async fn publish_draft(
 ) -> Result<Json<Value>, AppError> {
     require_can_publish_wfd(&s, &auth, id, ver).await?;
     assert_env_keys_defined(&s, id, ver).await?;
+    assert_attachment_storage_env(&s, id, ver).await?;
     s.wfd
         .publish_draft(id, ver)
         .await
@@ -688,6 +689,138 @@ async fn assert_env_keys_defined(s: &AppState, wfd_id: Uuid, version: i32) -> Re
     Ok(())
 }
 
+/// Yayın kapısı: belge TOPLAYAN bir akış yayınlanırken ek-belge deposunun `$env` ayarları
+/// TENANT'IN HER ORTAMINDA dolu olmalı.
+///
+/// `assert_env_keys_defined`den iki farkı var ve ikisi de bilinçli:
+///
+/// 1. **Anahtarlar dokümanda GEÇMEZ.** Depo konfigürasyonu doküman dışıdır
+///    (`attachment_store`), dolayısıyla `$env.X` referans taraması bu anahtarları hiç
+///    görmez — kendi kapısı olmak zorunda.
+/// 2. **Varlık değil DEĞER aranır ve boş ortam SESSİZ GEÇİLMEZ.** `$env` referansları için
+///    "hiç satırı olmayan ortam" meşrudur (WFD her ortamda koşmak zorunda değil); depo
+///    ayarında değil: eksik ayar hata vermez, deployment varsayılanına düşer ve belgeler
+///    müşterinin bucket'ı yerine sunucu diskine yazılır. Sessizce yanlış yere yazmak,
+///    yayını durdurmaktan pahalıdır.
+///
+/// Kapı publish + submit + approve'un HEPSİNDE koşar: yalnız publish'te olsaydı yayın
+/// yetkisi olmayan tasarımcı onaya gönderir, kapıya onaylayan çarpar.
+async fn assert_attachment_storage_env(
+    s: &AppState,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<(), AppError> {
+    let wfd = s
+        .wfd
+        .fetch(wfd_id, version)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    if !crate::attachment_store::collects_attachments(&wfd) {
+        return Ok(());
+    }
+
+    let Some((project_id, wfd_name, orgtnt_id)) =
+        sqlx::query_as::<_, (Option<Uuid>, String, Uuid)>(
+            "SELECT project_id, name, orgtnt_id FROM wf.wfd_meta WHERE wfd_id = $1",
+        )
+        .bind(wfd_id)
+        .fetch_optional(&s.pool)
+        .await
+        .map_err(internal_error)?
+        .and_then(|(p, n, t)| p.map(|p| (p, n, t)))
+    else {
+        // Projesi olmayan (eski/serbest) WFD'nin `$env` sahipliği yoktur — değer
+        // giremeyeceği bir kapıyla yayını kilitlemiyoruz (mevcut env kapısıyla aynı davranış).
+        return Ok(());
+    };
+
+    let envs = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, name FROM wf.environment WHERE orgtnt_id = $1 ORDER BY name",
+    )
+    .bind(orgtnt_id)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(internal_error)?;
+    if envs.is_empty() {
+        return Err(AppError(
+            "attachment_storage.missing_env — ek-belge deposu ayarlanamadı: tenant'ta hiç ortam tanımlı değil".into(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+
+    // Satırlar: (ortam, anahtar) → (değer, dolu mu). Joker (`env_id IS NULL`) tüm ortamları
+    // karşılar; tam eşleşme joker'i EZER (`repo::env::load_run_env` ile aynı öncelik).
+    // "Dolu" tanımı satırın türüne göre değişir: secret'ta şifreli değerin VARLIĞI, düz
+    // değerde boşluk kırpıldıktan sonra kalan metin.
+    let rows = sqlx::query_as::<_, (Option<Uuid>, String, String, bool)>(
+        "SELECT env_id, key, btrim(coalesce(value, '')) AS value, \
+                (CASE WHEN is_secret THEN value_enc IS NOT NULL ELSE btrim(coalesce(value, '')) <> '' END) AS filled \
+           FROM wf.wfd_env_var \
+          WHERE project_id = $1 AND wfd_name = $2",
+    )
+    .bind(project_id)
+    .bind(&wfd_name)
+    .fetch_all(&s.pool)
+    .await
+    .map_err(internal_error)?;
+
+    let mut wildcard: HashMap<String, (String, bool)> = HashMap::new();
+    let mut per_env: HashMap<Uuid, HashMap<String, (String, bool)>> = HashMap::new();
+    for (env_id, key, value, filled) in rows {
+        match env_id {
+            None => {
+                wildcard.insert(key, (value, filled));
+            }
+            Some(id) => {
+                per_env.entry(id).or_default().insert(key, (value, filled));
+            }
+        }
+    }
+
+    let mut problems: Vec<String> = Vec::new();
+    for (env_id, env_name) in &envs {
+        let own = per_env.get(env_id);
+        let effective = |key: &str| -> Option<&(String, bool)> {
+            own.and_then(|m| m.get(key)).or_else(|| wildcard.get(key))
+        };
+        let filled = |key: &str| effective(key).is_some_and(|(_, f)| *f);
+
+        let backend = effective(crate::attachment_store::KEY_BACKEND)
+            .filter(|(_, f)| *f)
+            .map(|(v, _)| v.clone());
+        let Some(backend) = backend else {
+            problems.push(format!(
+                "{env_name}: $env.{}",
+                crate::attachment_store::KEY_BACKEND
+            ));
+            continue;
+        };
+        let Some(keys) = crate::attachment_store::required_env_keys(&backend) else {
+            problems.push(format!(
+                "{env_name}: $env.{} = '{backend}' (local|s3 olmalı)",
+                crate::attachment_store::KEY_BACKEND
+            ));
+            continue;
+        };
+        for key in keys {
+            if !filled(key) {
+                problems.push(format!("{env_name}: $env.{key}"));
+            }
+        }
+    }
+
+    if !problems.is_empty() {
+        return Err(AppError(
+            format!(
+                "attachment_storage.missing_env — belge toplayan akış: ek-belge deposu ayarları eksik: {}",
+                problems.join(", ")
+            ),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+    Ok(())
+}
+
 /// Taslağı yayın onayına gönderir (tasarım yetkisi yeter). Validator kapısı
 /// yayınla AYNIDIR — geçersiz doküman onaya giremez.
 #[utoipa::path(post, path = "/draft/{id}/{version}/submit", tag = "wfd",
@@ -700,6 +833,7 @@ async fn submit_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
     require_design_on_wfd(&s, &auth, id, ver).await?;
+    assert_attachment_storage_env(&s, id, ver).await?;
     // Token minimal kimlik taşır — gönderenin görünen adı DB'den çözülür.
     let submitted_by: String =
         sqlx::query_scalar("SELECT display_name FROM wf.app_user WHERE user_id = $1")
@@ -727,6 +861,7 @@ async fn approve_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
     require_approver_on_wfd(&s, &auth, id, ver).await?;
+    assert_attachment_storage_env(&s, id, ver).await?;
     s.wfd
         .approve_draft(id, ver)
         .await

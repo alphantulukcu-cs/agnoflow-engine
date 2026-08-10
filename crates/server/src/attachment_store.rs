@@ -20,7 +20,11 @@
 //! | `ATTACHMENT_STORAGE_S3_BUCKET` / `_S3_REGION` / `_S3_ENDPOINT` | S3 hedefi |
 //! | `ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID` / `_S3_SECRET_ACCESS_KEY` | kimlik (secret olarak girilir) |
 //!
-//! Hiçbiri tanımlı değilse deployment varsayılanına düşülür — mevcut akışlar etkilenmez.
+//! Hiçbiri tanımlı değilse RUNTIME'da deployment varsayılanına düşülür — belge toplamayan
+//! akışlar etkilenmez. Ama **belge TOPLAYAN bir akış bu ayarlar olmadan YAYINLANAMAZ**
+//! (`routes::wfd::assert_attachment_storage_env`): sessizce sunucu diskine yazmak, yayını
+//! durdurmaktan pahalıdır. Editör bu yüzden anahtarları ortam tablosuna kendisi açar —
+//! tasarımcının adları bilmesi gerekmez, yalnız değerleri girer.
 //!
 //! **Operator önbelleklenir.** S3 istemcisi kurmak her istekte yapılacak bir iş değildir;
 //! anahtar, çözülmüş konfigürasyonun kendisidir (aynı config → aynı Operator). Konfigürasyon
@@ -32,7 +36,60 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 use wf_wfd::{StorageBackend, StorageConfig};
+use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::env::{EnvLookup, RunEnv};
+
+/// Depo anahtarlarının SÖZLEŞMESİ — tek kaynak. Editörün ortam değişkenleri tablosu bu
+/// adları otomatik açar (`utils/attachmentStorageEnv.ts`), yayın kapısı bu adları arar
+/// (`routes::wfd::assert_attachment_storage_env`). Adlar burada değişirse üç yer birlikte
+/// güncellenir; bir tanesi kalırsa "girilmiş ama okunmayan" bir ayar oluşur.
+pub const KEY_BACKEND: &str = "ATTACHMENT_STORAGE_BACKEND";
+pub const KEY_PATH: &str = "ATTACHMENT_STORAGE_PATH";
+pub const KEY_S3_BUCKET: &str = "ATTACHMENT_STORAGE_S3_BUCKET";
+pub const KEY_S3_REGION: &str = "ATTACHMENT_STORAGE_S3_REGION";
+pub const KEY_S3_ENDPOINT: &str = "ATTACHMENT_STORAGE_S3_ENDPOINT";
+pub const KEY_S3_ACCESS_KEY_ID: &str = "ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID";
+pub const KEY_S3_SECRET_ACCESS_KEY: &str = "ATTACHMENT_STORAGE_S3_SECRET_ACCESS_KEY";
+
+/// `backend` değerine göre DOLU olması gereken anahtarlar. Tanınmayan backend → `None`
+/// (çağıran bunu "geçersiz seçim" hatasına çevirir; `config_from_env`in sessizce
+/// varsayılana düşmesiyle aynı gerekçe — yanlış yazılmış bir backend değeri belgeleri
+/// müşterinin bucket'ı yerine sunucu diskine yazdırır).
+///
+/// **`_S3_ENDPOINT` de listededir** (2026-08-10). Başta "AWS'de bölge yeter" diye
+/// çıkarılmıştı; yanlış eksen: `wf_wfd::build_operator` endpoint'i ancak VERİLDİĞİNDE
+/// uygular ve `disable_config_load()`/`disable_ec2_metadata()`'yı da yalnız o zaman çağırır
+/// → boş endpoint sessizce AWS'e konuşur ve makinedeki ambient AWS credential'larını
+/// kullanabilir. Garage/MinIO niyetiyle boş bırakılmış bir endpoint, tam olarak bu kapının
+/// önlemeye çalıştığı "belgeler yanlış yere yazıldı" durumudur. AWS kullanan akış
+/// endpoint'i açıkça yazar (`https://s3.<region>.amazonaws.com`).
+pub fn required_env_keys(backend: &str) -> Option<&'static [&'static str]> {
+    match backend.trim().to_ascii_lowercase().as_str() {
+        "local" => Some(&[KEY_PATH]),
+        "s3" => Some(&[
+            KEY_S3_BUCKET,
+            KEY_S3_REGION,
+            KEY_S3_ENDPOINT,
+            KEY_S3_ACCESS_KEY_ID,
+            KEY_S3_SECRET_ACCESS_KEY,
+        ]),
+        _ => None,
+    }
+}
+
+/// Bu WFD'de gerçekten DOSYA TOPLANIYOR mu? Katalogda grup olması yetmez (kullanılmayan
+/// grup dosya üretmez); bir node'un referans verdiği ve İÇİNDE dosya slotu olan bir grup
+/// gerekir. Yayın kapısı bunu sorar: depo ayarını yalnız belge yükleyen akışlarda zorunlu
+/// tutmak, belgesiz akışları etkilemez.
+pub fn collects_attachments(wfd: &Wfd) -> bool {
+    wfd.nodes.values().any(|node| {
+        node.attachments.iter().any(|r| {
+            wfd.attachments
+                .get(r.group())
+                .is_some_and(|g| !g.items.is_empty())
+        })
+    })
+}
 
 /// Çözülmüş konfigürasyonun önbellek anahtarı (Operator kurulumunu belirleyen her alan).
 type CacheKey = (String, String, String, String, String, String, String);
@@ -159,5 +216,76 @@ pub async fn store_for_wfe(s: &AppState, wfe_id: Uuid) -> Result<Arc<AttachmentS
         // WFE yoksa (silinmiş/başlamamış) varsayılan depo: çağıranlar zaten kendi
         // 404'lerini üretir, burada ikinci bir hata yolu açmıyoruz.
         None => Ok(s.attachments.clone()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Tek node + tek grup taşıyan en küçük belge. `items` ve node referansı testten
+    /// parametrelenir — kapının sorduğu tam olarak bu ikisidir.
+    fn wfd_with(items: serde_json::Value, node_refs: serde_json::Value) -> Wfd {
+        Wfd::from_value(json!({
+            "wfd_version": "2.2",
+            "id": "t", "name": "t", "version": "1",
+            "context": { "type": "object", "properties": {} },
+            "nodes": {
+                "memur": {
+                    "c_a": { "c_orgu": "self", "c_r": ["memur"] },
+                    "attachments": node_refs
+                }
+            },
+            "start": [], "actions": {}, "transitions": [], "terminals": [],
+            "attachments": { "evraklar": { "items": items } }
+        }))
+        .expect("minimal wfd")
+    }
+
+    #[test]
+    fn collects_when_node_refers_to_nonempty_group() {
+        let wfd = wfd_with(json!([{ "id": "kimlik" }]), json!(["evraklar"]));
+        assert!(collects_attachments(&wfd));
+        // Kapsamlı referans da toplar — `actions` yalnız KAPIYI daraltır, dosya yine yüklenir.
+        let scoped = wfd_with(
+            json!([{ "id": "kimlik" }]),
+            json!([{ "group": "evraklar", "actions": [] }]),
+        );
+        assert!(collects_attachments(&scoped));
+    }
+
+    #[test]
+    fn does_not_collect_without_reference_or_items() {
+        // Katalogda grup var ama hiçbir node toplamıyor → dosya üretilmez.
+        assert!(!collects_attachments(&wfd_with(
+            json!([{ "id": "kimlik" }]),
+            json!([])
+        )));
+        // Referans var ama grubun dosya slotu yok → yüklenecek bir şey yok.
+        assert!(!collects_attachments(&wfd_with(json!([]), json!(["evraklar"]))));
+    }
+
+    #[test]
+    fn required_keys_follow_backend() {
+        assert_eq!(required_env_keys("local"), Some(&[KEY_PATH][..]));
+        assert_eq!(
+            required_env_keys(" S3 "),
+            Some(
+                &[
+                    KEY_S3_BUCKET,
+                    KEY_S3_REGION,
+                    KEY_S3_ENDPOINT,
+                    KEY_S3_ACCESS_KEY_ID,
+                    KEY_S3_SECRET_ACCESS_KEY
+                ][..]
+            )
+        );
+        // ENDPOINT ZORUNLU: boş bırakılırsa `build_operator` AWS'e konuşur ve ambient
+        // credential zinciri açık kalır (bkz. `required_env_keys` notu).
+        assert!(required_env_keys("s3").unwrap().contains(&KEY_S3_ENDPOINT));
+        // Tanınmayan backend sessizce local'a düşmez — çağıran hata verir.
+        assert_eq!(required_env_keys("S£"), None);
+        assert_eq!(required_env_keys(""), None);
     }
 }

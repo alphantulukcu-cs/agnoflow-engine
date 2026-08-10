@@ -26,6 +26,60 @@ pub async fn list_users(
     .map_err(OrgError::Database)
 }
 
+/// `LIKE` joker karakterlerini kaçırır — kullanıcının yazdığı `%` ve `_` ARAMA METNİDİR,
+/// desen değil. Kaçırılmazsa tek bir `%` tüm tenant'ı döndürür (ve indeksi işe yaramaz
+/// kılar), `_` de her harfe uyar.
+fn escape_like(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+/// Kullanıcı arama — editörün `c_u` tamamlaması buradan beslenir.
+///
+/// İstemci tarafı süzme YETMEZ: on binlerce kullanıcılı bir tenant'ta tüm listeyi
+/// indirmek gerekirdi. Arama kullanıcı adı / tam ad / e-posta üzerinde `ILIKE '%q%'`
+/// (trigram GIN indeksi, `migrations/org/20260807000001_user_search.sql`); `q` bir UUID
+/// ise `u_id` eşitliği de denenir — `c_u` alanı kullanıcı adını da UUID'yi de kabul
+/// ediyor (`wfe-core/src/v22/matcher.rs`), arama ikisini de bulabilmeli.
+///
+/// Sıra ÖNEK eşleşmesini öne alır: "ah" yazan kullanıcı `ahmet`i `mahmut`tan önce görür.
+pub async fn search_users(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    query: &str,
+    limit: i64,
+) -> Result<Vec<User>, OrgError> {
+    let escaped = escape_like(query.trim());
+    let contains = format!("%{escaped}%");
+    let prefix = format!("{escaped}%");
+    // Geçersiz UUID metni HATA DEĞİLDİR: sıradan bir arama terimidir, `u_id` kanalı kapanır.
+    let as_uuid = Uuid::parse_str(query.trim()).ok();
+
+    sqlx::query_as::<_, User>(
+        r#"SELECT u_id, orgtnt_id, username, full_name, email, is_active, created_at
+           FROM org.u
+           WHERE orgtnt_id = $1 AND is_active = true
+             AND (username ILIKE $2 ESCAPE '\'
+               OR full_name ILIKE $2 ESCAPE '\'
+               OR coalesce(email, '') ILIKE $2 ESCAPE '\'
+               OR u_id = $4)
+           ORDER BY (CASE WHEN username ILIKE $3 ESCAPE '\'
+                            OR full_name ILIKE $3 ESCAPE '\' THEN 0 ELSE 1 END),
+                    full_name, username
+           LIMIT $5"#,
+    )
+    .bind(orgtnt_id)
+    .bind(&contains)
+    .bind(&prefix)
+    .bind(as_uuid)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(OrgError::Database)
+}
+
 pub async fn list_roles(
     pool: &PgPool,
     orgtnt_id: Uuid,
@@ -44,6 +98,21 @@ pub async fn list_roles(
     .fetch_all(pool)
     .await
     .map_err(OrgError::Database)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_like;
+
+    #[test]
+    fn like_wildcards_are_literal_search_text() {
+        // Kaçırılmasaydı bu terim TÜM tenant'ı döndürürdü.
+        assert_eq!(escape_like("%"), "\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        // Ters bölü ÖNCE kaçırılmalı, yoksa kendi eklediğimiz kaçışları bozar.
+        assert_eq!(escape_like("a\\%"), "a\\\\\\%");
+        assert_eq!(escape_like("ahmet.yilmaz"), "ahmet.yilmaz");
+    }
 }
 
 pub async fn list_user_orgus(

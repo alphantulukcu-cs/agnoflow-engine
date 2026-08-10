@@ -226,21 +226,37 @@ async fn set_default_orgt(
         .map_err(Into::into)
 }
 
+/// Kullanıcı listesi + ARAMA. `q` verilirse sayfalama yerine arama koşar
+/// (`repo::user_role::search_users`): editörün `c_u` tamamlaması tüm tenant listesini
+/// indirmek zorunda kalmasın — on binlerce kullanıcıda o yol taşar.
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct UserSearchQuery {
+    /// Arama metni: kullanıcı adı, tam ad, e-posta ya da UUID. Boş/eksikse düz liste.
+    q: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+}
+
 #[utoipa::path(get, path = "/orgtnt/{id}/users", tag = "org",
-    params(("id" = Uuid, Path, description = "Tenant id"), PageQuery),
+    params(("id" = Uuid, Path, description = "Tenant id"), UserSearchQuery),
     responses((status = 200, description = "Tenant kullanıcıları", body = serde_json::Value)),
     security(("x_admin_key" = [])))]
 async fn list_users_by_tenant(
     State(pool): State<PgPool>,
     Path(orgtnt_id): Path<Uuid>,
-    Query(page): Query<PageQuery>,
+    Query(page): Query<UserSearchQuery>,
 ) -> Result<Json<Vec<wf_org::models::User>>, AppError> {
     let limit = page.limit.unwrap_or(50).clamp(1, 200);
     let offset = page.offset.unwrap_or(0).max(0);
-    repo::user_role::list_users(&pool, orgtnt_id, limit, offset)
-        .await
-        .map(Json)
-        .map_err(Into::into)
+    // Yalnız BOŞLUK olan `q` arama değildir — "hepsini getir"e düşer.
+    let query = page.q.as_deref().map(str::trim).filter(|q| !q.is_empty());
+    match query {
+        Some(q) => repo::user_role::search_users(&pool, orgtnt_id, q, limit).await,
+        None => repo::user_role::list_users(&pool, orgtnt_id, limit, offset).await,
+    }
+    .map(Json)
+    .map_err(Into::into)
 }
 
 #[utoipa::path(get, path = "/orgtnt/{id}/roles", tag = "org",

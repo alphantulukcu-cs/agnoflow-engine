@@ -637,6 +637,9 @@ pub struct CallRef {
     /// `call_next_cycle` ile reddedilir ve global ardıl derinliği sınırı geçerlidir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_next: Option<u32>,
+    /// Alt akışın notları çağıran akışta görünsün mü. Varsayılan false. Motor bu alanı OKUMAZ, yalnız taşır.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub notes_visible_to_caller: bool,
 }
 
 /// WFC modu — çağrının TEK belirleyici ekseni.

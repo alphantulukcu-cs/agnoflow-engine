@@ -1349,6 +1349,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Yalniz mode: terminal. Ardil dongusune ACIK izin + ust sinir. Verilmezse dongu validator tarafindan reddedilir (call_next_cycle) ve global ardil derinligi siniri gecerlidir. Ardil dongusu (A bitince B, B bitince A) sonsuz WFE uretir - iki katmanli fren: statik dongu tespiti + runtime derinlik siniri."
+        },
+        "notes_visible_to_caller": {
+          "type": "boolean",
+          "default": false,
+          "description": "Alt akışın notları çağıran akışta görünsün mü. Varsayılan false. Motor bu alanı OKUMAZ, yalnız taşır."
         }
       },
       "description": "Bir katalog kaydina yapilan referans. Node ve terminal yerlesimleri AYNI sekli kullanir; yanlis yere yazilmis alan validator tarafindan anlasilir bicimde reddedilir."

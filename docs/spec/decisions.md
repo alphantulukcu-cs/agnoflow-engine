@@ -1795,6 +1795,7 @@ Taslaklar agnoflow'a özgüdür (başka istemci taslak kaydetmez), etki yalnız 
 düşer, klasik "çöken sekme" vakası yok. Seam hazır — `DELETE .../lock`'a admin dalı.
 
 Detay: `docs/superpowers/specs/2026-08-11-draft-kilidi-design.md`.
+
 ## "Kim yapabilir" sorusu aksiyon deftere işlendikten SONRA sorulur (2026-08-11)
 
 **Hata.** `{c_orgu: {from: {wfah: "<aksiyon>", field: "actor.orgu"}, traverse: "..."}}` kuralı

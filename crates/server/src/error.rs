@@ -109,12 +109,31 @@ impl From<wf_org::error::OrgError> for AppError {
                 code,
             };
         }
+        // 404'ler de kod taşır: istemci "hangi kaynak yok" ayrımını hata METNİNDEN
+        // yapmak zorunda kalmasın. Beyaz liste dışı kaynak kodsuz döner.
+        if let wf_org::error::OrgError::NotFound(resource) = &e {
+            return AppError {
+                message: e.to_string(),
+                status: StatusCode::NOT_FOUND,
+                code: not_found_code(resource),
+            };
+        }
         let status = match &e {
-            wf_org::error::OrgError::NotFound(_) => StatusCode::NOT_FOUND,
             wf_org::error::OrgError::BadRequest(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         AppError(e.to_string(), status)
+    }
+}
+
+/// `OrgError::NotFound`'un taşıdığı kaynak adını makine koduna bağlar.
+fn not_found_code(resource: &str) -> Option<&'static str> {
+    match resource {
+        "permission" => Some("permission.not_found"),
+        "user" => Some("user.not_found"),
+        "role" => Some("role.not_found"),
+        "api key" => Some("api_key.not_found"),
+        _ => None,
     }
 }
 
@@ -178,4 +197,60 @@ fn from_constraint(dbe: &dyn sqlx::error::DatabaseError) -> Option<AppError> {
         status,
         code,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wf_org::error::OrgError;
+
+    /// 404'ler de makine-okunur kod taşır: istemci "hangi kaynak yok" ayrımını
+    /// hata METNİNDEN yapmak zorunda kalmasın (WOR-62 duruşu).
+    #[test]
+    fn not_found_carries_resource_code() {
+        let app: AppError = OrgError::NotFound("permission".into()).into();
+        assert_eq!(app.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.code, Some("permission.not_found"));
+    }
+
+    #[test]
+    fn known_resources_each_get_their_own_code() {
+        for (resource, expected) in [
+            ("permission", "permission.not_found"),
+            ("user", "user.not_found"),
+            ("role", "role.not_found"),
+            ("api key", "api_key.not_found"),
+        ] {
+            let app: AppError = OrgError::NotFound(resource.into()).into();
+            assert_eq!(app.code, Some(expected), "kaynak: {resource}");
+        }
+    }
+
+    /// Beyaz liste dışı kaynak KOD TAŞIMAZ — gövdeye rastgele metin sızmasın.
+    #[test]
+    fn unknown_resource_has_no_code() {
+        let app: AppError = OrgError::NotFound("orgu".into()).into();
+        assert_eq!(app.status, StatusCode::NOT_FOUND);
+        assert_eq!(app.code, None);
+    }
+
+    #[test]
+    fn conflict_maps_to_human_message_and_code() {
+        let app: AppError = OrgError::Conflict("permission.in_use".into()).into();
+        assert_eq!(app.status, StatusCode::CONFLICT);
+        assert_eq!(app.code, Some("permission.in_use"));
+        assert!(
+            !app.message.contains("permission.in_use"),
+            "kullanıcıya makine kodu değil insan mesajı gösterilir: {}",
+            app.message
+        );
+    }
+
+    /// Bilinmeyen çakışma kodsuz ve genel mesajla döner.
+    #[test]
+    fn unknown_conflict_has_no_code() {
+        let app: AppError = OrgError::Conflict("bir.sey".into()).into();
+        assert_eq!(app.code, None);
+        assert!(!app.message.contains("bir.sey"));
+    }
 }

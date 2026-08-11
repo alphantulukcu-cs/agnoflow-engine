@@ -1,7 +1,7 @@
 # Tenant Permission Havuzu + Rol = Permission Grubu (T‑A1, T‑A2)
 
 **Tarih:** 2026-08-11
-**Kapsam:** `agnoflow-engine` (org crate + server). Yönetim ekranları AYRI spec (`agnoflow-frontend`).
+**Kapsam:** `agnoflow-engine` (org crate + server). Yönetim ekranları `agnoflow-frontend`'de yapıldı — §12.
 **Görevlendirme:** T‑A1 ("Profil = Rol"), T‑A2 (rol içi `except`).
 
 ## 1. Amaç ve duruş
@@ -207,7 +207,20 @@ Rota adlandırması mevcut geleneği izler: tablo kısa (`org.r` → `/roles`), 
 | `GET /org/orgtnt/{id}/permissions/{pid}/roles` | Ters sorgu: hangi rollerde |
 | `GET /org/users/{id}/permissions` | Etkin küme + `via_roles` + ıskartalar |
 | `GET /org/users/{id}/permission-exceptions` | Kişisel ıskartalar |
-| `PUT /org/users/{id}/permission-exceptions` | Iskarta kümesini ayarla |
+| `PUT /org/users/{id}/permission-exceptions` | Iskarta kümesini ayarla (satır başına geçerlilik penceresi) |
+
+Iskarta gövdesi geçerlilik penceresini TAŞIR — aksi halde §3.1'de tasarlanan
+"geçici istisna" kolonları erişilemez kalırdı:
+
+```json
+{ "exceptions": [ { "p_id": "…", "valid_from": null, "valid_until": "2026-09-01T00:00:00Z" } ] }
+```
+
+Sade `{"p_ids":[…]}` biçimi de kabul edilir ve SÜRESİZ ıskarta kurar. Var olan satırın
+penceresi `ON CONFLICT DO UPDATE` ile güncellenir: `DO NOTHING` olsaydı bir ıskartanın
+süresini değiştirmek için önce kaldırıp yeniden eklemek gerekirdi ve arada yetki bir an
+açılırdı. Ters pencere (`valid_until <= valid_from`) **400** ile reddedilir — sessizce
+hiç geçerli olmayan bir ıskarta, yöneticiye yetkiyi kapattığını sandırırdı.
 
 `PATCH` semantiği `PATCH /org/orgtnt/{id}` ile aynıdır: **alan gönderilmezse
 değişmez, boş string temizler** (`description` için NULL). `code` ve
@@ -349,11 +362,16 @@ aynı biçim); kapsam `repo::permission::tenant_of_user` ile kullanıcı satır�
 | `permission.code_format` | 400 | Alfabe dışı karakter / boş / 128+ karakter kod |
 | `permission.code_conflict` | 409 | Aynı tenant'ta (harf duyarsız) aynı kod |
 | `permission.not_found` | 404 | Kapsam dışı veya olmayan `p_id` |
+| `user.not_found` | 404 | Kapsam dışı veya olmayan `u_id` |
+| `role.not_found` | 404 | Kapsam dışı veya olmayan `r_id` |
+| `api_key.not_found` | 404 | Kapsam dışı veya olmayan anahtar |
 | `permission.in_use` | 409 | Rol/ıskarta referansı olan permission silinmek istendi |
 | `api_key.invalid` | 401 | Bilinmeyen / süresi geçmiş / kapalı anahtar |
 
 DB kısıt ihlalleri kısıt **ADINDAN** çevrilir (mevcut `error.rs` deseni; SQL metni
-sızmaz).
+sızmaz). 404'ler de kod taşır: kaynak adı beyaz listeden koda bağlanır
+(`error::not_found_code`), liste dışı kaynak kodsuz döner — gövdeye rastgele metin
+sızmasın. Eşlemenin testi `crates/server/src/error.rs` içindedir.
 
 ## 10. Test stratejisi
 
@@ -435,9 +453,12 @@ dışı: bu havuz tenant'ın İŞ yetkileridir, agnoflow'un kendi yetkileri
 
 ## 12. Bu spec'in dışı
 
-- **Yönetim ekranları** (`agnoflow-frontend`): Ayarlar > Yetkiler havuzu, rol
-  detayında permission kutucukları, kullanıcı detayında etkin küme + ıskarta.
-  Ayrı spec; öncelik engine tarafı.
+- **Yönetim ekranları** (`agnoflow-frontend`) — **YAPILDI** (2026-08-11, ayrı spec
+  yazılmadı; kararlar `agnoflow-frontend/CLAUDE.md` "Tenant yetki havuzu" bölümünde).
+  Organizasyon > Roller sayfasında rol detayına "Yetkiler" bölümü + havuz modalı;
+  kişisel ıskarta kullanıcı sekmesinde (yetkiyi hangi rolden gelirse gelsin kapattığı
+  için rol ekranında DEĞİL). **API anahtarı ekranı hâlâ yok** — anahtar üretimi
+  `POST /org/orgtnt/{id}/api-keys` ile.
 - **T‑A4 / T‑A5 / T‑A6** — agnoflow'un kendi yetkileri (WFD‑Observer,
   WF Admin, doğrudan claim ettirme). Ayrı spec.
 - **T‑E1 notları:** "profil" teriminin temizliği; `org.ur.orgu_id IS NULL` ve

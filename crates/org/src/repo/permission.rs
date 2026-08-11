@@ -287,33 +287,69 @@ pub async fn user_exceptions(
     .map_err(OrgError::Database)
 }
 
+/// Ayarlanacak tek ıskarta: yetki + (isteğe bağlı) geçerlilik penceresi.
+///
+/// Pencere `None` ise ıskarta SÜRESİZDİR. Dolu verilirse istisna geçicidir
+/// ("bu ay onaylamasın") ve süresi geçince yetki kendiliğinden geri gelir —
+/// etkin küme hesabı `org.up` timeslice'ına saygı duyar.
+#[derive(Debug, Clone)]
+pub struct ExceptionInput {
+    pub p_id: Uuid,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
 /// Kişisel ıskarta KÜMESİNİ ayarlar (PUT semantiği, tek transaction).
+///
+/// Var olan satırın penceresi GÜNCELLENİR (`DO UPDATE`): `DO NOTHING` olsaydı bir
+/// ıskartanın süresini değiştirmek imkânsız olurdu — kullanıcı önce kaldırıp
+/// yeniden eklemek zorunda kalır, arada yetki bir an açılırdı.
 pub async fn set_user_exceptions(
     pool: &PgPool,
     orgtnt_id: Uuid,
     u_id: Uuid,
-    p_ids: &[Uuid],
+    items: &[ExceptionInput],
 ) -> Result<Vec<PermissionException>, OrgError> {
+    for item in items {
+        if let (Some(from), Some(until)) = (item.valid_from, item.valid_until) {
+            if until <= from {
+                // Ters pencere ıskartayı SESSİZCE etkisiz kılardı (hiçbir an geçerli
+                // olmaz) — yönetici yetkiyi kapattığını sanardı.
+                return Err(OrgError::BadRequest(
+                    "ıskarta bitişi başlangıcından sonra olmalı".into(),
+                ));
+            }
+        }
+    }
+    let p_ids: Vec<Uuid> = items.iter().map(|i| i.p_id).collect();
+    let from: Vec<Option<DateTime<Utc>>> = items.iter().map(|i| i.valid_from).collect();
+    let until: Vec<Option<DateTime<Utc>>> = items.iter().map(|i| i.valid_until).collect();
+
     let mut tx = pool.begin().await?;
     assert_user_in_tenant(&mut tx, orgtnt_id, u_id).await?;
-    assert_perms_in_tenant(&mut tx, orgtnt_id, p_ids).await?;
+    assert_perms_in_tenant(&mut tx, orgtnt_id, &p_ids).await?;
 
     sqlx::query(
         "DELETE FROM org.up
          WHERE u_id = $1 AND up_type = 'excluded' AND NOT (p_id = ANY($2))",
     )
     .bind(u_id)
-    .bind(p_ids)
+    .bind(&p_ids)
     .execute(&mut *tx)
     .await?;
     sqlx::query(
-        "INSERT INTO org.up (orgtnt_id, u_id, p_id, up_type)
-         SELECT $1, $2, unnest($3::uuid[]), 'excluded'
-         ON CONFLICT (u_id, p_id, up_type) DO NOTHING",
+        "INSERT INTO org.up (orgtnt_id, u_id, p_id, up_type, valid_from, valid_until)
+         SELECT $1, $2, t.p_id, 'excluded', t.valid_from, t.valid_until
+         FROM unnest($3::uuid[], $4::timestamptz[], $5::timestamptz[])
+              AS t(p_id, valid_from, valid_until)
+         ON CONFLICT (u_id, p_id, up_type) DO UPDATE
+         SET valid_from = EXCLUDED.valid_from, valid_until = EXCLUDED.valid_until",
     )
     .bind(orgtnt_id)
     .bind(u_id)
-    .bind(p_ids)
+    .bind(&p_ids)
+    .bind(&from)
+    .bind(&until)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;

@@ -20,6 +20,7 @@ use uuid::Uuid;
 use wf_org::{
     models::{Permission, PermissionException, PermissionRoleUsage, TenantApiKey},
     permission::EffectivePermission,
+    repo::permission::ExceptionInput,
     repo,
 };
 
@@ -270,20 +271,62 @@ async fn user_exceptions(
         .map_err(Into::into)
 }
 
+/// Tek ıskarta girdisi. `valid_from`/`valid_until` verilmezse ıskarta SÜRESİZDİR;
+/// verilirse geçicidir ("bu ay onaylamasın") ve süre bitince yetki kendiliğinden
+/// geri gelir.
+#[derive(Deserialize, ToSchema)]
+struct ExceptionItem {
+    p_id: Uuid,
+    valid_from: Option<chrono::DateTime<chrono::Utc>>,
+    valid_until: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// T‑A2 gövdesi. `exceptions` KÜMEDİR: listede olmayan ıskartalar kaldırılır.
+///
+/// Sade `p_ids` biçimi de kabul edilir (yalnız süresiz ıskarta kurar) — iki alan da
+/// verilmezse küme BOŞALTILIR, bu bilinçli: "hiç ıskarta kalmasın" ifade edilebilmeli.
+#[derive(Deserialize, ToSchema)]
+struct ExceptionSetBody {
+    #[serde(default)]
+    exceptions: Vec<ExceptionItem>,
+    #[serde(default)]
+    p_ids: Vec<Uuid>,
+}
+
 /// T‑A2: kişisel ıskarta kümesi. Iskarta yetkiyi kullanıcıdan TAMAMEN kaldırır,
 /// hangi rolden geldiğine bakmaz.
 #[utoipa::path(put, path = "/users/{id}/permission-exceptions", tag = "org",
     params(("id" = Uuid, Path, description = "Kullanıcı id")),
-    request_body = PermissionSetBody,
-    responses((status = 200, description = "Güncel ıskartalar", body = serde_json::Value)),
+    request_body = ExceptionSetBody,
+    responses(
+        (status = 200, description = "Güncel ıskartalar", body = serde_json::Value),
+        (status = 400, description = "Geçerlilik penceresi ters verildi"),
+        (status = 404, description = "Kullanıcı veya yetki bu tenant'ta yok (user.not_found / permission.not_found)"),
+    ),
     security(("x_admin_key" = [])))]
 async fn set_user_exceptions(
     State(s): State<AppState>,
     Path(u_id): Path<Uuid>,
-    Json(body): Json<PermissionSetBody>,
+    Json(body): Json<ExceptionSetBody>,
 ) -> Result<Json<Vec<PermissionException>>, AppError> {
     let orgtnt_id = repo::permission::tenant_of_user(&s.pool, u_id).await?;
-    repo::permission::set_user_exceptions(&s.pool, orgtnt_id, u_id, &body.p_ids)
+    // `exceptions` verildiyse o kazanır; yoksa sade `p_ids` süresiz ıskartaya çevrilir.
+    let items: Vec<ExceptionInput> = if body.exceptions.is_empty() {
+        body.p_ids
+            .into_iter()
+            .map(|p_id| ExceptionInput { p_id, valid_from: None, valid_until: None })
+            .collect()
+    } else {
+        body.exceptions
+            .into_iter()
+            .map(|e| ExceptionInput {
+                p_id: e.p_id,
+                valid_from: e.valid_from,
+                valid_until: e.valid_until,
+            })
+            .collect()
+    };
+    repo::permission::set_user_exceptions(&s.pool, orgtnt_id, u_id, &items)
         .await
         .map(Json)
         .map_err(Into::into)

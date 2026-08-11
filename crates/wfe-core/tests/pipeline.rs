@@ -4132,3 +4132,62 @@ async fn admin_fire_escalation_returns_none_when_nothing_pending() {
         .unwrap()
         .is_none());
 }
+
+/// Spec §6.1/10 — BİTMİŞ akışın sayacı yönetilmez (iki uç da reddeder).
+#[tokio::test]
+async fn escalation_admin_endpoints_reject_terminal_wfe() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+    let admin = manager(Uuid::new_v4());
+
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    wfes.status = WfeStatus::Terminal;
+
+    let err = engine
+        .skip_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect_err("biten akışta atlama reddedilmeli");
+    assert!(matches!(err, EngineError::WfeTerminal), "{err:?}");
+
+    let err = engine
+        .admin_fire_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect_err("biten akışta tetikleme reddedilmeli");
+    assert!(matches!(err, EngineError::WfeTerminal), "{err:?}");
+}
+
+/// WF Admin olmak AKSİYON yetkisi VERMEZ — tasarımın özü: işi yönetir, işi yapmaz.
+///
+/// `wf_admin` kuralına uyan ama node'un `c_a`'sına uymayan aktör `apply_action`'dan
+/// geçmemeli; geçseydi WF Admin, tasarımcının hiçbir node'unda öngörmediği bir ACT
+/// kanalı kazanırdı.
+#[tokio::test]
+async fn wf_admin_does_not_grant_action_rights() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    // Admin (branchManager) creditAnalyst node'unun c_a'sına UYMAZ.
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    // Yetki kanalı CLAIM kapısında yalıtılır: `apply` önce atama ister (NotClaimed),
+    // o yüzden c_a denetimini doğrudan sınamak için claim kullanılır.
+    assert_eq!(
+        engine.can_claim(&wfd, &wfes, &admin, None).await.unwrap(),
+        ClaimCheck::NotEligible,
+        "wf_admin, node c_a'sına uymadığı halde claim edebiliyor"
+    );
+
+    // Karşı kanıt: node c_a'sına UYAN aktör claim edebilir — yani yukarıdaki red
+    // gerçekten YETKİDEN geliyor, node'un genel bir kilidinden değil.
+    let analyst = analyst(orgu);
+    assert_eq!(
+        engine.can_claim(&wfd, &wfes, &analyst, None).await.unwrap(),
+        ClaimCheck::Ok
+    );
+}

@@ -175,7 +175,7 @@ pub struct WfeApplyResult {
 /// Paralel modda kol ipucu ZORUNLUDUR: `current_node` NULL'dır ve hangi kolun
 /// sayacına dokunulduğu belirsiz kalırdı. Paralel modda DEĞİLKEN gönderilen ipucu
 /// yok sayılır (aynı node grafın başka yerinden de erişilebilir).
-fn require_branch_hint(wfes: &Wfes, node: Option<&str>) -> Result<(), EngineError> {
+pub(crate) fn require_branch_hint(wfes: &Wfes, node: Option<&str>) -> Result<(), EngineError> {
     if wfes.join_target.is_some() && node.is_none() {
         return Err(EngineError::InvalidInput(
             "paralel modda escalation müdahalesi için kol node'u (`node`) gerekir".into(),
@@ -1432,5 +1432,54 @@ impl WfeExecutor {
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
         self.engine().next_escalation(&wfd, &wfes, now, None)
+    }
+}
+
+#[cfg(test)]
+mod branch_hint_tests {
+    use super::*;
+    use wfe_core::types::dynctx::DynCtx;
+    use wfe_core::types::wfah::Wfah;
+    use wfe_core::types::wfd_v22::{JoinRule, WftTarget};
+    use wfe_core::types::wfe::WfeStatus;
+
+    fn wfes(join_target: Option<WftTarget>, current_node: Option<&str>) -> Wfes {
+        Wfes {
+            wfe_id: Uuid::nil(),
+            orgtnt_id: Uuid::nil(),
+            environment_id: None,
+            wfd_id: Uuid::nil(),
+            wfd_version: 1,
+            dynctx: DynCtx(serde_json::json!({})),
+            wfah: Wfah::empty(),
+            status: WfeStatus::Active,
+            current_node: current_node.map(String::from),
+            assigned_to: None,
+            end_response: None,
+            deadline: None,
+            claimed_at: None,
+            created_at: chrono::DateTime::UNIX_EPOCH,
+            branches: vec![],
+            join_target,
+            join_rule: JoinRule::All,
+        }
+    }
+
+    /// Paralel modda kol ipucu ZORUNLU: `current_node` NULL'dır, hangi kolun sayacına
+    /// dokunulduğu belirsiz kalırdı.
+    #[test]
+    fn parallel_mode_requires_branch_hint() {
+        let w = wfes(Some(WftTarget::Node { node: "join".into() }), None);
+        assert!(require_branch_hint(&w, None).is_err());
+        assert!(require_branch_hint(&w, Some("kol_a")).is_ok());
+    }
+
+    /// Tek-kol modda ipucu YOK SAYILIR: aynı node grafın başka yerinden de
+    /// erişilebilir; hata vermek WFE'yi kilitlerdi.
+    #[test]
+    fn single_branch_mode_ignores_the_hint() {
+        let w = wfes(None, Some("onay"));
+        assert!(require_branch_hint(&w, None).is_ok());
+        assert!(require_branch_hint(&w, Some("onay")).is_ok());
     }
 }

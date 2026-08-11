@@ -1795,3 +1795,57 @@ Taslaklar agnoflow'a özgüdür (başka istemci taslak kaydetmez), etki yalnız 
 düşer, klasik "çöken sekme" vakası yok. Seam hazır — `DELETE .../lock`'a admin dalı.
 
 Detay: `docs/superpowers/specs/2026-08-11-draft-kilidi-design.md`.
+## "Kim yapabilir" sorusu aksiyon deftere işlendikten SONRA sorulur (2026-08-11)
+
+**Hata.** `{c_orgu: {from: {wfah: "<aksiyon>", field: "actor.orgu"}, traverse: "..."}}` kuralı
+taşıyan bir node, o node'a GİRİŞİ üreten aksiyona çapalandığında **daima adaysız** açılıyordu:
+`current_c_a = []`, kimse claim edemiyor, portal "c_a boş" gösteriyor ve "uygun aktör oluştur"
+formu hangi (birim, rol) için olduğunu bilemediği için hiç çıkmıyordu. En yaygın hâli
+"başlatanın biriminin müdürü" (`from.wfah = "<start aksiyonu>"`) — yani M16'nın açtığı yüzeyin
+kanonik kullanımı. Selector formları (`self`, `parent`, `*:[type:]`) etkilenmiyordu: onlar
+geçmişe bakmaz, yalnız aktörle çözülür.
+
+**Neden.** `resolve_wft` İKİ işi birden yapıyordu — "nereye gidiyoruz" (koşullar) ve "varılan
+yeri kim yapabilir" (adaylar) — ve ikisine de TEK geçmiş veriliyordu: aksiyon ÖNCESİ olan.
+Koşullar için doğru, adaylar için yanlış. §7 pipeline'ı atomik olduğundan aksiyonun WFAH kaydı
+commit'e kadar yalnız bellekteki staged listede durur; aday çözümü o listeyi görmeyince
+`resolver::resolve_anchor` çapayı bulamıyor, `resolve_c_orgu` BOŞ küme dönüyordu. Boş küme
+burada DOĞRU davranıştır (anchor çözülemezse aktörün birimine DÜŞMEZ — o düşüş kısıtı "daima
+doğru"ya çevirirdi, bkz. `resolver.rs`); kusur çapanın var olan kaydı görememesiydi.
+
+**Karar: iki soru iki adım.** `resolve_wft` artık YALNIZ hedefi çözer (`(outcome, ctx,
+landed)`). Aday çözümü ondan çıkarıldı ve `candidates_at` oldu; çağıranlar sırayı açıkça
+yazar:
+
+```text
+hedefi çöz (koşullar: aksiyon öncesi geçmiş)
+  → wfah = wfah.extended(&wfah_entries)   // aksiyon işlendi
+  → candidates_at(...)                    // adaylar: güncel geçmiş
+  → commit (tek yazma: current_node + current_c_a)
+```
+
+Her adım TEK geçmiş görür. Önce denenen "aday geçmişini ikinci bir parametre olarak geçir"
+çözümü aynı cevabı üretiyordu ama iki `&Wfah` argümanı yan yana duruyordu: derleyici ayırt
+edemez, doğruluk yoruma bakmaya bağlı kalır ve 7. bir çağrı yolu eklendiğinde aynı hata
+sessizce geri gelirdi. Sıra adımlara bölününce seçenek kalmıyor.
+
+**Neden commit'ten SONRA değil.** Aday cache'i commit'in yazdığı satırın kolonudur
+(`SET current_node = $1, current_c_a = $2`), tek UPDATE'te gitmeli. İkiye bölmek (a) iki yazma
+arasında node'u dolu ama adayı boş bir pencere açardı — havuz sorgusu o aralıkta kimseyi
+göstermez, (b) ikinci yazma düşerse `[]` KALICI olurdu, yani bu bug'ın crash'e bağlı hâli.
+Commit ayrıca yeni bilgi üretmez: defter satırı zaten bellektedir, commit onu yalnız diske
+indirir.
+
+**Koşullar aksiyonu HÂLÂ görmez.** `$prev` "bir önceki aksiyon" demektir — uygulanan aksiyon
+`$action.input` ile zaten erişilebilir, `$prev`i ona kaydırmak namespace'i tautolojiye
+çevirirdi. Ayrıca `count($wfah, #.action == "onay") >= 2` gibi yayınlanmış eşikler bir adım
+erken dolardı. Koşulların ekli defteri görmesi (daha sezgisel bir semantik) ayrı bir karar
+olarak alınabilir; bu bug düzeltmesinin kapsamı değildir.
+
+**Kapsam.** Düzeltme yeni geçişlerde etkilidir; `current_c_a` node'a girişte donan bir
+CACHE'tir (havuz listesi SQL'de `current_c_a @> ...` ile süzdüğü için var), hatalı `[]` ile
+açılmış KOŞAN WFE'ler kendiliğinden dolmaz.
+
+Testler: `wfe-core/tests/pipeline.rs::start_target_resolves_wfah_anchor_to_start_actor_orgu`,
+`::apply_target_resolves_wfah_anchor_to_applying_actor_orgu`,
+`::wft_conditions_do_not_see_the_action_being_applied`.

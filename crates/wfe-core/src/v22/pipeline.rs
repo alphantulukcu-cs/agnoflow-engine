@@ -242,7 +242,8 @@ impl<'a> Engine<'a> {
         )
         .await?;
 
-        let (outcome, resolved_c_a, final_ctx, landed) = self
+        // §7.8 — nereye gidiyoruz?
+        let (outcome, final_ctx, landed) = self
             .resolve_wft(
                 &rule.wft,
                 wfd,
@@ -252,8 +253,22 @@ impl<'a> Engine<'a> {
                 wfe_id,
                 Some(input),
                 None,
-                orgtnt_id,
                 WftMode::Start,
+            )
+            .await?;
+
+        // Aksiyon işlendi: `start[].action` kaydı artık defterde (M16 — çapalar bu
+        // gerçek adı referans alır). Adaylar bu defterle çözülür.
+        let wfah = empty_wfah.extended(&wfah_entries);
+        let resolved_c_a = self
+            .candidates_at(
+                &outcome,
+                landed.as_ref(),
+                wfd,
+                &final_ctx,
+                &wfah,
+                actor,
+                orgtnt_id,
             )
             .await?;
 
@@ -425,8 +440,8 @@ impl<'a> Engine<'a> {
         )
         .await?;
 
-        // §7.8 — wft staged ctx üzerinden
-        let (outcome, resolved_c_a, final_ctx, landed) = self
+        // §7.8 — wft staged ctx üzerinden: nereye gidiyoruz?
+        let (outcome, final_ctx, landed) = self
             .resolve_wft(
                 &transition.wft,
                 wfd,
@@ -436,8 +451,21 @@ impl<'a> Engine<'a> {
                 wfes.wfe_id,
                 Some(input),
                 None,
-                wfes.orgtnt_id,
                 WftMode::Single,
+            )
+            .await?;
+
+        // Aksiyon işlendi — varılan yeri kim yapabilir?
+        let wfah = wfes.wfah.extended(&wfah_entries);
+        let resolved_c_a = self
+            .candidates_at(
+                &outcome,
+                landed.as_ref(),
+                wfd,
+                &final_ctx,
+                &wfah,
+                actor,
+                wfes.orgtnt_id,
             )
             .await?;
 
@@ -621,7 +649,7 @@ impl<'a> Engine<'a> {
         // join kuralının değerlendirileceği snapshot.
         let all_entries = all_entry_nodes(wfes);
         let arrived_entries = arrived_entries_with(wfes, branch_node);
-        let (outcome, resolved_c_a, final_ctx, landed) = self
+        let (outcome, final_ctx, landed) = self
             .resolve_wft(
                 &transition.wft,
                 wfd,
@@ -631,7 +659,6 @@ impl<'a> Engine<'a> {
                 wfes.wfe_id,
                 Some(input),
                 None,
-                wfes.orgtnt_id,
                 WftMode::Branch {
                     join,
                     from_node: branch_node,
@@ -640,6 +667,20 @@ impl<'a> Engine<'a> {
                     all_entries: &all_entries,
                     arrived_entries: &arrived_entries,
                 },
+            )
+            .await?;
+
+        // Aksiyon işlendi — varılan yeri kim yapabilir? (kol varışında aday yok)
+        let wfah = wfes.wfah.extended(&wfah_entries);
+        let resolved_c_a = self
+            .candidates_at(
+                &outcome,
+                landed.as_ref(),
+                wfd,
+                &final_ctx,
+                &wfah,
+                actor,
+                wfes.orgtnt_id,
             )
             .await?;
 
@@ -1313,7 +1354,7 @@ impl<'a> Engine<'a> {
         // marker'ı ve SLA effects'i YUKARIDA saf `system` ile yazıldı — audit izi
         // değişmez; çapa YALNIZ çözümlemede kullanılır.
         let anchored = system_actor_anchored(wfes);
-        let (outcome, resolved_c_a, final_ctx, landed) = self
+        let (outcome, final_ctx, landed) = self
             .resolve_wft(
                 wft,
                 wfd,
@@ -1323,8 +1364,21 @@ impl<'a> Engine<'a> {
                 wfes.wfe_id,
                 None,
                 None,
-                wfes.orgtnt_id,
                 mode,
+            )
+            .await?;
+
+        // Escalation marker'ı işlendi — varılan yeri kim yapabilir?
+        let wfah = wfes.wfah.extended(&wfah_entries);
+        let resolved_c_a = self
+            .candidates_at(
+                &outcome,
+                landed.as_ref(),
+                wfd,
+                &final_ctx,
+                &wfah,
+                &anchored,
+                wfes.orgtnt_id,
             )
             .await?;
 
@@ -1587,7 +1641,7 @@ impl<'a> Engine<'a> {
                 // SLA-2 ile aynı gerekçe: hedef c_a'sı / `listable` çapalı olabilir,
                 // çözüm nil-orgu sistem aktörüyle yapılamaz. Audit izi saf `system`.
                 let anchored = system_actor_anchored(wfes);
-                let (outcome, resolved_c_a, final_ctx, landed) = self
+                let (outcome, final_ctx, landed) = self
                     .resolve_wft(
                         &wft,
                         wfd,
@@ -1597,8 +1651,20 @@ impl<'a> Engine<'a> {
                         wfes.wfe_id,
                         None,
                         None,
-                        wfes.orgtnt_id,
                         mode,
+                    )
+                    .await?;
+                // Timeout marker'ı işlendi — varılan yeri kim yapabilir?
+                let wfah = wfes.wfah.extended(&wfah_entries);
+                let resolved_c_a = self
+                    .candidates_at(
+                        &outcome,
+                        landed.as_ref(),
+                        wfd,
+                        &final_ctx,
+                        &wfah,
+                        &anchored,
+                        wfes.orgtnt_id,
                     )
                     .await?;
                 stage_parallel_markers(
@@ -1957,7 +2023,7 @@ impl<'a> Engine<'a> {
         // orgu'su ile çözülemez (bkz. `system_actor_anchored`). WFAH marker'ı ve
         // çağrı effects'i YUKARIDA saf `system` ile yazıldı — audit izi değişmez.
         let anchored = system_actor_anchored(wfes);
-        let (outcome, resolved_c_a, final_ctx, landed) = self
+        let (outcome, final_ctx, landed) = self
             .resolve_wft(
                 wft,
                 wfd,
@@ -1967,8 +2033,21 @@ impl<'a> Engine<'a> {
                 wfes.wfe_id,
                 None,
                 Some(&call),
-                wfes.orgtnt_id,
                 WftMode::Single,
+            )
+            .await?;
+
+        // Çağrı dönüş marker'ı işlendi — varılan yeri kim yapabilir?
+        let wfah = wfes.wfah.extended(&wfah_entries);
+        let resolved_c_a = self
+            .candidates_at(
+                &outcome,
+                landed.as_ref(),
+                wfd,
+                &final_ctx,
+                &wfah,
+                &anchored,
+                wfes.orgtnt_id,
             )
             .await?;
 
@@ -2105,9 +2184,14 @@ impl<'a> Engine<'a> {
     /// `mode`: WOR-31 — Parallel hedefin ve paralel kol bağlamının sınıflaması
     /// (bkz. `WftMode`).
     ///
-    /// Dördüncü dönüş değeri "nereye varıldı" (`CallSite`): `CommitOutcome::Terminal`
+    /// Üçüncü dönüş değeri "nereye varıldı" (`CallSite`): `CommitOutcome::Terminal`
     /// terminal id'sini TAŞIMAZ, ama WFC outbox'ı ardıl çağrıyı bulmak için ona ihtiyaç
     /// duyar — bu yüzden ayrıca döner.
+    ///
+    /// YALNIZ "nereye" sorusunu cevaplar. "Varılan yeri kim yapabilir" AYRI bir adımdır
+    /// (`candidates_at`) ve aksiyon deftere işlendikten SONRA sorulur — bkz. oradaki
+    /// yorum. Bu yüzden buradaki `wfah` daima aksiyon ÖNCESİ geçmiştir: koşullar
+    /// ($prev, `count($wfah, ...)`) uygulanmakta olan aksiyonu saymamalıdır.
     #[allow(clippy::too_many_arguments)]
     async fn resolve_wft(
         &self,
@@ -2121,17 +2205,8 @@ impl<'a> Engine<'a> {
         // WFC-RETURN bağlamı — `wft.conditions` ve terminal `wfe_end_response` içinde
         // `$call.*` görünür olsun. Diğer yollarda `None`.
         call: Option<&CallOutcome>,
-        orgtnt_id: Uuid,
         mode: WftMode<'_>,
-    ) -> Result<
-        (
-            CommitOutcome,
-            Vec<ResolvedCandidate>,
-            Value,
-            Option<CallSite>,
-        ),
-        EngineError,
-    > {
+    ) -> Result<(CommitOutcome, Value, Option<CallSite>), EngineError> {
         // WOR-56: collapse — yalnız kol bağlamında. Kardeşleri düşürüp WFE'yi
         // hedefe götürür. Terminal hedef = mevcut Terminal yolu (paralel modda
         // stage_parallel_markers zaten kardeşleri iptal eder). Node hedef =
@@ -2158,25 +2233,18 @@ impl<'a> Engine<'a> {
                     )?;
                     Ok((
                         CommitOutcome::Terminal { end_response },
-                        vec![],
                         final_ctx,
                         Some(CallSite::Terminal(terminal.clone())),
                     ))
                 }
-                WftTarget::Node { node } => {
-                    let resolved = self
-                        .node_candidates(node, wfd, &staged, wfah, actor, orgtnt_id)
-                        .await?;
-                    Ok((
-                        CommitOutcome::CollapseTo {
-                            from_node,
-                            node: node.clone(),
-                        },
-                        resolved,
-                        staged,
-                        Some(CallSite::Node(node.clone())),
-                    ))
-                }
+                WftTarget::Node { node } => Ok((
+                    CommitOutcome::CollapseTo {
+                        from_node,
+                        node: node.clone(),
+                    },
+                    staged,
+                    Some(CallSite::Node(node.clone())),
+                )),
             };
         }
         let target = match wft {
@@ -2192,44 +2260,20 @@ impl<'a> Engine<'a> {
                     WftMode::Branch { .. } => Err(EngineError::InvalidWfd(
                         "nested parallel çalıştırılamaz (WOR-31)".into(),
                     )),
-                    WftMode::Single => {
-                        // Aday cache'i tüm kol giriş node'larının birleşimi —
-                        // kol-bazlı havuz görünümü T3'te wfe_branch satırlarından
-                        // türetilir; buradaki union liste görünürlüğü içindir.
-                        let mut resolved = Vec::new();
-                        for b in &parallel.branches {
-                            let node = wfd.nodes.get(b).ok_or_else(|| {
-                                EngineError::InvalidWfd(format!(
-                                    "parallel branch bilinmeyen node '{b}'"
-                                ))
-                            })?;
-                            let mut extra = self
-                                .resolve_candidates(&node.c_a, &staged, wfah, actor, orgtnt_id)
-                                .await?;
-                            resolved.append(&mut extra);
-                        }
-                        for listable in &wfd.listable {
-                            let mut extra = self
-                                .resolve_candidates(&listable.c_a, &staged, wfah, actor, orgtnt_id)
-                                .await?;
-                            resolved.append(&mut extra);
-                        }
-                        Ok((
-                            CommitOutcome::ForkTo {
-                                branches: parallel.branches.clone(),
-                                join: parallel.join.clone(),
-                                // WOR-72/WOR-73: mod + eşik/ifade burada TEK çözülmüş
-                                // kurala indirgenir; runtime bundan sonra yalnız onu taşır.
-                                join_rule: parallel.join_rule(),
-                            },
-                            resolved,
-                            staged,
-                            // Fork BİRDEN FAZLA node'a girer; WFC outbox tek site
-                            // taşır. Bir kol giriş node'unun çağrı node'u olması
-                            // Faz 2 kapsamı dışıdır (validator ileride yasaklar).
-                            None,
-                        ))
-                    }
+                    WftMode::Single => Ok((
+                        CommitOutcome::ForkTo {
+                            branches: parallel.branches.clone(),
+                            join: parallel.join.clone(),
+                            // WOR-72/WOR-73: mod + eşik/ifade burada TEK çözülmüş
+                            // kurala indirgenir; runtime bundan sonra yalnız onu taşır.
+                            join_rule: parallel.join_rule(),
+                        },
+                        staged,
+                        // Fork BİRDEN FAZLA node'a girer; WFC outbox tek site
+                        // taşır. Bir kol giriş node'unun çağrı node'u olması
+                        // Faz 2 kapsamı dışıdır (validator ileride yasaklar).
+                        None,
+                    )),
                 };
             }
             Wft::Conditional {
@@ -2341,7 +2385,6 @@ impl<'a> Engine<'a> {
                                     "arrived": arrived_entries,
                                 }),
                             },
-                            vec![],
                             staged,
                             None,
                         ));
@@ -2353,29 +2396,22 @@ impl<'a> Engine<'a> {
                             from_node: from_node.to_string(),
                             arrived_entries: arrived_entries.to_vec(),
                         },
-                        vec![],
                         staged,
                         None,
                     ));
                 }
                 // Join doldu: paralel mod biter, join hedefine promotion.
                 return match join {
-                    WftTarget::Node { node } => {
-                        let resolved = self
-                            .node_candidates(node, wfd, &staged, wfah, actor, orgtnt_id)
-                            .await?;
-                        Ok((
-                            CommitOutcome::JoinComplete {
-                                from_node: from_node.to_string(),
-                                quorum_collapse,
-                                arrived_entries: arrived_entries.to_vec(),
-                                next: Box::new(CommitOutcome::MoveTo { node: node.clone() }),
-                            },
-                            resolved,
-                            staged,
-                            Some(CallSite::Node(node.clone())),
-                        ))
-                    }
+                    WftTarget::Node { node } => Ok((
+                        CommitOutcome::JoinComplete {
+                            from_node: from_node.to_string(),
+                            quorum_collapse,
+                            arrived_entries: arrived_entries.to_vec(),
+                            next: Box::new(CommitOutcome::MoveTo { node: node.clone() }),
+                        },
+                        staged,
+                        Some(CallSite::Node(node.clone())),
+                    )),
                     WftTarget::Terminal { terminal } => {
                         let (end_response, final_ctx) = self.terminal_outcome(
                             terminal,
@@ -2393,7 +2429,6 @@ impl<'a> Engine<'a> {
                                 arrived_entries: arrived_entries.to_vec(),
                                 next: Box::new(CommitOutcome::Terminal { end_response }),
                             },
-                            vec![],
                             final_ctx,
                             Some(CallSite::Terminal(terminal.clone())),
                         ))
@@ -2403,15 +2438,11 @@ impl<'a> Engine<'a> {
             if let Target::Node(node_key) = &target {
                 // Normal kol hareketi — paralel mod sürer; kol claim'i +
                 // entered_at adapter'da sıfırlanır (T3).
-                let resolved = self
-                    .node_candidates(node_key, wfd, &staged, wfah, actor, orgtnt_id)
-                    .await?;
                 return Ok((
                     CommitOutcome::BranchMoveTo {
                         from_node: from_node.to_string(),
                         node: node_key.clone(),
                     },
-                    resolved,
                     staged,
                     Some(CallSite::Node(node_key.clone())),
                 ));
@@ -2420,16 +2451,8 @@ impl<'a> Engine<'a> {
 
         match target {
             Target::Node(node_key) => {
-                let resolved = self
-                    .node_candidates(&node_key, wfd, &staged, wfah, actor, orgtnt_id)
-                    .await?;
                 let site = CallSite::Node(node_key.clone());
-                Ok((
-                    CommitOutcome::MoveTo { node: node_key },
-                    resolved,
-                    staged,
-                    Some(site),
-                ))
+                Ok((CommitOutcome::MoveTo { node: node_key }, staged, Some(site)))
             }
             Target::Terminal(terminal_id) => {
                 let (end_response, final_ctx) = self.terminal_outcome(
@@ -2443,11 +2466,64 @@ impl<'a> Engine<'a> {
                 )?;
                 Ok((
                     CommitOutcome::Terminal { end_response },
-                    vec![],
                     final_ctx,
                     Some(CallSite::Terminal(terminal_id)),
                 ))
             }
+        }
+    }
+
+    /// "Varılan node'u ŞU AN kim yapabilir?" — `current_c_a` cache'i.
+    ///
+    /// `resolve_wft`ten AYRI ve ondan SONRA çağrılır, çünkü cevabı aksiyonun kendisine
+    /// bağlı olabilir: WFAH-çapalı bir `c_orgu` ("başlatanın biriminin müdürü",
+    /// `{from: {wfah: "<aksiyon>", field: "actor.orgu"}}`) o aksiyonun kaydını
+    /// göremezse çapa çözülmez ve `resolve_c_orgu` BOŞ küme döner (aktörün birimine
+    /// DÜŞMEZ — bkz. `resolver.rs`), yani node adaysız açılır. Bu yüzden çağıranlar
+    /// `wfah`'ı `Wfah::extended` ile TAMAMLADIKTAN sonra buraya girer; koşulların
+    /// gördüğü aksiyon-öncesi geçmişle karıştırılmaz.
+    ///
+    /// Aday YOKTUR: terminal (iş bitti), kol varışı ve join-doldurmama (WFE bir
+    /// node'a inmedi).
+    #[allow(clippy::too_many_arguments)]
+    async fn candidates_at(
+        &self,
+        outcome: &CommitOutcome,
+        landed: Option<&CallSite>,
+        wfd: &Wfd,
+        ctx: &Value,
+        wfah: &Wfah,
+        actor: &Actor,
+        orgtnt_id: Uuid,
+    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
+        // Fork TEK bir node'a inmez (`landed` de bu yüzden None): cache tüm kol giriş
+        // node'larının birleşimidir — kol-bazlı havuz görünümü T3'te wfe_branch
+        // satırlarından türetilir, buradaki union liste görünürlüğü içindir.
+        if let CommitOutcome::ForkTo { branches, .. } = outcome {
+            let mut resolved = Vec::new();
+            for b in branches {
+                let node = wfd.nodes.get(b).ok_or_else(|| {
+                    EngineError::InvalidWfd(format!("parallel branch bilinmeyen node '{b}'"))
+                })?;
+                let mut extra = self
+                    .resolve_candidates(&node.c_a, ctx, wfah, actor, orgtnt_id)
+                    .await?;
+                resolved.append(&mut extra);
+            }
+            for listable in &wfd.listable {
+                let mut extra = self
+                    .resolve_candidates(&listable.c_a, ctx, wfah, actor, orgtnt_id)
+                    .await?;
+                resolved.append(&mut extra);
+            }
+            return Ok(resolved);
+        }
+        match landed {
+            Some(CallSite::Node(node_key)) => {
+                self.node_candidates(node_key, wfd, ctx, wfah, actor, orgtnt_id)
+                    .await
+            }
+            _ => Ok(vec![]),
         }
     }
 

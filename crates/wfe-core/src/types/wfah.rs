@@ -35,6 +35,15 @@ impl Wfah {
         Self(entries)
     }
 
+    /// Bu geçişte üretilmiş kayıtlar eklenmiş yeni bir Wfah. §7 pipeline'ı atomik
+    /// olduğu için satırlar commit'e kadar yalnız bellekte durur; "aksiyon işlendi"
+    /// anındaki defter böyle kurulur (bkz. `pipeline::Engine::apply`).
+    pub fn extended(&self, entries: &[WfahEntry]) -> Self {
+        let mut all = self.0.clone();
+        all.extend_from_slice(entries);
+        Self(all)
+    }
+
     pub fn entries(&self) -> &[WfahEntry] {
         &self.0
     }

@@ -530,6 +530,160 @@ async fn start_ineligible_actor_is_rejected() {
     assert!(matches!(err, EngineError::StartNotEligible));
 }
 
+// ======================================= WFAH-çapalı c_orgu (2026-08-11 regresyonu)
+//
+// `{from: {wfah: "<aksiyon>", field: "actor.orgu"}}` çapası, VARILAN node'un adayını
+// çözerken o node'a girişi ÜRETEN aksiyonu görebilmelidir. Geçmiş §7 atomikliği gereği
+// commit'ten önce yazılmaz — kayıt yalnız staged listede durur ve `resolve_wft`e ayrıca
+// verilmezse çapa çözülemez, `resolve_c_orgu` BOŞ küme döner (aktörün birimine düşmez)
+// ve node ADAYSIZ açılır: portalda "c_a boş", kimse claim edemez, "uygun aktör oluştur"
+// da hangi (birim, rol) için olduğunu bilemez.
+
+/// Start: "başlatanın biriminin analisti" kuralı, start kaydını görmek ZORUNDA.
+#[tokio::test]
+async fn start_target_resolves_wfah_anchor_to_start_actor_orgu() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    v["nodes"]["self__creditAnalyst"]["c_a"]["c_orgu"] = json!({
+        "from": {"wfah": "create_application", "field": "actor.orgu"},
+        "traverse": "self"
+    });
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let orgu = Uuid::new_v4();
+    let new = engine
+        .start(
+            &wfd,
+            &clerk(orgu),
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        new.resolved_c_a
+            .iter()
+            .any(|c| c.orgu_id == Some(orgu) && c.role == "creditAnalyst"),
+        "start aksiyonuna çapalı c_orgu başlatanın birimine çözülmeli: {:?}",
+        new.resolved_c_a
+    );
+}
+
+/// Apply: çapa, geçişi üreten aksiyonu (henüz commit edilmemiş kaydı) görmeli.
+#[tokio::test(start_paused = true)]
+async fn apply_target_resolves_wfah_anchor_to_applying_actor_orgu() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(650, "C", false); // within_limit false → default node
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    v["nodes"]["self__branchManager"]["c_a"] = json!({
+        "c_orgu": {"from": {"wfah": "analyst_approve", "field": "actor.orgu"}, "traverse": "self"},
+        // Rol `listable[]`teki hiçbir kuralda GEÇMEMELİ — geçseydi aday yalnız o
+        // union'dan gelip çapa çözülmese de assertion tutardı (test ayırt etmezdi).
+        "c_r": ["wfahAnchoredManager"]
+    });
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let orgu = Uuid::new_v4();
+    let a = analyst(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
+
+    let commit = engine
+        .apply(
+            &wfd,
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 90000}}),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
+        "{:?}",
+        commit.outcome
+    );
+    assert!(
+        commit
+            .resolved_c_a
+            .iter()
+            .any(|c| c.orgu_id == Some(orgu) && c.role == "wfahAnchoredManager"),
+        "aksiyona çapalı c_orgu aksiyonu alanın birimine çözülmeli: {:?}",
+        commit.resolved_c_a
+    );
+}
+
+/// Ayrımın diğer yarısı: KOŞUL değerlendirmesi o aksiyonu HÂLÂ görmez. `$prev` "bir
+/// önceki aksiyon" demektir ve yayınlanmış `count($wfah, ...)` eşikleri uygulanan
+/// aksiyonu erken saymamalıdır — aday çözümüne verilen geçmiş buraya SIZMAMALI.
+#[tokio::test(start_paused = true)]
+async fn wft_conditions_do_not_see_the_action_being_applied() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(650, "C", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("analyst_approve") {
+            t["wft"] = json!({
+                "conditions": [{"when": "$prev.action == 'analyst_approve'", "terminal": "terminal_rejected"}],
+                "default": {"node": "self__branchManager"}
+            });
+        }
+    }
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let a = analyst(Uuid::new_v4());
+    // wfes_at geçmişi tek "start" kaydıdır → $prev.action == "start".
+    let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
+
+    let commit = engine
+        .apply(
+            &wfd,
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 90000}}),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
+        "$prev uygulanan aksiyona kaymamalı: {:?}",
+        commit.outcome
+    );
+}
+
 // ================================================================ apply — assignment
 
 #[tokio::test]

@@ -17,6 +17,19 @@ pub struct Config {
     /// Swagger UI + `/api-docs/openapi.json` mount edilsin mi. Default açık;
     /// `ENABLE_SWAGGER=false|0|off` ile (örn. prod'da) kapatılır.
     pub enable_swagger: bool,
+    /// Ek-belge taşıyan alt ağaçların (`/wfe`, `/portal`) istek gövdesi üst sınırı
+    /// (MB). Axum'un varsayılanı 2 MB'tır ve `body: Bytes` extractor'ı bunu WFD
+    /// katalog denetiminden (`max_size_mb`) ÖNCE uygular — kataloğun izin verdiği
+    /// 20 MB'lık bir slot pratikte ~2 MB'ta 413 verirdi. `ATTACHMENT_MAX_REQUEST_MB`
+    /// ile yapılandırılır, varsayılan 200 (birden çok ek-belgeyi tek istekte
+    /// taşıyabilecek kadar geniş). Bilerek GLOBAL uygulanmaz: diğer uçların 2 MB
+    /// korumasını genişletmek gereksiz saldırı yüzeyi açardı.
+    pub attachment_max_request_mb: u64,
+    /// Tek istekli başlatmada çift WFE koruması (K6) — aynı parmak izinin "taze"
+    /// sayıldığı pencere. `WFE_START_DEDUPE_WINDOW_SECS`, varsayılan 60 sn: bu süre
+    /// içindeki tekrar aynı sonucu (`Idempotent-Replay`) alır, aşan istek yeni bir
+    /// başlatma sayılır (bkz. `start_dedupe.rs`).
+    pub dedupe_window_secs: u64,
 }
 
 impl Config {
@@ -44,6 +57,14 @@ impl Config {
             enable_swagger: std::env::var("ENABLE_SWAGGER")
                 .map(|v| !matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "off"))
                 .unwrap_or(true),
+            attachment_max_request_mb: std::env::var("ATTACHMENT_MAX_REQUEST_MB")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(200),
+            dedupe_window_secs: std::env::var("WFE_START_DEDUPE_WINDOW_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60),
         })
     }
 }

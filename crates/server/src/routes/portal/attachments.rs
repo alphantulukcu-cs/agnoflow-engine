@@ -13,24 +13,49 @@ use super::jwt::PortalActor;
 use crate::{error::AppError, state::AppState};
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 use utoipa_axum::routes;
 use uuid::Uuid;
+use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::ports::WfdStore;
 
 // Durum tipleri + gate yardımcıları paylaşımlıdır (bkz. crate::attachments) — hem bu
 // JWT route ağacı hem direkt X-Actor route ağacı (routes/attachments.rs) aynısını kullanır.
+//
+// `enrich_with_meta`: `GET /wfe/:id/attachments`in JWT karşılığı bu dosyada AYRI bir
+// handler olarak yok — `wf.wfe_attachment` görünürlüğü `routes/portal/wfe.rs`deki
+// WFE detay ucuna (`status_for_node` zaten oradan çağrılıyor) gömülüdür. Aynı cevabı
+// üretmek isteyen o kod burada re-export edilen fonksiyonu kullanır; mantık burada
+// (crate::attachments) tek kopya kalır, iki ağaç ayrı davranmaz.
 pub use crate::attachments::{
-    missing_required, satisfied, status_for_node, AttachmentGroupStatus,
+    enrich_with_meta, missing_required, satisfied, status_for_node, AttachmentGroupStatus,
 };
 
 /// wfe router'ına merge edilir (aynı `/:wfe_id` uzayında). State merge'den sonra bağlanır.
 pub fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(download, upload, remove))
+    // DİKKAT: `routes!` TEK path'e TEK MethodRouter kurar (path'i ilk handler'dan alır).
+    // `upload` (`/{wfe_id}/attachments/{group}/{item}`) ile `upload_multi`
+    // (`/{wfe_id}/attachments`) aynı makroya konursa ikisi de AYNI yola PUT olarak
+    // bağlanır ve axum açılışta "Overlapping method route" ile PANİKLER. Farklı path'ler
+    // AYRI `.routes(...)` çağrısı ister.
+    OpenApiRouter::new()
+        .routes(routes!(download, upload, remove))
+        .routes(routes!(upload_multi))
+}
+
+/// `PortalActor` (JWT) → `Actor` (engine/paylaşımlı yardımcıların ortak tipi). Bu ağacın
+/// diğer dosyaları (`routes/portal/wfe.rs::to_actor`) da AYNI dönüşümü kendi kopyasında
+/// yapar — o fonksiyon PRIVATE, buraya taşınamaz; alan eşlemesi birebir aynı kalmalı.
+fn to_actor(actor: &PortalActor) -> Actor {
+    Actor {
+        orgu_id: actor.orgu_id,
+        user_id: actor.user_id,
+        role: actor.role.clone(),
+    }
 }
 
 // ---- WFD çözümü (orgtnt sahipliği + aktif WFE doğrulaması) ----
@@ -129,9 +154,20 @@ async fn upload(
                 StatusCode::PAYLOAD_TOO_LARGE,
             ))
         }
+        // Magic-byte çelişkisi — direkt `/wfe/*` ağacındaki kardeşiyle aynı statü ve metin
+        // (bkz. routes/attachments.rs::validate_upload); iki ağaç aynı cevabı vermeli.
+        Err(crate::attachments::UploadReject::TypeMismatch { declared, detected }) => {
+            return Err(AppError(
+                format!("içerik beyan edilen tiple uyuşmuyor: {declared} denildi, {detected} bulundu"),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ))
+        }
     }
 
-    crate::attachment_store::store_for_wfe(&s, wfe_id)
+    // YAZMA yolu KATIDIR: `$env`de depo tanımlı değilse sunucu diskine düşmek yerine
+    // 422. Gerekçe direkt ağaçtaki kardeşiyle aynı (bkz. routes/attachments.rs::resolve_target);
+    // indirme/silme fallback'i korur, eski dosyalar erişilebilir kalsın.
+    crate::attachment_store::store_for_wfe_strict(&s, wfe_id)
         .await?
         .write(wfe_id, &group, &item, body.to_vec())
         .await
@@ -206,4 +242,29 @@ async fn remove(
             )
         })?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /{wfe_id}/attachments` — çok dosyalı, AKSİYONSUZ yükleme, JWT ağacının ince kabuğu.
+/// Ortak mantık (staging → doğrulama → atomik promote) `crate::routes::attachments::
+/// upload_multi_shared`de TEK yerde tutulur; bu ağaç yalnız `PortalActor`ı `Actor`a çevirip
+/// çağırır — iki ağaç (X-Actor / JWT) AYNI cevabı vermeli.
+#[utoipa::path(put,
+    operation_id = "portal_attachment_upload_multi", path = "/{wfe_id}/attachments", tag = "attachments",
+    params(("wfe_id" = Uuid, Path, description = "WFE id")),
+    request_body(content = String, description = "multipart/form-data — alan adları `{grup}/{slot}`; `payload` part'ı YOK (aksiyonsuz)"),
+    responses(
+        (status = 200, description = "Yükleme sonucu", body = serde_json::Value),
+        (status = 422, description = "Bir veya daha fazla dosya reddedildi (attachment.rejected)"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn upload_multi(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+    mp: Multipart,
+) -> Result<Json<crate::routes::attachments::UploadMultiResponse>, AppError> {
+    let actor = to_actor(&actor);
+    crate::routes::attachments::upload_multi_shared(&s, &actor, wfe_id, mp)
+        .await
+        .map(Json)
 }

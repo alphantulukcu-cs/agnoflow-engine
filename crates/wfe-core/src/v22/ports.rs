@@ -576,6 +576,22 @@ pub trait EnvPort: Send + Sync {
         wfd_id: Uuid,
         environment_id: Option<Uuid>,
     ) -> Result<RunEnv, EngineError>;
+
+    /// Çağıran ortam adı vermediğinde SATIRA yazılacak varsayılan ortam id'sini çözer.
+    ///
+    /// Neden ayrı bir metod: `load_run_env` varsayılanı RUNTIME değerlendirmesi için içeride
+    /// çözüyordu ama o id geri dönmüyordu — `start_reserved` da çağıranın `None`'ını
+    /// `wfe.environment_id`'ye yazıyordu. Kolon NOT NULL olduğundan (bkz.
+    /// `20260804000003_wfe_environment_not_null.sql`) ortam adı verilmeyen HER başlatma
+    /// constraint ihlaliyle ölüyordu. Bu metod çözülen id'yi döndürür ki executor onu
+    /// hem runtime'da kullansın hem satıra yazsın; `Some(id)` verildiğinde aynen döner.
+    /// `None` (varsayılan ortam yok, örn. store'suz bağlam) store'suz create ile birlikte
+    /// yaşar — gerçek DB constraint'ine ulaşmaz.
+    async fn resolve_environment_id(
+        &self,
+        orgtnt_id: Uuid,
+        environment_id: Option<Uuid>,
+    ) -> Result<Option<Uuid>, EngineError>;
 }
 
 /// `$env` kullanmayan bağlamlar (saf unit testler, simülasyon) için boş port.
@@ -590,5 +606,15 @@ impl EnvPort for NoEnv {
         _environment_id: Option<Uuid>,
     ) -> Result<RunEnv, EngineError> {
         Ok(RunEnv::default())
+    }
+
+    /// Store'suz bağlamda ortam kavramı yok — verileni aynen döner (`None` → `None`).
+    /// Gerçek WfeStore olmadığı için NOT NULL constraint'ine hiç ulaşılmaz.
+    async fn resolve_environment_id(
+        &self,
+        _orgtnt_id: Uuid,
+        environment_id: Option<Uuid>,
+    ) -> Result<Option<Uuid>, EngineError> {
+        Ok(environment_id)
     }
 }

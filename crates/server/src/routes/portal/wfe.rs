@@ -181,6 +181,16 @@ async fn get_wfe_detail(
                 })?,
             None => vec![],
         };
+        // Kapı kararı (`satisfied`) DEPODAN gelir; metadata yalnız GÖSTERİM için eklenir
+        // (ad/tip/boyut/tarih). Direkt `/wfe/*` ağacındaki `GET /wfe/{id}/attachments` ile
+        // aynı fonksiyon — iki ağaç aynı cevabı vermeli. Metadata okunamazsa süsleme
+        // düşer, aksiyon listesi ayakta kalır: bir gösterim ayrıntısı yüzünden portal
+        // detay sayfasını 500'e düşürmüyoruz.
+        let mut attachments = attachments;
+        match crate::wfe_attachment::list_by_wfe(&s.pool, wfe_id).await {
+            Ok(metas) => super::attachments::enrich_with_meta(&mut attachments, &metas),
+            Err(e) => tracing::warn!(%wfe_id, "attachment metadata okunamadı: {}", e.message),
+        }
         let attachments_satisfied = super::attachments::satisfied(&attachments);
         available_actions.push(AvailableAction {
             name: pa.action.clone(),
@@ -287,6 +297,7 @@ async fn submit_action(
                 message: format!("Eksik zorunlu belgeler: {}", missing.join(", ")),
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 code: Some("attachment.missing"),
+                items: None,
             });
         }
     }

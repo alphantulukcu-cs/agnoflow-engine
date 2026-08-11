@@ -65,6 +65,34 @@ impl AttachmentStore {
             .map(|_| ())
     }
 
+    /// Ham opendal `Operator` — YALNIZ bu store'un bilmediği anahtar kökleri için
+    /// (bugün: `staging/{upload_id}`, bkz. `crate::staging`). Katalog ve not anahtarları
+    /// için buradaki tipli metotlar kullanılır; anahtar biçimi bu dosyanın dışına sızmasın.
+    ///
+    /// Neden erişimci: staging nesnesi nihai anahtarla AYNI depoda olmak zorunda (taşıma
+    /// server-side copy olsun diye), o depo da WFD başına `$env` ile çözülüyor. İkinci bir
+    /// Operator kurmak `$env` çözümünü ikiye bölerdi.
+    pub fn operator(&self) -> &Operator {
+        &self.op
+    }
+
+    /// AKIŞ halinde yükleme (tek istekli başlatma yolu, 2026-08-11).
+    ///
+    /// `write` tüm gövdeyi `Vec<u8>` olarak ister; multipart yolunda bu, isteğe konan
+    /// TÜM dosyaların aynı anda bellekte olması demekti. Writer chunk chunk yazar →
+    /// bellek kullanımı dosya sayısından ve boyutundan BAĞIMSIZ kalır.
+    ///
+    /// Çağıran `close()` etmeli; etmezse nesne tamamlanmaz (S3'te multipart upload
+    /// abort edilir) — yarıda kalan yükleme yarım nesne bırakmaz.
+    pub async fn writer(
+        &self,
+        wfe_id: Uuid,
+        group: &str,
+        item: &str,
+    ) -> Result<opendal::Writer, opendal::Error> {
+        self.op.writer(&Self::key(wfe_id, group, item)).await
+    }
+
     /// İndirme.
     pub async fn read(
         &self,
@@ -142,6 +170,23 @@ pub struct AttachmentItemStatus {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<AttachmentFormatRule>,
     pub uploaded: bool,
+    /// Aşağıdaki alanlar `wf.wfe_attachment` DB metadata'sından gelir (bkz.
+    /// `enrich_with_meta`) — depo (`AttachmentStore`) yalnız "var mı" bilir, "hangi ad,
+    /// ne boyut, ne zaman, kim yükledi" sorusunun cevabı burada. Metadata satırı yoksa
+    /// (eski yükleme yolu ya da tablo eklenmeden ÖNCEki her şey) hepsi `None` kalır;
+    /// bu durum `uploaded: true` ile ÇELİŞMEZ — yalnız ek bilgi eksik demektir.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uploaded_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<i32>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -191,6 +236,14 @@ pub async fn status_for_node(
                 required: item.required,
                 formats: item.formats.clone(),
                 uploaded,
+                // DB metadata'sı burada YOK — bu fonksiyon depo dışına (pool) bağımlı
+                // olmasın diye kasıtlı olarak sızdırılmadı (bkz. `enrich_with_meta`).
+                filename: None,
+                content_type: None,
+                size_bytes: None,
+                sha256: None,
+                uploaded_at: None,
+                version: None,
             });
         }
         out.push(AttachmentGroupStatus {
@@ -204,27 +257,99 @@ pub async fn status_for_node(
     Ok(out)
 }
 
+/// Depodan üretilmiş durum listesini (`status_for_node`) DB metadata'sıyla
+/// (`wf.wfe_attachment`, bkz. `crate::wfe_attachment`) zenginleştirir: dosya adı, MIME
+/// tipi, boyut, sha256, yükleyen zaman ve sürüm numarası eklenir.
+///
+/// Kapı mantığı (`satisfied`/`missing_required`) bunu ÇAĞIRMAZ ve `uploaded` alanı
+/// gerçeğin kaynağı olarak DAİMA DEPODA kalır — bu fonksiyon `uploaded`'a HİÇ
+/// dokunmaz. NEDEN: `wf.wfe_attachment` tablosu 2026-08-11'de eklendi; ondan önce
+/// yüklenmiş (ve o tarihten sonra bile eski koddan geçmiş) hiçbir dosyanın metadata
+/// satırı yoktur. Metadata'yı gerçeğin kaynağı yapsaydık, storage'da fiilen duran bu
+/// dosyalar "yüklenmemiş" görünürdü — sırf DB'de audit kaydı yok diye zaten teslim
+/// edilmiş bir belgeyi kaybettirmiş olurduk. Bu yüzden metadata yalnız EK bilgi
+/// (ad/tip/boyut/tarih/sürüm) taşır; eşleşen satır yoksa item'ın ek alanları `None`
+/// kalır ama `uploaded` depodan geldiği gibi `true` olmaya devam eder.
+pub fn enrich_with_meta(
+    groups: &mut [AttachmentGroupStatus],
+    metas: &[crate::wfe_attachment::AttachmentMeta],
+) {
+    for group in groups.iter_mut() {
+        for item in group.items.iter_mut() {
+            let Some(meta) = metas
+                .iter()
+                .find(|m| m.grp == group.group && m.item == item.id)
+            else {
+                continue;
+            };
+            item.filename = meta.filename.clone();
+            item.content_type = Some(meta.content_type.clone());
+            item.size_bytes = Some(meta.size_bytes);
+            item.sha256 = Some(meta.sha256.clone());
+            item.uploaded_at = Some(meta.uploaded_at);
+            item.version = Some(meta.version);
+        }
+    }
+}
+
 /// Gate koşulu: sorulan aksiyonu KAPAYAN grupların tüm `required` dosyaları yüklü mü?
 /// Kapamayan gruplar (aksiyon kapsamı dışı) eksik olsa da engellemez.
+///
+/// Bu, `satisfied_with_pending`in boş `pending` ile özel hâlidir — davranış DEĞİŞMEDİ,
+/// yalnız ortak mantık tek yerde toplandı.
 pub fn satisfied(groups: &[AttachmentGroupStatus]) -> bool {
-    groups
-        .iter()
-        .filter(|g| g.gates)
-        .all(|g| g.items.iter().all(|i| !i.required || i.uploaded))
+    satisfied_with_pending(groups, &[])
 }
 
 /// Eksik zorunlu item id'leri ("grup/item" biçiminde) — 422 mesajı için.
+///
+/// Bu, `missing_required_with_pending`in boş `pending` ile özel hâlidir — davranış
+/// DEĞİŞMEDİ, yalnız ortak mantık tek yerde toplandı.
 pub fn missing_required(groups: &[AttachmentGroupStatus]) -> Vec<String> {
+    missing_required_with_pending(groups, &[])
+}
+
+/// `missing_required`in genelleştirilmiş hâli: bu istekte STAGING'e yazılmış ama henüz
+/// nihai anahtara taşınmamış slotları da YÜKLENMİŞ sayarak kapıyı sorar. `pending`:
+/// `(grup, item)` çiftleri.
+///
+/// Neden gerekli: Faz 4'te (`POST /wfe/{id}/actions`) dosyalar aksiyonla AYNI istekte
+/// gönderiliyor; aksiyon uygulanamazsa mevcut dosya DEĞİŞMEMELİ diye dosyalar önce
+/// staging'e yazılıyor, nihai anahtara ancak aksiyon başarılı olunca taşınıyor. Ama kapı
+/// (`status_for_node` → depodan `exists`) aksiyondan ÖNCE koşar ve staging'i hiç GÖREMEZ:
+/// birleştirilmezse kullanıcı eksik belgeyi bu istekte gönderse bile kapı "eksik" der,
+/// aksiyon reddedilir, dosya hiç yerine konmaz — kilitlenme. `pending` bu iki bilgiyi
+/// (depodaki gerçek + bu istekte staging'e konan) kapı için birleştirir.
+///
+/// Yalnız `gates: true` gruplar sayılır (mevcut `missing_required` ile aynı ayrım).
+/// `AttachmentItemStatus.uploaded` alanına HİÇ DOKUNMAZ: o alan deponun gerçeğidir,
+/// istemciye "şu an depoda ne var" bilgisini verir; `pending` yalnız KAPIYI gevşetir,
+/// depo/uploaded görünümü aksiyon başarılı olup taşıma gerçekleşene kadar eskisi gibi kalır.
+pub fn missing_required_with_pending(
+    groups: &[AttachmentGroupStatus],
+    pending: &[(String, String)],
+) -> Vec<String> {
     groups
         .iter()
         .filter(|g| g.gates)
         .flat_map(|g| {
             g.items
                 .iter()
-                .filter(|i| i.required && !i.uploaded)
+                .filter(|i| {
+                    i.required
+                        && !i.uploaded
+                        && !pending.iter().any(|(pg, pi)| pg == &g.group && pi == &i.id)
+                })
                 .map(move |i| format!("{}/{}", g.group, i.id))
         })
         .collect()
+}
+
+/// `satisfied`in genelleştirilmiş hâli — bkz. `missing_required_with_pending` NEDEN
+/// açıklaması için. Boşluk kontrolüyle tanımlanır: ikisi aynı kuralı iki farklı biçimde
+/// (bool / liste) sormasın diye ayrı yeniden yazılmaz.
+pub fn satisfied_with_pending(groups: &[AttachmentGroupStatus], pending: &[(String, String)]) -> bool {
+    missing_required_with_pending(groups, pending).is_empty()
 }
 
 // ---- upload doğrulaması (her iki route ağacı da kullanır) ----
@@ -241,11 +366,15 @@ pub fn mime_matches(pattern: &str, ct: &str) -> bool {
 }
 
 /// Upload reddi — route katmanı HTTP statüsüne çevirir.
+#[derive(Debug, PartialEq)]
 pub enum UploadReject {
     /// İçerik tipi hiçbir format kuralına uymadı (415).
     UnsupportedType(String),
     /// Eşleşen kuralın boyut sınırı aşıldı (413) — taşınan değer sınır (MB).
     TooLarge(f64),
+    /// Beyan edilen `Content-Type` ile dosya baytlarından sezilen gerçek tip çelişiyor
+    /// (route katmanı bunu 415 sayar) — bkz. `detect_mismatch`.
+    TypeMismatch { declared: String, detected: String },
 }
 
 /// Yüklenen dosyayı item'ın format kurallarına göre doğrular.
@@ -293,4 +422,426 @@ pub fn all_accept_patterns(item: &AttachmentItem) -> Vec<String> {
         }
     }
     out
+}
+
+// ---- magic-byte sniff (beyan edilen Content-Type'a körü körüne güvenmemek için) ----
+
+/// `PK\x03\x04` (ve boş/parçalı arşiv varyantları `PK\x05\x06`/`PK\x07\x08`) yalnız
+/// gerçek `.zip`'e değil, aynı konteyneri kullanan Office Open XML (docx/xlsx/pptx) ve
+/// OpenDocument/jar/apk ailesine de aittir — baytlardan bu ayrım YAPILAMAZ. Bu yüzden
+/// `detect_mismatch` `application/zip` tespitini bu ailenin herhangi bir üyesiyle beyan
+/// edilmiş olmaya izin verir; aksi halde meşru bir `.docx` yüklemesi yanlışlıkla "tip
+/// uyuşmazlığı" sayılırdı.
+const ZIP_FAMILY: &[&str] = &[
+    "application/zip",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation",
+    "application/java-archive",
+    "application/vnd.android.package-archive",
+];
+
+/// İçeriğin ilk baytlarından (`head`) gerçek tipi tespit eder. Bilinmeyen imza → `None`
+/// (reddetme sebebi DEĞİL; tanımadığımız her formatı yasaklamak katalogdaki serbest
+/// tipleri (`formats` boş item'lar) kullanılamaz yapardı).
+pub fn sniff_content_type(head: &[u8]) -> Option<&'static str> {
+    if head.starts_with(b"%PDF") {
+        return Some("application/pdf");
+    }
+    if head.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if head.starts_with(b"\xFF\xD8\xFF") {
+        return Some("image/jpeg");
+    }
+    if head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if head.starts_with(b"PK\x03\x04") || head.starts_with(b"PK\x05\x06") || head.starts_with(b"PK\x07\x08")
+    {
+        return Some("application/zip");
+    }
+    if head.starts_with(b"Rar!\x1a\x07\x00") || head.starts_with(b"Rar!\x1a\x07\x01\x00") {
+        return Some("application/vnd.rar");
+    }
+    if head.starts_with(b"7z\xbc\xaf\x27\x1c") {
+        return Some("application/x-7z-compressed");
+    }
+    if head.starts_with(b"\x1f\x8b") {
+        return Some("application/gzip");
+    }
+    // ELF/PE/Mach-O: çalıştırılabilir dosyanın belge diye geçmesi bu sniff'in kapatmak
+    // istediği asıl senaryo — bunlar `ZIP_FAMILY` gibi bir eşdeğerlik grubuna ASLA
+    // eklenmez, `detect_mismatch`'te yalnız kendileriyle (tam eşit) uyuşurlar.
+    if head.starts_with(b"\x7fELF") {
+        return Some("application/x-elf");
+    }
+    if head.starts_with(b"MZ") {
+        return Some("application/x-msdownload");
+    }
+    if head.len() >= 4 {
+        const MACHO_MAGICS: [[u8; 4]; 6] = [
+            [0xFE, 0xED, 0xFA, 0xCE], // 32-bit, big-endian
+            [0xFE, 0xED, 0xFA, 0xCF], // 64-bit, big-endian
+            [0xCE, 0xFA, 0xED, 0xFE], // 32-bit, little-endian
+            [0xCF, 0xFA, 0xED, 0xFE], // 64-bit, little-endian
+            [0xCA, 0xFE, 0xBA, 0xBE], // fat/universal binary, big-endian
+            [0xBE, 0xBA, 0xFE, 0xCA], // fat/universal binary, little-endian
+        ];
+        let magic = [head[0], head[1], head[2], head[3]];
+        if MACHO_MAGICS.contains(&magic) {
+            return Some("application/x-mach-binary");
+        }
+    }
+    None
+}
+
+/// Beyan edilen tip ile içerikten tespit edilen tip çelişiyor mu?
+/// Tespit edilemiyorsa (`None`) ÇELİŞKİ YOK sayılır — bilinmeyen imzalı serbest formatları
+/// bu fonksiyon da (`sniff_content_type` gibi) yasaklamaz. Beyan hiç verilmemişse de
+/// (`declared: None`, ya da boş string) kıyaslanacak bir şey yoktur → çelişki yok.
+pub fn detect_mismatch(declared: Option<&str>, head: &[u8]) -> Option<UploadReject> {
+    let detected = sniff_content_type(head)?;
+    let declared = declared?.trim();
+    if declared.is_empty() {
+        return None;
+    }
+    // check_upload'ın accept eşleştirmesiyle AYNI joker kuralı (`image/*` vb.) — bu
+    // mantık `mime_matches`'te zaten var, burada kopyalanmadan yeniden kullanılıyor.
+    // İki yönde de denenir: hangi tarafın joker/kalıp olduğu çağırana göre değişebilir.
+    if mime_matches(declared, detected) || mime_matches(detected, declared) {
+        return None;
+    }
+    if detected == "application/zip" && ZIP_FAMILY.contains(&declared) {
+        return None;
+    }
+    // Ret tipi `UploadReject`: yükleme reddinin TEK tipi olsun, çağıran iki ayrı
+    // hata biçimini birleştirmek zorunda kalmasın.
+    Some(UploadReject::TypeMismatch {
+        declared: declared.to_string(),
+        detected: detected.to_string(),
+    })
+}
+
+// ---- akış hâlinde SHA-256 (dosya tümüyle bellekte tutulmadan özetlenmesi için) ----
+
+/// Chunk chunk beslenen SHA-256 özeti. Yeni yükleme yolu dosyayı stream'le opendal'a
+/// yazacağı için tüm gövdenin bir kerede bellekte durup `Sha256::digest(&bytes)` ile
+/// özetlenmesi İSTENMİYOR — bu tip her `update` çağrısında parçayı içerdeki hasher'a
+/// besler, sonunda `finish` hex özeti üretir.
+pub struct Sha256Stream(sha2::Sha256);
+
+impl Sha256Stream {
+    pub fn new() -> Self {
+        use sha2::Digest;
+        Self(sha2::Sha256::new())
+    }
+
+    pub fn update(&mut self, chunk: &[u8]) {
+        use sha2::Digest;
+        self.0.update(chunk);
+    }
+
+    /// Hex kodlu özet (64 karakter, küçük harf).
+    pub fn finish(self) -> String {
+        use sha2::Digest;
+        let digest = self.0.finalize();
+        let mut hex = String::with_capacity(digest.len() * 2);
+        for b in digest {
+            hex.push_str(&format!("{b:02x}"));
+        }
+        hex
+    }
+}
+
+impl Default for Sha256Stream {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sha2::Digest;
+
+    #[test]
+    fn sniff_detects_pdf() {
+        assert_eq!(sniff_content_type(b"%PDF-1.7\n..."), Some("application/pdf"));
+    }
+
+    #[test]
+    fn sniff_detects_png() {
+        let mut head = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        head.extend_from_slice(&[0, 0, 0, 0]); // gerisi önemsiz
+        assert_eq!(sniff_content_type(&head), Some("image/png"));
+    }
+
+    #[test]
+    fn sniff_detects_zip() {
+        let head = [b'P', b'K', 0x03, 0x04, 0, 0, 0, 0];
+        assert_eq!(sniff_content_type(&head), Some("application/zip"));
+    }
+
+    #[test]
+    fn sniff_detects_elf() {
+        let head = [0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
+        assert_eq!(sniff_content_type(&head), Some("application/x-elf"));
+    }
+
+    #[test]
+    fn sniff_unknown_signature_is_none() {
+        assert_eq!(sniff_content_type(b"bilinmeyen-format-baytlari"), None);
+    }
+
+    #[test]
+    fn mismatch_none_when_sniff_unknown() {
+        // Tespit edilemeyen imza → çelişki yok, ne beyan edilirse edilsin.
+        assert_eq!(detect_mismatch(Some("application/pdf"), b"???"), None);
+    }
+
+    #[test]
+    fn mismatch_none_when_declared_matches_detected() {
+        assert_eq!(detect_mismatch(Some("application/pdf"), b"%PDF-1.4"), None);
+    }
+
+    #[test]
+    fn mismatch_none_with_wildcard_declared() {
+        let mut head = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        head.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(detect_mismatch(Some("image/*"), &head), None);
+    }
+
+    #[test]
+    fn mismatch_none_for_docx_zip_family() {
+        let head = [b'P', b'K', 0x03, 0x04, 0, 0, 0, 0];
+        let docx = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+        assert_eq!(detect_mismatch(Some(docx), &head), None);
+    }
+
+    #[test]
+    fn mismatch_none_when_declared_absent() {
+        let head = [0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
+        assert_eq!(detect_mismatch(None, &head), None);
+    }
+
+    #[test]
+    fn mismatch_detects_executable_disguised_as_pdf() {
+        let head = [0x7f, b'E', b'L', b'F', 2, 1, 1, 0];
+        let got = detect_mismatch(Some("application/pdf"), &head);
+        assert_eq!(
+            got,
+            Some(UploadReject::TypeMismatch {
+                declared: "application/pdf".to_string(),
+                detected: "application/x-elf".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn mismatch_detects_pe_disguised_as_pdf() {
+        let head = [b'M', b'Z', 0x90, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let got = detect_mismatch(Some("application/pdf"), &head);
+        assert_eq!(
+            got,
+            Some(UploadReject::TypeMismatch {
+                declared: "application/pdf".to_string(),
+                detected: "application/x-msdownload".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn sha256_stream_matches_one_shot_hash() {
+        let data = b"Agnoflow attachment stream sha256 testi - biraz daha uzun bir icerik.";
+
+        let mut stream = Sha256Stream::new();
+        for chunk in data.chunks(7) {
+            stream.update(chunk);
+        }
+        let streamed = stream.finish();
+
+        let expected = {
+            let digest = sha2::Sha256::digest(data);
+            let mut hex = String::with_capacity(digest.len() * 2);
+            for b in digest {
+                hex.push_str(&format!("{b:02x}"));
+            }
+            hex
+        };
+
+        assert_eq!(streamed, expected);
+    }
+
+    // ---- enrich_with_meta ----
+
+    fn test_item(id: &str, uploaded: bool) -> AttachmentItemStatus {
+        AttachmentItemStatus {
+            id: id.to_string(),
+            label: None,
+            required: true,
+            formats: vec![],
+            uploaded,
+            filename: None,
+            content_type: None,
+            size_bytes: None,
+            sha256: None,
+            uploaded_at: None,
+            version: None,
+        }
+    }
+
+    fn test_group(group: &str, items: Vec<AttachmentItemStatus>) -> AttachmentGroupStatus {
+        AttachmentGroupStatus {
+            group: group.to_string(),
+            label: None,
+            items,
+            gates: true,
+            actions: None,
+        }
+    }
+
+    fn test_meta(grp: &str, item: &str, filename: &str) -> crate::wfe_attachment::AttachmentMeta {
+        crate::wfe_attachment::AttachmentMeta {
+            grp: grp.to_string(),
+            item: item.to_string(),
+            version: 3,
+            filename: Some(filename.to_string()),
+            content_type: "application/pdf".to_string(),
+            size_bytes: 1234,
+            sha256: "deadbeef".to_string(),
+            uploaded_by: Uuid::nil(),
+            uploaded_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn enrich_with_meta_zenginlestirir_eslesen_slotu() {
+        let mut groups = vec![test_group("belgeler", vec![test_item("kimlik", true)])];
+        let metas = vec![test_meta("belgeler", "kimlik", "kimlik.pdf")];
+
+        enrich_with_meta(&mut groups, &metas);
+
+        let item = &groups[0].items[0];
+        assert!(item.uploaded);
+        assert_eq!(item.filename.as_deref(), Some("kimlik.pdf"));
+        assert_eq!(item.content_type.as_deref(), Some("application/pdf"));
+        assert_eq!(item.size_bytes, Some(1234));
+        assert_eq!(item.sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(item.version, Some(3));
+        assert!(item.uploaded_at.is_some());
+    }
+
+    #[test]
+    fn enrich_with_meta_metadatasiz_slot_uploaded_true_kalir() {
+        // Tabloya kayıt düşmeden önce (ya da eski yükleme yolundan) depoya yazılmış
+        // dosya: metadata satırı yok ama `exists` true dönmüştü → `uploaded: true`
+        // bu fonksiyondan geçtikten sonra da DEĞİŞMEMELİ, yalnız ek alanlar boş kalır.
+        let mut groups = vec![test_group("belgeler", vec![test_item("kimlik", true)])];
+        let metas: Vec<crate::wfe_attachment::AttachmentMeta> = vec![];
+
+        enrich_with_meta(&mut groups, &metas);
+
+        let item = &groups[0].items[0];
+        assert!(item.uploaded);
+        assert!(item.filename.is_none());
+        assert!(item.content_type.is_none());
+        assert!(item.size_bytes.is_none());
+        assert!(item.sha256.is_none());
+        assert!(item.uploaded_at.is_none());
+        assert!(item.version.is_none());
+    }
+
+    // ---- missing_required_with_pending / satisfied_with_pending ----
+
+    fn test_group_gates(group: &str, items: Vec<AttachmentItemStatus>, gates: bool) -> AttachmentGroupStatus {
+        AttachmentGroupStatus {
+            group: group.to_string(),
+            label: None,
+            items,
+            gates,
+            actions: None,
+        }
+    }
+
+    #[test]
+    fn pending_eksik_zorunlu_slotu_kapiyi_acar() {
+        // "belgeler/kimlik" depoda yok ama bu istekte staging'e yazıldı (pending) —
+        // kapı bunu YÜKLENMİŞ saymalı.
+        let groups = vec![test_group("belgeler", vec![test_item("kimlik", false)])];
+        let pending = vec![("belgeler".to_string(), "kimlik".to_string())];
+
+        assert!(missing_required_with_pending(&groups, &pending).is_empty());
+        assert!(satisfied_with_pending(&groups, &pending));
+    }
+
+    #[test]
+    fn pendingte_olmayan_eksik_zorunlu_slot_kapiyi_kapali_tutar() {
+        let groups = vec![test_group("belgeler", vec![test_item("kimlik", false)])];
+        // Farklı bir slot pending'de — "belgeler/kimlik" hâlâ eksik.
+        let pending = vec![("belgeler".to_string(), "baska-item".to_string())];
+
+        assert_eq!(
+            missing_required_with_pending(&groups, &pending),
+            vec!["belgeler/kimlik".to_string()]
+        );
+        assert!(!satisfied_with_pending(&groups, &pending));
+    }
+
+    #[test]
+    fn pendingteki_alakasiz_cift_hicbir_seyi_degistirmez() {
+        let groups = vec![test_group("belgeler", vec![test_item("kimlik", true)])];
+        // Zaten yüklü bir slot için alakasız pending girdileri — sonucu değiştirmemeli.
+        let pending = vec![
+            ("baska-grup".to_string(), "kimlik".to_string()),
+            ("belgeler".to_string(), "baska-item".to_string()),
+        ];
+
+        assert!(missing_required_with_pending(&groups, &pending).is_empty());
+        assert!(satisfied_with_pending(&groups, &pending));
+    }
+
+    #[test]
+    fn gates_false_grup_pending_ile_de_kapiyi_etkilemez() {
+        // gates:false grup aksiyon kapsamı dışı — eksik zorunlu slot pending'de olsun ya
+        // da olmasın, kapıyı hiç saymaz.
+        let groups_without_pending = vec![test_group_gates(
+            "belgeler",
+            vec![test_item("kimlik", false)],
+            false,
+        )];
+        assert!(missing_required_with_pending(&groups_without_pending, &[]).is_empty());
+        assert!(satisfied_with_pending(&groups_without_pending, &[]));
+
+        let pending = vec![("belgeler".to_string(), "kimlik".to_string())];
+        assert!(missing_required_with_pending(&groups_without_pending, &pending).is_empty());
+        assert!(satisfied_with_pending(&groups_without_pending, &pending));
+    }
+
+    #[test]
+    fn enrich_with_meta_eslesmeyen_metadata_hicbir_seyi_bozmaz() {
+        let mut groups = vec![test_group("belgeler", vec![test_item("kimlik", false)])];
+        // Farklı grup + farklı item — hiçbiri "belgeler/kimlik" ile eşleşmiyor.
+        let metas = vec![
+            test_meta("baska-grup", "kimlik", "yanlis-grup.pdf"),
+            test_meta("belgeler", "baska-item", "yanlis-item.pdf"),
+        ];
+
+        enrich_with_meta(&mut groups, &metas);
+
+        let item = &groups[0].items[0];
+        assert!(!item.uploaded); // depodan gelen değer aynen korunur
+        assert!(item.filename.is_none());
+        assert!(item.content_type.is_none());
+        assert!(item.size_bytes.is_none());
+        assert!(item.sha256.is_none());
+        assert!(item.uploaded_at.is_none());
+        assert!(item.version.is_none());
+    }
 }

@@ -20,6 +20,20 @@
 //! | `ATTACHMENT_STORAGE_S3_BUCKET` / `_S3_REGION` / `_S3_ENDPOINT` | S3 hedefi |
 //! | `ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID` / `_S3_SECRET_ACCESS_KEY` | kimlik (secret olarak girilir) |
 //!
+//! **2026-08-11 — YAZMA yolları artık fallback'e DÜŞMEZ.** Katalog attachment'larının
+//! yazma uçları (`PUT .../attachments/...`, multipart `POST /wfe`, `POST/PUT /uploads`,
+//! `staging::take`) `*_strict` varyantlarını kullanır: `$env`de depo tanımlı değilse
+//! `422 attachment_storage.missing_env`. Sessiz fallback, müşterinin bucket'ı yerine
+//! SUNUCU DİSKİNE yazmak demekti — farklı tenant'ların belgeleri bizim diskimizde yan yana.
+//! Publish kapısı (`routes::wfd::assert_attachment_storage_env`) bunu önden yakalıyor ama
+//! TEK savunma olamaz: kapıdan önce yayınlanmış akışlar, sonradan silinen `$env` satırları
+//! ve anahtarları eksik yeni ortamlar kapının arkasından geçer.
+//!
+//! **Okuma/silme yolları fallback'i KORUR** (`store_for_wfd`/`store_for_wfe`): eski
+//! davranışla deployment deposuna yazılmış dosyalar hâlâ indirilebilmeli, gate'te
+//! görünmeli ve süpürülebilmeli. Katılık yeni yanlış yazımı durdurur, geçmişi
+//! erişilemez yapmaz.
+//!
 //! Hiçbiri tanımlı değilse RUNTIME'da deployment varsayılanına düşülür — belge toplamayan
 //! akışlar etkilenmez. Ama **belge TOPLAYAN bir akış bu ayarlar olmadan YAYINLANAMAZ**
 //! (`routes::wfd::assert_attachment_storage_env`): sessizce sunucu diskine yazmak, yayını
@@ -194,6 +208,7 @@ fn missing_env_error(missing: &[&str]) -> AppError {
         ),
         status: StatusCode::UNPROCESSABLE_ENTITY,
         code: Some("attachment_storage.missing_env"),
+        items: None,
     }
 }
 
@@ -276,7 +291,7 @@ async fn store_for_wfd_impl(
 
 /// `(wfd_id, environment)` için depoyu çözer. WFD'nin `$env`inde depo tanımlı değilse
 /// deployment varsayılanı (`AppState.attachments`) döner. Katalog attachment rotalarının
-/// kullandığı davranış — DEĞİŞMEDİ.
+/// yalnız OKUMA/SİLME yollarında kullanılır (2026-08-11); yazma `store_for_wfd_strict`e geçti.
 pub async fn store_for_wfd(
     s: &AppState,
     wfd_id: Uuid,
@@ -286,7 +301,8 @@ pub async fn store_for_wfd(
     store_for_wfd_impl(s, wfd_id, orgtnt_id, environment_id, false).await
 }
 
-/// `store_for_wfd`in fallback'siz varyantı — ad-hoc not dosyası rotası içindir (K4).
+/// `store_for_wfd`in fallback'siz varyantı — ad-hoc not dosyası rotası (K4) VE katalog
+/// attachment'larının tüm YAZMA yolları (2026-08-11) bunu kullanır.
 /// `$env`de gerekli anahtarlar DEĞER olarak tanımlı değilse deployment varsayılanına
 /// asla düşmez, `422 code:"attachment_storage.missing_env"` döner.
 pub async fn store_for_wfd_strict(
@@ -330,12 +346,13 @@ async fn store_for_wfe_impl(
 }
 
 /// Var olan bir WFE'nin deposu — WFD'si ve ortamı satırdan okunur. Katalog attachment
-/// rotalarının kullandığı davranış — DEĞİŞMEDİ.
+/// rotalarının OKUMA/SİLME yollarında kullanılır; yazma `store_for_wfe_strict`e geçti.
 pub async fn store_for_wfe(s: &AppState, wfe_id: Uuid) -> Result<Arc<AttachmentStore>, AppError> {
     store_for_wfe_impl(s, wfe_id, false).await
 }
 
-/// `store_for_wfe`in fallback'siz varyantı — ad-hoc not dosyası rotası içindir (K4).
+/// `store_for_wfe`in fallback'siz varyantı — ad-hoc not dosyası rotası (K4) VE katalog
+/// attachment yüklemesi (2026-08-11) bunu kullanır.
 /// Bkz. `store_for_wfd_strict` doc yorumu.
 pub async fn store_for_wfe_strict(
     s: &AppState,

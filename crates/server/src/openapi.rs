@@ -28,6 +28,7 @@ use utoipa::{
         (name = "simulate", description = "Store'suz simülasyon"),
         (name = "autoexec", description = "Autoexec adım testleri (rest/sql/calc)"),
         (name = "attachments", description = "Ek-belge yükleme/durum (portal edge)"),
+        (name = "uploads", description = "Yükleme STAGING alanı: handle + presigned PUT, başlatmada server-side copy (Faz 3, K8)"),
         (name = "notes", description = "WFE not defteri: draft/publish/gizle + dosya iliştirme (Faz 1-2)"),
         (name = "auth", description = "Uygulama JWT login/kimlik"),
         (name = "users", description = "Kullanıcı yönetimi"),

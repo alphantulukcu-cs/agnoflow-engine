@@ -406,6 +406,7 @@ pub async fn update_draft(
             message: "yayınlanmış not düzenlenemez".into(),
             status: StatusCode::CONFLICT,
             code: Some("note.immutable"),
+            items: None,
         });
     }
     sqlx::query("UPDATE wf.wfe_note SET body = $1 WHERE note_id = $2")
@@ -441,6 +442,7 @@ pub async fn publish(
             message: "not zaten yayınlanmış".into(),
             status: StatusCode::CONFLICT,
             code: Some("note.not_draft"),
+            items: None,
         });
     }
     sqlx::query(
@@ -690,6 +692,7 @@ pub async fn add_file(
             message: "yayınlanmış nota dosya eklenemez".into(),
             status: StatusCode::CONFLICT,
             code: Some("note.immutable"),
+            items: None,
         });
     }
     if size_bytes <= 0 {
@@ -703,6 +706,7 @@ pub async fn add_file(
             ),
             status: StatusCode::PAYLOAD_TOO_LARGE,
             code: Some("note.too_large"),
+            items: None,
         });
     }
     if is_blocked_mime(mime) {
@@ -710,6 +714,7 @@ pub async fn add_file(
             message: format!("izin verilmeyen içerik tipi: {mime}"),
             status: StatusCode::UNSUPPORTED_MEDIA_TYPE,
             code: Some("note.unsupported_type"),
+            items: None,
         });
     }
     let existing_count: i64 =
@@ -786,6 +791,7 @@ pub async fn remove_file(
             message: "yayınlanmış nottan dosya silinemez".into(),
             status: StatusCode::CONFLICT,
             code: Some("note.immutable"),
+            items: None,
         });
     }
     let result = sqlx::query("DELETE FROM wf.wfe_note_file WHERE file_id = $1 AND note_id = $2")

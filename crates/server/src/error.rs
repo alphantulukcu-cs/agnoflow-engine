@@ -14,6 +14,10 @@ pub struct AppError {
     /// doldurulur, gövdede `code` alanı olarak çıkar. Portal ayrımı bu koddan
     /// yapar, hata METNİNİ parse ETMEZ (metin i18n/refactor ile değişebilir).
     pub code: Option<&'static str>,
+    /// Tek istekli başlatmada (2026-08-11) ÇOK dosyanın reddini anlatmak için: gövdeye
+    /// `items` alanı olarak eklenir. Tek `error` metni "hangi belge neden reddedildi"
+    /// sorusunu N dosya için cevaplayamıyordu; istemci bunu slot bazında gösterir.
+    pub items: Option<serde_json::Value>,
 }
 
 /// Mevcut ~120 çağrı yerinin `AppError(mesaj, status)` biçimini bozmadan üçüncü
@@ -30,6 +34,7 @@ pub fn AppError(message: String, status: StatusCode) -> AppError {
         message,
         status,
         code: None,
+        items: None,
     }
 }
 
@@ -37,10 +42,14 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         // Gövde şekli: {"error": "<mesaj>"} + conflict sınıfında {"code": "<kod>"}.
         // `error` alanı GERİYE UYUMLU kalır — `code` yalnızca EKLENİR.
-        let body = match self.code {
+        let mut body = match self.code {
             Some(code) => json!({"error": self.message, "code": code}),
             None => json!({"error": self.message}),
         };
+        // `items` de yalnızca EKLENİR — alanı tanımayan istemci `error`u okumaya devam eder.
+        if let (Some(items), Some(obj)) = (self.items, body.as_object_mut()) {
+            obj.insert("items".into(), items);
+        }
         (self.status, Json(body)).into_response()
     }
 }
@@ -85,6 +94,7 @@ impl From<EngineError> for AppError {
             message: e.to_string(),
             status,
             code,
+            items: None,
         }
     }
 }

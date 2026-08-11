@@ -8,7 +8,10 @@ mod notes;
 mod openapi;
 mod reservation;
 mod routes;
+mod staging;
+mod start_dedupe;
 mod state;
+mod wfe_attachment;
 
 use axum::response::IntoResponse;
 use sqlx::postgres::PgPoolOptions;
@@ -128,6 +131,18 @@ async fn main() {
     );
     let db_router = guard(routes::db::router(state.clone()));
 
+    // Gövde limiti (gerçek bug): axum'un varsayılanı 2 MB'tır ve `body: Bytes`
+    // extractor'ı bunu WFD kataloğunun `max_size_mb` denetiminden ÖNCE uygular —
+    // katalogda `max_size_mb: 20` yazan bir ek-belge slotu pratikte ~2 MB'ta 413
+    // verirdi (kural belgede yazıyor, davranış başka). `ATTACHMENT_MAX_REQUEST_MB`
+    // (varsayılan 200) ile yapılandırılır ve YALNIZ ek-belge TAŞIYAN alt ağaçlara
+    // (`/wfe`, `/portal`) `.layer(...)` ile uygulanır — TÜM uygulamaya global
+    // uygulanmaz, diğer uçlar 2 MB'lık varsayılan korumada kalır (gereksiz saldırı
+    // yüzeyi açmamak için). `DefaultBodyLimit` `Copy`'dir, iki ağaçta da aynı
+    // değer yeniden kullanılabilir.
+    let attachment_body_limit =
+        axum::extract::DefaultBodyLimit::max((cfg.attachment_max_request_mb * 1024 * 1024) as usize);
+
     // Tüm route'lar OpenApiRouter olarak toplanır → tek OpenApi belgesi üretilir.
     let api_router = OpenApiRouter::with_openapi(openapi::ApiDoc::openapi())
         .nest("/org", org_router)
@@ -143,10 +158,22 @@ async fn main() {
         .nest("/templates", routes::templates::router(state.clone()))
         .nest("/wfd", routes::wfd::router(state.clone()))
         .nest("/wfe/simulate", routes::simulate::router(state.clone()))
-        .nest("/wfe", routes::wfe::router(state.clone()))
+        .nest(
+            "/wfe",
+            routes::wfe::router(state.clone()).layer(attachment_body_limit),
+        )
+        // Staging yükleme (Faz 3): baytlar başlatmadan ÖNCE buraya konur, başlatma
+        // isteğine yalnız `upload_id` girer. Ek-belge gövde limiti burada da geçerli.
+        .nest(
+            "/uploads",
+            routes::uploads::router(state.clone()).layer(attachment_body_limit),
+        )
         .nest("/delegation", routes::delegation::router(state.clone()))
         .nest("/autoexec", routes::autoexec::router(state.clone()))
-        .nest("/portal", routes::portal::router(state.clone()));
+        .nest(
+            "/portal",
+            routes::portal::router(state.clone()).layer(attachment_body_limit),
+        );
 
     let (router, api) = api_router.split_for_parts();
 

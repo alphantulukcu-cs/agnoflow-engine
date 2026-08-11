@@ -524,7 +524,16 @@ impl WfeExecutor {
         let wfd = self.wfd.fetch(wfd_id, version).await?;
         let orgtnt_id = self.org.orgtnt_for_orgu(actor.orgu_id).await?;
 
-        // Start pipeline'ı da autoexec koşturup ifade değerlendirir — ortam ÖNCE çözülür.
+        // Ortam ÖNCE çözülür ve SATIRA yazılacak hâle getirilir: `None` (çağıran ad
+        // vermedi) tenant varsayılanına çevrilir. Eskiden `load_run_env` varsayılanı
+        // yalnız runtime için içeride çözüyor, `new.environment_id` ise çağıranın
+        // `None`'ını alıyordu → `wfe.environment_id` NOT NULL constraint'i ihlal ediliyordu.
+        let environment_id = self
+            .env
+            .resolve_environment_id(orgtnt_id, environment_id)
+            .await?;
+
+        // Start pipeline'ı da autoexec koşturup ifade değerlendirir — çözülmüş ortamla.
         let run_env = self
             .env
             .load_run_env(orgtnt_id, wfd_id, environment_id)

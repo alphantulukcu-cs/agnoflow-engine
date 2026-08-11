@@ -1,18 +1,18 @@
-//! wfe_id REZERVASYONU — başlatma öncesi ek-belge yüklemesi (2026-08-07).
+//! wfe_id REZERVASYONU — bugün yalnız CRASH AĞI (2026-08-07 → 2026-08-11).
 //!
-//! Dosya anahtarı `attachments/{wfe_id}/{grup}/{item}`; wfe_id ise eskiden akış
-//! başlarken doğardı. Bu yüzden "belgeler yüklenmeden akış başlamasın" kuralı BAŞLATMA
-//! aksiyonunda sunucuda zorlanamıyordu. Çözüm sırayı tersine çevirir:
+//! Dosya anahtarı `attachments/{wfe_id}/{grup}/{item}`; wfe_id ise eskiden akış başlarken
+//! doğardı. "Belgeler yüklenmeden akış başlamasın" kuralı bu yüzden başlatmada sunucuda
+//! zorlanamıyordu ve 2026-08-07'de sıra tersine çevrilmişti: istemci `POST /wfe/reserve`
+//! ile id alır, dosyaları o id'nin altına yükler, sonra o id ile başlatırdı.
 //!
-//! ```text
-//! POST /wfe/reserve                     → wfe_id (DB'de wfe satırı YOK, rezervasyon var)
-//! PUT  /wfe/{wfe_id}/attachments/g/i    → dosyalar NİHAİ anahtarına yazılır
-//! POST /wfe { …, wfe_id }               → engine depoya bakar; eksikse 422, WFE HİÇ oluşmaz
-//! ```
+//! **2026-08-11: o üç ucun HTTP karşılığı KALDIRILDI.** Rezervasyon dışarıya açılmıyor;
+//! tek istekli multipart `POST /wfe` id'yi kendi içinde üretiyor ve hata yollarında
+//! yazdığını kendi siliyor.
 //!
-//! Rezervasyon satırı iki soruyu cevaplar: (1) yükleme rotası dosyayı hangi WFD'nin
-//! kataloguna göre doğrulayacak, (2) süpürücü hangi dosyaların sahipsiz kaldığını nereden
-//! bilecek. Başlatma başarılı olunca satır silinir (wfe artık gerçek).
+//! Modül yine de yaşıyor, çünkü o istek sırasında yazılan satırın TEK bir işlevi var:
+//! **süreç isteğin ORTASINDA ölürse** (deploy/OOM/kill) `remove_all` çağrılamaz ve
+//! yazılmış baytları kimse bilemez. Satır, süpürücüye "bu id'nin altındaki dosyalar
+//! sahipsiz" diyen tek kayıttır. İstemciye HİÇ görünmez; başarıda silinir.
 
 use crate::error::AppError;
 use axum::http::StatusCode;
@@ -94,12 +94,34 @@ pub async fn expired(pool: &PgPool) -> Result<Vec<Reservation>, sqlx::Error> {
     .await
 }
 
+/// Rezervasyonu DOSYALARIYLA birlikte bırakır: önce depo, sonra defter satırı.
+///
+/// Sıra önemlidir: ters sırada satır silinip dosya silme başarısız olsaydı dosyaların
+/// kime ait olduğu bir daha bilinemez, depoda sonsuza dek kalırlardı.
+///
+/// İki çağıran var: (1) süpürücü (TTL dolmuş ya da süreç istek ortasında ölmüş),
+/// (2) tek istekli başlatmanın hata yolu (`routes::wfe::start_multipart_committed`).
+/// İkisi de aynı soruyu sorar: bu id'nin altındaki dosyaların bağlanacağı bir WFE artık
+/// olmayacak. (`DELETE /wfe/reserve/{id}` ucu 2026-08-11'de kaldırıldı.)
+pub async fn release(
+    state: &crate::state::AppState,
+    r: &Reservation,
+) -> Result<(), AppError> {
+    // Depo WFD başına çözülür ($env) — dosyalar hangi bucket'a yazıldıysa oradan silinir.
+    let store =
+        crate::attachment_store::store_for_wfd(state, r.wfd_id, r.orgtnt_id, r.environment_id)
+            .await?;
+    store.remove_all(r.wfe_id).await.map_err(|e| {
+        AppError(
+            format!("rezervasyon dosyaları silinemedi: {e}"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+    delete(&state.pool, r.wfe_id).await
+}
+
 /// Süresi geçmiş rezervasyonları ve DOSYALARINI temizler. Sunucu açılışında bir kez,
 /// sonra saatte bir koşar (`spawn_sweeper`).
-///
-/// Sıra önemlidir: önce dosyalar, sonra satır. Ters sırada satır silinip dosya silme
-/// başarısız olsaydı dosyaların kime ait olduğu bir daha bilinemez, depoda sonsuza dek
-/// kalırlardı.
 pub async fn sweep(state: &crate::state::AppState) -> usize {
     let rows = match expired(&state.pool).await {
         Ok(r) => r,
@@ -110,23 +132,8 @@ pub async fn sweep(state: &crate::state::AppState) -> usize {
     };
     let mut swept = 0usize;
     for r in rows {
-        // Depo WFD başına çözülür ($env) — dosyalar hangi bucket'a yazıldıysa oradan silinir.
-        let store =
-            match crate::attachment_store::store_for_wfd(state, r.wfd_id, r.orgtnt_id, r.environment_id)
-                .await
-            {
-                Ok(store) => store,
-                Err(e) => {
-                    tracing::warn!(wfe_id = %r.wfe_id, "rezervasyon deposu çözülemedi: {}", e.message);
-                    continue;
-                }
-            };
-        if let Err(e) = store.remove_all(r.wfe_id).await {
-            tracing::warn!(wfe_id = %r.wfe_id, "rezervasyon dosyaları silinemedi: {e}");
-            continue;
-        }
-        if let Err(e) = delete(&state.pool, r.wfe_id).await {
-            tracing::warn!(wfe_id = %r.wfe_id, "rezervasyon satırı silinemedi: {}", e.message);
+        if let Err(e) = release(state, &r).await {
+            tracing::warn!(wfe_id = %r.wfe_id, "rezervasyon bırakılamadı: {}", e.message);
             continue;
         }
         swept += 1;
@@ -140,6 +147,24 @@ pub async fn sweep(state: &crate::state::AppState) -> usize {
         Ok(n) if n > 0 => tracing::info!("{n} süresi geçmiş taslak not temizlendi"),
         Ok(_) => {}
         Err(e) => tracing::warn!("taslak not süpürmesi başarısız: {}", e.message),
+    }
+
+    // Staging (Faz 3, K8): başlatmaya hiç girmemiş yüklemeler. Rezervasyonla AYNI
+    // gerekçe — nesne var, sahibi yok. Kendi TTL'i var (`staging::TTL_HOURS`) ve
+    // `swept` sayacını ETKİLEMEZ.
+    match crate::staging::sweep_expired(state).await {
+        Ok(n) if n > 0 => tracing::info!("{n} süresi geçmiş staging yüklemesi temizlendi"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("staging süpürmesi başarısız: {}", e.message),
+    }
+
+    // Tek istekli başlatma dedupe defteri (K6): fiziksel TTL 1 saat, `window_secs`
+    // (tazelik penceresi) ile AYRI bir eksen — bkz. `start_dedupe.rs`. Hata warn'lanır,
+    // `swept` sayacını ETKİLEMEZ.
+    match crate::start_dedupe::sweep_expired(&state.pool).await {
+        Ok(n) if n > 0 => tracing::info!("{n} süresi geçmiş başlatma dedupe kaydı temizlendi"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("başlatma dedupe süpürmesi başarısız: {}", e.message),
     }
 
     swept

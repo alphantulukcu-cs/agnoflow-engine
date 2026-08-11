@@ -80,4 +80,24 @@ impl EnvPort for EnvAdapter {
             .await
             .map_err(db_err)
     }
+
+    /// Çağıran ortam adı vermediyse tenant'ın VARSAYILAN ortamının id'sini döndürür —
+    /// `load_run_env`'in içeride yaptığı çözümün AYNISI, ama artık executor bunu satıra
+    /// yazabilsin diye dışarı verilir (bkz. trait doc'u). `Some(id)` verildiğinde
+    /// dokunulmaz.
+    async fn resolve_environment_id(
+        &self,
+        orgtnt_id: Uuid,
+        environment_id: Option<Uuid>,
+    ) -> Result<Option<Uuid>, EngineError> {
+        match environment_id {
+            Some(id) => Ok(Some(id)),
+            None => Ok(Some(
+                repo::env::resolve_environment(&self.pool, orgtnt_id, None)
+                    .await
+                    .map_err(db_err)?
+                    .id,
+            )),
+        }
+    }
 }

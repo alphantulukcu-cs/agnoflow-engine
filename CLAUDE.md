@@ -75,6 +75,8 @@ ayrılmış LİSTE olabilir** — şifreleme daima ilkiyle, çözme hepsi denene
 yeni anahtarı başa eklemekle yapılır (GitLab `db_key_base` dizisiyle aynı yaklaşım).
 Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE_BACKEND=local|s3`
 (+`ATTACHMENT_STORAGE_PATH`, local default `../work-pool-portal/storage`; `ATTACHMENT_STORAGE_S3_BUCKET/REGION`).
+`ATTACHMENT_MAX_REQUEST_MB` (varsayılan 200, yalnız `/wfe`+`/portal` alt ağaçlarına
+uygulanır) ve `WFE_START_DEDUPE_WINDOW_SECS` (varsayılan 60) — 2026-08-11, aşağıda.
 
 ## Attachments (ek-belge) sözleşmesi
 
@@ -88,7 +90,11 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
   bulunmalı (`attachment_action_ref`), kapsam içi tekrar yok (`attachment_action_dup`).
 - Varlık kontrolü + yükleme server portal edge'inde: `AttachmentStore` (opendal), storage anahtarı
   `attachments/{wfe_id}/{grup}/{item}`. Rotalar hem direkt `/wfe/*` (X-Actor, portal bunu kullanır) hem
-  JWT `/portal/wfe/*` ağacında: `GET /wfe/:id/attachments` (durum), `PUT/GET/DELETE .../:group/:item`.
+  JWT `/portal/wfe/*` ağacında: `GET .../attachments` (durum), tek dosya `GET/DELETE .../:group/:item`
+  (indirme + tekil silme, DURUYOR). Tek dosyalık `PUT .../:group/:item` **yalnız JWT ağacında** kaldı
+  (2026-08-11: direkt X-Actor karşılığı + tek kullanıcısı `validate_upload` silindi — JWT'nin bu
+  workspace dışında tüketicisi olabileceğinden o duruyor). Çok dosyalı yükleme aksiyonsuz akışta
+  aşağıda, aksiyonlu akışta Faz 4'te anlatılır.
 - **Depo WFD BAŞINA çözülür** (2026-08-07): `$env`teki `ATTACHMENT_STORAGE_BACKEND` /
   `_PATH` / `_S3_BUCKET` / `_S3_REGION` / `_S3_ENDPOINT` / `_S3_ACCESS_KEY_ID` /
   `_S3_SECRET_ACCESS_KEY` anahtarları okunur (`server/src/attachment_store.rs`, Operator
@@ -109,17 +115,110 @@ Ek-belge deposu (attachments, WFD JSON storage'ından AYRI): `ATTACHMENT_STORAGE
   "Belge topluyor" = bir node'un referans verdiği ve İÇİNDE `items` olan katalog grubu
   (`attachment_store::collects_attachments`); editör tarafındaki aynası
   `utils/attachmentStorageEnv.wfdCollectsAttachments` — İKİSİ AYNI SORUYU SORAR.
-- **Başlatma aksiyonu için REZERVASYON**: `POST /wfe/reserve` → wfe_id (DB'de wfe satırı
-  yok, `wf.wfe_reservation` defterinde kayıt var) → dosyalar o id'nin altına yüklenir →
-  `POST /wfe {…, wfe_id}` kapıyı kontrol eder, eksikse WFE HİÇ oluşmaz. Yükleme rotaları
-  rezerve edilmiş id'yi de kabul eder (yetki: rezervasyonun sahibi). Başlatılmayan
-  rezervasyonlar saatlik süpürücüyle dosyalarıyla silinir (TTL 24 saat,
-  `server/src/reservation.rs`). Belge istemeyen akışta rezervasyon gerekmez.
+- **Rezervasyon satırı artık YALNIZ crash ağıdır** (2026-08-11): `wf.wfe_reservation`
+  tablosu, `reservation.rs` ve saatlik süpürücü DURUYOR, ama HTTP yüzeyi kalmadı —
+  `POST /wfe/reserve` ve `DELETE /wfe/reserve/{wfe_id}` KALDIRILDI (tarama: bu
+  workspace'te çağıranı yoktu; tek yol multipart/JSON `POST /wfe` oldu). `wfe_id`'yi artık
+  DAİMA engine üretir — `POST /wfe` gövdesindeki `wfe_id` alanı da kaldırıldı, rezerve
+  edilmiş id almanın dışarıdan yolu yok. Satırın tek işlevi: sunucu istek ortasında ölürse
+  (deploy/OOM) yazılmış baytların sahibini süpürücüye bildirmek — istek başında yazılır,
+  başarıda silinir, istemciye hiç görünmez. `assert_can_start` (start kuralının `from`
+  node'unun c_a'sı `Engine::start`'ın kural seçimiyle AYNI testten geçer) artık doğrudan
+  `POST /wfe` (her iki content-type) içinde koşar; eşleşme yoksa `403` ve bayt hiç
+  okunmaz. `WfeExecutor::start_reserved`ın `reserved_wfe_id` parametresi koddadır
+  (multipart yolu kullanır) ama dışarıdan id vermenin HTTP karşılığı yok.
+- **Tek istekte başlatma** (2026-08-11): `POST /wfe` artık `multipart/form-data` da
+  kabul eder — `payload` part'ı İLK olmak ZORUNDA (`400 multipart.payload_first`,
+  yetki kararı baytlardan önce). Dosya part adı `{grup}/{slot}`; `filename` yalnız
+  metadata, storage anahtarına karışmaz. Dosyalar `AttachmentStore::writer` ile STREAM
+  yazılır (bellek dosya sayısı/boyutundan bağımsız); her hata yolunda yazılanlar silinir
+  + rezervasyon satırı bırakılır — **istemci telafi çağrısı yapmaz**. `application/json`
+  gövdeli `POST /wfe` (dosyasız başlatma) AYNEN çalışır — yalnız `wfe_id` alanı YOK
+  artık; eski rezerve→yükle→başlat HTTP ucu tamamen kaldırıldı (yukarıdaki madde). `POST
+  /wfe/preflight` gövdesiz ön kontrol verir (yetki + slot kuralları + bildirilen
+  boyut/tip); YAN ETKİSİZ ve **KAPI DEĞİLDİR**, gerçek denetim `POST /wfe` içinde
+  yeniden koşar. Tasarım: `docs/superpowers/specs/2026-08-11-tek-istekte-baslatma-design.md`.
+- **Çift başlatma koruması sunucudadır** (`start_dedupe.rs`, tablo
+  `wf.wfe_start_dedupe`): parmak izi İSTEKTEN türetilir (actor+wfd+version+action+
+  kanonik `input`+`attachments` bildirimi), istemci hiçbir header göndermez. Pencere
+  `WFE_START_DEDUPE_WINDOW_SECS` içinde tekrar → ilk `wfe_id` + `Idempotent-Replay: true`;
+  hâlâ koşuyorsa `409 conflict.start_in_progress`. Kaçış: `X-Allow-Duplicate: true`.
+  Parmak izi YALNIZ `payload`tan türer, baytlardan DEĞİL — tekrar istek dosyaları
+  aktarmadan yanıtlansın diye. Hata yolunda satır silinir; fiziksel süpürme mevcut
+  saatlik süpürücüde (`reservation::sweep`).
+- **Gövde limiti düzeltildi** (gerçek bug'dı): `DefaultBodyLimit` layer'ı hiçbir yerde
+  yoktu → axum'un 2 MB varsayılanı katalogdaki `max_size_mb` sözünü yalanlıyordu.
+  `ATTACHMENT_MAX_REQUEST_MB` (varsayılan 200) YALNIZ `/wfe`+`/portal` alt ağaçlarına
+  uygulanır; diğer uçların 2 MB koruması durur. **İçerik tipi artık SNIFF edilir**
+  (`sniff_content_type`/`detect_mismatch` → 415 `TypeMismatch`): istemcinin
+  `Content-Type` beyanına güvenilmez (`.exe`nin `application/pdf` diye geçmesi
+  kapatıldı); zip ailesi (docx/xlsx/pptx) aynı magic byte'ı paylaştığından allow-list
+  ile ayrılır. `Sha256Stream` ile akış halinde özet hesaplanır; `payload.attachments[]
+  .sha256` bildirilirse doğrulanır (`checksum_mismatch`).
+- **Depo çözümünde YAZMA katı, OKUMA toleranslı** (2026-08-11): katalog belgelerinin tüm
+  yazma yolları (`PUT .../attachments/...`, multipart `POST /wfe`, `POST/PUT /uploads`,
+  `staging::take`) `store_for_wfd_strict`/`store_for_wfe_strict` kullanır — `$env`de depo
+  yoksa `422 attachment_storage.missing_env`, deployment varsayılanına DÜŞMEZ. Sessiz
+  fallback müşterinin bucket'ı yerine sunucu diskine yazmak, yani tenant'ların belgelerini
+  bizim diskimizde yan yana koymak demekti; publish kapısı bunu önden yakalıyor ama tek
+  savunma olamaz (kapıdan önce yayınlanmış akışlar, sonradan silinen `$env` satırı, anahtarı
+  eksik yeni ortam). İndirme/durum/silme/süpürme yolları fallback'i KORUR: eski davranışla
+  deployment deposuna yazılmış dosyalar erişilebilir ve temizlenebilir kalmalı.
+- **Dosya metadata'sı `wf.wfe_attachment`te** (2026-08-11 Faz 2, `wfe_attachment.rs`): ad,
+  tip, boyut, sha256, yükleyen, `uploaded_at` + `version`. Aynı slota tekrar yükleme ÜZERİNE
+  YAZMAZ, yeni sürüm açar; okuma en yüksek sürümü alır. `wfe_id` FK'sı `ON DELETE CASCADE` —
+  **satır varsa WFE vardır** (tasarımdaki "aynı transaction" sözü tutulamadı: o transaction
+  `wf_wfe` içinde açılıp kapanıyor, server katılamıyor; değişmez FK ile korunuyor). Satırlar
+  start BAŞARILI olduktan sonra yazılır, yazılamazsa `warn` + başarı cevabı yine döner.
+  **`uploaded` gerçeğinin kaynağı hâlâ DEPO** (`status_for_node` → `exists`); metadata yalnız
+  gösterim için eklenir (`attachments::enrich_with_meta`, iki route ağacı da çağırır) —
+  kaynak yapılsaydı tablo eklenmeden önce yüklenmiş her belge "yok" görünürdü. Bu yüzden
+  `status_for_node` imzası değişmedi, kapı yolunda DB bağımlılığı YOK.
+- **Staging yükleme** (2026-08-11 Faz 3, `staging.rs` + `routes/uploads.rs`, tablo
+  `wf.upload_staging`): büyük dosyanın baytları başlatma isteğine hiç girmesin diye ÖNCEDEN
+  `POST /uploads` ile depoya konur, başlatmaya yalnız `payload.attachments[].upload_id` girer;
+  sunucu sahiplik+varlık doğrulayıp **server-side COPY** ile nihai anahtara taşır. Anahtar
+  `staging/{upload_id}` — `attachments/`/`notes/` köklerinden AYRI (karışsaydı henüz hiçbir
+  WFE'ye ait olmayan dosya "yüklenmiş" sayılırdı). Depo `store_for_wfd` ile çözülür: staging
+  nihai anahtarla AYNI bucket'ta olmalı, yoksa taşıma indir-yükle olurdu. s3'te presigned PUT
+  (baytlar engine'e uğramaz), local'de sunucuya stream'li `PUT /uploads/{id}`. Handle'lar
+  multipart part'larından SONRA işlenir (aynı slot ikisiyle de gelirse son söz handle'ın).
+  GC bucket lifecycle DEĞİL, `staging::sweep_expired` (TTL 24s, saatlik süpürücüde) — lifecycle
+  ayrı repoda (agnoflow-infra) ve local backend'de karşılığı yok. AV taraması / KMS / retention
+  YAPILMADI.
+- **`AppError` opsiyonel `items` taşır** (`error.rs`): çok-dosyalı ret slot bazında
+  anlatılabilir (`422 attachment.rejected` + `items[]`); `error`/`code` alanları
+  GERİYE UYUMLU, `items` yalnız EKLENİR.
 - Gate server-side ve AKSİYON BAZLI: `apply_action`/`submit_action` submit edilen aksiyonu KAPAYAN
   grupların `required` dosyaları eksikse `422 code:"attachment.missing"` döner
   (`status_for_node(..., Some(action))` → `gates` alanı → `satisfied`/`missing_required` yalnız
   kapayanları sayar). `GET /wfe/:id/attachments` aksiyon sormaz: her grup `gates: true` + kapsamı
   `actions` ile döner, süzme istemcidedir. Detay: `docs/spec/decisions.md` Madde 8.
+- **Akış ortasında çok dosyalı aksiyon** (2026-08-11 Faz 4): `POST /wfe/{id}/actions` artık
+  `multipart/form-data` da kabul eder (`payload` part'ı `ApplyBody`, kalan part'lar
+  `{grup}/{slot}`); `application/json` eski yol AYNEN çalışır. Sıra: dosyalar staging'e
+  (nihai anahtara DOKUNULMADAN) → kapı depo ∪ staging birleşimine bakar (`pending` yalnız
+  kapıyı gevşetir, `uploaded` deponun gerçeği kalır) → aksiyon uygulanır → başarıda staging
+  server-side copy ile nihai anahtara taşınır + `wf.wfe_attachment` satırı, hatada staging
+  silinir ve nihai anahtar hiç dokunulmaz. Dedupe çapası `expected_rev`tir ("o anki rev"
+  olsaydı ilk apply'dan sonra parmak izi ilerler, aksiyon ikinci kez uygulanırdı);
+  gönderilmezse dedupe hiç koşmaz. Kabul edilen tek boşluk: commit SONRASI taşıma hatası
+  aksiyonu geri almaz, cevaba `attachment_error` eklenir (metadata yazılmaz, sonraki kapı
+  durdurur). Detay: `docs/superpowers/specs/2026-08-11-tek-istekte-baslatma-design.md`
+  Faz 4 / K11-K13.
+- **Aksiyonsuz çok dosyalı yükleme** (2026-08-11): `PUT /wfe/{id}/attachments` —
+  multipart, `{grup}/{slot}` alanları, `payload` part'ı YOK (aksiyon/girdi taşımaz, salt
+  dosya). **Atomik**: staging'e yaz → hepsi doğrulanınca hepsi promote edilir; bir dosya
+  reddedilirse hiçbiri yazılmaz. `gates_action` süzmesi YOK — aksiyonsuz yüklemede "bu
+  grup burada toplanır" yeterli, kapı ayrı bir sorudur (kapı yalnız `apply_action`/
+  `submit_action`'da sorulur). JWT simetriği `PUT /portal/wfe/{wfe_id}/attachments`.
+  Ortak mantık `upload_multi_shared` — Faz 4'ün staging altyapısını paylaşır.
+- **Portal artık HER yerde toplu multipart kullanır**: başlatma (+preflight), aksiyon+belge,
+  aksiyonsuz belge (yukarıdaki madde) — tekil `validate_upload`/`uploadAttachment` yolları
+  tüketicisiz kalıp silindi. 180 MB üstü istekte en büyük dosyalar önce `/uploads` ile
+  staging'e gider (`upload_id` başlatma isteğine girer, istek yine TEK); portal sabiti
+  `MAX_INLINE_REQUEST_BYTES` (`workflows/api.ts`) `ATTACHMENT_MAX_REQUEST_MB` (200) ile
+  eşleşmeli tutulur — aradaki pay payload+multipart boundary içindir.
 
 ## WFE not defteri (ad-hoc not + belge)
 

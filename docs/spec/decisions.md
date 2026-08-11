@@ -649,6 +649,18 @@ istenmedi. Ek olarak: engine dış kaynaklara (S3/dosya sistemi) bağımlı OLMA
    `start[]` kurallarını DA sayar (M16: `start[].action` normal bir ACT'tir) — yalnız
    transition'lara bakmak başlatma aksiyonuna konan kapıyı yanlışlıkla reddederdi.
 
+   > **TARİHSEL (2026-08-11, aynı gün ikinci güncelleme):** bu paragrafın anlattığı
+   > `POST /wfe/reserve` → `PUT /wfe/{wfe_id}/attachments/{grup}/{item}` (direkt X-Actor
+   > ağacı) → `POST /wfe {…, wfe_id}` sırası ve `DELETE /wfe/reserve/{wfe_id}` ucu HTTP
+   > olarak KALDIRILDI — tarama bu workspace'te çağıranı kalmadığını gösterdi. Yerini
+   > altta anlatılan tek istekli multipart `POST /wfe` aldı (artık TEK yol; "ikinci yol"
+   > değil). `POST /wfe` gövdesindeki `wfe_id` alanı da kaldırıldı — wfe_id'yi DAİMA
+   > engine üretir, rezerve edilmiş id almanın dışarıdan yolu yok. `wf.wfe_reservation`
+   > tablosu + `reservation.rs` + saatlik süpürücü DURUYOR ama YALNIZ crash ağı olarak
+   > (istek ortasında sunucu ölürse yazılmış baytların sahibini süpürücüye bildirmek;
+   > satır istemciye hiç görünmez). Bu blok geçmiş kararın gerekçesini anlatmak için
+   > AYNEN kalır — güncel sözleşme `CLAUDE.md` → "Attachments (ek-belge) sözleşmesi"nde.
+
    **Başlatma aksiyonunda sıra TERSTİR: rezerve → yükle → başlat.** Dosya anahtarı
    `attachments/{wfe_id}/…` ve `wfe_id` eskiden start'ın İÇİNDE doğardı — bu yüzden
    başlatma kapısı sunucuda zorlanamıyordu. Çözüm id'yi başlatmadan önce üretir:
@@ -668,7 +680,66 @@ istenmedi. Ek olarak: engine dış kaynaklara (S3/dosya sistemi) bağımlı OLMA
    `from` node'u + aksiyonu üzerinden uygulanır; birden çok start kuralı varsa ve çağıran
    aksiyon adı vermediyse kapı uygulanmaz (hangi kuralın koşacağı belli değildir).
    Rezervasyonsuz gelen ve belge isteyen bir başlatma `422 attachment.reservation_required`
-   ile reddedilir — sessizce başlatmak kuralı delerdi.
+   ile reddedilir — sessizce başlatmak kuralı delerdi. (**2026-08-11:** rezervasyon uçları
+   kaldırıldığı için bu kodun adı `attachment.multipart_required` oldu; anlamı "dosyaları
+   multipart gövdesiyle aynı istekte gönder".)
+
+   **2026-08-11 — ikinci yol: tek istekte başlatma.** Yukarıdaki sıra (rezerve → yükle →
+   başlat) YANLIŞ değildi; başta kaldırılmadı, tamamlayıcı bir ikinci yol olarak eklendi
+   (aşağıdaki adımlar o hâliyle uygulandı). **Aynı gün daha sonra** tarama HTTP uçlarının
+   bu workspace'te tek kullanıcısı olmadığını gösterince eski yol tamamen kaldırıldı —
+   bkz. yukarıdaki TARİHSEL kutusu; tek istekli yol artık tamamlayıcı değil, TEK yoldur.
+   Gerekçe (tarihsel, eklendiği andaki gerekçe): 2+N
+   isteğin her biri istemciye "hangi hatada rezervasyonu bırakmalıyım" sorusunu bilme
+   yükü bindiriyordu — motor bilgisi istemci disiplinine bırakılmıştı. Aynı gün önce
+   yalnız bu ikinci yolun kapıları eklendi (`assert_can_start` rezervasyonda + ortak
+   `reservation::release` yardımcısı, yukarıdaki iki madde), sonra tek istekli yol bunların
+   üstüne inşa edildi:
+   - `POST /wfe` artık `multipart/form-data` da kabul eder; `payload` (JSON) parçası İLK
+     olmak ZORUNDADIR (`400 multipart.payload_first`) — yetki kararı (aynı `assert_can_start`)
+     dosya baytları okunmadan verilsin diye. Dosya part adı `{grup}/{slot}`; `filename`
+     yalnız metadata, storage anahtarı dosya adından etkilenmez.
+   - Dosyalar `AttachmentStore::writer` ile STREAM yazılır — bellek kullanımı dosya
+     sayısından/boyutundan bağımsızdır. Her hata yolunda (413/415/422/5xx) o istekte
+     yazılmış TÜM baytlar silinir ve rezervasyon satırı bırakılır: **istemci hiçbir
+     telafi çağrısı yapmaz** (`DELETE /wfe/reserve/{id}` yeni yolun normal akışında hiç
+     çağrılmaz; **güncelleme:** eski yol da aynı gün ikinci turda tamamen kaldırıldığından
+     bu uç artık hiçbir yoldan çağrılamaz — bkz. yukarıdaki TARİHSEL kutusu).
+   - Rezervasyon satırı crash ağı olarak GENİŞLETİLDİ: tek istekli yolda da istek başında
+     yazılır, başarıda silinir, istemciye hiç görünmez — süreç istek ortasında ölürse
+     (deploy/OOM) yazılmış baytların sahibi süpürücüye bildirilmiş olur.
+   - **Çift başlatma koruması eklendi** (`start_dedupe.rs`, tablo `wf.wfe_start_dedupe`,
+     migration `migrations/wf/20260811000001_wfe_start_dedupe.sql`): tek istek büyüyüp
+     uzadıkça timeout/bağlantı kopması → "Başlat"a tekrar basma riski büyüdü. Parmak izi
+     İSTEKTEN türetilir (actor+wfd+version+action+kanonik input+attachments bildirimi),
+     istemciden `Idempotency-Key` gibi bir header İSTENMEDİ (bilinçli: üretmeyen istemci
+     korumasız kalırdı). Pencere içinde (`WFE_START_DEDUPE_WINDOW_SECS`, 60 sn) tekrar →
+     ilk `wfe_id` + `Idempotent-Replay: true`; hâlâ koşuyorsa `409 conflict.start_in_progress`.
+     Kaçış: `X-Allow-Duplicate: true`. Parmak izi YALNIZ `payload`tan türer, dosya
+     baytlarından DEĞİL — karar baytlar okunmadan verilir, tekrar istek dosyaları
+     aktarmadan yanıtlanır.
+   - `POST /wfe/preflight` eklendi: gövdesiz ön kontrol (yetki + slot kuralları +
+     bildirilen boyut/tip). YAN ETKİSİZ ve KAPI DEĞİLDİR — `ok:true` dese bile gerçek
+     denetim `POST /wfe` içinde yeniden koşar.
+   - Yan düzeltmeler aynı turda: `DefaultBodyLimit` hiçbir yerde tanımlı değildi (axum
+     varsayılanı 2 MB, katalogdaki `max_size_mb` sözünü yalanlıyordu) — `ATTACHMENT_MAX_REQUEST_MB`
+     (200) ile yalnız `/wfe`+`/portal` alt ağaçlarına uygulandı. İçerik tipi artık
+     `sniff_content_type`/`detect_mismatch` ile SNIFF edilir (415 `TypeMismatch`),
+     `Sha256Stream` ile akış halinde bütünlük doğrulanır. `AppError` opsiyonel `items`
+     alanı kazandı (çok-dosyalı ret slot bazında, `422 attachment.rejected`).
+   - **Dosyanın DB'de bir karşılığı oldu**: `wf.wfe_attachment` (ad/tip/boyut/sha256/
+     yükleyen/sürüm). Aynı slota tekrar yükleme üzerine yazmaz, yeni sürüm açar — denetimde
+     "karar anında hangi belge oradaydı" cevaplanabilir. `wfe_id` FK'sı CASCADE: satır varsa
+     WFE vardır. **Kapı yine DEPOYA bakar** (`status_for_node` → `exists`); metadata gösterim
+     katmanıdır (`enrich_with_meta`), kaynak yapılsaydı tablo eklenmeden önce yüklenmiş her
+     belge "yok" görünürdü.
+   - **Baytlar isteğe hiç girmeden de gelebilir**: `POST /uploads` ile staging'e konur
+     (`wf.upload_staging`, anahtar `staging/{upload_id}`, nihai anahtarla AYNI depoda),
+     başlatmaya yalnız `upload_id` girer, sunucu server-side COPY ile taşır. s3'te presigned
+     PUT — 500 MB'lık bir rapor engine'in bant genişliğini hiç kullanmaz. Sahipsiz staging
+     `staging::sweep_expired` ile (TTL 24s) toplanır.
+   - Tasarım, reddedilen alternatifler (K1-K10) ve UYGULAMADAKİ SAPMALAR:
+     `docs/superpowers/specs/2026-08-11-tek-istekte-baslatma-design.md`.
 2. **Engine saf kalır; gate portal edge'inde.** wfe-core yalnız katalog + referansı
    METADATA olarak taşır, dosya I/O YAPMAZ. Varlık kontrolü ve yükleme server'ın portal
    katmanındadır: `AttachmentStore` (opendal; local fs default kök `../work-pool-portal/

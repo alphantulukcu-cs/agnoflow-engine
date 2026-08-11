@@ -171,6 +171,21 @@ async fn upload_wfd(
     if let Some(name) = body.wfd.get("name").and_then(Value::as_str) {
         super::db::assert_no_foreign_local_connections(&s.pool, project_id, name, &body.wfd).await?;
     }
+    // Depo kapısı: `POST /wfd` doğrudan status='published' yazıyor (adapter), oysa
+    // submit/approve/publish yolu `assert_attachment_storage_env`ten geçiyordu — bu uç
+    // atlıyordu. Belge toplayan bir akış depo ayarı olmadan yayınlanabiliyordu. Satır
+    // YARATILMADAN önce, doğrudan JSON üzerinden kontrol edilir; kimlik (`project_id`,
+    // ad) zaten elde. Ad çözümü adapter'ınkiyle AYNI: boş `name` → `id`.
+    if let Ok(parsed) = wfe_core::types::wfd_v22::Wfd::from_value_checked(body.wfd.clone()) {
+        if crate::attachment_store::collects_attachments(&parsed) {
+            let name = if parsed.name.trim().is_empty() {
+                parsed.id.as_str()
+            } else {
+                parsed.name.as_str()
+            };
+            assert_storage_env_for(&s, body.orgtnt_id, project_id, name).await?;
+        }
+    }
     let (wfd_id, version) = s
         .wfd
         .upload(body.orgtnt_id, Some(project_id), &body.wfd)
@@ -747,6 +762,22 @@ async fn assert_attachment_storage_env(
         return Ok(());
     };
 
+    assert_storage_env_for(s, orgtnt_id, project_id, &wfd_name).await
+}
+
+/// Kapının `$env` denetim kısmı — kimlik (`orgtnt_id`, `project_id`, `wfd_name`) DIŞARIDAN
+/// verilir. İki çağıranı var: (1) `assert_attachment_storage_env` kimliği `wf.wfd_meta`'dan
+/// çözer (publish/submit/approve), (2) `upload_wfd` kimliği elinde olduğu için doğrudan
+/// çağırır — satırı YARATMADAN önce (`POST /wfd` insert'te status='published' yazıyor;
+/// belge toplayan bir akışı depo ayarı olmadan yayınlamak, çalışma anında müşterinin
+/// bucket'ı yerine sunucu diskine yazmak demekti; katı yazma bunu 422 ile yakalar ama
+/// tek savunma olmasın diye kapı burada da uygulanır).
+async fn assert_storage_env_for(
+    s: &AppState,
+    orgtnt_id: Uuid,
+    project_id: Uuid,
+    wfd_name: &str,
+) -> Result<(), AppError> {
     let envs = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id, name FROM wf.environment WHERE orgtnt_id = $1 ORDER BY name",
     )
@@ -772,7 +803,7 @@ async fn assert_attachment_storage_env(
           WHERE project_id = $1 AND wfd_name = $2",
     )
     .bind(project_id)
-    .bind(&wfd_name)
+    .bind(wfd_name)
     .fetch_all(&s.pool)
     .await
     .map_err(internal_error)?;

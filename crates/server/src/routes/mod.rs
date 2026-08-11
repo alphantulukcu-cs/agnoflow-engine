@@ -13,6 +13,7 @@ pub mod portal;
 pub mod project;
 pub mod simulate;
 pub mod templates;
+pub mod uploads;
 pub mod users;
 pub mod wfd;
 pub mod wfe;

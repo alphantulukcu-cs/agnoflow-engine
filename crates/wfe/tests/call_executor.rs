@@ -338,6 +338,15 @@ impl WfeStore for MemStore {
         Ok(())
     }
 
+    async fn append_marker(
+        &self,
+        _wfe_id: Uuid,
+        _orgtnt_id: Uuid,
+        _wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+
     async fn reassign(
         &self,
         _wfe_id: Uuid,

@@ -14,7 +14,7 @@ use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::{COrgu, CandidateActor, CuItem, Wfd};
-use crate::v22::eval::{evaluate_bool, EvalEnv};
+use crate::v22::grants::matches_grant_rules;
 use crate::v22::matcher::{authorize_or_delegated, MatchEnv};
 use crate::v22::ports::{BranchStatus, Wfes};
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
@@ -132,6 +132,8 @@ pub async fn filter_dynctx(
 ///       aktif kol node'larından HERHANGİ birinin c_a'sı — WOR-31)
 ///   (d) viewer `wfd.listable[]` kurallarından birine authorize VE kuralın
 ///       `when` guard'ı (varsa) staged ctx üzerinde true mü
+///   (e) viewer `wfd.wf_admin[]` kurallarından birine authorize (aynı şekil) —
+///       akış yöneticisi yönettiği akışı görür (T‑A5)
 /// `visible`/`filter_dynctx`'ten AYRIDIR: onlar field-level x-visibility'dir,
 /// bu fonksiyon WFE'nin bütünüyle görünür olup olmadığını belirler.
 pub async fn can_view(
@@ -195,29 +197,15 @@ pub async fn can_view(
     }
 
     // (d) wfd.listable[] grant'i — c_a eşleşir VE when (varsa) true
-    for rule in &wfd.listable {
-        let env = MatchEnv {
-            ctx,
-            wfah: &wfes.wfah,
-            orgtnt_id: wfes.orgtnt_id,
-        };
-        if !authorize_or_delegated(&rule.c_a, viewer, env, org).await? {
-            continue;
-        }
-        let when_ok = match &rule.when {
-            None => true,
-            Some(expr) => {
-                let eval_env = EvalEnv::new(ctx)
-                    .with_wfah(&wfes.wfah)
-                    .with_node(wfes.current_node.as_deref())
-                    .with_actor(viewer)
-                    .with_wfe_id(wfes.wfe_id);
-                evaluate_bool(expr, &eval_env)?
-            }
-        };
-        if when_ok {
-            return Ok(true);
-        }
+    if matches_grant_rules(&wfd.listable, viewer, wfes, org).await? {
+        return Ok(true);
+    }
+
+    // (e) wfd.wf_admin[] grant'i (T‑A5) — akış yöneticisi yönettiği akışı GÖRÜR.
+    // Ayrı kriter olmasının nedeni: tasarımcıya aynı kuralı bir de `listable`'a
+    // yazdırmak, ikisinden birinin güncellenip diğerinin unutulmasıyla biter.
+    if matches_grant_rules(&wfd.wf_admin, viewer, wfes, org).await? {
+        return Ok(true);
     }
 
     Ok(false)

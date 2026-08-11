@@ -24,6 +24,8 @@ pub fn router(state: AppState) -> OpenApiRouter {
     OpenApiRouter::new()
         .routes(routes!(get_wfe_detail))
         .routes(routes!(submit_action))
+        .routes(routes!(portal_fire_escalation))
+        .routes(routes!(portal_skip_escalation))
         .merge(super::attachments::routes())
         .merge(super::notes::routes())
         .with_state(state)
@@ -327,4 +329,60 @@ async fn submit_action(
         end_response: result.end_response,
         note_error,
     }))
+}
+
+// ── T‑A5 WF Admin: escalation müdahalesi (portal ağacı, JWT) ─────────────────
+//
+// `/wfe/*` ağacındaki ikizlerin ince kabuğu: yetki, terminal kontrolü ve adım seçimi
+// çekirdektedir; burada yalnız aktör JWT'den çözülür. "Bekleyen adım yok" → 409
+// dönüşümü de ortaktır (`routes::wfe::none_pending_to_conflict`).
+
+#[derive(Deserialize, ToSchema)]
+struct PortalEscalationBody {
+    #[serde(default)]
+    node: Option<String>,
+}
+
+#[utoipa::path(post, path = "/{id}/escalation/fire", tag = "portal",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = PortalEscalationBody,
+    responses(
+        (status = 200, description = "Uygulanan adım", body = serde_json::Value),
+        (status = 403, description = "Aktör wf_admin kurallarına uymuyor"),
+        (status = 409, description = "Bekleyen adım yok (escalation.none_pending)"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn portal_fire_escalation(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<PortalEscalationBody>,
+) -> Result<Json<wf_wfe::executor::EscalationAdminOutcome>, AppError> {
+    let outcome = s
+        .executor
+        .fire_escalation_now(wfe_id, &to_actor(&actor), body.node.as_deref())
+        .await?;
+    crate::routes::wfe::none_pending_to_conflict(outcome).map(Json)
+}
+
+#[utoipa::path(post, path = "/{id}/escalation/skip", tag = "portal",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = PortalEscalationBody,
+    responses(
+        (status = 200, description = "Atlanan adım", body = serde_json::Value),
+        (status = 403, description = "Aktör wf_admin kurallarına uymuyor"),
+        (status = 409, description = "Bekleyen adım yok (escalation.none_pending)"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn portal_skip_escalation(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<PortalEscalationBody>,
+) -> Result<Json<wf_wfe::executor::EscalationAdminOutcome>, AppError> {
+    let outcome = s
+        .executor
+        .skip_escalation(wfe_id, &to_actor(&actor), body.node.as_deref())
+        .await?;
+    crate::routes::wfe::none_pending_to_conflict(outcome).map(Json)
 }

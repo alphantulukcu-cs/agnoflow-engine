@@ -15,8 +15,8 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
-    AutoexecDef, AutoexecType, COrgu, CandidateActor, ClaimTimeout, EscalationStep, Wfd,
-    WfesEffects, Wft, WftTarget, JoinRule,};
+    AutoexecDef, AutoexecType, COrgu, CaGrantRule, CandidateActor, ClaimTimeout,
+    EscalationStep, Wfd, WfesEffects, Wft, WftTarget, JoinRule,};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
@@ -3709,4 +3709,426 @@ async fn expr_join_identifies_branch_by_entry_node_after_move() {
         } => assert_eq!(arrived_entries, vec!["self__hrApprover".to_string()]),
         other => panic!("JoinComplete beklendi: {other:?}"),
     }
+}
+
+// ================================================================ T‑A5: WF Admin
+// Akış-içi yetkili: node'un kendi `reassign` kuralı olmasa da devredebilir, escalation
+// sayacına müdahale edebilir. Tasarım: docs/superpowers/specs/2026-08-11-wf-admin-design.md
+
+/// Golden'a WF Admin kuralı ekler: bu akışta branchManager akış yöneticisidir.
+fn golden_with_wf_admin(when: Option<&str>) -> Wfd {
+    let mut wfd = golden();
+    wfd.wf_admin = vec![CaGrantRule {
+        c_a: CandidateActor {
+            c_orgu: Some(COrgu::Selector("self".into())),
+            c_r: Some(vec!["branchManager".into()]),
+            c_u: None,
+        },
+        when: when.map(String::from),
+    }];
+    wfd
+}
+
+fn test_engine<'a>(org: &'a MockOrg, runner: &'a MockRunner) -> Engine<'a> {
+    Engine {
+        org,
+        exec: runner,
+        env: Default::default(),
+    }
+}
+
+/// WF Admin, node'un `reassign` kuralı OLMASA da devredebilir — "tek yerde ayarla".
+#[tokio::test]
+async fn wf_admin_can_reassign_on_node_without_reassign_rule() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+    assert!(
+        wfd.nodes["self__creditAnalyst"].reassign.is_none(),
+        "test öncülü: node'un kendi reassign kuralı olmamalı"
+    );
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let target = analyst(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entry = engine
+        .reassign(&wfd, &wfes, &admin, Some(&target), None, Utc::now())
+        .await
+        .expect("wf_admin devredebilmeli");
+    assert_eq!(entry.action, "reassign");
+    assert_eq!(entry.actor.user_id, admin.user_id);
+}
+
+/// Marker hangi yoldan geldiğini söyler: denetimde "node amiri mi, akış admini mi"
+/// ayrımı gerekir.
+#[tokio::test]
+async fn wf_admin_reassign_marker_records_via() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entry = engine
+        .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
+        .await
+        .expect("havuza bırakabilmeli");
+    assert_eq!(entry.input.as_ref().unwrap()["via"], json!("wf_admin"));
+}
+
+/// Node'un kendi kuralıyla gelen devir `via` TAŞIMAZ — eski kayıtların şekli korunur.
+#[tokio::test]
+async fn node_reassign_path_does_not_record_via() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_reassign(); // wf_admin YOK
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let mgr = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entry = engine
+        .reassign(&wfd, &wfes, &mgr, None, None, Utc::now())
+        .await
+        .expect("node amiri devredebilmeli");
+    assert!(
+        entry.input.as_ref().unwrap().get("via").is_none(),
+        "node.reassign yolunda via alanı olmamalı: {:?}",
+        entry.input
+    );
+}
+
+/// WF Admin de hedefi node'un c_a'sına uymaya zorlar: uymayan hedef claim'i tutar ama
+/// hiçbir aksiyon alamaz — WF Admin akışı kilitlemiş olurdu.
+#[tokio::test]
+async fn wf_admin_reassign_still_requires_eligible_target() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let bad_target = manager(orgu); // creditAnalyst node'unun c_a'sına uymaz
+
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+    let err = engine
+        .reassign(&wfd, &wfes, &admin, Some(&bad_target), None, Utc::now())
+        .await
+        .expect_err("uygunsuz hedef reddedilmeli");
+    assert!(matches!(err, EngineError::TargetNotEligible), "{err:?}");
+}
+
+/// Kural eşleşmiyorsa yetki yok (kapı `wf_admin` VARLIĞIYLA açılmaz).
+#[tokio::test]
+async fn non_matching_wf_admin_rule_does_not_authorize_reassign() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let mut wfd = golden_with_wf_admin(None);
+    wfd.wf_admin[0].c_a.c_r = Some(vec!["auditor".into()]); // kimse bu rolde değil
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let err = engine
+        .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
+        .await
+        .expect_err("eşleşmeyen kural yetki vermemeli");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// `when` guard'ı false ise yetki yok.
+#[tokio::test]
+async fn wf_admin_when_guard_false_does_not_authorize() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(Some("false"));
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let err = engine
+        .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
+        .await
+        .expect_err("when false iken yetki olmamalı");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+// ---- escalation müdahalesi ----
+
+/// Atlama marker'ı `:skipped` sonekiyle yazılır ve geçiş UYGULANMAZ.
+#[tokio::test]
+async fn skip_escalation_writes_skipped_marker() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    let skip = engine
+        .skip_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect("atlama çalışmalı")
+        .expect("bekleyen adım olmalı");
+    assert_eq!(skip.step_idx, 0);
+    assert_eq!(skip.node, "self__creditAnalyst");
+    assert_eq!(skip.marker, "escalate:self__creditAnalyst:0:skipped");
+    assert_eq!(skip.entry.action, skip.marker);
+    assert_eq!(skip.entry.actor.user_id, admin.user_id, "iz admini gösterir");
+}
+
+/// Atlanan adım bir daha ateşlenmez.
+#[tokio::test]
+async fn skipped_escalation_step_does_not_refire() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
+
+    let skip = engine
+        .skip_escalation(&wfd, &wfes, &admin, None, entered_at)
+        .await
+        .unwrap()
+        .unwrap();
+    wfes.wfah = Wfah(
+        wfes.wfah
+            .entries()
+            .iter()
+            .cloned()
+            .chain(std::iter::once(skip.entry))
+            .collect(),
+    );
+
+    let now = entered_at + Duration::days(10);
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, now, None).unwrap(),
+        None,
+        "atlanan adım tekrar due olmamalı"
+    );
+}
+
+/// KRİTİK: atlama marker'ı escalation TABANINI kaydırmaz. `next_escalation` node giriş
+/// zamanını "son escalation-DIŞI kayıt"tan hesaplıyor; marker `escalate:` önekini
+/// taşımasa tüm sayaçlar sessizce sıfırlanırdı.
+#[tokio::test]
+async fn skipping_does_not_shift_the_escalation_base() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let mut wfd = golden_with_wf_admin(None);
+    // İkinci adım (P5D) ekle: atlama sonrası ONUN vadesi kaymamalı.
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P5D".into(),
+            wfes_effects: None,
+            wft: Some(Wft::Node {
+                node: "self__branchManager".into(),
+            }),
+            terminate: None,
+        });
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let entered_at = wfes.wfah.entries().last().unwrap().applied_at;
+
+    let before = engine
+        .next_escalation(&wfd, &wfes, entered_at, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.step_idx, 0);
+
+    // Atlama 4 gün SONRA yapılıyor — taban kaysa adım 1'in vadesi +9 güne giderdi.
+    let skip_at = entered_at + Duration::days(4);
+    let skip = engine
+        .skip_escalation(&wfd, &wfes, &admin, None, skip_at)
+        .await
+        .unwrap()
+        .unwrap();
+    wfes.wfah = Wfah(
+        wfes.wfah
+            .entries()
+            .iter()
+            .cloned()
+            .chain(std::iter::once(skip.entry))
+            .collect(),
+    );
+
+    let after = engine
+        .next_escalation(&wfd, &wfes, skip_at, None)
+        .unwrap()
+        .expect("adım 1 hâlâ beklemede olmalı");
+    assert_eq!(after.step_idx, 1);
+    assert_eq!(
+        after.entered_at, before.entered_at,
+        "atlama node giriş zamanını DEĞİŞTİRMEMELİ"
+    );
+    assert_eq!(
+        after.deadline,
+        before.entered_at + Duration::days(5),
+        "adım 1'in vadesi node girişinden ölçülmeye devam etmeli"
+    );
+}
+
+/// Escalation müdahalesi `node.reassign` ile AÇILMAZ — farklı bir güç.
+#[tokio::test]
+async fn skip_escalation_requires_wf_admin() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_reassign(); // node amiri var, wf_admin YOK
+
+    let orgu = Uuid::new_v4();
+    let mgr = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    let err = engine
+        .skip_escalation(&wfd, &wfes, &mgr, None, Utc::now())
+        .await
+        .expect_err("node amiri sayacı yönetemez");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// Bekleyen adım yoksa cevap `None` — hata değil (route bunu 409'a çevirir).
+#[tokio::test]
+async fn skip_escalation_returns_none_when_no_step_pending() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let mut wfd = golden_with_wf_admin(None);
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .escalation
+        .clear();
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    assert!(engine
+        .skip_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// Elle tetikleme OTOMATİK yolun aynı marker'ını yazar (yayınlanmış akışların
+/// `count($wfah, ...)` sayımları bozulmasın); ayrım AKTÖRDEDİR.
+#[tokio::test]
+async fn manual_fire_uses_same_marker_but_records_admin_actor() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    // Vade GELMEDEN tetikleniyor — erken tetikleme bu ucun varlık sebebi.
+    let commit = engine
+        .fire_escalation_by(&wfd, &wfes, 0, Utc::now(), None, &admin)
+        .await
+        .expect("elle tetikleme çalışmalı");
+    let marker = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action.starts_with("escalate:"))
+        .expect("escalation marker'ı yazılmalı");
+    assert_eq!(marker.action, "escalate:self__creditAnalyst:0");
+    assert_eq!(marker.actor.user_id, admin.user_id);
+}
+
+/// Elle tetiklemenin YETKİ KAPISI çekirdektedir: executor'da unutulabilecek bir
+/// denetim, yetkisiz bir aktörün akışı ilerletmesi demek olurdu.
+#[tokio::test]
+async fn admin_fire_escalation_requires_wf_admin() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_reassign(); // node amiri var, wf_admin YOK
+
+    let mgr = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    let err = engine
+        .admin_fire_escalation(&wfd, &wfes, &mgr, None, Utc::now())
+        .await
+        .expect_err("wf_admin olmadan tetiklenemez");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// Yetkili aktör vade gelmeden tetikleyebilir; sonuç adım index'i + commit'tir.
+#[tokio::test]
+async fn admin_fire_escalation_applies_step_before_deadline() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let admin = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    let (step_idx, commit) = engine
+        .admin_fire_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect("tetikleme çalışmalı")
+        .expect("bekleyen adım olmalı");
+    assert_eq!(step_idx, 0);
+    assert!(commit
+        .wfah_entries
+        .iter()
+        .any(|e| e.action == "escalate:self__creditAnalyst:0"));
+}
+
+/// Bekleyen adım yoksa `None` (rota 409'a çevirir).
+#[tokio::test]
+async fn admin_fire_escalation_returns_none_when_nothing_pending() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let mut wfd = golden_with_wf_admin(None);
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .escalation
+        .clear();
+
+    let admin = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__creditAnalyst", None, start_input());
+
+    assert!(engine
+        .admin_fire_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .unwrap()
+        .is_none());
 }

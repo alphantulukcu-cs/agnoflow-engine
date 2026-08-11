@@ -20,7 +20,7 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::JoinRule;
+use wfe_core::types::wfd_v22::{CaGrantRule, COrgu, CandidateActor, JoinRule};
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::types::wfe::WfeStatus;
@@ -388,4 +388,78 @@ async fn parallel_unrelated_actor_cannot_view() {
     ]);
 
     assert!(!can_view(&paralel(), &wfes, &outsider, &org).await.unwrap());
+}
+
+// ================================================================ (e) wf_admin
+// T‑A5: akış yöneticisi yönettiği akışı GÖRÜR — yoksa yönetemez.
+
+fn golden_with_wf_admin(when: Option<&str>) -> Wfd {
+    let mut wfd = golden();
+    wfd.listable.clear(); // (d) yolunu kapat: (e) tek başına test edilsin
+    wfd.wf_admin = vec![CaGrantRule {
+        c_a: CandidateActor {
+            c_orgu: Some(COrgu::Selector("self".into())),
+            c_r: Some(vec!["creditDeptManager".into()]),
+            c_u: None,
+        },
+        when: when.map(String::from),
+    }];
+    wfd
+}
+
+#[tokio::test]
+async fn wf_admin_can_view() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let admin = credit_dept_manager(orgu);
+    // Sahip DEĞİL, WFAH katılımcısı DEĞİL, aktif node'un c_a'sı creditAnalyst.
+    let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(30000));
+
+    assert!(
+        can_view(&golden_with_wf_admin(None), &wfes, &admin, &org)
+            .await
+            .unwrap(),
+        "wf_admin kuralına uyan aktör WFE'yi görmeli"
+    );
+}
+
+#[tokio::test]
+async fn non_matching_actor_still_cannot_view() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let outsider = clerk(orgu); // wf_admin kuralı creditDeptManager ister
+    let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(30000));
+
+    assert!(
+        !can_view(&golden_with_wf_admin(None), &wfes, &outsider, &org)
+            .await
+            .unwrap(),
+        "wf_admin VARLIĞI görme hakkı vermez — kural eşleşmeli"
+    );
+}
+
+#[tokio::test]
+async fn wf_admin_when_guard_gates_visibility() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let admin = credit_dept_manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(30000));
+
+    let gated = golden_with_wf_admin(Some("$ctx.credit_info.amount_requested > 100000"));
+    assert!(
+        !can_view(&gated, &wfes, &admin, &org).await.unwrap(),
+        "when false iken görünmemeli (30.000 < 100.000)"
+    );
+
+    let big = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(250000));
+    assert!(
+        can_view(&gated, &big, &admin, &org).await.unwrap(),
+        "when true iken görünmeli"
+    );
 }

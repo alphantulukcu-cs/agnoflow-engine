@@ -1076,6 +1076,32 @@ impl WfeStore for WfeAdapter {
     /// claimed_at = now(); `None`: her ikisi NULL (havuz). Uygunluk
     /// `Engine::reassign`'da doğrulanmıştır — burada yalnızca `status = 'active'`
     /// kapısı vardır (claim CAS'ının `claimed_by IS NULL` koşulu YOK: override).
+    /// T‑A5: yalnız audit satırı. Tenant kapısı WFE satırından doğrulanır — yol
+    /// parametresi tek başına bir WFE'ye yazma hakkı vermez.
+    async fn append_marker(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError> {
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        let owned: Option<Uuid> = sqlx::query_scalar(
+            "SELECT wfe_id FROM wf.wfe
+             WHERE wfe_id = $1 AND orgtnt_id = $2 AND status = 'active' FOR UPDATE",
+        )
+        .bind(wfe_id)
+        .bind(orgtnt_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        if owned.is_none() {
+            return Err(EngineError::Conflict(ConflictKind::WfeGone));
+        }
+        // Marker node DEĞİŞTİRMEZ — from/to NULL (reassign ile aynı gerekçe, K7).
+        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry), None, None).await?;
+        tx.commit().await.map_err(db_err)
+    }
+
     async fn reassign(
         &self,
         wfe_id: Uuid,

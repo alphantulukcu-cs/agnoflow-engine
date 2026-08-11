@@ -139,6 +139,13 @@
         "$ref": "#/$defs/listableRule"
       }
     },
+    "wf_admin": {
+      "description": "T‑A5 WF Admin: akış-içi yetkili havuzu. Bu kurallardan birine uyan aktör bu WFE'de claim devredebilir (node'un kendi reassign kuralı olmasa bile), escalation sayacına müdahale edebilir ve WFE'yi görebilir. agnoflow PLATFORM admini ile ilgisi yoktur; aksiyon yetkisi VERMEZ.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/caGrantRule"
+      }
+    },
     "attachments": {
       "type": "object",
       "minProperties": 1,
@@ -455,7 +462,10 @@
         },
         "x-wf-kind": {
           "type": "string",
-          "enum": ["orgu", "actor"],
+          "enum": [
+            "orgu",
+            "actor"
+          ],
           "description": "Alanin ANLAMSAL tipi (bkz. terminology.md USER/ROLE/ACTOR). 'orgu' = alan bir ORGU tutar ({orgu_id, name?}). 'actor' = alan bir ACTOR ucluSU tutar ({user_id, orgu_id, role?, name?}) — yani (ORGU,(U,R)); `$actor` effect'inin yazdigi sekil. ACTOR orgu'yu KAPSAR (icindeki orgu_id ile c_orgu.from'u da besler) ve ayrica kisi referanslarinin (c_u) hedefi olur. NOT: salt kisi tutan (koltuksuz) bir alan icin ayri bir 'user' kind'i YOKTUR — ihtiyac dogdugunda eklenir. Validator c_orgu.from'un kind'li bir yola isaret etmesini zorunlu kilar (c_orgu_anchor_not_orgu_kind)."
         }
       },
@@ -561,7 +571,9 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": ["from"],
+          "required": [
+            "from"
+          ],
           "properties": {
             "from": {
               "type": "string",
@@ -1398,19 +1410,7 @@
       ]
     },
     "listableRule": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "c_a"
-      ],
-      "properties": {
-        "c_a": {
-          "$ref": "#/$defs/candidateActor"
-        },
-        "when": {
-          "$ref": "#/$defs/expression"
-        }
-      }
+      "$ref": "#/$defs/caGrantRule"
     },
     "wftCollapse": {
       "type": "object",
@@ -1439,6 +1439,22 @@
         }
       },
       "description": "2026-08-03 (WOR-56/SLA-2): node hedefli collapse. SLA-2'de kullanilinca sure dolunca kardes kollar cancelled, paralel mod kapanir ve WFE bu node'a gider. Kaynak node bir paralel KOLUN ICINDE olmak ZORUNDA (validator escalation_collapse_outside_parallel). Paralel baglam yoksa duz {node} devrine duser (runtime savunmasi)."
+    },
+    "caGrantRule": {
+      "description": "C_A tabanlı grant kaydı: kural + opsiyonel when guard'ı. listable[] (görme) ve wf_admin[] (akış-içi yetkili) bu şekli paylaşır.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "c_a"
+      ],
+      "properties": {
+        "c_a": {
+          "$ref": "#/$defs/candidateActor"
+        },
+        "when": {
+          "$ref": "#/$defs/expression"
+        }
+      }
     }
   }
 }

@@ -194,6 +194,38 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
 - Detay/reddedilen alternatifler için spec dosyasına bak; kod ile spec çeliştiğinde KOD
   esastır.
 
+## WF Admin (akış-içi yetkili) — `wfd.wf_admin[]`
+
+Tasarım: `docs/superpowers/specs/2026-08-11-wf-admin-design.md`; karar kaydı
+`docs/spec/decisions.md` "T‑A5". **agnoflow PLATFORM admini ile karıştırılmamalıdır:**
+platform admini (`X-Admin-Key`) sistemi yönetir, WF Admin tek bir akışın gidişatına
+müdahale eder ve yetkisi WFD'den doğar.
+
+- **Şekil `listable[]` ile AYNI** (`CaGrantRule { c_a, when? }`, `$defs/caGrantRule`) ve
+  aynı matcher; dizi olması "çoklu grant = çoklu kayıt" (bir C_A kuralında VEYA yok).
+  `listable` bu tipin alias'ıdır — kural şekli TEK yerde durur.
+- **Üç yetki:** (1) claim devri — kapı `node.reassign eşleşir VEYA wf_admin eşleşir`,
+  hedef hâlâ node `c_a`'sına uymak zorunda (uymayan hedef claim'i tutar ama `apply_action`
+  c_a'yı yeniden sorar → akış kilitlenir); (2) escalation müdahalesi
+  (`POST /wfe/:id/escalation/fire|skip`, YALNIZ `wf_admin` — `node.reassign` açmaz);
+  (3) görünürlük (`can_view` (e)).
+- **Aksiyon yetkisi VERMEZ.** WF Admin işi yönetir, işi yapmaz; aksiyon için node
+  `c_a`'sına uyması gerekir. Akışı bitirme/iptal, rastgele node'a taşıma ve `$ctx`'e yazma
+  da YOK.
+- **Marker sözleşmesi:** elle tetikleme otomatik yolun AYNI marker'ını yazar
+  (`escalate:<node>:<idx>`) — yayınlanmış akışlar `count($wfah, ...)` ile karar veriyor,
+  ayrı ad sayımı bozar; ayrım AKTÖRDEDİR. `wfes_effects`'teki `$actor` system KALIR.
+  Atlama marker'ı `escalate:<node>:<idx>:skipped` — **`escalate:` öneki ZORUNLU**, yoksa
+  `next_escalation`'ın tabanı (son escalation-DIŞI kayıt) kayar ve o node'un tüm
+  sayaçları sessizce sıfırlanır.
+- **Atlama `append_marker` ile yazılır** (yeni `WfeStore` metodu, **varsayılan
+  implementasyon YOK**): atlama geçiş değil audit satırıdır. Varsayılan no-op, hiçbir şey
+  yazmayan bir store'a izin verirdi ve adım tekrar ateşlenirdi.
+- Adım numarası istemciden ALINMAZ (sıradaki ateşlenmemiş adım işlenir); vade GEREKMEZ.
+  Paralel modda kol ipucu (`node`) zorunlu, tek-kol modda yok sayılır.
+- `GET /wfe/:id` yanıtı `next_escalation` taşır — görmediği sayacı yönetmek kör karar
+  olurdu.
+
 ## Tenant permission havuzu (rol = permission grubu)
 
 Tasarım: `docs/superpowers/specs/2026-08-11-tenant-permission-rol-modeli-design.md`

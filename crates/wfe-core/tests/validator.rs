@@ -2632,3 +2632,69 @@ fn anchorless_reassign_with_c_r_is_error() {
     let report = validate_value(v);
     assert!(has_error(&report, "c_a_anchorless_role"), "{:#?}", report.errors);
 }
+
+// ================================================================ T‑A5: wf_admin
+// Akış-içi yetkili kuralları `listable` ile AYNI denetimlerden geçer.
+
+/// `wf_admin[].when` ifade denetimine girer — bozuk guard yayına çıkmaz.
+#[test]
+fn wf_admin_when_expression_is_validated() {
+    let mut v = fixture_value();
+    v["wf_admin"] = json!([{
+        "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+        // count'un iki argümanlı olması gerekir (WOR-84) — bu form parse hatası verir.
+        "when": "count(filter($wfah, #.action == \"Onayla\")) > 0"
+    }]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.path.starts_with("wf_admin[0].when")),
+        "wf_admin[].when denetlenmeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Geçerli `wf_admin` kuralı temiz geçer.
+#[test]
+fn valid_wf_admin_rule_passes() {
+    let mut v = fixture_value();
+    v["wf_admin"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } },
+        { "c_a": { "c_u": ["ahmet"] }, "when": "$ctx.credit_info.amount_requested > 100000" }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "geçerli wf_admin hata üretmemeli: {:#?}",
+        report.errors
+    );
+}
+
+/// Çapasız `wf_admin` kuralında `c_r` YASAK — kural `c_a` şekil denetimine dahildir
+/// (en geniş kapı: "tenant'taki tüm müdürler").
+#[test]
+fn anchorless_wf_admin_rule_cannot_carry_role() {
+    let mut v = fixture_value();
+    v["wf_admin"] = json!([{ "c_a": { "c_r": ["branchManager"], "c_u": ["ahmet"] } }]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "c_a_anchorless_role"),
+        "çapasız wf_admin kuralı rol taşımamalı: {:#?}",
+        report.errors
+    );
+}
+
+/// Ne çapa ne kişi taşıyan kural HİÇ KİMSEYLE eşleşmez → hata.
+#[test]
+fn empty_wf_admin_rule_is_rejected() {
+    let mut v = fixture_value();
+    v["wf_admin"] = json!([{ "c_a": {} }]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "c_a_anchorless_needs_user"),
+        "boş kural reddedilmeli: {:#?}",
+        report.errors
+    );
+}

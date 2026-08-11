@@ -172,6 +172,57 @@ pub struct WfeApplyResult {
     pub current_c_a: Vec<CandidateActor>,
 }
 
+/// Paralel modda kol ipucu ZORUNLUDUR: `current_node` NULL'dır ve hangi kolun
+/// sayacına dokunulduğu belirsiz kalırdı. Paralel modda DEĞİLKEN gönderilen ipucu
+/// yok sayılır (aynı node grafın başka yerinden de erişilebilir).
+fn require_branch_hint(wfes: &Wfes, node: Option<&str>) -> Result<(), EngineError> {
+    if wfes.join_target.is_some() && node.is_none() {
+        return Err(EngineError::InvalidInput(
+            "paralel modda escalation müdahalesi için kol node'u (`node`) gerekir".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Müdahalenin hangi node'a ait olduğu: kol ipucu varsa o, yoksa `current_node`.
+fn escalation_node(wfes: &Wfes, node: Option<&str>) -> String {
+    node.map(String::from)
+        .or_else(|| wfes.current_node.clone())
+        .unwrap_or_default()
+}
+
+/// `WfeView.next_escalation` — `EscalationForecast`'ın dış yüzü.
+#[derive(Debug, serde::Serialize)]
+pub struct EscalationView {
+    pub step_idx: usize,
+    pub node: String,
+    pub entered_at: DateTime<Utc>,
+    pub deadline: DateTime<Utc>,
+    pub overdue: bool,
+}
+
+/// WF Admin escalation müdahalesinin sonucu.
+///
+/// `NonePending` bir HATA DEĞİL, bir cevaptır: "dokunacak adım yok". HTTP karşılığını
+/// (409) rota katmanı verir — core ve executor durum bilgisini hata olarak kodlamaz.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EscalationAdminOutcome {
+    /// Adım elle uygulandı (otomatik yolun aynı marker'ı, aktör admin).
+    Applied {
+        step_idx: usize,
+        node: String,
+        marker: String,
+    },
+    /// Adım atlandı — geçiş uygulanmadı, yalnız audit satırı yazıldı.
+    Skipped {
+        step_idx: usize,
+        node: String,
+        marker: String,
+    },
+    NonePending,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct WfeView {
     pub wfe_id: Uuid,
@@ -187,6 +238,12 @@ pub struct WfeView {
     pub claimed_at: Option<DateTime<Utc>>,
     /// SLA-1: `claimed_at + node.claim_timeout.after` (hesaplanmış); n/a ise NULL.
     pub claim_deadline: Option<DateTime<Utc>>,
+    /// SLA-2/T‑A5: sıradaki ATEŞLENMEMİŞ escalation adımı (vadesi gelmiş olması
+    /// gerekmez). WF Admin sayacı yönetebilmek için görmek zorunda; görmediği bir
+    /// sayaca müdahale etmek kör karar olurdu. Paralel modda kol başına hesap
+    /// `branches` içindedir; burada wfe-seviyesi (tek-kol) tahmin durur.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_escalation: Option<EscalationView>,
     /// 1–10, deadline'dan otomatik hesaplanır (bkz. `priority::compute_priority`).
     pub priority: i32,
     /// WOR-31 T4: paralel mod kol durumları — paralel modda değilken boş.
@@ -720,6 +777,67 @@ impl WfeExecutor {
         })
     }
 
+    /// T‑A5: WF Admin sıradaki escalation adımını ELLE tetikler (vade gerekmez).
+    ///
+    /// Yetki, terminal kontrolü ve adım seçimi çekirdektedir
+    /// (`Engine::admin_fire_escalation`); burada yalnız paralel-mod ipucu doğrulanır ve
+    /// commit yazılır.
+    pub async fn fire_escalation_now(
+        &self,
+        wfe_id: Uuid,
+        admin: &Actor,
+        node: Option<&str>,
+    ) -> Result<EscalationAdminOutcome, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        require_branch_hint(&wfes, node)?;
+        let engine = self.engine_for(&wfes).await?;
+        let Some((step_idx, commit)) = engine
+            .admin_fire_escalation(&wfd, &wfes, admin, node, Utc::now())
+            .await?
+        else {
+            return Ok(EscalationAdminOutcome::NonePending);
+        };
+        self.wfe.commit(&commit).await?;
+        self.after_wfe_settled(wfe_id, &commit.outcome).await?;
+        self.nudge_timers();
+        Ok(EscalationAdminOutcome::Applied {
+            step_idx,
+            node: escalation_node(&wfes, node),
+            marker: format!("escalate:{}:{step_idx}", escalation_node(&wfes, node)),
+        })
+    }
+
+    /// T‑A5: WF Admin sıradaki escalation adımını ATLAR — geçiş uygulanmaz, yalnız
+    /// audit satırı yazılır (`append_marker`).
+    pub async fn skip_escalation(
+        &self,
+        wfe_id: Uuid,
+        admin: &Actor,
+        node: Option<&str>,
+    ) -> Result<EscalationAdminOutcome, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        require_branch_hint(&wfes, node)?;
+        let engine = self.engine_for(&wfes).await?;
+        let Some(skip) = engine
+            .skip_escalation(&wfd, &wfes, admin, node, Utc::now())
+            .await?
+        else {
+            return Ok(EscalationAdminOutcome::NonePending);
+        };
+        self.wfe
+            .append_marker(wfe_id, wfes.orgtnt_id, &skip.entry)
+            .await?;
+        // Atlanan adım artık due değil — süpürücünün en yakın vade hesabı tazelenir.
+        self.nudge_timers();
+        Ok(EscalationAdminOutcome::Skipped {
+            step_idx: skip.step_idx,
+            node: skip.node,
+            marker: skip.marker,
+        })
+    }
+
     /// WFE görünümü — önce WFE-seviyesi VIEW kapısı (owner / node c_a / listable,
     /// spec Terminology VISIBILITY+LISTABLE), sonra DynCtx `x-visibility` field
     /// filtrelemesi (M13). Kapı geçilmezse WFE'nin varlığı bile sızmaz.
@@ -808,6 +926,16 @@ impl WfeExecutor {
         // K7 (Faz 0): WFAH akış izi — store bunu desteklemiyorsa (`NoWfahPath`)
         // boş döner, alan hiç yazılmaz (calls/caller ile aynı davranış deseni).
         let path = self.wfah_path.load_wfah_path(wfe_id).await?;
+        // Sıradaki escalation adımı (vade gerekmez) — WF Admin'in göreceği sayaç.
+        let next_escalation = engine
+            .next_escalation(&wfd, &wfes, now, None)?
+            .map(|f| EscalationView {
+                step_idx: f.step_idx,
+                node: wfes.current_node.clone().unwrap_or_default(),
+                entered_at: f.entered_at,
+                deadline: f.deadline,
+                overdue: f.overdue,
+            });
 
         Ok(WfeView {
             wfe_id,
@@ -820,6 +948,7 @@ impl WfeExecutor {
             deadline: wfes.deadline,
             claimed_at: wfes.claimed_at,
             claim_deadline,
+            next_escalation,
             priority,
             rev,
             branches: branch_views,

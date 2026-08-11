@@ -402,6 +402,22 @@ pub trait WfeStore: Send + Sync {
         branch: Option<&str>,
         new_dynctx: Option<&Value>,
     ) -> Result<(), EngineError>;
+    /// T‑A5: yalnız AUDIT satırı ekler — node, sahiplik ve ctx'e DOKUNMAZ.
+    ///
+    /// WF Admin'in escalation atlaması bunu kullanır: atlama bir geçiş değildir, yalnız
+    /// "bu adım kapandı" defterine düşen bir kayıttır. `release_claim` kullanılamazdı
+    /// (o claim'i de temizler), `commit` de kullanılamazdı (o node/status taşır).
+    ///
+    /// VARSAYILAN İMPLEMENTASYON YOKTUR: no-op bir varsayılan, atlamanın çalıştığını
+    /// sanıp hiçbir şey yazmayan bir store'a izin verirdi — adım bir sonraki turda yine
+    /// ateşlenirdi.
+    async fn append_marker(
+        &self,
+        wfe_id: Uuid,
+        orgtnt_id: Uuid,
+        wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError>;
+
     /// Madde 7: yetkili devir. `claim`'in CAS'ının aksine zaten sahipli (ya da
     /// havuzdaki) bir satırı override eder — uygunluk `Engine::reassign`'da
     /// (reassign c_a + hedef node c_a) doğrulanmıştır. `target = Some` belirli

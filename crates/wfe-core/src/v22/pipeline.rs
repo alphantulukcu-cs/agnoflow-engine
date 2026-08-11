@@ -29,6 +29,7 @@ use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
 use crate::v22::env::RunEnv;
 use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv, JoinEnv};
+use crate::v22::grants::matches_grant_rules;
 use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
 use crate::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallSite, CommitOutcome, ExecEnv, ExecFailure,
@@ -70,6 +71,17 @@ pub struct EscalationForecast {
     pub entered_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
     pub overdue: bool,
+}
+
+/// T‑A5: WF Admin atlamasının sonucu. `entry` store tarafından WFAH'a eklenir
+/// (`reassign`'ın deseni: core kaydı üretir, I/O çağırana ait).
+#[derive(Debug, Clone)]
+pub struct EscalationSkip {
+    pub step_idx: usize,
+    pub node: String,
+    /// Yazılan WFAH aksiyon adı — istemciye neye dokunulduğunu söylemek için.
+    pub marker: String,
+    pub entry: WfahEntry,
 }
 
 /// `fire_claim_timeout` sonucu — `wft` verilmişse node taşıması
@@ -842,17 +854,26 @@ impl<'a> Engine<'a> {
             .get(node_key)
             .ok_or_else(|| EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'")))?;
 
-        // 1+2. reassign kuralı VAR olmalı VE reassigner uymalı.
-        let Some(reassign_rule) = node.reassign.as_ref() else {
-            return Err(EngineError::Unauthorized);
-        };
+        // 1+2. Yetki İKİ yoldan gelir (T‑A5):
+        //   · node.reassign — o node'un kendi amiri (Madde 7, bugünkü davranış)
+        //   · wfd.wf_admin  — akış yöneticisi; node'un kuralı OLMASA da devredebilir
+        // İkisi de yoksa devir kapalıdır (403).
         let ctx = wfes.dynctx.as_value();
         let env = MatchEnv {
             ctx,
             wfah: &wfes.wfah,
             orgtnt_id: wfes.orgtnt_id,
         };
-        if !authorize(reassign_rule, reassigner, env, self.org).await? {
+        let by_node_rule = match node.reassign.as_ref() {
+            Some(rule) => authorize(rule, reassigner, env, self.org).await?,
+            None => false,
+        };
+        let by_wf_admin = if by_node_rule {
+            false // node kuralı yetti; wf_admin sorgusu gereksiz I/O olurdu
+        } else {
+            matches_grant_rules(&wfd.wf_admin, reassigner, wfes, self.org).await?
+        };
+        if !by_node_rule && !by_wf_admin {
             return Err(EngineError::Unauthorized);
         }
 
@@ -869,14 +890,20 @@ impl<'a> Engine<'a> {
         } else {
             "unclaim"
         };
+        // Denetim izi hangi yoldan gelindiğini söyler: `via` YALNIZ akış yöneticisi
+        // yolunda yazılır, node.reassign yolundaki eski kayıtların şekli korunur.
+        let mut input = json!({
+            "from": from_owner.map(|u| u.to_string()),
+            "to": target.map(|t| t.user_id.to_string()),
+        });
+        if by_wf_admin {
+            input["via"] = json!("wf_admin");
+        }
         Ok(WfahEntry {
             seq,
             action: action.to_string(),
             actor: reassigner.clone(),
-            input: Some(json!({
-                "from": from_owner.map(|u| u.to_string()),
-                "to": target.map(|t| t.user_id.to_string()),
-            })),
+            input: Some(input),
             applied_at: now,
         })
     }
@@ -1006,12 +1033,13 @@ impl<'a> Engine<'a> {
         };
         for (idx, step) in node.escalation.iter().enumerate() {
             let marker = escalation_marker(node_key, idx);
-            let fired = wfes
-                .wfah
-                .entries()
-                .iter()
-                .any(|e| e.action == marker && e.applied_at >= entered_at);
-            if fired {
+            let skipped_marker = skipped_escalation_marker(node_key, idx);
+            // "Bu adım kapandı" iki yoldan olur: otomatik/elle ATEŞLENDİ ya da WF Admin
+            // ATLADI. İkisi de aynı defteri kullanır (T‑A5).
+            let settled = wfes.wfah.entries().iter().any(|e| {
+                (e.action == marker || e.action == skipped_marker) && e.applied_at >= entered_at
+            });
+            if settled {
                 continue;
             }
             // adımlar sıralı — ilk ateşlenmemiş adım bu turun cevabıdır
@@ -1025,6 +1053,87 @@ impl<'a> Engine<'a> {
             }));
         }
         Ok(None)
+    }
+
+    /// T‑A5: WF Admin'in ELLE TETİKLEMESİ — yetki kapısı DAHİL.
+    ///
+    /// `fire_escalation_by` mekanik primitiftir (yetki sormaz); bu fonksiyon yetkiyi,
+    /// terminal kontrolünü ve "hangi adım" seçimini bir arada yapar. Ayrı bırakılsa
+    /// yetki denetimi çağıran katmanın hatırlamasına kalırdı — unutulduğunda yetkisiz
+    /// bir aktör akışı ilerletebilirdi.
+    ///
+    /// Adım numarası ÇAĞIRANDAN alınmaz: sıradaki ateşlenmemiş adım uygulanır, böylece
+    /// escalation adımlarının sıralı olma sözleşmesi korunur. Vade GEREKMEZ.
+    ///
+    /// Bekleyen adım yoksa `Ok(None)`.
+    pub async fn admin_fire_escalation(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        branch: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(usize, TransitionCommit)>, EngineError> {
+        if is_terminal_class(&wfes.status) {
+            return Err(EngineError::WfeTerminal);
+        }
+        if !matches_grant_rules(&wfd.wf_admin, admin, wfes, self.org).await? {
+            return Err(EngineError::Unauthorized);
+        }
+        let Some(forecast) = self.next_escalation(wfd, wfes, now, branch)? else {
+            return Ok(None);
+        };
+        let commit = self
+            .fire_escalation_by(wfd, wfes, forecast.step_idx, now, branch, admin)
+            .await?;
+        Ok(Some((forecast.step_idx, commit)))
+    }
+
+    /// T‑A5: WF Admin'in ATLAMASI. Marker yazar, geçişi UYGULAMAZ.
+    ///
+    /// Marker adı `escalate:<node>:<idx>:skipped` — `escalate:` öneki ZORUNLUDUR:
+    /// `next_escalation` node giriş zamanını "son escalation-DIŞI WFAH kaydı"ndan
+    /// hesaplıyor, yani başka bir adla yazılan atlama marker'ı tabanı kendine kaydırır
+    /// ve o node'un TÜM escalation sayaçlarını sessizce sıfırlar.
+    ///
+    /// Bekleyen adım yoksa `Ok(None)` — bu bir hata değil, bir cevaptır; HTTP karşılığını
+    /// çağıran katman verir.
+    pub async fn skip_escalation(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        branch: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<Option<EscalationSkip>, EngineError> {
+        if is_terminal_class(&wfes.status) {
+            return Err(EngineError::WfeTerminal);
+        }
+        // Sayaç yönetimi YALNIZ wf_admin yetkisidir; node.reassign bunu AÇMAZ.
+        if !matches_grant_rules(&wfd.wf_admin, admin, wfes, self.org).await? {
+            return Err(EngineError::Unauthorized);
+        }
+        let Some(forecast) = self.next_escalation(wfd, wfes, now, branch)? else {
+            return Ok(None);
+        };
+        let node_key = match branch {
+            Some(b) => b.to_string(),
+            None => wfes.current_node.clone().unwrap_or_default(),
+        };
+        let marker = skipped_escalation_marker(&node_key, forecast.step_idx);
+        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        Ok(Some(EscalationSkip {
+            step_idx: forecast.step_idx,
+            node: node_key,
+            entry: WfahEntry {
+                seq,
+                action: marker.clone(),
+                actor: admin.clone(),
+                input: Some(json!({"skipped": true, "after": forecast.deadline.to_rfc3339()})),
+                applied_at: now,
+            },
+            marker,
+        }))
     }
 
     /// Süresi dolan ilk escalation adımının index'i (M6/§8).
@@ -1056,6 +1165,40 @@ impl<'a> Engine<'a> {
         step_idx: usize,
         now: DateTime<Utc>,
         branch: Option<&str>,
+    ) -> Result<TransitionCommit, EngineError> {
+        self.fire_escalation_inner(wfd, wfes, step_idx, now, branch, None)
+            .await
+    }
+
+    /// T‑A5: WF Admin'in ELLE tetiklemesi. Vade gelmiş olması ŞART DEĞİL — erken
+    /// tetikleme bu yolun varlık sebebi. Yetki ÇAĞIRANDA denetlenir (executor).
+    ///
+    /// Otomatik yolla tek farkı WFAH marker'ının AKTÖRÜdür: marker adı aynı kalır
+    /// (`escalate:<node>:<idx>`), çünkü yayınlanmış akışlar `count($wfah, #.action ==
+    /// "escalate:...")` ile karar veriyor ve elle tetiklemeye ayrı ad vermek o sayımları
+    /// bozar. `wfes_effects` bağlamındaki `$actor` ise SYSTEM kalır: effects akışın
+    /// VERİ semantiğidir, elle tetikleme onu değiştirmemeli.
+    pub async fn fire_escalation_by(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        step_idx: usize,
+        now: DateTime<Utc>,
+        branch: Option<&str>,
+        by: &Actor,
+    ) -> Result<TransitionCommit, EngineError> {
+        self.fire_escalation_inner(wfd, wfes, step_idx, now, branch, Some(by))
+            .await
+    }
+
+    async fn fire_escalation_inner(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        step_idx: usize,
+        now: DateTime<Utc>,
+        branch: Option<&str>,
+        by: Option<&Actor>,
     ) -> Result<TransitionCommit, EngineError> {
         let node_key = match branch {
             Some(b) => {
@@ -1103,7 +1246,8 @@ impl<'a> Engine<'a> {
         let mut wfah_entries = vec![WfahEntry {
             seq,
             action: trigger_action.clone(),
-            actor: system.clone(),
+            // Elle tetiklemede iz admini gösterir; otomatik yolda system aktörü.
+            actor: by.cloned().unwrap_or_else(|| system.clone()),
             input: Some(if collapsing {
                 json!({"after": step.after, "collapse": true})
             } else {
@@ -2807,6 +2951,12 @@ fn branch_approval(wfah: &Wfah, node: &str) -> (Value, Value) {
 
 fn escalation_marker(node_key: &str, idx: usize) -> String {
     format!("escalate:{node_key}:{idx}")
+}
+
+/// WF Admin atlamasının marker'ı. `escalate:` önekini PAYLAŞIR — bkz.
+/// `Engine::skip_escalation` yorumu (önek olmadan escalation tabanı kayar).
+fn skipped_escalation_marker(node_key: &str, idx: usize) -> String {
+    format!("{}:skipped", escalation_marker(node_key, idx))
 }
 
 /// Engine-tetiklemeli kenarlar (WFC-RETURN, SLA) için **çapa aktörü**.

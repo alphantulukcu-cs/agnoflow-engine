@@ -436,6 +436,32 @@ Claim/owner/ACT semantiği öncekiyle aynıdır (unassigned: C_A görür+claim e
 
 ---
 
+## WF_ADMIN — akış-içi yetkili (T‑A5)
+
+WFD kökünde, `listable` ile AYNI şekli taşıyan bir grant dizisi. Bu kurallardan birine uyan
+aktör O AKIŞA müdahale edebilir: claim devri (node'un kendi `reassign` kuralı olmasa da),
+escalation sayacına müdahale (`fire` / `skip`), ve WFE'yi görme.
+
+```json
+"wf_admin": [
+  { "c_a": { "c_orgu": { "from": {"wfah": "start", "field": "actor.orgu", "occurrence": "first"},
+                         "traverse": "self" },
+             "c_r": ["genel-mudur"] } },
+  { "c_a": { "c_u": [{ "from": "$ctx.baslatan" }] },
+    "when": "$ctx.tutar > 100000" }
+]
+```
+
+Birinci kural "akışı BAŞLATAN kişinin biriminde genel müdür olan" demektir — yetkili akıştan
+akışa değişir; statik bir rol grant'ıyla ifade edilemez, bu yüzden C_A kuralıdır.
+
+**AKSİYON YETKİSİ VERMEZ.** WF Admin işi yönetir, işi yapmaz: bir node'da ACT alabilmesi
+için o node'un `c_a`'sına uyması gerekir. Akışı bitirme/iptal, rastgele node'a taşıma ve
+`$ctx`'e yazma da kapsam dışıdır. agnoflow PLATFORM admini (`X-Admin-Key`) ile ilgisi
+yoktur.
+
+---
+
 ## SCHEMA ANNOTATION UZANTILARI
 
 `context` bir JSON Schema 2020-12 dokümanıdır; `context.properties` altındaki

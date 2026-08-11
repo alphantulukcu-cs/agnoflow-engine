@@ -2133,6 +2133,14 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
             check(when, format!("listable[{i}].when"), report);
         }
     }
+    // T‑A5: `wf_admin[]` kuralları `listable` ile aynı şekli taşır (`CaGrantRule`) ve
+    // aynı guard denetimine girer. `c_a` şekli ise `check_c_a_shape`'in genel
+    // toplayıcısına (`collect_key_sites(doc, "c_a")`) kendiliğinden dahildir.
+    for (i, a) in wfd.wf_admin.iter().enumerate() {
+        if let Some(when) = &a.when {
+            check(when, format!("wf_admin[{i}].when"), report);
+        }
+    }
     // WOR-84: `calc` autoexec ifadeleri. `config` şemasız `Value` olduğu için upload
     // kapısı buraya HİÇ bakmıyordu — bozuk ifade yayınlanıp akış koşarken patlıyordu
     // (`ExecFailure`), yani tasarımcı hatayı üretimde öğreniyordu.

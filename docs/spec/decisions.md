@@ -1618,3 +1618,58 @@ salt-okunur bir namespace açılabilir — bu tasarım o kapıyı kapatmaz, sade
 
 Detay (K1–K9, veri modeli, API yüzeyi, fazlar): `docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md`.
 Sözleşme özeti: CLAUDE.md "WFE not defteri (ad-hoc not + belge)".
+
+## T‑A5 — WF Admin: akış-içi yetkili (`wfd.wf_admin[]`, 2026-08-11)
+
+**Sorun:** Tıkanmış bir akışa müdahale etme yetkisi yalnız NODE başına tanımlanabiliyordu
+(`node.reassign`, Madde 7). 20 node'lu bir akışta aynı amiri 20 yere yazmak gerekiyordu; ve
+escalation sayaçlarına çalışma anında dokunmanın hiçbir yolu yoktu.
+
+**Karar:** WFD köküne `wf_admin[]` eklendi — `listable[]` ile AYNI şekil (`{c_a, when?}`,
+tip `CaGrantRule`) ve AYNI matcher. Bu kurallardan birine uyan aktör:
+
+1. **claim devredebilir** — node'un kendi `reassign` kuralı olmasa bile. Kapı iki yollu:
+   `node.reassign eşleşir VEYA wf_admin eşleşir`. Hedef hâlâ node `c_a`'sına uymak
+   zorundadır (`TargetNotEligible`): uymayan kişi claim'i tutar ama `apply_action` c_a'yı
+   yeniden sorduğu için hiçbir aksiyon alamaz — WF Admin akışı kilitlemiş olurdu. Devir
+   marker'ının `input`'una `"via": "wf_admin"` yazılır; node amiri yolunda YAZILMAZ
+   (eski kayıtların şekli korunur). Bu, T‑A6'yı ("amir işi doğrudan bir kişiye
+   claim'letsin") da karşılar.
+2. **escalation sayacına müdahale edebilir** — `POST /wfe/:id/escalation/fire` (sıradaki
+   adımı vade beklemeden uygula) ve `.../skip` (adımı atla). Adım numarası istemciden
+   ALINMAZ: sıradaki ateşlenmemiş adım işlenir, böylece adımların sıralı olma sözleşmesi
+   korunur. Yetki YALNIZ `wf_admin`'dir — `node.reassign` bunu açmaz.
+3. **WFE'yi görebilir** — `can_view` (e) kriteri. Ayrı kriter olmasının nedeni: yönettiği
+   akışı göremeyen admin işe yaramaz, ve aynı kuralı bir de `listable`'a yazdırmak
+   ikisinden birinin unutulmasıyla biter.
+
+**Marker sözleşmesi.** Elle tetikleme OTOMATİK yolun aynı marker'ını yazar
+(`escalate:<node>:<idx>`): yayınlanmış akışlar `count($wfah, #.action == "escalate:...")`
+ile karar veriyor, ayrı ad o sayımları bozardı. Ayrım AKTÖRDEDİR (otomatikte system,
+ellede admin). `wfes_effects` bağlamındaki `$actor` ise system KALIR — effects akışın veri
+semantiğidir, elle tetikleme onu değiştirmemeli.
+
+Atlama marker'ı `escalate:<node>:<idx>:skipped`. `escalate:` öneki ZORUNLUDUR:
+`next_escalation` node giriş zamanını "son escalation-DIŞI WFAH kaydı"ndan hesaplıyor, yani
+başka bir adla yazılan atlama marker'ı tabanı kendine kaydırır ve o node'un TÜM
+sayaçlarını sessizce sıfırlar. Atlama adım başınadır; "escalation'ı komple kapat" yoktur.
+
+**Atlama `commit` değil `append_marker` kullanır** (yeni `WfeStore` metodu, varsayılan
+implementasyon YOK): atlama bir geçiş değil, yalnız "bu adım kapandı" defterine düşen bir
+kayıttır. `release_claim` claim'i de temizlerdi, `commit` node/status taşırdı. Varsayılan
+no-op bir implementasyon, atlamanın çalıştığını sanıp hiçbir şey yazmayan bir store'a izin
+verirdi — adım bir sonraki turda yine ateşlenirdi.
+
+**WF Admin'in YAPAMADIKLARI:** akışı bitirmek/iptal etmek (yalnız aksiyonlar ve SLA-3),
+rastgele node'a taşımak, `$ctx`'e yazmak, kendi adına aksiyon uygulamak (bunun için node
+`c_a`'sına uyması gerekir). **WF Admin işi yönetir, işi yapmaz.**
+
+**Reddedilenler:** node başına `wf_admin` (zaten `node.reassign`); yeni C_A kanalı
+`c_admin` ("C_A TEK KURALDIR" bozulur); yetkiyi tenant permission havuzuna (`org.p`)
+bağlamak (havuz STATİK iş yetkileridir, "başlatanın şubesindeki müdür" gibi akış örneğine
+göre değişen yetki orada ifade edilemez); escalation ötelemesi (adım başına offset yeni
+kalıcı durum ister, "saati sıfırla" ise WFAH tabanını örtük kaydırır — ihtiyaç atlama ile
+karşılanır).
+
+Detay: `docs/superpowers/specs/2026-08-11-wf-admin-design.md`.
+Sözleşme özeti: CLAUDE.md "WF Admin (akış-içi yetkili)".

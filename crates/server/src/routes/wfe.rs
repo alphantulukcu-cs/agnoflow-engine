@@ -47,6 +47,8 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(query_wfe))
         .routes(routes!(claim_wfe))
         .routes(routes!(reassign_wfe))
+        .routes(routes!(fire_escalation))
+        .routes(routes!(skip_escalation))
         .routes(routes!(possible_actions))
         .merge(super::attachments::routes())
         .merge(super::notes::routes())
@@ -514,6 +516,85 @@ async fn reassign_wfe(
         .await
         .map(Json)
         .map_err(AppError::from)
+}
+
+/// T‑A5 WF Admin: escalation müdahalesi gövdesi. `node` yalnız paralel modda anlamlı
+/// (kol başına sayaç) — `reassign` ile aynı konvansiyon.
+#[derive(Deserialize, ToSchema)]
+struct EscalationAdminBody {
+    #[serde(default)]
+    node: Option<String>,
+}
+
+/// Sıradaki escalation adımını ELLE tetikler (vade beklemeden).
+///
+/// Adım numarası istemciden alınmaz: sıradaki ateşlenmemiş adım uygulanır, böylece
+/// escalation adımlarının sıralı olma sözleşmesi korunur.
+#[utoipa::path(post, path = "/{id}/escalation/fire", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = EscalationAdminBody,
+    responses(
+        (status = 200, description = "Uygulanan adım", body = serde_json::Value),
+        (status = 400, description = "Paralel modda kol node'u verilmedi"),
+        (status = 403, description = "Aktör wf_admin kurallarına uymuyor"),
+        (status = 409, description = "Bekleyen adım yok (escalation.none_pending) veya WFE bitmiş"),
+    ),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn fire_escalation(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<EscalationAdminBody>,
+) -> Result<Json<wf_wfe::executor::EscalationAdminOutcome>, AppError> {
+    let admin = extract_actor(&headers)?;
+    let outcome = s
+        .executor
+        .fire_escalation_now(wfe_id, &admin, body.node.as_deref())
+        .await?;
+    none_pending_to_conflict(outcome).map(Json)
+}
+
+/// Sıradaki escalation adımını ATLAR — geçiş uygulanmaz, audit satırı yazılır.
+#[utoipa::path(post, path = "/{id}/escalation/skip", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = EscalationAdminBody,
+    responses(
+        (status = 200, description = "Atlanan adım", body = serde_json::Value),
+        (status = 400, description = "Paralel modda kol node'u verilmedi"),
+        (status = 403, description = "Aktör wf_admin kurallarına uymuyor"),
+        (status = 409, description = "Bekleyen adım yok (escalation.none_pending) veya WFE bitmiş"),
+    ),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn skip_escalation(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<EscalationAdminBody>,
+) -> Result<Json<wf_wfe::executor::EscalationAdminOutcome>, AppError> {
+    let admin = extract_actor(&headers)?;
+    let outcome = s
+        .executor
+        .skip_escalation(wfe_id, &admin, body.node.as_deref())
+        .await?;
+    none_pending_to_conflict(outcome).map(Json)
+}
+
+/// "Dokunacak adım yok" çekirdekte bir CEVAPtır; HTTP'de 409 + makine kodudur.
+/// Dönüşüm burada, tek yerde yapılır (portal kabuğu da bunu kullanır).
+pub(crate) fn none_pending_to_conflict(
+    outcome: wf_wfe::executor::EscalationAdminOutcome,
+) -> Result<wf_wfe::executor::EscalationAdminOutcome, AppError> {
+    if matches!(
+        outcome,
+        wf_wfe::executor::EscalationAdminOutcome::NonePending
+    ) {
+        return Err(AppError {
+            message: "bu node'da bekleyen escalation adımı yok".into(),
+            status: StatusCode::CONFLICT,
+            code: Some("escalation.none_pending"),
+        });
+    }
+    Ok(outcome)
 }
 
 #[utoipa::path(get, path = "/{id}", tag = "wfe",

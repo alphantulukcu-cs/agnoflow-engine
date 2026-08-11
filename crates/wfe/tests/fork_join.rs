@@ -494,6 +494,18 @@ impl WfeStore for ParStore {
         Ok(())
     }
 
+    async fn append_marker(
+        &self,
+        wfe_id: Uuid,
+        _orgtnt_id: Uuid,
+        wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError> {
+        let mut map = self.wfes.lock().unwrap();
+        let w = map.get_mut(&wfe_id).unwrap();
+        w.wfah.0.push(wfah_entry.clone());
+        Ok(())
+    }
+
     async fn reassign(
         &self,
         wfe_id: Uuid,

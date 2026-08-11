@@ -50,6 +50,18 @@ pub struct Wfd {
     pub terminals: Vec<Terminal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listable: Vec<ListableRule>,
+    /// T‑A5: **akış-içi** yetkili havuzu. Bu kurallardan birine uyan aktör bu WFE'de
+    /// claim devredebilir (node'un kendi `reassign` kuralı olmasa bile) ve escalation
+    /// sayacına müdahale edebilir; WFE'yi görmeye de yetkilidir (`can_view` (e)).
+    ///
+    /// agnoflow PLATFORM admini ile karıştırılmamalıdır: bu yetki tek bir akışın
+    /// gidişatına müdahale eder ve WFD'den doğar. Aksiyon yetkisi VERMEZ — WF Admin
+    /// işi yönetir, işi yapmaz.
+    ///
+    /// `listable` ile aynı şekil ve aynı matcher; dizi olması "çoklu grant = çoklu
+    /// kayıt" desenidir (bir C_A kuralı içinde VEYA yoktur, §3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wf_admin: Vec<CaGrantRule>,
     /// Opsiyonel ek-belge katalogu (grup adı → grup). Node'lar `NodeDef.attachments`
     /// ile bu grupları adıyla referanslar. Engine yalnız metadata taşır; dosya I/O
     /// portal katmanındadır (bkz. server/routes/portal/attachments.rs).
@@ -955,14 +967,23 @@ pub struct Terminal {
     pub call: Option<CallRef>,
 }
 
+/// C_A tabanlı bir grant kaydı: kural + opsiyonel `when` guard'ı.
+///
+/// İki yer bu şekli paylaşır — `wfd.listable[]` (görme hakkı) ve `wfd.wf_admin[]`
+/// (akış-içi yetkili). İkisi için ayrı ama özdeş struct yazmak, kuralın şeklini iki
+/// yerden bakımı gereken bir şey yapardı; farkları ne verdikleridir, nasıl yazıldıkları
+/// değil.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ListableRule {
+pub struct CaGrantRule {
     /// v2.2: TEK kural (çoklu grant = çoklu kayıt).
     pub c_a: CandidateActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
 }
+
+/// `wfd.listable[]` öğesi — `CaGrantRule`'un alias'ı (bkz. o tipin yorumu).
+pub type ListableRule = CaGrantRule;
 
 #[cfg(test)]
 mod wft_roundtrip_tests {

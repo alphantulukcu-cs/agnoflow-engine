@@ -207,6 +207,20 @@ impl WfeStore for MemStore {
         Ok(())
     }
 
+    async fn append_marker(
+        &self,
+        wfe_id: Uuid,
+        _orgtnt_id: Uuid,
+        wfah_entry: &WfahEntry,
+    ) -> Result<(), EngineError> {
+        let mut map = self.wfes.lock().unwrap();
+        let wfes = map
+            .get_mut(&wfe_id)
+            .ok_or_else(|| EngineError::WfePort(format!("not found: {wfe_id}")))?;
+        wfes.wfah.0.push(wfah_entry.clone());
+        Ok(())
+    }
+
     async fn reassign(
         &self,
         wfe_id: Uuid,

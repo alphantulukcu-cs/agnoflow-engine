@@ -194,6 +194,41 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
 - Detay/reddedilen alternatifler için spec dosyasına bak; kod ile spec çeliştiğinde KOD
   esastır.
 
+## Tenant permission havuzu (rol = permission grubu)
+
+Tasarım: `docs/superpowers/specs/2026-08-11-tenant-permission-rol-modeli-design.md`
+(T‑A1, T‑A2). agnoflow burada tenant'ın **merkezi yetki dizinidir**.
+
+- **Bunlar agnoflow'un yetkileri DEĞİL**, tenant'ın kendi iş yetkileri ("1043",
+  `KREDI_ONAY`); motor anlamını BİLMEZ. agnoflow saklar, dağıtır, sorulunca cevaplar.
+  agnoflow'un kendi yetkileri (WFD‑Observer / WF Admin / doğrudan claim — T‑A4/A5/A6)
+  AYRI bir eksendir, bu havuz onları karşılamaz.
+- **Motor bu katmandan habersizdir**: `wfe-core`'a tek satır girmez, `c_a`/`c_r` tek
+  kural modeli değişmez, `$p` diye ZEN namespace'i YOKTUR, `schema.json` ve golden
+  fixture etkilenmez. (Not defterindeki K1 duruşunun aynısı.)
+- **T‑A1 kararı: yeni katman YOK.** "Profil" Rol'ün eş anlamlısıdır; `org.r` TEK
+  katalogdur ve iki işi birden yapar — motorun `c_a.c_r` rol kanalı + permission grubu.
+- 4 tablo: `org.p` (havuz) · `org.rp` (rol→yetki) · `org.up` (kişisel ıskarta,
+  `up_type` şimdilik yalnız `'excluded'`) · `org.orgtnt_api_key` (`/ext` erişimi).
+- **Etkin küme**: `⋃ rp(etkin_rol(u)) − up_excluded(u)`; bir rol kullanıcının **en az
+  bir** biriminde etkinse sayılır (`check_user_role` semantiği birim başına aynen
+  korunur). `org.ur.orgu_id IS NULL` ve `orgu_scope` yetki ÜRETMEZ — `check_user_role`
+  da okumuyor. Rol ıskartasına timeslice UYGULANMAZ (motor paritesi), `org.up`
+  ıskartasına UYGULANIR.
+- **Saf/I/O ayrımı**: karar `crates/org/src/permission.rs`'de (saf, testler orada),
+  satır çekme `repo/permission.rs`'de. Süzme (`is_active`, timeslice) SQL `WHERE`'ine
+  YAZILMAZ — yazılırsa kural test dışına düşer (bu repoda DB'li test koşulmuyor).
+- **`code` ASCII** (`[A-Za-z0-9._:-]{1,128}`), benzersizlik `lower(code)` üzerinde.
+  Türkçe harf yasak çünkü PG `lower()` ile Rust `to_lowercase()` `İ`'de ayrışır.
+  `code` yeniden adlandırılabilir, atamalar `p_id`'ye bağlıdır.
+- **Üç kabuk, tek mantık**: `/org/...` yönetim (X‑Admin-Key), `/ext/permissions/*`
+  dış uygulama (X‑Api-Key, SALT OKUMA), `GET /portal/me/permissions` (JWT, yalnız
+  kendi kümesi). `/ext` `/org` altında OLAMAZ — `main.rs` tüm `/org` ağacını küresel
+  X‑Admin-Key middleware'ine sarıyor.
+- Küme uçları **`PUT`** (kutucuk ekranı tek transaction'da diff uygular); kullanımdaki
+  yetki silinmez → 409 `permission.in_use`, `is_active=false` kullanılır. Permission
+  **JWT'ye gömülmez** (TTL saatlerce; ıskarta anında etkisiz kalırdı).
+
 ## DB bağlantı kapsamı (global / lokal)
 
 - `wf.db_connection.scope`: `global` = tenant genelinde, HER projedeki her WFD'de görünür

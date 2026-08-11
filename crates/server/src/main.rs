@@ -1,3 +1,4 @@
+mod api_key;
 mod attachment_store;
 mod attachments;
 mod branding;
@@ -121,7 +122,9 @@ async fn main() {
     // Marka varlığı rotaları storage'a da eriştiği için AppState ile kurulur;
     // /org ağacına merge edilir ki aynı X-Admin-Key kapısının arkasında kalsın.
     let org_router = guard(
-        routes::org::router(pool.clone()).merge(routes::org_branding::router(state.clone())),
+        routes::org::router(pool.clone())
+            .merge(routes::org_branding::router(state.clone()))
+            .merge(routes::permissions::router(state.clone())),
     );
     let db_router = guard(routes::db::router(state.clone()));
 
@@ -129,6 +132,10 @@ async fn main() {
     let api_router = OpenApiRouter::with_openapi(openapi::ApiDoc::openapi())
         .nest("/org", org_router)
         .nest("/db", db_router)
+        // Dış uygulama yüzeyi: X-Admin-Key middleware'inin DIŞINDA, kendi kapısı
+        // (X-Api-Key) extractor'da. /org'a nest edilse küresel admin anahtarı
+        // gerekirdi — o anahtar tüm tenant'larda tam YAZMA yetkisi verir.
+        .nest("/ext", routes::ext_permissions::router(state.clone()))
         .nest("/env", routes::env::router(state.clone()))
         .nest("/auth", routes::auth::router(state.clone()))
         .nest("/users", routes::users::router(state.clone()))

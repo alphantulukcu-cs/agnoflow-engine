@@ -51,7 +51,7 @@ CREATE TABLE org.p (
     is_active    boolean NOT NULL DEFAULT true,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT p_code_format CHECK (code ~ '^[^[:space:]]{1,128}$')
+    CONSTRAINT p_code_format CHECK (code ~ '^[A-Za-z0-9._:-]{1,128}$')
 );
 CREATE UNIQUE INDEX p_code_unique ON org.p (orgtnt_id, lower(code));
 CREATE INDEX p_orgtnt_idx ON org.p(orgtnt_id);
@@ -90,12 +90,20 @@ CREATE INDEX up_p_idx ON org.up(p_id);
 tenant "1043"ü `KREDI_ONAY`a çevirdiğinde kimse yetki kaybetmez. `org.r`'de `r_id`
 ile aynı gerekçe (`repo::user_role::update_role` yorumu).
 
-**`code` içinde boşluk YASAK; benzersizlik büyük/küçük harf DUYARSIZ.** Dış
-uygulama permission listesini boşluk/virgülle ayırıp bölebilir — içinde boşluk olan
-kod sessizce ikiye ayrılır. `KREDI_ONAY` ile `kredi_onay`ın birlikte var olması, dış
-uygulamanın hangisini yazdığını hatırlamasını gerektirir. Kod yazıldığı gibi
-saklanır; **tüm karşılaştırmalar `lower()` üzerinden** yapılır (unique index de,
-`check` ucu da).
+**`code` ASCII harf/rakam + `. _ : -` ile sınırlı; benzersizlik büyük/küçük harf
+DUYARSIZ.** `code` bir MAKİNE kimliğidir, gösterim metni değil — o `display_name`'de
+ve serbesttir. İki gerekçe:
+
+- Boşluk yasak: dış uygulama permission listesini boşluk/virgülle ayırıp bölebilir,
+  içinde boşluk olan kod sessizce ikiye ayrılırdı.
+- Türkçe harf yasak: benzersizlik `lower(code)` üzerindedir ve PostgreSQL'in
+  `lower()`'ı ile Rust'ın `to_lowercase()`'i **`İ` üzerinde ayrışır** (libc noktayı
+  düşürür, Rust birleştirici nokta bırakır). Havuzda benzersiz sayılan iki kod,
+  `check` karşılaştırmasında farklı görünürdü. Alfabe ASCII'ye kapatıldığı için
+  `fold_code` = `to_ascii_lowercase` ile `lower()` aynı cevabı verir.
+
+Kod yazıldığı gibi saklanır; tüm karşılaştırmalar katlanmış biçim üzerinden yapılır
+(unique index de, `check` ucu da).
 
 **`up_type` CHECK'i şimdilik yalnız `'excluded'`.** Tablo şekli `org.ur`'nin
 aynısıdır (ileride kişiye doğrudan grant istenirse yer var) ama tasarlanmamış
@@ -125,6 +133,12 @@ ezer; `r.is_active` ve `p.is_active` süzer.
 Türetilmiş kurallar:
 
 - Birim A'daki `excluded`, birim B'deki grant'ı **ezmez** (kapsam birimdir).
+- **`org.ur`'daki rol ıskartasına timeslice UYGULANMAZ**: süresi geçmiş bir
+  `excluded` satırı rolü yine kapatır. `check_user_role`'ün son `NOT EXISTS`'i de
+  öyle davranıyor ([user_role.rs:186](crates/org/src/repo/user_role.rs#L186)) —
+  motorla aynı cevabı vermek, "portal yetki veriyor ama node açılmıyor"
+  çelişkisinden daha önemli. `org.up` kişisel ıskartası bundan AYRIDIR: orada
+  timeslice geçerlidir (§3.1'de bilinçli tasarlandı).
 - `org.ur.orgu_id IS NULL` satırı yetki **ÜRETMEZ**. `check_user_role` birim
   eşitliği ister; bu satırlar bugün motorda hiçbir kapı açmıyor. Burada "tenant
   geneli grant" saymak, kimsenin niyet etmediği yetkileri sessizce dağıtırdı.
@@ -307,8 +321,10 @@ WFD `actions[].input` → `wfes_effects` → `$ctx` yolundan gider.
 | Dosya | İş |
 |---|---|
 | `migrations/org/20260811000001_permission.sql` | `org.p` / `org.rp` / `org.up` / `org.orgtnt_api_key` (idempotent, psql ile manuel) |
-| `crates/org/src/repo/permission.rs` | Yeni modül — satır çekme + `effective_permissions` |
-| `crates/org/src/models.rs` | `Permission`, `EffectivePermission`, satır tipleri |
+| `crates/org/src/permission.rs` | **SAF** çekirdek: satır tipleri, `effective_permissions`, `check_codes` + testler |
+| `crates/org/src/repo/permission.rs` | I/O: satır çekme, küme `PUT` transaction'ları, API anahtarı sorguları |
+| `crates/org/src/models.rs` | `Permission`, `PermissionRoleUsage`, `PermissionException`, `TenantApiKey` |
+| `crates/org/src/error.rs` | `OrgError::Conflict(String)` — 409 sınıfı (metin makine kodudur) |
 | `crates/server/src/routes/permissions.rs` | Yönetim uçları; `/org` ağacına merge (`org_branding.rs` deseni) |
 | `crates/server/src/routes/ext_permissions.rs` | `/ext` ağacı — X‑Api-Key kapısı, salt okuma |
 | `crates/server/src/routes/portal/permissions.rs` | İnce kabuk, ortak mantık paylaşılır (`notes.rs` / `portal/notes.rs` ikilisi gibi) |
@@ -318,13 +334,19 @@ WFD `actions[].input` → `wfes_effects` → `$ctx` yolundan gider.
 Üç kabuk (`/org`, `/ext`, `/portal`) aynı `repo::permission` fonksiyonlarını çağırır;
 etkin küme mantığı tek yerde durur.
 
-`user_role.rs` (450+ satır) şişmesin diye permission ayrı modüldedir.
+`user_role.rs` (450+ satır) şişmesin diye permission ayrı modüldedir. Saf mantık
+`repo/`'nun DIŞINDA yaşar: `repo/` I/O'nun yeri, `wfe-core`'un "I/O YOK" ayrımının
+org katmanındaki karşılığı.
+
+`/org/users/{id}/...` yolları tenant taşımaz (mevcut `/org/users/{id}/roles` ile
+aynı biçim); kapsam `repo::permission::tenant_of_user` ile kullanıcı satırından
+çözülür, böylece alt sorgular yine `orgtnt_id` ile bağlanır.
 
 ## 9. Hata kodları
 
 | Kod | HTTP | Durum |
 |---|---|---|
-| `permission.code_format` | 400 | Boşluk içeren / boş / 128+ karakter kod |
+| `permission.code_format` | 400 | Alfabe dışı karakter / boş / 128+ karakter kod |
 | `permission.code_conflict` | 409 | Aynı tenant'ta (harf duyarsız) aynı kod |
 | `permission.not_found` | 404 | Kapsam dışı veya olmayan `p_id` |
 | `permission.in_use` | 409 | Rol/ıskarta referansı olan permission silinmek istendi |
@@ -350,11 +372,38 @@ sızmaz).
 11. Süresi geçmiş ıskarta → permission geri gelir.
 12. İki rol aynı permission'ı verir → `via_roles` İKİSİNİ de listeler, kod tek satır.
 
-**Server testleri:** `check` ucunda bilinmeyen kod `denied` + `unknown`;
-kapsam dışı `u_id` → 404; geçersiz `X-Api-Key` → 401; `PUT` küme uçlarının
-idempotentliği; `DELETE` kullanımdayken 409.
+Ek olarak `check_codes` (harf duyarsızlık, tekrar, sıra korunumu, `unknown` ayrımı)
+ve `api_key` (üret→ayrıştır→doğrula turu, yabancı şema, bozuk/yanlış uzunluk, özet
+determinizmi) saf testleri.
+
+**DB gerektiren yollar** (rota kabukları, transaction'lar, kapsam kapıları) birim
+testiyle kapatılamaz — bu repoda DB'li test koşulmuyor. Onlar canlı duman testiyle
+doğrulandı (§10.1).
 
 `cargo test --workspace` her değişiklikten sonra koşar.
+
+### 10.1 Canlı doğrulama (2026-08-11, dev DB)
+
+Uygulama sonrası gerçek sunucu + gerçek Postgres ile koşulan ve GEÇEN senaryolar:
+
+| Senaryo | Sonuç |
+|---|---|
+| Havuza yetki ekleme (`1043`, `MUSTERI.GORUNTULE`) | 200 |
+| Boşluklu kod / Türkçe `İ` içeren kod | 400 `permission.code_format` |
+| Aynı kodun farklı harf biçimi | 409 `permission.code_conflict` |
+| Rolün kümesini `PUT` ile ayarlama | 200, küme birebir |
+| Kullanıcının etkin kümesi + `via_roles` | 2 yetki, `via_roles: ["mudur"]` |
+| Ters sorgu: yetki hangi rollerde | `mudur`, `user_count: 6` |
+| Kişisel ıskarta (T‑A2) sonrası etkin küme | ıskartalı yetki DÜŞTÜ |
+| Kullanımdaki yetkiyi silme | 409 `permission.in_use` |
+| `/ext/permissions/check` anahtarsız | 401 `api_key.invalid` |
+| `/ext/permissions/check` anahtarlı | `granted:[musteri.goruntule]`, `denied:[1043,1O43]`, `unknown:[1O43]` |
+| Başka tenant'ın kullanıcısı (`u_id` ve `username` ile) | 404, iki yoldan da |
+| Kapatılmış (`is_active=false`) anahtar | 401 `api_key.invalid` |
+| `GET /portal/me/permissions` token'sız | 401 (mount doğrulaması) |
+
+Duman testinde yaratılan veri (yetkiler, atamalar, ıskarta, anahtarlar, geçici
+tenant) sonrasında geri alındı.
 
 ## 11. Reddedilen alternatifler
 

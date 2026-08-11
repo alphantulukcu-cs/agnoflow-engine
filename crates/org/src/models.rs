@@ -134,6 +134,61 @@ pub struct Role {
     pub created_at: DateTime<Utc>,
 }
 
+/// `org.p` — tenant'ın atomik yetki havuzundan bir satır.
+///
+/// `code` numara ("1043") da olabilir, isim (`KREDI_ONAY`) da; agnoflow anlamını
+/// BİLMEZ. Yeniden adlandırılabilir olması gerektiği için atamalar `p_id`'ye bağlıdır
+/// (`org.r`'de `r_id` ile aynı gerekçe).
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct Permission {
+    pub p_id: Uuid,
+    pub orgtnt_id: Uuid,
+    pub code: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// `org.p` ters sorgusu: bir yetki hangi rollerde ve kaç kullanıcıya ulaşıyor.
+/// Yetkiyi havuzdan kaldırmadan önce yöneticinin görmesi gereken sayı.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct PermissionRoleUsage {
+    pub r_id: Uuid,
+    pub role_name: String,
+    pub user_count: i64,
+}
+
+/// `org.up` satırı + kataloğundan ad — kişisel ıskarta listesi (T‑A2).
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct PermissionException {
+    pub up_id: Uuid,
+    pub p_id: Uuid,
+    pub code: String,
+    pub display_name: String,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_until: Option<DateTime<Utc>>,
+}
+
+/// `org.orgtnt_api_key` — tenant kapsamlı SALT OKUMA anahtarı (`/ext` ağacı).
+///
+/// `key_hash` serialize EDİLMEZ: liste ucu anahtar hakkında hiçbir sır sızdırmaz.
+/// Düz metin yalnız yaratılışta bir kez döner ve hiçbir yerde saklanmaz.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct TenantApiKey {
+    pub key_id: Uuid,
+    pub orgtnt_id: Uuid,
+    pub name: String,
+    pub prefix: String,
+    #[serde(skip)]
+    pub key_hash: String,
+    pub is_active: bool,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 pub struct OrguTypeDef {
     pub type_id: Uuid,

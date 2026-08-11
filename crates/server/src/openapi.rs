@@ -37,6 +37,7 @@ use utoipa::{
         (name = "portal", description = "Portal JWT ağacı: login/pool/wfd/wfe"),
         (name = "org", description = "Organizasyon admin API (X-Admin-Key)"),
         (name = "db", description = "DB admin/bakım API (X-Admin-Key)"),
+        (name = "ext", description = "Tenant'ın dış uygulamaları: permission sorgulama (X-Api-Key, salt okuma)"),
     ),
 )]
 pub struct ApiDoc;
@@ -95,6 +96,17 @@ impl Modify for SecurityAddon {
                 "Admin API anahtarı — /org ve /db için (ADMIN_API_KEY).",
             ))),
         );
+
+        // Tenant kapsamlı SALT OKUMA anahtarı (/ext). X-Admin-Key'in aksine tek
+        // tenant'a bağlıdır ve yazma rotası yoktur.
+        components.add_security_scheme(
+            "x_api_key",
+            SecurityScheme::ApiKey(ApiKey::Header(ApiKeyValue::with_description(
+                "X-Api-Key",
+                "Tenant API anahtarı (agp_…) — /ext salt-okuma uçları için. \
+                 /org/orgtnt/{id}/api-keys ile üretilir.",
+            ))),
+        );
     }
 }
 
@@ -116,6 +128,7 @@ mod tests {
             "x_actor_user",
             "x_actor_role",
             "x_admin_key",
+            "x_api_key",
         ] {
             assert!(schemes.contains_key(name), "eksik güvenlik şeması: {name}");
         }

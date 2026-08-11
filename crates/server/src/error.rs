@@ -99,12 +99,37 @@ impl From<wf_org::error::OrgError> for AppError {
                 return app;
             }
         }
+        // Conflict'in taşıdığı metin makine kodudur; istemci ayrımı `code` alanından
+        // yapar (WOR-62 duruşu: hata METNİ i18n/refactor ile değişebilir).
+        if let wf_org::error::OrgError::Conflict(kind) = &e {
+            let (message, code) = org_conflict(kind);
+            return AppError {
+                message: message.to_string(),
+                status: StatusCode::CONFLICT,
+                code,
+            };
+        }
         let status = match &e {
             wf_org::error::OrgError::NotFound(_) => StatusCode::NOT_FOUND,
             wf_org::error::OrgError::BadRequest(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         AppError(e.to_string(), status)
+    }
+}
+
+/// `OrgError::Conflict` metnini insan mesajı + `&'static str` koduna bağlar.
+/// Beyaz liste: gövdeye yalnız BİLDİĞİMİZ kodlar çıkar, rastgele bir hata metni
+/// `code` alanına sızmaz. Bilinmeyen çakışma kodsuz ve genel mesajla döner —
+/// makine kodunun `error` alanına düşüp kullanıcıya gösterilmesi yerine.
+fn org_conflict(kind: &str) -> (&'static str, Option<&'static str>) {
+    match kind {
+        "permission.in_use" => (
+            "yetki bir rolde ya da kişisel ıskartada kullanılıyor; \
+             silmek yerine is_active=false yapın",
+            Some("permission.in_use"),
+        ),
+        _ => ("kaynağın mevcut durumu bu işlemi kabul etmiyor", None),
     }
 }
 
@@ -125,20 +150,32 @@ fn from_constraint(dbe: &dyn sqlx::error::DatabaseError) -> Option<AppError> {
         "orgtnt_no_blank_text" => Some("alan boş metin olamaz"),
         "orgtnt_external_id_unique" => Some("external_id başka bir tenant'ta kullanılıyor"),
         "orgtnt_code_key" => Some("code başka bir tenant'ta kullanılıyor"),
+        "p_code_format" => Some(
+            "permission kodu yalnız ASCII harf/rakam ve . _ : - içerebilir (en çok 128 karakter)",
+        ),
+        "p_code_unique" => Some("bu permission kodu tenant'ta zaten tanımlı"),
         _ => None,
     };
 
-    match sqlstate.as_str() {
-        "23514" => Some(AppError(
-            known
-                .unwrap_or("gönderilen değer şema kısıtını ihlal ediyor")
-                .to_string(),
-            StatusCode::BAD_REQUEST,
-        )),
-        "23505" => Some(AppError(
-            known.unwrap_or("kayıt zaten mevcut").to_string(),
-            StatusCode::CONFLICT,
-        )),
+    // Makine-okunur kod: istemci mesajı parse etmesin. Yalnız beyaz listedeki
+    // kısıtlar kod taşır.
+    let code = match constraint {
+        "p_code_format" => Some("permission.code_format"),
+        "p_code_unique" => Some("permission.code_conflict"),
         _ => None,
-    }
+    };
+
+    let (message, status) = match sqlstate.as_str() {
+        "23514" => (
+            known.unwrap_or("gönderilen değer şema kısıtını ihlal ediyor"),
+            StatusCode::BAD_REQUEST,
+        ),
+        "23505" => (known.unwrap_or("kayıt zaten mevcut"), StatusCode::CONFLICT),
+        _ => return None,
+    };
+    Some(AppError {
+        message: message.to_string(),
+        status,
+        code,
+    })
 }

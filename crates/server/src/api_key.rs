@@ -158,6 +158,7 @@ fn invalid() -> AppError {
         message: "X-Api-Key geçersiz".into(),
         status: StatusCode::UNAUTHORIZED,
         code: Some("api_key.invalid"),
+        items: None,
     }
 }
 

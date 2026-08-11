@@ -1795,6 +1795,7 @@ pub(crate) fn none_pending_to_conflict(
             message: "bu node'da bekleyen escalation adımı yok".into(),
             status: StatusCode::CONFLICT,
             code: Some("escalation.none_pending"),
+            items: None,
         });
     }
     Ok(outcome)

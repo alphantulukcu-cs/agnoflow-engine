@@ -117,6 +117,7 @@ impl From<wf_org::error::OrgError> for AppError {
                 message: message.to_string(),
                 status: StatusCode::CONFLICT,
                 code,
+                items: None,
             };
         }
         // 404'ler de kod taşır: istemci "hangi kaynak yok" ayrımını hata METNİNDEN
@@ -126,6 +127,7 @@ impl From<wf_org::error::OrgError> for AppError {
                 message: e.to_string(),
                 status: StatusCode::NOT_FOUND,
                 code: not_found_code(resource),
+                items: None,
             };
         }
         let status = match &e {
@@ -206,6 +208,7 @@ fn from_constraint(dbe: &dyn sqlx::error::DatabaseError) -> Option<AppError> {
         message: message.to_string(),
         status,
         code,
+        items: None,
     })
 }
 

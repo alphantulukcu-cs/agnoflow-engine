@@ -21,6 +21,10 @@ thiserror          = { workspace = true }
 uuid               = { workspace = true }
 chrono             = { workspace = true }
 opendal            = { workspace = true }
+# Ek-belge akışında akış-halinde özet (Sha256Stream) + tenant API anahtarı özeti.
+# API anahtarında bcrypt DEĞİL: anahtar 256-bit rastgele (sözlük saldırısı yüzeyi yok)
+# ve /ext/permissions/check her dış ekranda çağrılır — bcrypt cost 12 her isteğe
+# ~100 ms eklerdi. bcrypt kullanıcı ŞİFRESİNDE kalır.
 sha2               = { workspace = true }
 futures-util       = { workspace = true }
 tower-http         = { workspace = true }
@@ -32,8 +36,4 @@ utoipa-axum        = { workspace = true }
 utoipa-swagger-ui  = { workspace = true }
 jsonwebtoken       = "9"
 bcrypt             = "0.15"
-# Tenant API anahtarı özeti. bcrypt DEĞİL: anahtar 256-bit rastgele (sözlük
-# saldırısı yüzeyi yok) ve /ext/permissions/check her dış ekranda çağrılır —
-# bcrypt cost 12 her isteğe ~100 ms eklerdi. bcrypt kullanıcı ŞİFRESİNDE kalır.
-sha2               = "0.10"
 rand               = { workspace = true }

@@ -40,4 +40,10 @@ pub struct WfdMeta {
     pub doc_id: Option<String>,
     /// WFC: dokümanın semver `version`'ı — `calls.<key>.version` pinlemesi için.
     pub doc_version: Option<String>,
+    /// T‑B4 taslak kilidi: kilidi tutan kullanıcı. `NULL` = serbest.
+    pub lock_user_id: Option<Uuid>,
+    /// Kilidin İLK alındığı an — tazelemede DEĞİŞMEZ ("ne zamandır tutuyor").
+    pub lock_acquired_at: Option<DateTime<Utc>>,
+    /// Kilidin bitişi. Geçmişte kalmışsa kilit YOK sayılır (süpürücü gerekmez).
+    pub lock_expires_at: Option<DateTime<Utc>>,
 }

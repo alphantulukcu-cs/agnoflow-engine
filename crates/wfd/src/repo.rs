@@ -4,10 +4,12 @@ use uuid::Uuid;
 
 const COLS: &str = "wfd_id, orgtnt_id, project_id, name, version, s3_key, is_active, created_at, \
                     status, description, tags, owner, updated_at, source_template_id, review_note, \
-                    submitted_by, doc_id, doc_version";
+                    submitted_by, doc_id, doc_version, lock_user_id, lock_acquired_at, \
+                    lock_expires_at";
 const M_COLS: &str = "m.wfd_id, m.orgtnt_id, m.project_id, m.name, m.version, m.s3_key, m.is_active, m.created_at, \
                       m.status, m.description, m.tags, m.owner, m.updated_at, m.source_template_id, m.review_note, \
-                      m.submitted_by, m.doc_id, m.doc_version";
+                      m.submitted_by, m.doc_id, m.doc_version, m.lock_user_id, m.lock_acquired_at, \
+                      m.lock_expires_at";
 
 /// Yeni satır ekler (published veya draft). status/description/tags/owner verilir.
 #[allow(clippy::too_many_arguments)]
@@ -116,25 +118,35 @@ pub async fn update_draft(
     version: i32,
     description: Option<&str>,
     tags: Option<&[String]>,
+    // T‑B4: kaydetme kilidi ZORUNLU — kilit sahibinin kimliği.
+    lock_user_id: Uuid,
 ) -> Result<(), WfdError> {
     // COALESCE: verilmeyen alan (NULL) mevcut değeri korur — editör kaydı
     // yalnızca JSON gönderdiğinden create'te girilen description/tags silinmez.
-    let n = sqlx::query(
+    // T‑B4: kilit koşulu AYNI WHERE'de — kontrol-sonra-yaz açığı olmasın. Aynı ifade
+    // `lock_expires_at`'i de ileri atar: KAYDETMEK TAZELEMEKTİR, çalışan tasarımcının
+    // ayrıca "devam et" demesi gerekmez.
+    let n = sqlx::query(&format!(
         "UPDATE wf.wfd_meta \
          SET description = COALESCE($3, description), \
              tags = COALESCE($4, tags), \
-             updated_at = now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='draft'",
-    )
+             updated_at = now(), \
+             lock_expires_at = now() + interval '{DRAFT_LOCK_TTL}' \
+         WHERE wfd_id=$1 AND version=$2 AND status='draft' AND {}",
+        lock_held(5)
+    ))
     .bind(wfd_id)
     .bind(version)
     .bind(description)
     .bind(tags)
+    .bind(lock_user_id)
     .execute(pool)
     .await?
     .rows_affected();
     if n == 0 {
-        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+        // Sıfır satırın İKİ sebebi olabilir: satır draft değil ya da kilit bizde değil.
+        // `NotFound` dönmek ikinciyi gizler ve istemciye yanlış yol gösterir.
+        return Err(lock_conflict_reason(pool, wfd_id, version, lock_user_id).await);
     }
     Ok(())
 }
@@ -208,15 +220,21 @@ pub async fn set_pending(
     wfd_id: Uuid,
     version: i32,
     submitted_by: &str,
+    // T‑B4: onaya göndermek de kilit ister; başarıda kilit BIRAKILIR
+    // (pending satır düzenlenemez, tutmanın anlamı yok).
+    lock_user_id: Uuid,
 ) -> Result<(), WfdError> {
     let n = sqlx::query(
-        "UPDATE wf.wfd_meta SET status='pending_approval', submitted_by=$3, review_note=NULL, updated_at=now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='draft'"
+        &format!(
+        "UPDATE wf.wfd_meta SET status='pending_approval', submitted_by=$3, review_note=NULL, \
+             updated_at=now(), lock_user_id=NULL, lock_acquired_at=NULL, lock_expires_at=NULL \
+         WHERE wfd_id=$1 AND version=$2 AND status='draft' AND {}",
+        lock_held(4))
     )
-    .bind(wfd_id).bind(version).bind(submitted_by)
+    .bind(wfd_id).bind(version).bind(submitted_by).bind(lock_user_id)
     .execute(pool).await?.rows_affected();
     if n == 0 {
-        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+        return Err(lock_conflict_reason(pool, wfd_id, version, lock_user_id).await);
     }
     Ok(())
 }
@@ -266,37 +284,58 @@ pub async fn set_rejected(
 }
 
 /// Draft'ı published yapar (publish sonrası). status flip + updated_at.
-pub async fn set_published(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
+/// T‑B4: doğrudan yayın da kilit ister — A düzenlerken B'nin A'nın YARIM işini
+/// yayınlaması engellenir. Başarıda kilit bırakılır (satır artık published, immutable).
+pub async fn set_published(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    lock_user_id: Uuid,
+) -> Result<(), WfdError> {
     let n = sqlx::query(
-        "UPDATE wf.wfd_meta SET status='published', updated_at=now() \
-         WHERE wfd_id=$1 AND version=$2 AND status='draft'",
+        &format!(
+        "UPDATE wf.wfd_meta SET status='published', updated_at=now(), \
+             lock_user_id=NULL, lock_acquired_at=NULL, lock_expires_at=NULL \
+         WHERE wfd_id=$1 AND version=$2 AND status='draft' AND {}",
+        lock_held(3)),
     )
     .bind(wfd_id)
     .bind(version)
+    .bind(lock_user_id)
     .execute(pool)
     .await?
     .rows_affected();
     if n == 0 {
-        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+        return Err(lock_conflict_reason(pool, wfd_id, version, lock_user_id).await);
     }
     Ok(())
 }
 
 /// Draft satırını siler (published silinemez).
-pub async fn delete_draft(pool: &PgPool, wfd_id: Uuid, version: i32) -> Result<(), WfdError> {
+/// T‑B4: silme de kilit ister — kilidi tutan kişi çalışırken taslak altından
+/// silinemesin.
+pub async fn delete_draft(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    lock_user_id: Uuid,
+) -> Result<(), WfdError> {
     let mut tx = pool.begin().await?;
     // Silinen satırın grup kimliği: son versiyon da gidiyorsa gruba ait lokal DB
     // bağlantıları sahipsiz kalır (hiçbir WFD listelemez) → onlar da temizlenir.
-    let owner = sqlx::query_as::<_, (Uuid, String)>(
+    let owner = sqlx::query_as::<_, (Uuid, String)>(&format!(
         "DELETE FROM wf.wfd_meta WHERE wfd_id=$1 AND version=$2 AND status='draft' \
+           AND {} \
          RETURNING project_id, name",
-    )
+        lock_held(3)
+    ))
     .bind(wfd_id)
     .bind(version)
+    .bind(lock_user_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some((project_id, name)) = owner else {
-        return Err(WfdError::NotFound(format!("draft {wfd_id} v{version}")));
+        return Err(lock_conflict_reason(pool, wfd_id, version, lock_user_id).await);
     };
     let remaining: i64 =
         sqlx::query_scalar("SELECT count(*) FROM wf.wfd_meta WHERE project_id=$1 AND name=$2")
@@ -346,4 +385,150 @@ pub async fn resolve_doc(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+// ── T‑B4: taslak kilidi (pessimistic) ────────────────────────────────────────
+//
+// Kilit KOŞULU mutasyonların kendi WHERE cümlesine girer; ayrı bir "önce oku sonra
+// yaz" adımı YOKTUR. `update_draft`'ın `status='draft'` kapısı da böyle çalışıyor
+// (bkz. adapter::save_draft yorumu): DB kapısı geçmezse storage'a hiç dokunulmaz.
+
+/// Kilit ömrü. Kısa tutulur çünkü tazeleme İNSAN eylemine bağlıdır (kör zamanlayıcı
+/// yok); uzun TTL gözetimsiz sekmenin taslağı rehin alma süresini uzatırdı.
+pub const DRAFT_LOCK_TTL: &str = "5 minutes";
+
+/// Makine kodu olarak taşınan çakışma işaretleri (server katmanı bunları HTTP koda
+/// ve insan mesajına çevirir — bkz. `routes::wfd::draft_lock_conflict`).
+pub const LOCK_HELD_BY_OTHER: &str = "draft.locked";
+pub const LOCK_REQUIRED: &str = "draft.lock_required";
+
+/// Kilidi ALIR ya da TAZELER — tek ifade, `WHERE` cümlesi CAS görevi yapar.
+///
+/// `lock_acquired_at` tazelemede DEĞİŞMEZ (`COALESCE`): "bu kişi bu taslağı ne
+/// zamandır tutuyor" sorusu ancak böyle cevaplanır.
+///
+/// Sıfır satır → ya başkasında canlı kilit var ya satır draft değil. İkisini ayırmak
+/// için satır ayrıca okunur; ayrım önemlidir çünkü istemci "Ahmet'te" ile "bu artık
+/// taslak değil" durumlarında farklı davranır.
+pub async fn acquire_or_renew_lock(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    orgtnt_id: Uuid,
+    user_id: Uuid,
+) -> Result<WfdMeta, WfdError> {
+    let updated = sqlx::query_as::<_, WfdMeta>(&format!(
+        "UPDATE wf.wfd_meta \
+         SET lock_user_id = $4, \
+             lock_acquired_at = COALESCE(lock_acquired_at, now()), \
+             lock_expires_at = now() + interval '{DRAFT_LOCK_TTL}' \
+         WHERE wfd_id = $1 AND version = $2 AND orgtnt_id = $3 AND status = 'draft' \
+           AND (lock_user_id IS NULL OR lock_user_id = $4 OR lock_expires_at <= now()) \
+         RETURNING {COLS}"
+    ))
+    .bind(wfd_id)
+    .bind(version)
+    .bind(orgtnt_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(meta) = updated {
+        return Ok(meta);
+    }
+    // Neden olmadığını söyle: taslak mı değil, başkasında mı?
+    let meta = get_meta_any(pool, wfd_id, version).await?;
+    if meta.status != "draft" {
+        return Err(WfdError::Conflict(format!(
+            "{wfd_id} v{version} draft değil (status: {})",
+            meta.status
+        )));
+    }
+    Err(WfdError::Conflict(LOCK_HELD_BY_OTHER.into()))
+}
+
+/// Kilidi bırakır — YALNIZ sahibi. Başkası çağırırsa kilit DÜŞMEZ (`draft.locked`):
+/// aksi halde "bırak" ucu zorla-açma ucuna dönüşürdü.
+pub async fn release_lock(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    orgtnt_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), WfdError> {
+    let n = sqlx::query(
+        "UPDATE wf.wfd_meta \
+         SET lock_user_id = NULL, lock_acquired_at = NULL, lock_expires_at = NULL \
+         WHERE wfd_id = $1 AND version = $2 AND orgtnt_id = $3 AND lock_user_id = $4",
+    )
+    .bind(wfd_id)
+    .bind(version)
+    .bind(orgtnt_id)
+    .bind(user_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if n == 0 {
+        return Err(WfdError::Conflict(LOCK_HELD_BY_OTHER.into()));
+    }
+    Ok(())
+}
+
+/// Mutasyon `WHERE` cümlesine eklenecek kilit koşulu — tek yerde durur ki dört
+/// mutasyon (kaydet/yayınla/onaya gönder/sil) aynı kuralı paylaşsın.
+const LOCK_HELD: &str = "lock_user_id = $LOCK_USER AND lock_expires_at > now()";
+
+/// `$LOCK_USER` yer tutucusunu gerçek parametre numarasına çevirir.
+fn lock_held(param: u8) -> String {
+    LOCK_HELD.replace("$LOCK_USER", &format!("${param}"))
+}
+
+/// Kilit bu kullanıcıda mı — PAHALI işten (validator) ÖNCE koşan ön kontrol.
+///
+/// Asıl kapı mutasyonun `WHERE`'indedir; bu yalnız HATA SIRASI içindir. Yayınlamaya
+/// yetkisi olmayan birine önce içerik hatası göstermek hem yanlış sırayı öğretir
+/// ("JSON'u düzelt" der, oysa sorun yetkidir) hem taslağın durumunu gereksiz sızdırır.
+pub async fn assert_lock_held(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    user_id: Uuid,
+) -> Result<(), WfdError> {
+    let ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM wf.wfd_meta \
+         WHERE wfd_id=$1 AND version=$2 AND lock_user_id=$3 AND lock_expires_at > now())",
+    )
+    .bind(wfd_id)
+    .bind(version)
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    if ok {
+        return Ok(());
+    }
+    Err(lock_conflict_reason(pool, wfd_id, version, user_id).await)
+}
+
+/// Kilit hâlâ bu kullanıcıda mı — mutasyon 0 satır etkilediğinde SEBEBİ ayırmak için.
+/// Kaydetme reddedildiğinde istemci "kilidi al ve tekrar dene" mi yapacak
+/// (`lock_required`), yoksa kullanıcıya "Ahmet'te" mi diyecek (`locked`) buradan çıkar.
+pub async fn lock_conflict_reason(
+    pool: &PgPool,
+    wfd_id: Uuid,
+    version: i32,
+    user_id: Uuid,
+) -> WfdError {
+    match get_meta_any(pool, wfd_id, version).await {
+        Ok(meta) => {
+            let live = meta
+                .lock_expires_at
+                .is_some_and(|e| e > chrono::Utc::now());
+            match meta.lock_user_id {
+                Some(holder) if live && holder != user_id => {
+                    WfdError::Conflict(LOCK_HELD_BY_OTHER.into())
+                }
+                _ => WfdError::Conflict(LOCK_REQUIRED.into()),
+            }
+        }
+        Err(e) => e,
+    }
 }

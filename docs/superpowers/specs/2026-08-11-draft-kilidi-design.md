@@ -66,7 +66,14 @@ gözetimsiz sekmenin rehin süresini uzatırdı.
 |---|---|
 | `POST /wfd/draft/{id}/{ver}/lock` | Al **veya** tazele → `{lock_expires_at, lock_acquired_at, holder}` |
 | `DELETE /wfd/draft/{id}/{ver}/lock` | Bırak — **yalnız sahibi**; başkası çağırırsa `409 draft.locked` (kilit sessizce düşmesin) |
-| `GET /wfd/draft/{id}/{ver}` | Yanıta kilit durumu eklenir — editör salt-okunur açabilsin |
+| `GET /wfd/draft/{id}/{ver}/lock` | Kilit durumunu OKUR: `{locked, mine, lock_user_id, lock_acquired_at, lock_expires_at}` |
+
+**Kilit durumu `GET /draft/{id}/{ver}` yanıtına GÖMÜLMEZ** (ilk tasarımdan sapma,
+uygulamada ortaya çıktı): o uç HAM WFD BELGESİNİ döndürüyor ve belgenin kökü
+`additionalProperties: false` — kilit alanlarını içine koymak editörün şema
+doğrulamasında belgeyi GEÇERSİZ kılardı. Kilit, belgenin değil satırın bir özelliğidir;
+ayrı uç bu ayrımı korur. Süresi geçmiş kilit `locked: false` olarak gösterilir (kapılar
+onu geçiriyor; "kilitli" demek yanlış bilgi olurdu).
 
 Kapılar:
 
@@ -86,7 +93,18 @@ Yayınlamak isteyen kilidi alır; başkasındaysa `409` → devir açık bir el 
 onaycının korunacak bir şeyi yoktur. Kilit istemek onaycıyı tasarımcının kilidine bağımlı
 kılardı.
 
-### 3.1 Kapı, kontrol-sonra-yaz DEĞİL
+### 3.1 `publish` / `submit` kilidi ROTADA da sorar
+
+Adapter'daki kilit kontrolü bu iki uç için YETMEZ: rotalar adapter'a girmeden belgeyi
+parse eden ön kapılar koşuyor (`assert_env_keys_defined`,
+`assert_attachment_storage_env`). Kilit sorulmadan onlara girilirse yayın yetkisi olmayan
+kullanıcı `422` (şema ihlali) alır ve yanlış yola sevk edilir: "JSON'u düzelt" der, oysa
+sorun yetkidir. Bu yüzden `require_draft_lock` rotada, o kapılardan ÖNCE koşar. Asıl kapı
+hâlâ mutasyonun `WHERE`'inde — bu yalnız hata SIRASI içindir.
+
+(Uygulamada ortaya çıktı: duman testinde B'nin yayınlama denemesi 409 yerine 422 döndü.)
+
+### 3.2 Kapı, kontrol-sonra-yaz DEĞİL
 
 Kilit koşulu ayrı bir `SELECT` ile değil, mutasyonun kendi `WHERE` cümlesine eklenir.
 Repoda bu desen zaten var: `update_draft` `status='draft'` kapısını `WHERE`'de tutuyor ve

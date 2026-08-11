@@ -265,6 +265,8 @@ impl WfdAdapter {
         wfd_json: &Value,
         description: Option<&str>,
         tags: Option<&[String]>,
+        // T‑B4: kilit sahibinin kimliği — kapı repo::update_draft'ın WHERE'inde.
+        lock_user_id: Uuid,
     ) -> Result<(), crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "draft" {
@@ -276,13 +278,38 @@ impl WfdAdapter {
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         // DB status-gate'i ÖNCE koş: satırın hâlâ draft olduğunu atomik doğrular.
         // Eşzamanlı bir publish araya girerse artık immutable JSON'a dokunmayız.
-        repo::update_draft(&self.pool, wfd_id, version, description, tags).await?;
+        repo::update_draft(&self.pool, wfd_id, version, description, tags, lock_user_id).await?;
         self.storage
             .write(&meta.s3_key, bytes)
             .await
             .map_err(|e| crate::error::WfdError::Storage(e.to_string()))?;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
+    }
+
+    // ── T‑B4: taslak kilidi ────────────────────────────────────────────────
+    // İnce sarmalayıcılar: kilit mantığı SQL'de (repo), burada yalnız yönlendirme.
+
+    /// Kilidi alır ya da tazeler; güncel meta (kilit alanları dahil) döner.
+    pub async fn lock_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        orgtnt_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<crate::models::WfdMeta, crate::error::WfdError> {
+        repo::acquire_or_renew_lock(&self.pool, wfd_id, version, orgtnt_id, user_id).await
+    }
+
+    /// Kilidi bırakır — yalnız sahibi.
+    pub async fn unlock_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        orgtnt_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<(), crate::error::WfdError> {
+        repo::release_lock(&self.pool, wfd_id, version, orgtnt_id, user_id).await
     }
 
     /// Draft/pending bir WFD'yi **upload ile AYNI kapıdan** doğrular.
@@ -328,12 +355,18 @@ impl WfdAdapter {
         &self,
         wfd_id: Uuid,
         version: i32,
+        // T‑B4: yayınlamak da kilit ister — A'nın yarım işi B tarafından yayınlanmasın.
+        lock_user_id: Uuid,
     ) -> Result<(), crate::error::WfdError> {
+        // Kilit ÖNCE sorulur: yetkisi olmayana içerik hatası göstermek yanlış sırayı
+        // öğretir ("JSON'u düzelt" der, oysa sorun yetkidir). Asıl kapı set_published'ın
+        // WHERE'inde kalır — bu yalnız hata sırası.
+        repo::assert_lock_held(&self.pool, wfd_id, version, lock_user_id).await?;
         let json = self.fetch_draft_json(wfd_id, version).await?;
         let wfd = Wfd::from_value_checked(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.validate_for_release(wfd_id, version, &wfd).await?;
-        repo::set_published(&self.pool, wfd_id, version).await?;
+        repo::set_published(&self.pool, wfd_id, version, lock_user_id).await?;
         self.cache.write().await.remove(&(wfd_id, version));
         Ok(())
     }
@@ -345,12 +378,14 @@ impl WfdAdapter {
         wfd_id: Uuid,
         version: i32,
         submitted_by: &str,
+        lock_user_id: Uuid,
     ) -> Result<(), crate::error::WfdError> {
+        repo::assert_lock_held(&self.pool, wfd_id, version, lock_user_id).await?;
         let json = self.fetch_draft_json(wfd_id, version).await?;
         let wfd = Wfd::from_value_checked(json)
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
         self.validate_for_release(wfd_id, version, &wfd).await?;
-        repo::set_pending(&self.pool, wfd_id, version, submitted_by).await
+        repo::set_pending(&self.pool, wfd_id, version, submitted_by, lock_user_id).await
     }
 
     /// Onay bekleyeni yayınlar. Validator yeniden koşar (pending JSON immutable
@@ -551,6 +586,7 @@ impl WfdAdapter {
         &self,
         wfd_id: Uuid,
         version: i32,
+        lock_user_id: Uuid,
     ) -> Result<(), crate::error::WfdError> {
         let meta = repo::get_meta_any(&self.pool, wfd_id, version).await?;
         if meta.status != "draft" {
@@ -560,7 +596,7 @@ impl WfdAdapter {
         }
         // DB status-gate'i ÖNCE koş; ancak satır silinirse (hâlâ draft'tı)
         // storage'ı best-effort temizle. Eşzamanlı publish JSON'u korur.
-        repo::delete_draft(&self.pool, wfd_id, version).await?;
+        repo::delete_draft(&self.pool, wfd_id, version, lock_user_id).await?;
         let _ = self.storage.delete(&meta.s3_key).await;
         // Sidecar'lar da gider — aksi halde storage'da öksüz blob birikir.
         // (Layout bugüne kadar temizlenmiyordu; senaryo sidecar'ını eklerken
@@ -646,4 +682,5 @@ impl validator::WfdProvider for CalleeCatalog {
             .find(|w| w.id == wfd_id && version.map_or(true, |v| w.version == v))
             .cloned()
     }
+
 }

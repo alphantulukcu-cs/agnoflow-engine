@@ -1744,3 +1744,54 @@ karşılanır).
 
 Detay: `docs/superpowers/specs/2026-08-11-wf-admin-design.md`.
 Sözleşme özeti: CLAUDE.md "WF Admin (akış-içi yetkili)".
+
+## T‑B4 — WFD taslak kilidi: pessimistic (2026-08-11)
+
+**Sorun:** `save_draft`'ta eşzamanlılık denetimi yoktu — son yazan kazanıyordu. İki
+tasarımcı aynı taslağı açıp çalışırsa ikinci kaydeden birincinin emeğini sessizce siler.
+
+**Karar:** Pessimistic kilit. `wf.wfd_meta`'ya üç kolon (`lock_user_id`,
+`lock_acquired_at`, `lock_expires_at`) — AYRI TABLO DEĞİL, çünkü kilit taslakla 1:1 ve
+taslak zaten o satırdır; böylece kilit koşulu mutasyonun kendi `WHERE`'ine girebiliyor
+(kontrol-sonra-yaz açığı olmadan).
+
+**Alma ve tazeleme AYNI ifadedir** — tek `UPDATE`, `WHERE` cümlesi CAS:
+`(lock_user_id IS NULL OR lock_user_id = $user OR lock_expires_at <= now())`. Sıfır satır
+→ başkasında canlı kilit. `lock_acquired_at` tazelemede DEĞİŞMEZ (`COALESCE`): "bu kişi
+bu taslağı ne zamandır tutuyor" ancak böyle cevaplanır.
+
+**Süresi geçmiş kilit yok sayılır, SİLİNMEZ** — `lock_expires_at <= now()` koşulu onu
+zaten geçirir, süpürücüye gerek yok; kolonlar son sahibin izini taşımaya devam eder.
+
+**TTL 5 dakika ve tazeleme YALNIZ İNSAN eylemiyle olur** (kör zamanlayıcı YOK). Editör
+`T-60s`'de "Devam et / Kaydet / Kaydetmeden çık" sorar; `T-30s`'de cevap yoksa ÖNCE
+KAYDEDER sonra kilidi bırakır. Popup `T-0`'da değil `T-30s`'de karar verir: otomatik
+kaydetme tam bitiş anında koşarsa kilit düşmüş olabilir ve emeği kurtaracak mekanizma tam
+o anda `409` alır. Bu tasarım "açık ama idle sekme taslağı rehin alır" deliğini kapatır.
+
+**Kilit TÜM taslak mutasyonlarında zorunlu** (kaydet / yayınla / onaya gönder / sil):
+A kilidi tutup düzenlerken B yayınlarsa A'nın YARIM işi yayına çıkar — kaydetmeyi
+korumak tek başına yetmez. Onay/ret kilit İSTEMEZ (pending satır düzenlenemez).
+Başarılı publish/submit kilidi BIRAKIR.
+
+**`publish`/`submit` kilidi ROTADA da sorar** (`require_draft_lock`): o rotalar adapter'a
+girmeden belgeyi parse eden ön kapılar koşuyor (`assert_env_keys_defined`,
+`assert_attachment_storage_env`); kilit önce sorulmazsa yetkisiz kullanıcı `422` alır ve
+"JSON'u düzelt" gibi yanlış yola sevk edilir. Asıl kapı hâlâ mutasyonun `WHERE`'inde.
+
+**Kilit durumu `GET /draft/{id}/{ver}` yanıtına GÖMÜLMEZ**, ayrı `GET .../lock` ucu
+vardır: draft GET'i ham WFD belgesini döndürüyor ve kökü `additionalProperties: false` —
+kilit alanları belgeyi geçersiz kılardı.
+
+**İki hata kodu:** `draft.locked` (başkasında → kullanıcıya gösterilir) ve
+`draft.lock_required` (kimsede değil / sende değil → istemci kilidi alıp kendiliğinden
+tekrar dener). Tek kod olsaydı istemci ikisini metinden ayırmak zorunda kalırdı.
+
+**Bilinçli sözleşme kırılması:** kimse kilidi tutmuyorsa da kaydetme reddedilir; aksi
+halde kilit almayan iki istemci birbirini yine ezer ve mekanizma dekoratif kalır.
+Taslaklar agnoflow'a özgüdür (başka istemci taslak kaydetmez), etki yalnız editördedir.
+
+**Zorla açma (`?force=true`) EKLENMEDİ:** gözetimsiz kilit 5 dakikada kendiliğinden
+düşer, klasik "çöken sekme" vakası yok. Seam hazır — `DELETE .../lock`'a admin dalı.
+
+Detay: `docs/superpowers/specs/2026-08-11-draft-kilidi-design.md`.

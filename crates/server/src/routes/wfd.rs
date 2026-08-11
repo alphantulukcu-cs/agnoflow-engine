@@ -29,6 +29,7 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(dashboard_summary))
         .routes(routes!(create_draft))
         .routes(routes!(get_draft, save_draft, delete_draft))
+        .routes(routes!(get_draft_lock, lock_draft, unlock_draft))
         .routes(routes!(publish_draft))
         .routes(routes!(submit_draft))
         .routes(routes!(approve_draft))
@@ -547,6 +548,108 @@ struct SaveDraftBody {
     tags: Option<Vec<String>>,
 }
 
+/// T‑B4: rota seviyesinde kilit ön kapısı.
+///
+/// Neden adapter'daki kontrol yetmiyor: `publish`/`submit` rotaları adapter'a GİRMEDEN
+/// belgeyi parse eden ön kapılar koşuyor (`assert_env_keys_defined`,
+/// `assert_attachment_storage_env`). Kilit sorulmadan onlara girilirse, yayınlama
+/// yetkisi olmayan kullanıcıya içerik hatası (422) döner ve yanlış yol gösterilir:
+/// "JSON'u düzelt" der, oysa sorun yetkidir. Asıl kapı hâlâ mutasyonun `WHERE`'inde.
+async fn require_draft_lock(
+    s: &AppState,
+    auth: &AppAuth,
+    wfd_id: Uuid,
+    version: i32,
+) -> Result<(), AppError> {
+    wf_wfd::repo::assert_lock_held(&s.pool, wfd_id, version, auth.user_id)
+        .await
+        .map_err(map_wfd_err)
+}
+
+/// T‑B4: taslak kilidi — AL ya da TAZELE (tek uç, tek SQL ifadesi).
+///
+/// Kilit sahibi zaten sen isen bu çağrı tazelemedir; bu yüzden istemcinin "aldım mı,
+/// tazeliyor muyum" ayrımını yapması gerekmez.
+#[utoipa::path(post, path = "/draft/{id}/{version}/lock", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses(
+        (status = 200, description = "Kilit sende — lock_expires_at ile", body = serde_json::Value),
+        (status = 409, description = "Başkasında (draft.locked) veya satır draft değil"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn lock_draft(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    let meta = s
+        .wfd
+        .lock_draft(id, ver, auth.orgtnt_id, auth.user_id)
+        .await
+        .map_err(map_wfd_err)?;
+    Ok(Json(serde_json::json!({
+        "lock_user_id": meta.lock_user_id,
+        "lock_acquired_at": meta.lock_acquired_at,
+        "lock_expires_at": meta.lock_expires_at,
+    })))
+}
+
+/// T‑B4: kilit durumunu OKUR (yan etkisiz).
+///
+/// Neden `GET /draft/{id}/{ver}` yanıtına gömülmedi: o uç HAM WFD BELGESİNİ döndürüyor
+/// ve belgenin kökü `additionalProperties: false` — kilit alanlarını içine koymak
+/// editörün şema doğrulamasında belgeyi geçersiz kılardı. Kilit durumu belgenin bir
+/// parçası değil, satırın bir özelliğidir; ayrı uç bu ayrımı korur.
+#[utoipa::path(get, path = "/draft/{id}/{version}/lock", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses((status = 200, description = "Kilit durumu (serbestse alanlar null)", body = serde_json::Value)),
+    security(("bearer_jwt" = [])))]
+async fn get_draft_lock(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    let meta = wf_wfd::repo::get_meta_any(&s.pool, id, ver)
+        .await
+        .map_err(map_wfd_err)?;
+    // Süresi geçmiş kilit SERBEST gösterilir: DB'de satır duruyor ama kapılar onu
+    // geçiriyor — istemciye "kilitli" demek yanlış bilgi olurdu.
+    let live = meta
+        .lock_expires_at
+        .is_some_and(|e| e > chrono::Utc::now());
+    Ok(Json(serde_json::json!({
+        "locked": live,
+        "lock_user_id": live.then_some(meta.lock_user_id).flatten(),
+        "lock_acquired_at": live.then_some(meta.lock_acquired_at).flatten(),
+        "lock_expires_at": live.then_some(meta.lock_expires_at).flatten(),
+        "mine": live && meta.lock_user_id == Some(auth.user_id),
+    })))
+}
+
+/// T‑B4: kilidi bırakır — YALNIZ sahibi. Başkası çağırırsa kilit düşmez (409):
+/// aksi halde bu uç zorla-açma ucuna dönüşürdü.
+#[utoipa::path(delete, path = "/draft/{id}/{version}/lock", tag = "wfd",
+    params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
+    responses(
+        (status = 204, description = "Bırakıldı"),
+        (status = 409, description = "Kilit sende değil (draft.locked)"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn unlock_draft(
+    State(s): State<AppState>,
+    auth: AppAuth,
+    Path((id, ver)): Path<(Uuid, i32)>,
+) -> Result<StatusCode, AppError> {
+    require_design_on_wfd(&s, &auth, id, ver).await?;
+    s.wfd
+        .unlock_draft(id, ver, auth.orgtnt_id, auth.user_id)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(map_wfd_err)
+}
+
 #[utoipa::path(put, path = "/draft/{id}/{version}", tag = "wfd",
     params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")), request_body = SaveDraftBody,
     responses((status = 204, description = "Kaydedildi")),
@@ -564,7 +667,7 @@ async fn save_draft(
     super::db::assert_no_foreign_local_connections(&s.pool, meta.project_id, &meta.name, &b.wfd)
         .await?;
     s.wfd
-        .save_draft(id, ver, &b.wfd, b.description.as_deref(), b.tags.as_deref())
+        .save_draft(id, ver, &b.wfd, b.description.as_deref(), b.tags.as_deref(), auth.user_id)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(map_wfd_err)
@@ -612,10 +715,11 @@ async fn publish_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
     require_can_publish_wfd(&s, &auth, id, ver).await?;
+    require_draft_lock(&s, &auth, id, ver).await?;
     assert_env_keys_defined(&s, id, ver).await?;
     assert_attachment_storage_env(&s, id, ver).await?;
     s.wfd
-        .publish_draft(id, ver)
+        .publish_draft(id, ver, auth.user_id)
         .await
         .map(|_| Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "published" })))
         .map_err(map_wfd_err)
@@ -877,6 +981,7 @@ async fn submit_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
     require_design_on_wfd(&s, &auth, id, ver).await?;
+    require_draft_lock(&s, &auth, id, ver).await?;
     assert_attachment_storage_env(&s, id, ver).await?;
     // Token minimal kimlik taşır — gönderenin görünen adı DB'den çözülür.
     let submitted_by: String =
@@ -887,7 +992,7 @@ async fn submit_draft(
             .map_err(internal_error)?
             .unwrap_or_else(|| auth.user_id.to_string());
     s.wfd
-        .submit_draft(id, ver, &submitted_by)
+        .submit_draft(id, ver, &submitted_by, auth.user_id)
         .await
         .map(|_| {
             Json(serde_json::json!({ "wfd_id": id, "version": ver, "status": "pending_approval" }))
@@ -948,7 +1053,7 @@ async fn delete_draft(
 ) -> Result<StatusCode, AppError> {
     require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
-        .delete_draft(id, ver)
+        .delete_draft(id, ver, auth.user_id)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(map_wfd_err)
@@ -1703,6 +1808,19 @@ fn internal_error(e: impl std::fmt::Display) -> AppError {
 /// WfdError → HTTP kodu eşlemesi.
 fn map_wfd_err(e: wf_wfd::error::WfdError) -> AppError {
     use wf_wfd::error::WfdError as E;
+    // T‑B4: taslak kilidi çakışmaları makine kodu taşır. `Conflict`'in metni bu iki
+    // durumda bir KOD'dur (mesaj değil) — beyaz liste dışındaki çakışmalar mevcut
+    // davranışlarını korur, çünkü onların metni bilgi taşıyor ("... draft değil").
+    if let E::Conflict(marker) = &e {
+        if let Some((message, code)) = draft_lock_conflict(marker) {
+            return AppError {
+                message: message.to_string(),
+                status: StatusCode::CONFLICT,
+                code: Some(code),
+                items: None,
+            };
+        }
+    }
     let code = match e {
         E::NotFound(_) => StatusCode::NOT_FOUND,
         E::Conflict(_) => StatusCode::CONFLICT,
@@ -1710,4 +1828,74 @@ fn map_wfd_err(e: wf_wfd::error::WfdError) -> AppError {
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
     AppError(e.to_string(), code)
+}
+
+/// Kilit çakışması işaretini insan mesajı + `&'static str` koda bağlar.
+///
+/// İki kod AYRIDIR çünkü istemci farklı davranır: `draft.locked` kullanıcıya gösterilir
+/// ("Ahmet'te"), `draft.lock_required` ise kilidi alıp isteği kendiliğinden tekrar
+/// denemeyi tetikler. Tek kod olsaydı istemci ikisini metinden ayırmak zorunda kalırdı.
+fn draft_lock_conflict(marker: &str) -> Option<(&'static str, &'static str)> {
+    match marker {
+        "draft.locked" => Some((
+            "Bu taslak şu an başka bir kullanıcıda açık. Kilit bilgisini taslak \
+             detayından görebilirsiniz.",
+            "draft.locked",
+        )),
+        "draft.lock_required" => Some((
+            "Taslağı değiştirmek için önce kilidi almanız gerekir.",
+            "draft.lock_required",
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod lock_error_tests {
+    use super::*;
+    use wf_wfd::error::WfdError;
+
+    /// T‑B4: kilit çakışması makine kodu taşır — istemci ayrımı METİNDEN yapmaz
+    /// (WOR-62 duruşu). İki kod ayrıdır çünkü istemci farklı davranır: `draft.locked`
+    /// kullanıcıya gösterilir, `draft.lock_required` kilit alıp KENDİLİĞİNDEN tekrar
+    /// denemeyi tetikler.
+    #[test]
+    fn lock_conflicts_carry_machine_codes() {
+        for (marker, expected) in [
+            ("draft.locked", "draft.locked"),
+            ("draft.lock_required", "draft.lock_required"),
+        ] {
+            let app = map_wfd_err(WfdError::Conflict(marker.into()));
+            assert_eq!(app.status, StatusCode::CONFLICT);
+            assert_eq!(app.code, Some(expected), "marker: {marker}");
+            assert!(
+                !app.message.contains(marker),
+                "kullanıcıya makine kodu değil insan mesajı gösterilir: {}",
+                app.message
+            );
+        }
+    }
+
+    /// Beyaz liste dışı çakışma kodsuz kalır ve METNİ korunur: mevcut çakışma
+    /// mesajları ("... draft değil" gibi) bilgi taşıyor, genel bir metinle
+    /// değiştirilmeleri hata ayıklamayı zorlaştırırdı.
+    #[test]
+    fn other_conflicts_keep_their_message_and_have_no_code() {
+        let app = map_wfd_err(WfdError::Conflict("abc v1 draft değil".into()));
+        assert_eq!(app.status, StatusCode::CONFLICT);
+        assert_eq!(app.code, None);
+        assert!(app.message.contains("draft değil"));
+    }
+
+    #[test]
+    fn other_variants_keep_their_status() {
+        assert_eq!(
+            map_wfd_err(WfdError::NotFound("x".into())).status,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            map_wfd_err(WfdError::InvalidJson("x".into())).status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
 }

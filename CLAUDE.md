@@ -293,6 +293,32 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
 - Detay/reddedilen alternatifler için spec dosyasına bak; kod ile spec çeliştiğinde KOD
   esastır.
 
+## WFD taslak kilidi (T‑B4, pessimistic)
+
+Tasarım: `docs/superpowers/specs/2026-08-11-draft-kilidi-design.md`; karar kaydı
+`docs/spec/decisions.md` "T‑B4".
+
+- **Kilit `wf.wfd_meta`'da üç kolon** (`lock_user_id` / `lock_acquired_at` /
+  `lock_expires_at`), ayrı tablo DEĞİL — kilit koşulu mutasyonun kendi `WHERE`'ine
+  girsin (kontrol-sonra-yaz açığı olmasın).
+- **Alma = tazeleme**: tek `UPDATE`, `WHERE` cümlesi CAS. `lock_acquired_at` tazelemede
+  DEĞİŞMEZ (`COALESCE`). Süresi geçmiş kilit yok sayılır, SİLİNMEZ (süpürücü yok).
+- **TTL 5 dk, tazeleme YALNIZ insan eylemiyle** — kör zamanlayıcı yok. Editör `T-60s`'de
+  sorar, `T-30s`'de cevap yoksa ÖNCE KAYDEDER sonra bırakır. `T-0`'da karar vermek
+  otomatik kaydetmeyi kilidin düştüğü ana denk getirir ve `409` alır.
+- **Tüm taslak mutasyonları kilit ister** (kaydet/yayınla/onaya gönder/sil); onay/ret
+  İSTEMEZ (pending düzenlenemez). Başarılı publish/submit kilidi bırakır.
+  **Kaydetmek tazelemektir.**
+- `publish`/`submit`'te kilit **ROTADA da** sorulur (`require_draft_lock`): o rotaların
+  ön kapıları adapter'a girmeden belgeyi parse ediyor, kilit sorulmazsa yetkisiz
+  kullanıcı 422 alıp yanlış yola sevk edilir.
+- **Kilit durumu draft GET'ine GÖMÜLMEZ** (`GET .../lock` ayrı uç): draft GET'i ham WFD
+  belgesi döndürür, kökü `additionalProperties: false`.
+- İki kod: `draft.locked` (başkasında, kullanıcıya gösterilir) · `draft.lock_required`
+  (kimsede değil/sende değil → istemci kilidi alıp kendiliğinden tekrar dener).
+- **Kilitsiz kaydetme REDDEDİLİR** — bilinçli sözleşme kırılması; aksi halde kilit
+  almayan iki istemci birbirini yine ezer.
+
 ## WF Admin (akış-içi yetkili) — `wfd.wf_admin[]`
 
 Tasarım: `docs/superpowers/specs/2026-08-11-wf-admin-design.md`; karar kaydı

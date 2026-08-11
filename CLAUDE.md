@@ -239,13 +239,30 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
   `to_node`/`current_node`'dan), `GET /wfe/:id` cevabına `WfeView.path` (`Vec<PathStep>`)
   ile sunulur; seam `crates/wfe/src/executor.rs`'deki `WfahPathSource` trait'i + boş
   dönen `NoWfahPath` (store'suz testleri etkilemesin diye).
-- **draft → (dosya) → publish** deseni (K5): `POST /wfe/:id/notes` draft yaratır (yalnız
-  yazarı görür) → istenirse `PUT .../notes/:note_id/files` ile dosya → yayınlama iki
-  yoldan: aksiyonla (`POST /wfe/:id/actions` gövdesinde `note_id`, `ApplyBody.note_id`) ya
-  da serbest (`POST .../notes/:note_id/publish`). Aksiyonla yayınlamada çapa apply'ın
-  ÜRETTİĞİ `wfah_seq`'dir, `node` geçişin `from_node`'udur (notun yazıldığı adım). Apply
-  BAŞARILI ama not yayınlanamazsa cevaba `note_error` eklenir, **aksiyon geri alınmaz** —
-  not draft kalır, kullanıcı tekrar yayınlar (`routes/wfe.rs::apply_action`).
+- **draft → (dosya) → AKSİYONLA publish** deseni (K5): `POST /wfe/:id/notes` draft yaratır
+  (yalnız yazarı görür) → istenirse `PUT .../notes/:note_id/files` ile dosya → yayın
+  **yalnız aksiyonla** olur (`POST /wfe/:id/actions` gövdesinde `note_id`,
+  `ApplyBody.note_id`). Çapa apply'ın ÜRETTİĞİ `wfah_seq`'dir, `node` geçişin
+  `from_node`'udur (notun yazıldığı adım). Apply BAŞARILI ama not yayınlanamazsa cevaba
+  `note_error` eklenir, **aksiyon geri alınmaz** — not draft kalır, kullanıcı tekrar
+  yayınlar (`routes/wfe.rs::apply_action`).
+- **Not/dosya EKLEMEK claim ister; SERBEST yayın YOK** (2026-08-11 kuralı): kural sahibinin
+  ifadesiyle "not yazılır, dosya eklenir, aksiyon alındığında bunlar yayınlanır; claim
+  etmeden, aksiyon almadan not ve dosya eklenemez".
+  - Kapı `notes::assert_actor_holds_claim` — create note / draft güncelleme / dosya yükleme
+    uçlarında (İKİ route ağacında da), 409 `note.requires_claim`. `Engine::apply` §7.1'in
+    sorduğu soruyu sorar (`NotClaimed`/`NotOwner`): not ekleyebilen, aksiyonu da alabilendir.
+    Paralel modda WFE-seviyesi `claimed_by` ANLAMSIZDIR — aktif kollardan biri o aktörde
+    olmalı. Saf çekirdeği `holds_claim` (birim testli).
+  - Okuma / okundu işaretleme / kendi taslağını silme / published notu gizleme claim
+    İSTEMEZ: claim düştükten sonra da kendi taslağını temizleyebilmeli.
+  - `POST .../notes/:note_id/publish` ucu DURUYOR ama artık serbest yayın değil, yalnız
+    `note_error` telafisidir (`notes::republish_after_apply`): WFE'nin EN SON wfah kaydı
+    çağıran aktörün olmalı (409 `note.requires_action`), yayın o kayda çapalanır. Böylece
+    YAYINLANMIŞ HER NOT bir aksiyona bağlıdır (`wfah_seq` NULL olmaz); `notes::publish`
+    modül-içine alındı (`pub` değil) ki çapasız yayın yeni bir çağıran kazanmasın.
+  - Portal karşılığı: "Serbest not" kartı ve timeline'daki "Yayınla" düğmesi KALDIRILDI; not
+    kutusu yalnız aksiyon composer'ında ve claim yoksa kilitli (`NoteComposer.locked`).
 - **Değişmezlik (K3)**: yayınlanmış not `body` üzerinde UPDATE edilmez. Silme yerine
   gizleme: `hidden_at`/`hidden_by` dolar, gövde DB'de kalır, API `{hidden:true}` döner.
   Gizleme YALNIZ yazarı yapabilir (WFE'yi görebilen herkes değil — aksi halde karar delili

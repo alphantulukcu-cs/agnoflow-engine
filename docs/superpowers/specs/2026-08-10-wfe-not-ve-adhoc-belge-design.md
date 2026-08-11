@@ -94,10 +94,27 @@ kimliği olmak zorundadır. Aynı problem başlatma-öncesi belge yüklemesinde 
 
 1. `POST /wfe/:id/notes` → **draft** not, yalnız yazarı görür → `note_id`
 2. (opsiyonel) `PUT /wfe/:id/notes/:note_id/files` → dosya, n kez
-3. Yayınlama iki yoldan:
-   - **Aksiyonla:** `POST /wfe/:id/actions` gövdesinde `note_id`. Engine commit **başarılıysa**
-     not `published` olur, `wfah_seq` = commit'in ürettiği seq, `node` = geçişin `from_node`'u.
-   - **Serbest:** `POST /wfe/:id/notes/:note_id/publish` — aksiyona bağlı olmayan not.
+3. Yayınlama **YALNIZ aksiyonla:** `POST /wfe/:id/actions` gövdesinde `note_id`. Engine commit
+   **başarılıysa** not `published` olur, `wfah_seq` = commit'in ürettiği seq, `node` = geçişin
+   `from_node`'u.
+
+**2026-08-11 revizyonu (kural sahibinden):** "not yazılır, dosya eklenir, AKSİYON ALINDIĞINDA
+bunlar yayınlanır; claim etmeden, aksiyon almadan not ve dosya eklenemez."
+
+- **Serbest yayın KALDIRILDI.** Başlangıçtaki ikinci yol (aksiyona bağlı olmayan
+  `POST .../publish`, `wfah_seq = NULL`) kalktı: yayınlanmış her not artık bir aksiyona
+  çapalıdır. `POST .../publish` ucu duruyor ama sözleşmesi daraldı — yalnız "apply BAŞARILI
+  oldu, not yayınlanamadı (`note_error`)" arızasının telafisidir ve WFE'nin EN SON wfah
+  kaydının çağıran aktöre ait olmasını ŞART koşar (409 `note.requires_action`).
+  Uygulama: `notes::republish_after_apply`; `notes::publish` artık modül-içi (`pub` değil).
+- **Not/dosya EKLEMEK claim ister** (`notes::assert_actor_holds_claim`; create note, draft
+  güncelleme, dosya yükleme). Kapı `Engine::apply` §7.1'in sorduğu soruyu sorar
+  (`NotClaimed`/`NotOwner`) — 409 `note.requires_claim`. Gerekçe: yayını aksiyona bağladıktan
+  sonra, claim'i olmayan aktörün taslağı HİÇBİR zaman yayınlanamaz; K6 görünürlüğü tek kapı
+  bırakılsaydı sistem yalnızca süpürücüye yem üretirdi. Paralel modda WFE-seviyesi `claimed_by`
+  anlamsızdır: aktif kollardan biri o aktörde olmalı.
+- **Claim İSTEMEYENLER**: okuma uçları, okundu işaretleme, kendi taslağını silme / published
+  notu gizleme. Claim düştükten sonra da kendi taslağını temizleyebilmeli.
 
 Apply 422/409 alırsa not draft kalır; kullanıcı düzeltip tekrar dener. Yayınlama motorun
 transaction'ının **içinde değil, sonrasındadır** — `WfeStore::commit`'in atomikliğine
@@ -229,12 +246,12 @@ Her uç **iki route ağacında** da yaşar (kod tekrarı değil, ortak modül + 
 
 | Uç | Açıklama |
 |---|---|
-| `POST   /wfe/:id/notes` | Draft not yarat → `note_id` |
-| `PATCH  /wfe/:id/notes/:note_id` | Draft gövdesini düzenle (yalnız yazarı, yalnız draft) |
-| `DELETE /wfe/:id/notes/:note_id` | Draft sil / published gizle (`hidden_at`) |
-| `POST   /wfe/:id/notes/:note_id/publish` | Serbest not yayınla (aksiyonsuz) |
+| `POST   /wfe/:id/notes` | Draft not yarat → `note_id` (2026-08-11: claim ŞART) |
+| `PATCH  /wfe/:id/notes/:note_id` | Draft gövdesini düzenle (yalnız yazarı, yalnız draft; claim ŞART) |
+| `DELETE /wfe/:id/notes/:note_id` | Draft sil / published gizle (`hidden_at`) — claim istemez |
+| `POST   /wfe/:id/notes/:note_id/publish` | 2026-08-11: yalnız apply sonrası yeniden deneme (son wfah kaydı çağıranın olmalı) |
 | `GET    /wfe/:id/notes` | Görünür notlar + dosya metadata, `wfah_seq` ile |
-| `PUT    /wfe/:id/notes/:note_id/files` | Dosya yükle (binary; `X-Filename` + `Content-Type`) |
+| `PUT    /wfe/:id/notes/:note_id/files` | Dosya yükle (binary; `X-Filename` + `Content-Type`; claim ŞART) |
 | `GET    /wfe/:id/notes/:note_id/files/:file_id` | İndir |
 | `DELETE /wfe/:id/notes/:note_id/files/:file_id` | Sil (yalnız draft) |
 

@@ -9,6 +9,12 @@
 //! göremeyen aktör notu da göremez/değiştiremez (403/404). Draft'a özgü ek
 //! kısıtlar (yalnız yazarı düzenler/siler/yayınlar/dosya ekler-siler) `crate::notes`
 //! içindedir.
+//!
+//! 2026-08-11 kuralı: not/dosya EKLEME claim ister (`notes::assert_actor_holds_claim`
+//! — create/update/file-upload) ve yayın yalnız AKSİYONLA olur; serbest yayın
+//! kaldırıldı (`publish_note` artık yalnız apply sonrası yeniden denemedir).
+//! Silme/gizleme ve okuma uçları claim İSTEMEZ — kendi taslağını temizlemek claim
+//! düştükten sonra da mümkün kalmalı.
 
 use crate::{error::AppError, notes, state::AppState};
 use axum::{
@@ -57,7 +63,10 @@ struct CreateNoteResult {
 #[utoipa::path(post, path = "/{id}/notes", tag = "notes",
     params(("id" = Uuid, Path, description = "WFE id")),
     request_body = CreateNoteBody,
-    responses((status = 200, description = "Draft not oluşturuldu — yalnız yazarı görür", body = CreateNoteResult)),
+    responses(
+        (status = 200, description = "Draft not oluşturuldu — yalnız yazarı görür", body = CreateNoteResult),
+        (status = 409, description = "Aktör bu işi claim etmemiş (`note.requires_claim`)"),
+    ),
     security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn create_note(
     State(s): State<AppState>,
@@ -66,10 +75,12 @@ async fn create_note(
     Json(body): Json<CreateNoteBody>,
 ) -> Result<Json<CreateNoteResult>, AppError> {
     let actor = super::wfe::extract_actor(&headers)?;
-    s.executor
+    let view = s
+        .executor
         .query(wfe_id, &actor)
         .await
         .map_err(AppError::from)?;
+    notes::assert_actor_holds_claim(&view, &actor)?;
     let orgtnt_id = orgtnt_of(&s, &actor).await?;
     let note_id =
         notes::create_draft(&s.pool, wfe_id, orgtnt_id, &actor, body.body, body.audience).await?;
@@ -134,7 +145,10 @@ struct UpdateNoteBody {
         ("note_id" = Uuid, Path, description = "Not id"),
     ),
     request_body = UpdateNoteBody,
-    responses((status = 204, description = "Güncellendi (yalnız draft, yalnız yazarı)")),
+    responses(
+        (status = 204, description = "Güncellendi (yalnız draft, yalnız yazarı)"),
+        (status = 409, description = "Aktör bu işi claim etmemiş (`note.requires_claim`)"),
+    ),
     security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn update_note(
     State(s): State<AppState>,
@@ -143,10 +157,12 @@ async fn update_note(
     Json(body): Json<UpdateNoteBody>,
 ) -> Result<StatusCode, AppError> {
     let actor = super::wfe::extract_actor(&headers)?;
-    s.executor
+    let view = s
+        .executor
         .query(wfe_id, &actor)
         .await
         .map_err(AppError::from)?;
+    notes::assert_actor_holds_claim(&view, &actor)?;
     notes::update_draft(&s.pool, wfe_id, note_id, &actor, body.body).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -172,12 +188,18 @@ async fn delete_note(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Yayın-DIŞI tek yol: apply BAŞARILI oldu ama not yayınlanamadı (`note_error`)
+/// → yeniden dene. Serbest (aksiyona bağlı olmayan) yayın KALDIRILDI — bkz.
+/// `notes::republish_after_apply`.
 #[utoipa::path(post, path = "/{id}/notes/{note_id}/publish", tag = "notes",
     params(
         ("id" = Uuid, Path, description = "WFE id"),
         ("note_id" = Uuid, Path, description = "Not id"),
     ),
-    responses((status = 204, description = "Serbest yayınlama (aksiyona bağlı değil)")),
+    responses(
+        (status = 204, description = "Son aksiyona çapalanarak yayınlandı (apply sonrası yeniden deneme)"),
+        (status = 409, description = "Son wfah kaydı bu aktörün değil (`note.requires_action`)"),
+    ),
     security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
 async fn publish_note(
     State(s): State<AppState>,
@@ -189,7 +211,7 @@ async fn publish_note(
         .query(wfe_id, &actor)
         .await
         .map_err(AppError::from)?;
-    notes::publish(&s.pool, wfe_id, note_id, &actor, None, None).await?;
+    notes::republish_after_apply(&s.pool, wfe_id, note_id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -228,7 +250,7 @@ fn filename_of(headers: &HeaderMap) -> String {
     request_body(content = Vec<u8>, description = "Dosya içeriği (binary); ad `X-Filename` header'ından, tip `Content-Type`'tan okunur"),
     responses(
         (status = 200, description = "Dosya eklendi", body = NoteFileUploadResult),
-        (status = 409, description = "Not draft değil (`note.immutable`)"),
+        (status = 409, description = "Not draft değil (`note.immutable`) ya da aktör claim etmemiş (`note.requires_claim`)"),
         (status = 413, description = "Dosya çok büyük (`note.too_large`)"),
         (status = 415, description = "İzin verilmeyen içerik tipi (`note.unsupported_type`)"),
         (status = 422, description = "Kota aşıldı ya da $env'de depo tanımsız (`attachment_storage.missing_env`)"),
@@ -241,10 +263,12 @@ async fn upload_note_file(
     body: Bytes,
 ) -> Result<Json<NoteFileUploadResult>, AppError> {
     let actor = super::wfe::extract_actor(&headers)?;
-    s.executor
+    let view = s
+        .executor
         .query(wfe_id, &actor)
         .await
         .map_err(AppError::from)?;
+    notes::assert_actor_holds_claim(&view, &actor)?;
     if body.is_empty() {
         return Err(AppError(
             "boş dosya yüklenemez".into(),

@@ -33,6 +33,7 @@ use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::v22::ports::BranchStatus;
 
 /// Not hedefleme (K9). `{"kind":"all"}` (varsayılan) → herkes (WFE'yi
 /// görebilen); `{"kind":"users","ids":[...]}` → yalnız listelenen
@@ -418,11 +419,16 @@ pub async fn update_draft(
     Ok(())
 }
 
-/// Draft'ı yayınlar — motorun defterine (`wf.wfah`) çapa atar (K5/K7).
-/// `wfah_seq`/`node` `None` ise SERBEST not (aksiyona bağlı değil). `status`
-/// `draft` değilse 409 `note.not_draft` (zaten yayınlanmış notu tekrar
-/// yayınlama girişimi).
-pub async fn publish(
+/// Draft'ı yayınlar — motorun defterine (`wf.wfah`) çapa atar (K5/K7). `status`
+/// `draft` değilse 409 `note.not_draft` (zaten yayınlanmış notu tekrar yayınlama
+/// girişimi).
+///
+/// **`pub` DEĞİL** (2026-08-11): serbest yayın (`wfah_seq`/`node` = `None`,
+/// aksiyona bağlı olmayan not) KALDIRILDI — dışa açık tek yayın yolu
+/// `publish_after_apply`/`republish_after_apply`, ikisi de çapa geçer. İmza hâlâ
+/// `Option` alıyor çünkü apply'ın `from_node`'u NULL olabilir (fork/join sistem
+/// geçişleri); `wfah_seq: None` çağrısı artık bu modülde bile yapılmaz.
+async fn publish(
     pool: &PgPool,
     wfe_id: Uuid,
     note_id: Uuid,
@@ -730,7 +736,10 @@ pub async fn add_file(
         ));
     }
     let used_bytes: i64 = sqlx::query_scalar(
-        "SELECT coalesce(sum(f.size_bytes), 0) FROM wf.wfe_note_file f \
+        // `sum(bigint)` Postgres'te NUMERIC döner (taşma koruması) — `i64` decode'u
+        // "mismatched types" ile patlar. Kota zaten `bigint` sınırının çok altında,
+        // toplam güvenle geri daraltılır.
+        "SELECT coalesce(sum(f.size_bytes), 0)::bigint FROM wf.wfe_note_file f \
            JOIN wf.wfe_note n ON n.note_id = f.note_id \
           WHERE n.wfe_id = $1",
     )
@@ -945,19 +954,7 @@ pub async fn publish_after_apply(
     note_id: Uuid,
     actor: &Actor,
 ) -> Result<(), AppError> {
-    #[derive(sqlx::FromRow)]
-    struct LastWfah {
-        seq: i32,
-        from_node: Option<String>,
-    }
-    let row = sqlx::query_as::<_, LastWfah>(
-        "SELECT seq, from_node FROM wf.wfah WHERE wfe_id = $1 ORDER BY seq DESC LIMIT 1",
-    )
-    .bind(wfe_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(db_err)?
-    .ok_or_else(|| AppError("wfah kaydı bulunamadı".into(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    let row = last_wfah(pool, wfe_id).await?;
     publish(
         pool,
         wfe_id,
@@ -967,6 +964,147 @@ pub async fn publish_after_apply(
         row.from_node.as_deref(),
     )
     .await
+}
+
+/// WFE'nin EN SON defter satırı — `publish_after_apply`ın çapası ve
+/// `republish_after_apply`ın kapısı aynı satırdan okunur.
+#[derive(sqlx::FromRow)]
+struct LastWfah {
+    seq: i32,
+    from_node: Option<String>,
+    /// `wf.wfah.actor` jsonb'sinden çıkarılan `user_id` (sistem satırlarında nil UUID).
+    actor_user_id: Option<Uuid>,
+}
+
+async fn last_wfah(pool: &PgPool, wfe_id: Uuid) -> Result<LastWfah, AppError> {
+    sqlx::query_as::<_, LastWfah>(
+        "SELECT seq, from_node, (actor->>'user_id')::uuid AS actor_user_id \
+           FROM wf.wfah WHERE wfe_id = $1 ORDER BY seq DESC LIMIT 1",
+    )
+    .bind(wfe_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_err)?
+    .ok_or_else(|| AppError("wfah kaydı bulunamadı".into(), StatusCode::INTERNAL_SERVER_ERROR))
+}
+
+/// Aksiyondan BAĞIMSIZ yayının (eski `POST .../publish`, çapasız not) yerini alan
+/// TEK istisna (2026-08-11): apply BAŞARILI oldu ama nota çapa yazımı düştü
+/// (`ApplyResult.note_error`) — aksiyon geri alınmadığı için not draft kaldı ve
+/// kullanıcıya yeniden deneme yolu bırakılır.
+///
+/// Kapı: WFE'nin EN SON wfah satırı BU aktörün olmalı. Böylece uç "az önce aksiyon
+/// alan kişinin, o aksiyona çapalanacak notu" ile sınırlı kalır; aksiyon almadan
+/// not yayınlamanın yolu yoktur (409 `note.requires_action`). Çapa da o satırdır —
+/// artık YAYINLANMIŞ HER NOT bir aksiyona bağlıdır (`wfah_seq` NULL olmaz).
+///
+/// Kabul edilen sınır: aynı aktör apply'dan sonra BAŞKA bir draft'ını da bu uçtan
+/// yayınlayabilir (sunucu "hangi draft o apply'a gönderilmişti"yi bilmez — apply
+/// yolu `note_id`'yi kalıcı olarak işaretlemiyor). Yayın yine gerçek bir aksiyona
+/// çapalanır ve yine yalnız notun yazarı yapabilir; delil zincirinde boşluk açmaz.
+pub async fn republish_after_apply(
+    pool: &PgPool,
+    wfe_id: Uuid,
+    note_id: Uuid,
+    actor: &Actor,
+) -> Result<(), AppError> {
+    let row = last_wfah(pool, wfe_id).await?;
+    if row.actor_user_id != Some(actor.user_id) {
+        return Err(AppError {
+            message: "not yalnız bir aksiyonla yayınlanır — bu işte son aksiyon size ait değil"
+                .into(),
+            status: StatusCode::CONFLICT,
+            code: Some("note.requires_action"),
+            items: None,
+        });
+    }
+    publish(
+        pool,
+        wfe_id,
+        note_id,
+        actor,
+        Some(row.seq),
+        row.from_node.as_deref(),
+    )
+    .await
+}
+
+/// K5 (2026-08-11 kuralı): not/dosya EKLEMEK claim ister. Not "bu adımı şu
+/// gerekçeyle yaptım" kaydıdır ve yayınlanması aksiyona bağlıdır — işi üstlenmemiş
+/// bir aktörün bıraktığı taslak hiçbir zaman yayınlanamaz (çapası olacak apply'ı o
+/// aktör alamaz), 24 saat sonra süpürücüye kalırdı. Kapı `Engine::apply`'ın §7.1
+/// assignment kontrolüyle AYNI soruyu sorar (`NotClaimed`/`NotOwner`): not
+/// ekleyebilen, aksiyonu da alabilendir.
+///
+/// Paralel modda WFE-seviyesi `claimed_by` ANLAMSIZDIR (fork `current_node`'u
+/// NULL'lar, claim kol-bazlıdır) — AKTİF kollardan en az biri bu aktörde olmalı.
+/// Çağıran taraf zaten `executor.query` ile görünürlüğü doğruladı (K6); bu kapı
+/// onun ÜSTÜNE biner, yerine geçmez.
+pub fn assert_actor_holds_claim(
+    view: &wf_wfe::executor::WfeView,
+    actor: &Actor,
+) -> Result<(), AppError> {
+    let active_branch_claimers: Vec<Uuid> = view
+        .branches
+        .iter()
+        .filter(|b| b.state.status == BranchStatus::Active)
+        .filter_map(|b| b.state.claimed_by)
+        .collect();
+    let holds = holds_claim(
+        view.join_target.is_some(),
+        view.claimed_by,
+        &active_branch_claimers,
+        actor.user_id,
+    );
+    if holds {
+        return Ok(());
+    }
+    Err(AppError {
+        message: "not/dosya eklemek için işi üstüne almalısınız (claim)".into(),
+        status: StatusCode::CONFLICT,
+        code: Some("note.requires_claim"),
+        items: None,
+    })
+}
+
+/// `assert_actor_holds_claim`ın SAF çekirdeği — `WfeView` kurmadan sınanabilsin diye
+/// ayrı (bu repoda DB'li test koşulmuyor, karar kuralı yine de test altında olmalı).
+fn holds_claim(
+    parallel: bool,
+    wfe_claimed_by: Option<Uuid>,
+    active_branch_claimers: &[Uuid],
+    user_id: Uuid,
+) -> bool {
+    if parallel {
+        active_branch_claimers.contains(&user_id)
+    } else {
+        wfe_claimed_by == Some(user_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::holds_claim;
+    use uuid::Uuid;
+
+    #[test]
+    fn single_branch_requires_the_wfe_claim() {
+        let me = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        assert!(holds_claim(false, Some(me), &[], me));
+        assert!(!holds_claim(false, None, &[], me), "claim yoksa not eklenemez");
+        assert!(!holds_claim(false, Some(other), &[], me), "claim başkasında");
+    }
+
+    #[test]
+    fn parallel_mode_ignores_wfe_level_claim() {
+        let me = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        // Fork'ta WFE-seviyesi claim ANLAMSIZDIR — kol claim'i olmadan kapı kapalı.
+        assert!(!holds_claim(true, Some(me), &[], me));
+        assert!(holds_claim(true, None, &[other, me], me), "aktif kollardan biri bende");
+        assert!(!holds_claim(true, None, &[other], me));
+    }
 }
 
 /// Yetim draft'ları süpürür (K5, TTL 24 saat) — kullanıcı yayınlamadan/silmeden

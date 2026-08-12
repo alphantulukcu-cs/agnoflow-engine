@@ -1189,13 +1189,13 @@ impl crate::executor::WfahPathSource for WfeAdapter {
     async fn load_wfah_path(
         &self,
         wfe_id: Uuid,
-    ) -> Result<Vec<crate::executor::PathStep>, EngineError> {
+    ) -> Result<Vec<crate::executor::PathRow>, EngineError> {
         let rows = repo::wfah::load_all(&self.pool, wfe_id)
             .await
             .map_err(db_err)?;
         Ok(rows
             .into_iter()
-            .map(|r| crate::executor::PathStep {
+            .map(|r| crate::executor::PathRow {
                 seq: r.seq as u32,
                 action: r.action,
                 from_node: r.from_node,

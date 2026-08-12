@@ -76,8 +76,9 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     let mut report = ValidationReport::default();
     check_calls(wfd, &mut report);
     check_uniqueness(wfd, &mut report);
-    check_slugs(wfd, &mut report);
+    check_shared_c_a(wfd, &mut report);
     check_cross_refs(wfd, &mut report);
+    check_global_targets(wfd, &mut report);
     check_start_rules(wfd, &mut report);
     check_wft_conditions(wfd, &mut report);
     check_graph(wfd, &mut report);
@@ -1158,30 +1159,29 @@ fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
             );
         }
     }
+    // Terminal id'si artık MAKİNE kimliğidir: gösterim `terminals[].label`e taşındı.
+    // Bu yüzden eski "isim" kuralı (case-insensitive benzersizlik) KALKTI — `onaylandi`
+    // ile `Onaylandi` farklı iki kimliktir, tıpkı node key'leri gibi. Yerine gelen
+    // kural desen + tam benzersizliktir.
     let mut terminal_ids = HashSet::new();
-    let mut terminal_ids_ci: HashMap<String, &str> = HashMap::new();
     for (i, t) in wfd.terminals.iter().enumerate() {
+        if !t.id.is_empty() && !t.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            report.error(
+                "terminal_id_pattern",
+                format!("terminals[{i}].id"),
+                format!(
+                    "terminal id '{}' deseni ihlal ediyor (^[a-zA-Z0-9_]+$) — kullanıcı metni \
+                     `label` alanına yazılır",
+                    t.id
+                ),
+            );
+        }
         if !terminal_ids.insert(t.id.clone()) {
             report.error(
-                "unique",
+                "terminal_id_dup",
                 format!("terminals[{i}]"),
                 format!("terminal id '{}' birden fazla kez tanımlı", t.id),
             );
-        }
-        // Terminal id'leri case-insensitive unique olmak zorunda (editor id = kullanıcı
-        // adı; "Start" ile "sTaRT" aynı isim sayılır).
-        let lower = t.id.to_lowercase();
-        if let Some(prev) = terminal_ids_ci.insert(lower, &t.id) {
-            if prev != t.id {
-                report.error(
-                    "unique",
-                    format!("terminals[{i}]"),
-                    format!(
-                        "terminal id '{}' ile '{}' büyük/küçük harf farkı hariç aynı",
-                        t.id, prev
-                    ),
-                );
-            }
         }
     }
     // node ve terminal id'leri global namespace'te çakışamaz
@@ -1196,38 +1196,57 @@ fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
     }
 }
 
-// ---- §2b: slug + canonical c_a uniqueness ----
+// ---- §2b (KALDIRILDI): node key ARTIK `slug(c_a)`dan TÜRETİLMEZ ----
+//
+// 2026-08-12: node kimliğini tasarımcı verir; `c_a` node'un bir ALANIDIR, kimliği değil.
+// Eski kural iki şeyi birden dayatıyordu ve ikisi de zarardı:
+//
+//   • `node key == slug(c_a)` → kimlik org yolunu (ORGTRVLANG) taşıyordu ve "bu adımı
+//     kim yapar"ı değiştirmek adımın KİMLİĞİNİ değiştiriyordu: koşan işler eski
+//     anahtarı gösterirken belge yeni anahtara geçiyordu.
+//   • `duplicate_c_a` → aynı kişinin iki farklı adımı olamıyordu ("müdür inceler" +
+//     "müdür onaylar" yazılamıyordu), çünkü ikisinin anahtarı aynı düşerdi.
+//
+// Anahtarın BİÇİMİ hâlâ zorlanıyor ama şemada: `nodes` `propertyNames: idName`
+// (`^[A-Za-z_][A-Za-z0-9_-]*$`). Benzersizlik zaten yapısaldır (JSON objesi anahtarı)
+// ve node/terminal ortak isim uzayı çakışması `check_uniqueness`te denetlenir.
+//
+// GERİYE UYUMLU: yalnız KISIT KALKTI, yeni bir kısıt gelmedi — `self__creditAnalyst`
+// gibi mevcut anahtarlar deseni zaten sağlıyor, hiçbir belge geçersizleşmez ve koşan
+// WFE'ler kendi belgelerindeki anahtarlarla çalışmaya devam eder. Veri taşıması YOK.
 
-fn check_slugs(wfd: &Wfd, report: &mut ValidationReport) {
-    for (key, node) in &wfd.nodes {
-        let slug = node.c_a.slug();
-        if key != &slug && !is_collision_suffixed(key, &slug) {
-            report.error(
-                "slug",
-                format!("nodes[{key}]"),
-                format!("node key '{key}' != slug(c_a) '{slug}'"),
-            );
-        }
-    }
+/// Aynı `c_a`'yı taşıyan iki node — HATA DEĞİL, UYARI (2026-08-12).
+///
+/// Eskiden hataydı, çünkü node kimliği `slug(c_a)`dan türüyordu ve iki node aynı
+/// anahtara düşerdi. Kimlik tasarımcıya geçince kural anlamını yitirdi, ama tamamen
+/// kaldırmak da yanlış: iki durumu ayırt etmek gerekiyor.
+///
+/// **Meşru:** paralel kollar. Kol kimliği node anahtarıdır (`BranchState.branch_node`);
+/// aynı havuzun İKİ KOLDA EŞZAMANLI beklemesi ancak iki ayrı node ile ifade edilebilir.
+/// Yasak olsaydı "müdür hem hukuk hem mali kolu onaylasın" çizilemezdi.
+///
+/// **Modelleme hatası:** ARDIŞIK adımlar. "Müdür inceler" ve "müdür nihai onayı verir"
+/// aynı havuzdur → AYNI node'dur; fark alınan AKSİYONDADIR ve aksiyonun `when`i ile
+/// (`$wfah` üzerinden "önceki aksiyon şuydu") ayrılır. İki node açmak akışı gereksizce
+/// çoğaltır ve geçmişe bakan koşulları bölerek okunmaz hale getirir.
+///
+/// Motor ikisini ayırt edemez (graf yapısına bakmadan bilinemez), bu yüzden karar
+/// tasarımcıya bırakılır: uyarı çıkar, yayın durmaz.
+fn check_shared_c_a(wfd: &Wfd, report: &mut ValidationReport) {
     let mut seen: HashMap<String, &String> = HashMap::new();
     for (key, node) in &wfd.nodes {
-        let canonical = node.c_a.canonical();
-        if let Some(prev) = seen.insert(canonical, key) {
-            report.error(
-                "duplicate_c_a",
+        if let Some(prev) = seen.insert(node.c_a.canonical(), key) {
+            report.warn(
+                "shared_c_a",
                 format!("nodes[{key}]"),
-                format!("aynı canonical c_a iki node'da: '{prev}' ve '{key}'"),
+                format!(
+                    "'{prev}' ve '{key}' AYNI c_a'yı taşıyor. Paralel kollarda bu \
+                     gereklidir; ardışık adımlarsa muhtemelen TEK node olmalı ve fark \
+                     aksiyonların `when` koşuluyla ($wfah) verilmelidir."
+                ),
             );
         }
     }
-}
-
-/// Collision durumunda editör `_<fnv1a16>` (4 hex) son eki ekler; validator kabul eder.
-fn is_collision_suffixed(key: &str, slug: &str) -> bool {
-    key.strip_prefix(slug)
-        .and_then(|rest| rest.strip_prefix('_'))
-        .map(|hex| hex.len() == 4 && hex.chars().all(|c| c.is_ascii_hexdigit()))
-        .unwrap_or(false)
 }
 
 // ---- §1: cross-reference ----
@@ -1297,6 +1316,12 @@ fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
 }
 
 fn check_wft_refs(wfd: &Wfd, wft: &Wft, path: &str, report: &mut ValidationReport) {
+    // GLB hedefleri KENDİ kodlarıyla denetlenir (`global_action_target_unknown`) —
+    // burada ikinci kez jenerik `cross_ref` basılsaydı tasarımcı aynı sorunu iki
+    // farklı isimle görürdü.
+    if matches!(wft, Wft::Targets { .. }) {
+        return;
+    }
     for (kind, target) in wft_targets(wft) {
         let known = match kind {
             TargetKind::Node => wfd.nodes.contains_key(target),
@@ -1322,11 +1347,105 @@ enum TargetKind {
     Terminal,
 }
 
+// ---- GLB (global aksiyon) — `wft: {targets}` ----
+
+/// GLB hedef listesinin denetimi. Hedef artık aksiyon ANAHTARINA kodlanmadığı için
+/// (`Geri_Gonder__gt__self__mudur` kalktı) hataların hepsi burada, tasarımcıya dönük
+/// adlarla yakalanır; runtime'ın gördüğü tek şey "listede var mı" sorusudur.
+fn check_global_targets(wfd: &Wfd, report: &mut ValidationReport) {
+    for t in &wfd.transitions {
+        let Wft::Targets { targets } = &t.wft else {
+            continue;
+        };
+        let path = format!("transitions[{}].wft", t.id);
+        if targets.is_empty() {
+            report.error(
+                "global_action_no_targets",
+                path.clone(),
+                "global aksiyonun hedef listesi boş — en az bir hedef gerekir".into(),
+            );
+        }
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (i, g) in targets.iter().enumerate() {
+            let at = format!("{path}.targets[{i}]");
+            if !wfd.nodes.contains_key(&g.node) {
+                report.error(
+                    "global_action_target_unknown",
+                    at.clone(),
+                    format!("bilinmeyen node '{}'", g.node),
+                );
+            }
+            if !seen.insert(g.node.as_str()) {
+                report.error(
+                    "global_action_target_dup",
+                    at.clone(),
+                    format!("hedef '{}' listede birden fazla kez var", g.node),
+                );
+            }
+            // Kendine dönen hedef bir "geri gönder" seçeneği DEĞİLDİR: aksiyon
+            // uygulanır, WFE aynı node'da kalır ve claim sıfırlanır — kullanıcı
+            // için hiçbir şey olmamış gibi görünen sessiz bir tuzak.
+            if t.from.contains(&g.node) {
+                report.error(
+                    "global_action_target_self",
+                    at,
+                    format!(
+                        "hedef '{}' transition'ın kendi `from` node'u — kendine dönen global hedef anlamsızdır",
+                        g.node
+                    ),
+                );
+            }
+        }
+    }
+
+    // GLB YALNIZ transition'da anlamlıdır: hedefi bir KİŞİ seçer. Start / escalation /
+    // çağrı dönüşü yollarında seçim yapacak kimse yoktur (sırasıyla: seçim taşıyan bir
+    // API yok, tetikleyici system aktörü, karar çağrılanın sonucunda). Şema `$defs/wft`
+    // paylaşıldığı için bu kapı burada durur — yoksa hata ancak RUNTIME'da, akış
+    // tıkandığında görünürdü.
+    let mut misplaced = Vec::new();
+    for s in &wfd.start {
+        if matches!(s.wft, Wft::Targets { .. }) {
+            misplaced.push(format!("start[{}].wft", s.id));
+        }
+    }
+    for (key, node) in &wfd.nodes {
+        if let Some(call) = &node.call {
+            if matches!(call.wft, Some(Wft::Targets { .. })) {
+                misplaced.push(format!("nodes[{key}].call.wft"));
+            }
+        }
+        for (j, esc) in node.escalation.iter().enumerate() {
+            if matches!(esc.wft, Some(Wft::Targets { .. })) {
+                misplaced.push(format!("nodes[{key}].escalation[{j}].wft"));
+            }
+        }
+    }
+    for path in misplaced {
+        report.error(
+            "global_action_placement",
+            path,
+            "global aksiyon hedef seçimi (`targets`) yalnız transitions[].wft içinde kullanılabilir \
+             — bu yolda hedefi seçecek bir aktör yoktur"
+                .into(),
+        );
+    }
+}
+
 fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
     let mut out = Vec::new();
     match wft {
         Wft::Node { node } => out.push((TargetKind::Node, node.as_str())),
         Wft::Terminal { terminal } => out.push((TargetKind::Terminal, terminal.as_str())),
+        // GLB: her hedef gerçek bir çıkış kenarıdır — graf erişilebilirliği (BFS)
+        // bunları izlemek ZORUNDA, aksi halde yalnız GLB ile ulaşılan node'lar
+        // "erişilemez" görünürdü. Referans denetimi ise `check_global_targets`ta
+        // kendi koduyla yapılır (bkz. `check_wft_refs`).
+        Wft::Targets { targets } => {
+            for t in targets {
+                out.push((TargetKind::Node, t.node.as_str()));
+            }
+        }
         Wft::Conditional {
             conditions,
             default,
@@ -3014,6 +3133,7 @@ fn wft_form_name(wft: &Wft) -> &'static str {
     match wft {
         Wft::Node { .. } => "node",
         Wft::Terminal { .. } => "terminal",
+        Wft::Targets { .. } => "targets (global aksiyon hedef seçimi)",
         Wft::Conditional { .. } => "conditions (koşullu dallanma)",
         Wft::Parallel { .. } => "parallel (fork/join)",
         Wft::Collapse { .. } => "collapse (kolları düşür)",

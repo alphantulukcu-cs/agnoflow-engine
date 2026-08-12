@@ -10,6 +10,7 @@ use serde_json::Value;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::routes;
 use uuid::Uuid;
+use wf_wfe::executor::BranchView;
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfah::Wfah;
 use wfe_core::v22::matcher::{authorize, MatchEnv};
@@ -1076,8 +1077,16 @@ struct ApplyBody {
     input: Value,
     /// WOR-31 T4: paralel modda kol seçimi — action ≥2 aktif kolun
     /// transition'ıyla eşleşiyorsa zorunlu (aksi halde `AmbiguousAction`/409).
+    /// Değer `possible-actions`taki `branch.id`dir; istemci için OPAKTIR.
     #[serde(default)]
-    node: Option<String>,
+    branch: Option<String>,
+    /// GLB (global aksiyon) hedef seçimi — değer `possible-actions`taki
+    /// `target.options[].id`dir. `wft: {targets}` taşıyan aksiyonda ZORUNLU
+    /// (400 `action.target_required`), diğerlerinde YASAK (400
+    /// `action.target_unexpected`). Bir action input DEĞİLDİR: `$ctx`'e yazılmaz,
+    /// `$wfah` izdüşümüne girmez.
+    #[serde(default)]
+    target: Option<String>,
     /// WOR-65: istemcinin okuduğu WFE revizyon token'ı (`GET /wfe/:id` →`rev`,
     /// `GET /wfe` → satır başına `rev`). OPSİYONEL — göndermeyen istemci bugünkü
     /// davranışı görür. Verilirse ve durum bu arada ilerlemişse hiçbir şey
@@ -1086,7 +1095,7 @@ struct ApplyBody {
     /// Neden gövde alanı, `If-Match` başlığı değil: token opak bir entity-tag
     /// değil, düz bir tamsayıdır; `If-Match`'in weak/strong karşılaştırma, `*`
     /// ve liste semantiğinin yarısını uygulamak yanıltıcı olurdu. Ayrıca bu
-    /// endpoint'in gövdesinde zaten opsiyonel alanlar var (`node`) — token da
+    /// endpoint'in gövdesinde zaten opsiyonel alanlar var (`branch`) — token da
     /// aynı yerde, aynı tipte, tek bir sözleşmede durur.
     #[serde(default)]
     expected_rev: Option<u32>,
@@ -1167,8 +1176,11 @@ async fn apply_json(
             .query(wfe_id, &actor)
             .await
             .map_err(AppError::from)?;
-        // Paralelde current_node None'dur; kol seçimi body.node ile gelir.
-        let target_node = body.node.clone().or(view.current_node.clone());
+        // Paralelde current_node None'dur; kol seçimi body.branch ile gelir.
+        let target_node = body
+            .branch
+            .clone()
+            .or_else(|| view.current_node.as_ref().map(|n| n.id.clone()));
         if let Some(node) = &target_node {
             let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
             let groups =
@@ -1205,7 +1217,8 @@ async fn apply_json(
             &actor,
             &body.action,
             &body.input,
-            body.node.as_deref(),
+            body.branch.as_deref(),
+            body.target.as_deref(),
             body.expected_rev,
         )
         .await
@@ -1361,8 +1374,11 @@ async fn apply_multipart_staged(
     body: &ApplyBody,
     mut mp: axum::extract::Multipart,
 ) -> Result<ApplyResultWithNote, AppError> {
-    // Paralelde `current_node` None'dur; kol seçimi `body.node` ile gelir (JSON yolla aynı).
-    let target_node = body.node.clone().or_else(|| view.current_node.clone());
+    // Paralelde `current_node` None'dur; kol seçimi `body.branch` ile gelir (JSON yolla aynı).
+    let target_node = body
+        .branch
+        .clone()
+        .or_else(|| view.current_node.as_ref().map(|n| n.id.clone()));
 
     // Bu aksiyonu KAPAYAN grupların katalogu — başlatmadaki çözümün aynısı.
     let mut catalog: std::collections::HashMap<
@@ -1548,7 +1564,8 @@ async fn apply_multipart_staged(
             actor,
             &body.action,
             &body.input,
-            body.node.as_deref(),
+            body.branch.as_deref(),
+            body.target.as_deref(),
             body.expected_rev,
         )
         .await
@@ -1850,6 +1867,10 @@ struct WfeListQuery {
 struct WfeListItem {
     #[serde(flatten)]
     row: wf_wfe::models::WfeRow,
+    /// `WfeRow.current_node`un dış yüzü: anahtar + gösterim (`Ref`). Satır tipinde
+    /// `skip_serializing`dir çünkü etiket ancak WFD elde varken üretilir.
+    /// WFD çözülemezse (silinmiş/bozuk sürüm) `label` anahtarın okunur hâline düşer.
+    current_node: Option<wf_wfe::executor::Ref>,
     priority: i32,
     claim_deadline: Option<chrono::DateTime<chrono::Utc>>,
     /// WOR-65: WFE revizyon token'ı. Listede AÇIKÇA döner çünkü buraya `wfah`
@@ -1857,11 +1878,11 @@ struct WfeListItem {
     /// YOK. `priority`/`claim_deadline` gibi hesaplanmış bir alandır (`wf.wfe`
     /// kolonu DEĞİL), bu yüzden `WfeRow`'a değil buraya konur.
     rev: i32,
-    /// WOR-31 T4: paralel modda bu WFE'nin AKTİF kolları (`[{node, status,
-    /// claimed_by, claimed_at, entered_at}]`, `GET /wfe/:id` ile aynı şekil).
+    /// WOR-31 T4: paralel modda bu WFE'nin AKTİF kolları (`GET /wfe/:id` ile aynı
+    /// şekil — `node` bir `Ref`tir; `c_a`/`claim_as` liste ucunda hesaplanmaz).
     /// Paralel değilken (join_target NULL) BOŞ dizi — liste tüketicisi kol-başına
     /// satır fan-out'u için bunu okur (current_node paralel modda NULL'dır).
-    branches: Vec<BranchState>,
+    branches: Vec<BranchView>,
     /// WFE not tasarımı Faz 1 (K9): görünür (published + gizlenmemiş + bu
     /// aktöre `audience` açık) not sayısı — TEK toplu sorgu
     /// (`notes::count_by_wfe`), N+1 yok. `WfeView`'a DOKUNULMAZ; sayaç yalnız
@@ -1873,8 +1894,40 @@ struct WfeListItem {
     unread_note_count: i64,
 }
 
-/// WOR-31 T4: liste kol satırı (`BranchListRow`) → API görünümü (`BranchState`,
-/// `node` alan adıyla serialize olur). `claimed_by` jsonb `{"user_id": "<uuid>"}`
+/// Liste uçlarının node `Ref`i. WFD çözülemediyse (silinmiş/bozuk sürüm) etiket
+/// anahtarın okunur hâline düşer — istemci `label` alanının DAİMA dolu olduğuna
+/// güvenebilmeli, tek bir bozuk satır bu sözü bozmamalı.
+fn node_ref(wfd: Option<&wfe_core::types::wfd_v22::Wfd>, key: &str) -> wf_wfe::executor::Ref {
+    match wfd {
+        Some(w) => wf_wfe::executor::Ref::node(w, key),
+        None => wf_wfe::executor::Ref {
+            id: key.to_string(),
+            label: wfe_core::v22::display::humanize_key(key),
+        },
+    }
+}
+
+/// Liste ucunun kol görünümü: `c_a`/`claim_as` HESAPLANMAZ (havuz "görünürlük"
+/// listesidir, claim kararı `GET /wfe/:id`de verilir) — o alanlar boş kalır ve
+/// serileşmede düşer.
+fn branch_list_view(
+    wfd: Option<&wfe_core::types::wfd_v22::Wfd>,
+    b: &BranchState,
+) -> BranchView {
+    BranchView {
+        node: node_ref(wfd, &b.branch_node),
+        entry_node: node_ref(wfd, b.entry_or_current()),
+        status: b.status,
+        claimed_by: b.claimed_by,
+        claimed_at: b.claimed_at,
+        entered_at: b.entered_at,
+        c_a: vec![],
+        claim_as: None,
+    }
+}
+
+/// WOR-31 T4: liste kol satırı (`BranchListRow`) → kalıcı temsil (`BranchState`).
+/// `claimed_by` jsonb `{"user_id": "<uuid>"}`
 /// biçiminden Uuid'e çözülür (wfe_adapter `parse_claimed_by` ile aynı sözleşme);
 /// `status` metni enum'a eşlenir (aktif dışı zaten sorguda süzülür).
 fn branch_list_row_to_state(r: wf_wfe::models::BranchListRow) -> BranchState {
@@ -1953,25 +2006,23 @@ async fn list_wfe(
 
     let now = chrono::Utc::now();
     // (wfd_id, version) immutable — aynı sürüm birden çok satırda paylaşılıyorsa
-    // fetch tekrarlanmaz.
+    // fetch tekrarlanmaz. Artık HER satır için çözülür (yalnız claim_deadline
+    // gerektiğinde değil): `current_node`/kol etiketleri de WFD'den gelir.
     let mut wfd_cache: std::collections::HashMap<(Uuid, i32), wfe_core::types::wfd_v22::Wfd> =
         std::collections::HashMap::new();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
+        let key = (row.wfd_id, row.wfd_version);
+        if !wfd_cache.contains_key(&key) {
+            // Bozuk/silinmiş tek bir WFD tüm listeyi düşürmesin — etiketler
+            // anahtarın okunur hâline düşer, satır listede kalır.
+            if let Ok(w) = s.wfd.fetch(row.wfd_id, row.wfd_version).await {
+                wfd_cache.insert(key, w);
+            }
+        }
+        let wfd = wfd_cache.get(&key);
         let claim_deadline = if row.claimed_at.is_some() && row.current_node.is_some() {
-            let key = (row.wfd_id, row.wfd_version);
-            let wfd = match wfd_cache.get(&key) {
-                Some(w) => Some(w),
-                None => match s.wfd.fetch(row.wfd_id, row.wfd_version).await {
-                    Ok(w) => {
-                        wfd_cache.insert(key, w);
-                        wfd_cache.get(&key)
-                    }
-                    // Bozuk/silinmiş tek bir WFD tüm listeyi düşürmesin.
-                    Err(_) => None,
-                },
-            };
             wfd.and_then(|wfd| {
                 wf_wfe::executor::compute_claim_deadline(
                     wfd,
@@ -1982,11 +2033,21 @@ async fn list_wfe(
         } else {
             None
         };
+        let current_node = row
+            .current_node
+            .as_deref()
+            .map(|n| node_ref(wfd, n));
         let rev = revs.get(&row.wfe_id).copied().unwrap_or(0);
-        let branches = branches_by_wfe.remove(&row.wfe_id).unwrap_or_default();
+        let branches = branches_by_wfe
+            .remove(&row.wfe_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|b| branch_list_view(wfd, &b))
+            .collect();
         let note_count = note_counts.get(&row.wfe_id).copied().unwrap_or(0);
         let unread_note_count = unread_counts.get(&row.wfe_id).copied().unwrap_or(0);
         out.push(WfeListItem {
+            current_node,
             priority,
             claim_deadline,
             rev,

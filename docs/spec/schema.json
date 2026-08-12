@@ -285,7 +285,8 @@
     "terminalId": {
       "type": "string",
       "minLength": 1,
-      "description": "Terminal id/referansi - node key'lerin aksine slug/charset kisiti yok, engine sadece case-insensitive uniqueness kontrol eder (bkz. wfe-core validator.rs)."
+      "pattern": "^[a-zA-Z0-9_]+$",
+      "description": "Terminal MAKINE kimligi - kullanici metni DEGILDIR, ekrana terminals[].label basilir. Belge icinde benzersiz (validator terminal_id_dup); desen validator tarafinda da zorlanir (terminal_id_pattern). Eskiden id kullanici metniydi ve 'isim' gibi case-insensitive benzersizlik tasiyordu; o kisit KALKTI."
     },
     "expression": {
       "type": "string",
@@ -1003,6 +1004,23 @@
         }
       }
     },
+    "wftGlobalTargets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "targets"
+      ],
+      "properties": {
+        "targets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/wftNode"
+          },
+          "description": "Global aksiyon (GLB) hedef kumesi - hedefi belge degil, aksiyonu ALAN KISI secer. TEK aksiyon + TEK transition: when/c_a/wfes_effects/trigger dallara KOPYALANMAZ. Secim calisma aninda POST /wfe/{id}/actions govdesindeki 'target' ile gelir (zorunlu; listede olmayan hedef 400 action.target_invalid). Secim bir action input DEGILDIR: $ctx'e yazilmaz, wfes_effects gerektirmez, $wfah izdusumune girmez. Custom validator: global_action_no_targets / _target_unknown / _target_dup / _target_self. YALNIZ transitions[].wft icinde gecerlidir (global_action_placement)."
+        }
+      }
+    },
     "wftSimpleTerminal": {
       "type": "object",
       "additionalProperties": false,
@@ -1161,6 +1179,9 @@
           "$ref": "#/$defs/wftSimpleTerminal"
         },
         {
+          "$ref": "#/$defs/wftGlobalTargets"
+        },
+        {
           "$ref": "#/$defs/wftConditional"
         },
         {
@@ -1265,6 +1286,11 @@
       "properties": {
         "id": {
           "$ref": "#/$defs/terminalId"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Gosterim adi (insan metni). Verilmezse motor id'nin okunur halini uretir (display::humanize_key) - istemci fallback yazmak zorunda kalmaz."
         },
         "wfes_effects": {
           "$ref": "#/$defs/wfesEffects",

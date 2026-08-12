@@ -102,10 +102,54 @@ pub struct ClaimRelease {
     pub new_dynctx: Option<Value>,
 }
 
+/// `Engine::possible_actions` öğesi: uygulanabilir bir aksiyon + (GLB ise) o
+/// aksiyonun seçilebilir hedefleri.
+///
+/// Çekirdek burada ANAHTAR taşır, etiket taşımaz: gösterim adları tek bir yerde
+/// (`v22::display`) üretilir ve dış görünüme (`Ref`) adapter katmanında çevrilir.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionChoice {
+    pub action: String,
+    /// `Wft::Targets` transition'ında hedef node anahtarları (belgedeki SIRAYLA);
+    /// düz aksiyonda `None` — "hedef seçimi yok" ile "hedef listesi boş" ayrımı
+    /// korunsun diye `Option`, boş `Vec` değil.
+    pub targets: Option<Vec<String>>,
+}
+
 /// `Terminal` ve `Terminated` her ikisi de "aktif değil" sınıfıdır: yeni
 /// aksiyon/claim/escalation kabul etmezler (2026-07-16 SLA sözleşmesi).
 fn is_terminal_class(status: &WfeStatus) -> bool {
     matches!(status, WfeStatus::Terminal | WfeStatus::Terminated)
+}
+
+/// GLB hedef seçimini transition'ın wft'sine UYGULAR.
+///
+/// `Wft::Targets` çalıştırılabilir bir hedef DEĞİLDİR — bir MENÜDÜR. Seçim
+/// yapıldıktan sonra kalan yol normal `Wft::Node` yoludur (MoveTo), yani hedef
+/// seçimi runtime'a yeni bir geçiş türü sokmaz: yalnız hangi node'a gidileceğini
+/// belirler. Bu yüzden burada `Cow` ile TEK bir noktada çözülür ve `resolve_wft`
+/// GLB'den habersiz kalır.
+///
+/// Simetri bilinçlidir: menü varsa seçim ZORUNLU, menü yoksa seçim YASAK. İkincisi
+/// sessizce yok sayılsaydı istemcinin yanlış transition'ı hedeflediği gizlenirdi.
+fn select_wft<'w>(wft: &'w Wft, target: Option<&str>) -> Result<std::borrow::Cow<'w, Wft>, EngineError> {
+    match wft {
+        Wft::Targets { targets } => {
+            let chosen = target.ok_or(EngineError::TargetRequired)?;
+            if !targets.iter().any(|t| t.node == chosen) {
+                return Err(EngineError::TargetInvalid(chosen.to_string()));
+            }
+            Ok(std::borrow::Cow::Owned(Wft::Node {
+                node: chosen.to_string(),
+            }))
+        }
+        other => {
+            if target.is_some() {
+                return Err(EngineError::TargetUnexpected);
+            }
+            Ok(std::borrow::Cow::Borrowed(other))
+        }
+    }
 }
 
 impl<'a> Engine<'a> {
@@ -305,6 +349,12 @@ impl<'a> Engine<'a> {
     /// transition'ıyla eşleşebilir; çağıran kol node'unu vererek belirsizliği
     /// çözer. Paralel mod dışında `None` eski davranıştır; verilirse
     /// current_node ile örtüşmek zorundadır.
+    ///
+    /// `target`: GLB (`wft: {targets}`) hedef seçimi — hedefi belge değil, aksiyonu
+    /// ALAN KİŞİ seçer. `Targets` transition'ında ZORUNLU, diğerlerinde YASAK
+    /// (bkz. `select_wft`). Seçim ctx'e YAZILMAZ ve `$wfah` izdüşümüne girmez:
+    /// nereye gidildiği zaten geçişin kendisinde (`to_node`) görünür.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply(
         &self,
         wfd: &Wfd,
@@ -313,6 +363,7 @@ impl<'a> Engine<'a> {
         action: &str,
         input: &Value,
         node_hint: Option<&str>,
+        target: Option<&str>,
     ) -> Result<TransitionCommit, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Err(EngineError::WfeTerminal);
@@ -327,7 +378,7 @@ impl<'a> Engine<'a> {
         // node'ları üzerinden aranır (kol-bazlı assignment kontrolüyle).
         if wfes.join_target.is_some() {
             return self
-                .apply_parallel(wfd, wfes, actor, action, input, node_hint)
+                .apply_parallel(wfd, wfes, actor, action, input, node_hint, target)
                 .await;
         }
         let current_node = wfes
@@ -394,6 +445,9 @@ impl<'a> Engine<'a> {
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
         validate_action_input(action_def, input)?;
+        // GLB hedef seçimi — effects STAGE EDİLMEDEN önce doğrulanır: reddedilecek
+        // bir aksiyon için hiçbir hesap yapılmasın.
+        let wft = select_wft(&transition.wft, target)?;
         let mut staged = ctx.clone();
 
         let now = Utc::now();
@@ -443,7 +497,7 @@ impl<'a> Engine<'a> {
         // §7.8 — wft staged ctx üzerinden: nereye gidiyoruz?
         let (outcome, final_ctx, landed) = self
             .resolve_wft(
-                &transition.wft,
+                &wft,
                 wfd,
                 staged,
                 &wfes.wfah,
@@ -505,6 +559,7 @@ impl<'a> Engine<'a> {
     /// Aksiyon ≥2 farklı kolun transition'ıyla eşleşir ve `node_hint` verilmemişse
     /// `AmbiguousAction` (kol subgraph'ları ayrık olduğundan tek kol eşleşmesi
     /// kesin sahiplik verir). Assignment/owner kontrolü KOL-bazlıdır.
+    #[allow(clippy::too_many_arguments)]
     async fn apply_parallel(
         &self,
         wfd: &Wfd,
@@ -513,6 +568,7 @@ impl<'a> Engine<'a> {
         action: &str,
         input: &Value,
         node_hint: Option<&str>,
+        target: Option<&str>,
     ) -> Result<TransitionCommit, EngineError> {
         let join = wfes
             .join_target
@@ -598,6 +654,8 @@ impl<'a> Engine<'a> {
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
         validate_action_input(action_def, input)?;
+        // GLB hedef seçimi (tek-kol yolla AYNI kural — kolda da geçerlidir).
+        let wft = select_wft(&transition.wft, target)?;
         let mut staged = ctx.clone();
 
         let now = Utc::now();
@@ -651,7 +709,7 @@ impl<'a> Engine<'a> {
         let arrived_entries = arrived_entries_with(wfes, branch_node);
         let (outcome, final_ctx, landed) = self
             .resolve_wft(
-                &transition.wft,
+                &wft,
                 wfd,
                 staged,
                 &wfes.wfah,
@@ -951,7 +1009,14 @@ impl<'a> Engine<'a> {
 
     // ------------------------------------------------------ possible actions
 
-    /// Owner'ın şu an gerçekleştirebileceği action adları.
+    /// Owner'ın şu an gerçekleştirebileceği aksiyonlar + (GLB ise) seçilebilir
+    /// hedefleri.
+    ///
+    /// Dönüş tipi düz `Vec<String>` DEĞİLDİR: GLB'de hedef artık aksiyon anahtarına
+    /// kodlanmadığı için, "hangi aksiyonlar mümkün" sorusunun cevabı "hangi hedefler
+    /// seçilebilir" bilgisi olmadan eksik kalır — istemci hedef listesini WFD'yi
+    /// okuyarak türetmek zorunda kalırdı.
+    ///
     /// `branch`: WOR-31 — paralel modda kol node'u verilirse mümkün aksiyonlar
     /// O KOLUN node'una ve KOLUN claimed_by'ına göre hesaplanır (wfe-seviyesi
     /// current_node/assigned_to yerine). `None` paralel-olmayan eski davranış;
@@ -964,7 +1029,7 @@ impl<'a> Engine<'a> {
         wfes: &Wfes,
         actor: &Actor,
         branch: Option<&str>,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<Vec<ActionChoice>, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Ok(vec![]);
         }
@@ -987,9 +1052,9 @@ impl<'a> Engine<'a> {
             return Ok(vec![]);
         }
         let ctx = wfes.dynctx.as_value().clone();
-        let mut actions = Vec::new();
+        let mut actions: Vec<ActionChoice> = Vec::new();
         for t in &wfd.transitions {
-            if !t.from.contains(node_key) || actions.contains(&t.action) {
+            if !t.from.contains(node_key) || actions.iter().any(|a| a.action == t.action) {
                 continue;
             }
             let when_ok = match &t.when {
@@ -1017,7 +1082,15 @@ impl<'a> Engine<'a> {
                     continue;
                 }
             }
-            actions.push(t.action.clone());
+            actions.push(ActionChoice {
+                action: t.action.clone(),
+                targets: match &t.wft {
+                    Wft::Targets { targets } => {
+                        Some(targets.iter().map(|g| g.node.clone()).collect())
+                    }
+                    _ => None,
+                },
+            });
         }
         Ok(actions)
     }
@@ -2250,6 +2323,15 @@ impl<'a> Engine<'a> {
         let target = match wft {
             Wft::Node { node } => Target::Node(node.clone()),
             Wft::Terminal { terminal } => Target::Terminal(terminal.clone()),
+            // GLB menüsü buraya HİÇ ulaşmamalı: `select_wft` seçimi apply'ın
+            // başında `Wft::Node`'a indirger. Ulaşıyorsa hedef seçimi olmayan bir
+            // yerde (start / escalation / çağrı dönüşü) GLB yazılmış demektir —
+            // validator `global_action_placement` ile bunu yayından önce keser.
+            Wft::Targets { .. } => {
+                return Err(EngineError::InvalidWfd(
+                    "GLB (`wft: {targets}`) yalnız transitions[].wft içinde kullanılabilir".into(),
+                ))
+            }
             // WOR-31: fork — yalnız tekil modda geçerli. Start'ta ve paralel
             // modda (nested) validator zaten reddeder; runtime yine de korunur.
             Wft::Parallel { parallel } => {

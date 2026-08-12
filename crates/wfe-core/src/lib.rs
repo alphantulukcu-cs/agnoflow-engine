@@ -1,3 +1,4 @@
+pub mod dupkeys;
 pub mod error;
 pub mod expr_types;
 pub mod ports;

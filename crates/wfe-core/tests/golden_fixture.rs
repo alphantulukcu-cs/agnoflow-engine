@@ -31,26 +31,27 @@ fn golden_fixture_parses_losslessly() {
     assert!(!t.trigger[2].required);
 }
 
-#[test]
-fn every_node_key_equals_slug_of_its_c_a() {
-    let wfd = golden();
-    for (key, node) in &wfd.nodes {
-        assert_eq!(
-            key,
-            &node.c_a.slug(),
-            "node key '{key}' c_a slug'ı ile eşleşmeli"
-        );
-    }
-}
+// NOT: "node key == slug(c_a)" ve "canonical c_a benzersiz" KURALLARI 2026-08-12'de
+// KALDIRILDI (bkz. validator.rs §2b notu) — kimliği artık tasarımcı verir. Bu fixture'ın
+// anahtarları TARİHSEL olarak slug biçimindedir ve öyle kalır (geriye uyumluluk kanıtı:
+// eski belgeler geçerliliğini korur), ama bu bir sözleşme DEĞİLDİR; kuralı doğrulayan
+// iki test bilerek silindi. `slug()`/`canonical()` yardımcıları duruyor: editörün eski
+// taslaklar için kullandığı varsayılan anahtar üretiminin motor tarafındaki aynasıdır.
 
 #[test]
-fn canonical_c_a_is_unique_across_nodes() {
+fn golden_node_keys_still_satisfy_the_schema_id_pattern() {
+    // Kural kalktı ama BİÇİM kısıtı şemada duruyor (`nodes` propertyNames: idName).
     let wfd = golden();
-    let mut seen = std::collections::HashSet::new();
-    for node in wfd.nodes.values() {
+    for key in wfd.nodes.keys() {
+        let mut chars = key.chars();
+        let first = chars.next().expect("node key boş olamaz");
         assert!(
-            seen.insert(node.c_a.canonical()),
-            "aynı canonical c_a iki node'da bulunamaz"
+            first.is_ascii_alphabetic() || first == '_',
+            "node key '{key}' harf ya da '_' ile başlamalı"
+        );
+        assert!(
+            chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "node key '{key}' desene uymuyor"
         );
     }
 }

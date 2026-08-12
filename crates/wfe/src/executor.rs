@@ -10,8 +10,9 @@ use wfe_core::types::actor::{Actor, CandidateActor};
 use wfe_core::types::wfah::WfahEntry;
 use wfe_core::types::wfd_v22::{CallMode, JoinRule, StartAs, Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
+use wfe_core::v22::display;
 use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
-use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
+use wfe_core::v22::pipeline::{ActionChoice, ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallView, CommitOutcome, EnvPort, NoEnv,
     PendingCall, WfdStore, WfeStore, Wfes,
@@ -78,18 +79,83 @@ pub fn active_branch_nodes(wfes: &Wfes) -> Vec<String> {
         .collect()
 }
 
-/// T4 (API/sim): mümkün aksiyon — paralel modda hangi kola ait olduğunu belirten
-/// opsiyonel `node` etiketiyle. Paralel-olmayan modda `node` her zaman `None`.
+/// **Kimlik + gösterim** çifti — motorun DÖNDÜĞÜ her aksiyon/node/terminal
+/// anahtarının tek biçimi.
+///
+/// `id` motorun opak kimliğidir: istemci onu GERİ GÖNDERİR, ASLA AYRIŞTIRMAZ ve
+/// ASLA EKRANA BASMAZ. Ekrana basılan tek şey `label`'dır ve `label` ASLA boş/eksik
+/// dönmez (`display` modülü anahtarın okunur hâline düşer) — böylece istemci
+/// tarafında "etiket yoksa anahtarı bas" gibi bir fallback yazılmasına gerek kalmaz.
+/// İkisinin ayrı alanlar olması, istemcinin etiketi anahtar sanıp geri göndermesini
+/// de imkânsız kılar.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Ref {
+    pub id: String,
+    pub label: String,
+}
+
+impl Ref {
+    pub fn node(wfd: &Wfd, key: &str) -> Self {
+        Ref {
+            label: display::node_label(wfd, key),
+            id: key.to_string(),
+        }
+    }
+
+    pub fn action(wfd: &Wfd, key: &str) -> Self {
+        Ref {
+            label: display::action_label(wfd, key),
+            id: key.to_string(),
+        }
+    }
+
+    pub fn terminal(wfd: &Wfd, id: &str) -> Self {
+        Ref {
+            label: display::terminal_label(wfd, id),
+            id: id.to_string(),
+        }
+    }
+}
+
+/// GLB (global aksiyon) hedef seçimi — `PossibleAction.target`.
+///
+/// Yalnız `options` taşır: "Kime gönderilsin?" gibi bir başlık MOTORUN işi değil,
+/// istemcinin kendi metnidir. Motor seçeneklerin kimliğini ve gösterimini verir.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TargetChoice {
+    pub options: Vec<Ref>,
+}
+
+/// T4 (API/sim): uygulanabilir bir aksiyon.
+///
+/// - `target` YALNIZ GLB aksiyonlarında bulunur (`wft: {targets}`); yoksa alan hiç çıkmaz.
+/// - `branch` YALNIZ paralel modda bulunur — aksiyonun ait olduğu kol; `id` kolun node
+///   anahtarıdır ve istekte `branch` olarak geri gönderilir (istemci için OPAKTIR).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PossibleAction {
-    pub action: String,
+    pub action: Ref,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
+    pub target: Option<TargetChoice>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<Ref>,
+}
+
+/// `ActionChoice` (çekirdek, salt anahtar) → `PossibleAction` (API, `Ref`).
+/// Etiketlerin üretildiği TEK yer `display` modülüdür; simülasyon rotaları da
+/// bu çeviriyi kullanır ki sim ile gerçek akış AYNI şekli döndürsün.
+pub fn to_possible_action(wfd: &Wfd, choice: ActionChoice, branch: Option<&str>) -> PossibleAction {
+    PossibleAction {
+        action: Ref::action(wfd, &choice.action),
+        target: choice.targets.map(|nodes| TargetChoice {
+            options: nodes.iter().map(|n| Ref::node(wfd, n)).collect(),
+        }),
+        branch: branch.map(|b| Ref::node(wfd, b)),
+    }
 }
 
 /// T4: `Engine::possible_actions`'ın paralel-farkında sarmalayıcısı — paralel
 /// modda TÜM aktif kollar için ayrı çağrı yapılıp birleşim (her öğe kendi kol
-/// node'uyla etiketli) döner; paralel değilse tek çağrı, `node: None`. Hem
+/// `branch`'iyle etiketli) döner; paralel değilse tek çağrı, `branch: None`. Hem
 /// `WfeExecutor::possible_actions` hem de `routes/simulate.rs` (store'suz sim)
 /// bu ortak yardımcıyı kullanır.
 pub async fn possible_actions_for(
@@ -101,20 +167,21 @@ pub async fn possible_actions_for(
     if wfes.join_target.is_some() {
         let mut out = Vec::new();
         for node in active_branch_nodes(wfes) {
-            let actions = engine
+            let choices = engine
                 .possible_actions(wfd, wfes, actor, Some(&node))
                 .await?;
-            out.extend(actions.into_iter().map(|action| PossibleAction {
-                action,
-                node: Some(node.clone()),
-            }));
+            out.extend(
+                choices
+                    .into_iter()
+                    .map(|c| to_possible_action(wfd, c, Some(&node))),
+            );
         }
         Ok(out)
     } else {
-        let actions = engine.possible_actions(wfd, wfes, actor, None).await?;
-        Ok(actions
+        let choices = engine.possible_actions(wfd, wfes, actor, None).await?;
+        Ok(choices
             .into_iter()
-            .map(|action| PossibleAction { action, node: None })
+            .map(|c| to_possible_action(wfd, c, None))
             .collect())
     }
 }
@@ -158,7 +225,8 @@ pub struct WfeExecutor {
 pub struct WfeStartResult {
     pub wfe_id: Uuid,
     pub terminal: bool,
-    pub current_node: Option<String>,
+    /// Varılan node — anahtar + gösterim (bkz. `Ref`). Terminal'de `None`.
+    pub current_node: Option<Ref>,
     pub end_response: Option<Value>,
     pub current_c_a: Vec<CandidateActor>,
 }
@@ -167,7 +235,7 @@ pub struct WfeStartResult {
 pub struct WfeApplyResult {
     pub wfe_id: Uuid,
     pub terminal: bool,
-    pub current_node: Option<String>,
+    pub current_node: Option<Ref>,
     pub end_response: Option<Value>,
     pub current_c_a: Vec<CandidateActor>,
 }
@@ -195,10 +263,35 @@ fn escalation_node(wfes: &Wfes, node: Option<&str>) -> String {
 #[derive(Debug, serde::Serialize)]
 pub struct EscalationView {
     pub step_idx: usize,
-    pub node: String,
+    pub node: Ref,
     pub entered_at: DateTime<Utc>,
     pub deadline: DateTime<Utc>,
     pub overdue: bool,
+}
+
+/// `WfeView.join_target` — fork'ta persist edilen join hedefinin dış yüzü.
+///
+/// Ham `WftTarget` untagged'dır (`{node}` / `{terminal}`); istemcinin hangi tür
+/// olduğunu ALAN VARLIĞINDAN çıkarması gerekirdi. Burada `kind` ile açıkça
+/// etiketlenir ve hedef bir `Ref` olur.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum JoinTargetView {
+    Node { node: Ref },
+    Terminal { terminal: Ref },
+}
+
+impl JoinTargetView {
+    fn new(wfd: &Wfd, t: &WftTarget) -> Self {
+        match t {
+            WftTarget::Node { node } => JoinTargetView::Node {
+                node: Ref::node(wfd, node),
+            },
+            WftTarget::Terminal { terminal } => JoinTargetView::Terminal {
+                terminal: Ref::terminal(wfd, terminal),
+            },
+        }
+    }
 }
 
 /// WF Admin escalation müdahalesinin sonucu.
@@ -227,10 +320,13 @@ pub enum EscalationAdminOutcome {
 pub struct WfeView {
     pub wfe_id: Uuid,
     pub status: WfeStatus,
-    pub current_node: Option<String>,
+    pub current_node: Option<Ref>,
     pub claimed_by: Option<Uuid>,
     pub dynctx: Value,
-    pub wfah: Vec<wfe_core::types::wfah::WfahEntry>,
+    /// Akış geçmişinin GÖRÜNÜM hâli: sihirli metin ayrıştırması istemcide DEĞİL
+    /// burada yapılır (bkz. `WfahView`). Motorun İÇİNDEKİ marker adları ve `$wfah`
+    /// izdüşümü DEĞİŞMEZ — değişen yalnız API görünümüdür.
+    pub wfah: Vec<WfahView>,
     pub end_response: Option<Value>,
     /// SLA-3: çözülmüş mutlak workflow deadline'ı; NULL = yok.
     pub deadline: Option<DateTime<Utc>>,
@@ -251,7 +347,7 @@ pub struct WfeView {
     pub branches: Vec<BranchView>,
     /// WOR-31 T4: fork'ta persist edilen join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
-    pub join_target: Option<WftTarget>,
+    pub join_target: Option<JoinTargetView>,
     /// WOR-72/WOR-73: join kuralının kısa adı — `"and"` | `"or"` | `"expr"`.
     /// İstemci hangi mantığın işlediğini buradan bilir (paralel modda değilken
     /// `join_target` gibi anlamsızdır, o yüzden yalnız paralel modda gönderilir).
@@ -286,20 +382,53 @@ pub struct WfeView {
     pub path: Vec<PathStep>,
 }
 
-/// GET /wfe/:id kol görünümü: kalıcı `BranchState` alanları (`#[serde(flatten)]` ile
-/// `node`/`status`/`claimed_by`/`claimed_at`/`entered_at`) + sorgu-anında çözülmüş
-/// `c_a` (bu kolu kim claim edebilir — tek-kol `current_c_a`'nın kol karşılığı).
+/// GET /wfe/:id kol görünümü: `BranchState`in alanları + sorgu-anında çözülmüş `c_a`
+/// (bu kolu kim claim edebilir — tek-kol `current_c_a`'nın kol karşılığı).
 /// `c_a` PERSIST EDİLMEZ; yalnız aktif kollar için doldurulur (arrived/cancelled boş).
+///
+/// `BranchState` artık `#[serde(flatten)]` ile GÖMÜLMÜYOR: o tip aynı zamanda sim
+/// state blob'una serileşiyor ve node anahtarlarını `Ref`e çevirmek onu da bozardı.
+/// Görünüm ile kalıcı temsil burada ayrılır.
 #[derive(Debug, serde::Serialize)]
 pub struct BranchView {
-    #[serde(flatten)]
-    pub state: BranchState,
+    /// Kolun ŞU AN beklediği node.
+    pub node: Ref,
+    /// WOR-73: kolun değişmez kimliği (fork'taki giriş node'u).
+    pub entry_node: Ref,
+    pub status: BranchStatus,
+    pub claimed_by: Option<Uuid>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub entered_at: DateTime<Utc>,
+    /// Liste uçlarında (havuz fan-out'u) çözülmez — orada boş kalır ve alan düşer.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub c_a: Vec<CandidateActor>,
     /// Madde 6: viewer bu kolu claim edebilir mi ve NASIL — sorgu-anında
     /// `claim_decision` ile. `None` = claim edemez / kol claim'li / claim aşaması
     /// değil. `delegated` ise UI "X adına vekaleten" gösterir.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub claim_as: Option<ClaimProvenance>,
+}
+
+impl BranchView {
+    /// Kalıcı kol satırından görünüm. `c_a`/`claim_as` çağıranın işidir (liste
+    /// uçları bunları hesaplamaz).
+    pub fn new(
+        wfd: &Wfd,
+        state: &BranchState,
+        c_a: Vec<CandidateActor>,
+        claim_as: Option<ClaimProvenance>,
+    ) -> Self {
+        BranchView {
+            node: Ref::node(wfd, &state.branch_node),
+            entry_node: Ref::node(wfd, state.entry_or_current()),
+            status: state.status,
+            claimed_by: state.claimed_by,
+            claimed_at: state.claimed_at,
+            entered_at: state.entered_at,
+            c_a,
+            claim_as,
+        }
+    }
 }
 
 /// Viewer'ın bir (kol) node'unu claim edebilirliği (Madde 6 vekalet-farkında).
@@ -354,18 +483,30 @@ pub struct ReassignOutcome {
     pub reason: Option<String>,
 }
 
-/// K7 (WFE not tasarımı, Faz 0, 2026-08-10): `wf.wfah` satırının akış izi —
+/// K7 (WFE not tasarımı, Faz 0, 2026-08-10): `wf.wfah` satırının HAM akış izi —
 /// hangi aksiyon hangi node'dan hangi node'a gitti. `wf.wfah.from_node`/
 /// `to_node` kolonlarından okunur (bkz. `crate::wfe_adapter::WfeAdapter`'ın
 /// `insert_wfah_entries` türetimi). Motor tipine (`WfahEntry`) BİLEREK
 /// eklenmedi — o tip `project_entry` ile `$wfah`'a akıyor ve golden fixture'da
 /// serileşiyor; bu yalnız kayıt/ekran amaçlıdır, ZEN izdüşümünü etkilemez.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PathStep {
+///
+/// Serileşmez: dışarı çıkan hâli `PathStep`tir (anahtarlar `Ref`e çevrilmiş).
+#[derive(Debug, Clone)]
+pub struct PathRow {
     pub seq: u32,
     pub action: String,
     pub from_node: Option<String>,
     pub to_node: Option<String>,
+    pub at: DateTime<Utc>,
+}
+
+/// `WfeView.path` öğesi: `PathRow`un `Ref`lenmiş hâli. `from` = null → başlangıç.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PathStep {
+    pub seq: u32,
+    pub action: Ref,
+    pub from: Option<Ref>,
+    pub to: Option<Ref>,
     pub at: DateTime<Utc>,
 }
 
@@ -376,7 +517,7 @@ pub struct PathStep {
 /// `NoWfahPath` ile boş döner — mevcut `$wfah` testleri etkilenmez.
 #[async_trait::async_trait]
 pub trait WfahPathSource: Send + Sync {
-    async fn load_wfah_path(&self, wfe_id: Uuid) -> Result<Vec<PathStep>, EngineError>;
+    async fn load_wfah_path(&self, wfe_id: Uuid) -> Result<Vec<PathRow>, EngineError>;
 }
 
 /// Path kaynağı bağlanmamış kurulumlar için boş kapı (bkz. `NoEnv` deseni).
@@ -384,8 +525,262 @@ pub struct NoWfahPath;
 
 #[async_trait::async_trait]
 impl WfahPathSource for NoWfahPath {
-    async fn load_wfah_path(&self, _wfe_id: Uuid) -> Result<Vec<PathStep>, EngineError> {
+    async fn load_wfah_path(&self, _wfe_id: Uuid) -> Result<Vec<PathRow>, EngineError> {
         Ok(Vec::new())
+    }
+}
+
+// ---------------------------------------------------------------- wfah görünümü
+
+/// Bir WFAH satırının NE OLDUĞU — kapalı liste.
+///
+/// Motorun kendi marker adları (`_branch_cancelled`, `escalate:<node>:<idx>`,
+/// `call:<key>/<action>` …) DEĞİŞMEZ: yayınlanmış akışlar `count($wfah, #.action ==
+/// ...)` ile karar veriyor ve `$wfah` izdüşümü sözleşmedir. Değişen yalnız API
+/// GÖRÜNÜMÜDÜR — sınıflandırma burada yapılır, istemciye ham metin ASLA verilmez.
+/// İstemci kendi metnini yazmak isterse `label` yerine `kind` üzerinden switch yapar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WfahKind {
+    /// İnsan (ya da WF Admin) eliyle alınan normal aksiyon — varsayılan sınıf.
+    Action,
+    /// SLA-3: akış deadline'ı doldu.
+    Deadline,
+    Escalation,
+    EscalationSkipped,
+    ClaimTimeout,
+    Trigger,
+    CallReturn,
+    /// Alt akış geçmişi çağıranın defterine sığmadı, kırpıldı.
+    CallTruncated,
+    Fork,
+    BranchArrived,
+    /// Kollar birleşti. Motor bugün ayrı bir `_join` marker'ı YAZMAZ (join varışı
+    /// `_branch_arrived` ile kaydedilir); varyant kapalı listenin bütünlüğü için
+    /// durur, istemci switch'i eksik kalmasın.
+    Join,
+    Collapse,
+    BranchCancelled,
+    BranchSuperseded,
+}
+
+/// `GET /wfe/:id` → `wfah[]` satırı. Sihirli metin ayrıştırması BURADA biter.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WfahView {
+    pub seq: u32,
+    pub kind: WfahKind,
+    /// Satırın hazır başlığı (Türkçe). İstemci kendi metnini yazmak isterse `kind`'a bakar.
+    pub label: String,
+    /// `kind: action`ta dolu; sistem satırlarında yok (ham marker adı SIZMAZ).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<Ref>,
+    /// Satırın ilgili olduğu node (varsa): aksiyonda geçişin KAYNAK node'u,
+    /// escalation/claim_timeout/kol marker'larında marker'ın node'u.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node: Option<Ref>,
+    pub actor: Actor,
+    /// Motorun kendi yazdığı satır mı? Ayrım AKTÖRDEDİR (WF Admin'in elle
+    /// tetiklediği escalation aynı marker'ı yazar ama gerçek bir aktörle).
+    pub system: bool,
+    /// Marker payload'u AYNEN — istemci ayrıntıya inmek isterse buradan okur.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<Value>,
+    pub at: DateTime<Utc>,
+    /// Satır bir alt akıştan geldiyse çağrı anahtarı (`call:` öneki SÖKÜLMÜŞ hâli).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_call: Option<String>,
+    /// Escalation adım numarası (0 tabanlı) — yalnız escalation satırlarında.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<usize>,
+}
+
+/// Marker adının çözümlenmiş hâli — `WfahView`'ın metin ayrıştırma çekirdeği.
+/// Saf (WFD'siz, `Ref`siz) tutulur ki birim testlenebilsin.
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedMarker {
+    kind: WfahKind,
+    /// `kind: action` ise aksiyonun KENDİ adı (call öneki sökülmüş).
+    action: Option<String>,
+    node: Option<String>,
+    step: Option<usize>,
+    from_call: Option<String>,
+}
+
+/// Ham WFAH `action` adını sınıflandırır.
+///
+/// Ayrıştırma önek/desen tabanlıdır çünkü marker adlarının KENDİSİ sözleşmedir
+/// (`escalate:` öneki olmadan yazılan bir atlama marker'ı `next_escalation`'ın
+/// tabanını kaydırır — bkz. CLAUDE.md WF Admin bölümü). Tanınmayan her ad
+/// `Action`a düşer: bilinmeyen bir markerı "sistem" diye etiketlemek, ham adı
+/// ekrana basmaktan daha yanıltıcı olurdu.
+fn parse_marker(raw: &str) -> ParsedMarker {
+    let plain = |kind: WfahKind| ParsedMarker {
+        kind,
+        action: None,
+        node: None,
+        step: None,
+        from_call: None,
+    };
+
+    // Alt akış izdüşümü: `call:<key>/<action>` — önek SÖKÜLÜR, kalan ad kendi
+    // kurallarıyla yeniden sınıflandırılır (alt akışın markerları da markerdır).
+    if let Some(rest) = raw.strip_prefix("call:") {
+        return match rest.split_once('/') {
+            // `call:<key>/…` — kırpma işareti (bkz. pipeline `format!("{marker}/…")`).
+            Some((key, "…")) => ParsedMarker {
+                from_call: Some(key.to_string()),
+                ..plain(WfahKind::CallTruncated)
+            },
+            Some((key, inner)) => ParsedMarker {
+                from_call: Some(key.to_string()),
+                ..parse_marker(inner)
+            },
+            // Önek tek başına = çağrının KAPANIŞ marker'ı (dönüş işlendi).
+            None => ParsedMarker {
+                from_call: Some(rest.to_string()),
+                ..plain(WfahKind::CallReturn)
+            },
+        };
+    }
+    if let Some(rest) = raw.strip_prefix("escalate:") {
+        // `<node>:<idx>` ya da `<node>:<idx>:skipped`
+        let (body, kind) = match rest.strip_suffix(":skipped") {
+            Some(b) => (b, WfahKind::EscalationSkipped),
+            None => (rest, WfahKind::Escalation),
+        };
+        // Node anahtarı `:` içermez; sondaki alan adım numarasıdır.
+        let (node, step) = match body.rsplit_once(':') {
+            Some((n, idx)) => (Some(n.to_string()), idx.parse::<usize>().ok()),
+            None => (Some(body.to_string()), None),
+        };
+        return ParsedMarker {
+            node,
+            step,
+            ..plain(kind)
+        };
+    }
+    if let Some(node) = raw.strip_prefix("claim_timeout:") {
+        return ParsedMarker {
+            node: Some(node.to_string()),
+            ..plain(WfahKind::ClaimTimeout)
+        };
+    }
+    if raw.starts_with("trigger:") {
+        return plain(WfahKind::Trigger);
+    }
+    match raw {
+        "timeout:deadline" => plain(WfahKind::Deadline),
+        "_fork" => plain(WfahKind::Fork),
+        "_branch_arrived" => plain(WfahKind::BranchArrived),
+        "_join" => plain(WfahKind::Join),
+        "_collapse" => plain(WfahKind::Collapse),
+        "_branch_cancelled" => plain(WfahKind::BranchCancelled),
+        "_branch_superseded" => plain(WfahKind::BranchSuperseded),
+        other => ParsedMarker {
+            action: Some(other.to_string()),
+            ..plain(WfahKind::Action)
+        },
+    }
+}
+
+/// Collapse/iptal marker'larının `reason` alanını okunur metne çevirir. Kod kapalı
+/// bir listedir (motor `stage_parallel_markers` yazar); tanımadığımız bir değer
+/// gelirse etiketi susturmak yerine ham kodu göstermek daha dürüsttür.
+fn collapse_reason_label(input: Option<&Value>) -> Option<String> {
+    let reason = input?.get("reason")?.as_str()?;
+    Some(
+        match reason {
+            "collapsed" => "reddet/bitiren aksiyon",
+            "sibling_terminal" => "kardeş kol terminale ulaştı",
+            "failed" => "hata",
+            "terminated" => "SLA sonlandırması",
+            other => other,
+        }
+        .to_string(),
+    )
+}
+
+/// Satırın hazır başlığı. `kind` makine kimliği, bu ise EKRAN metnidir.
+///
+/// `input` marker payload'udur: sebep gibi ekranda ANLAM taşıyan alanlar buradan
+/// etikete çekilir. Aksi halde istemci payload'un içindeki HAM node/aksiyon
+/// anahtarlarını basmak zorunda kalır — sözleşmenin kaçındığı şey tam olarak budur.
+fn wfah_label(wfd: &Wfd, p: &ParsedMarker, node: Option<&Ref>, input: Option<&Value>) -> String {
+    let step_no = p.step.map(|s| s + 1).unwrap_or(1);
+    let at_node = || {
+        node.map(|n| format!(" ({})", n.label))
+            .unwrap_or_default()
+    };
+    match p.kind {
+        WfahKind::Action => p
+            .action
+            .as_deref()
+            .map(|a| display::action_label(wfd, a))
+            .unwrap_or_else(|| "Aksiyon".into()),
+        WfahKind::Deadline => "Akış süresi doldu".into(),
+        WfahKind::Escalation => format!("{step_no}. escalation adımı işletildi{}", at_node()),
+        WfahKind::EscalationSkipped => format!("{step_no}. escalation adımı atlandı{}", at_node()),
+        WfahKind::ClaimTimeout => format!("Üstlenme süresi doldu{}", at_node()),
+        WfahKind::Trigger => "Otomatik işlem çalıştı".into(),
+        WfahKind::CallReturn => "Alt akış tamamlandı".into(),
+        WfahKind::CallTruncated => "Alt akış geçmişi kısaltıldı".into(),
+        WfahKind::Fork => "Paralel kollar açıldı".into(),
+        WfahKind::BranchArrived => format!("Kol tamamlandı{}", at_node()),
+        WfahKind::Join => "Kollar birleşti".into(),
+        WfahKind::Collapse => match collapse_reason_label(input) {
+            Some(reason) => format!("Paralel akış sonlandırıldı — {reason}"),
+            None => "Paralel akış sonlandırıldı".into(),
+        },
+        WfahKind::BranchCancelled => match collapse_reason_label(input) {
+            Some(reason) => format!("Kol iptal edildi{} — {reason}", at_node()),
+            None => format!("Kol iptal edildi{}", at_node()),
+        },
+        WfahKind::BranchSuperseded => match collapse_reason_label(input) {
+            Some(reason) => format!("Kol onayı geçersizleşti{} — {reason}", at_node()),
+            None => format!("Kol onayı geçersizleşti{}", at_node()),
+        },
+    }
+}
+
+/// `WfahEntry` (motor izdüşümü) → `WfahView` (API görünümü).
+///
+/// `from_nodes`: `seq` → geçişin KAYNAK node'u eşlemesi (`PathRow`dan). Aksiyon
+/// satırlarının node bilgisi motor tipinde YOKTUR (`WfahEntry` bilerek alan
+/// kazanmadı — golden fixture'ı bozardı), bu yüzden akış izinden ödünç alınır.
+fn to_wfah_view(
+    wfd: &Wfd,
+    entry: &WfahEntry,
+    from_nodes: &std::collections::HashMap<u32, String>,
+) -> WfahView {
+    let parsed = parse_marker(&entry.action);
+    // Kol/collapse marker'ları node'u payload'da taşır; aksiyon satırları akış izinde.
+    let node_key = parsed.node.clone().or_else(|| {
+        entry
+            .input
+            .as_ref()
+            .and_then(|i| i.get("node"))
+            .and_then(|n| n.as_str())
+            .map(str::to_string)
+            .or_else(|| from_nodes.get(&entry.seq).cloned())
+    });
+    let node = node_key.map(|k| Ref::node(wfd, &k));
+    WfahView {
+        seq: entry.seq,
+        kind: parsed.kind,
+        label: wfah_label(wfd, &parsed, node.as_ref(), entry.input.as_ref()),
+        action: match parsed.kind {
+            WfahKind::Action => parsed.action.as_deref().map(|a| Ref::action(wfd, a)),
+            _ => None,
+        },
+        node,
+        // Sistem satırlarının aktörü nil user_id'li `system` aktörüdür (bkz.
+        // pipeline `system_actor`); WF Admin'in elle tetiklediğinde gerçek aktör yazılır.
+        system: entry.actor.user_id.is_nil(),
+        actor: entry.actor.clone(),
+        input: entry.input.clone(),
+        at: entry.applied_at,
+        from_call: parsed.from_call,
+        step: parsed.step,
     }
 }
 
@@ -561,7 +956,7 @@ impl WfeExecutor {
         Ok(WfeStartResult {
             wfe_id,
             terminal,
-            current_node,
+            current_node: current_node.map(|n| Ref::node(&wfd, &n)),
             end_response,
             current_c_a: new.resolved_c_a,
         })
@@ -572,6 +967,9 @@ impl WfeExecutor {
     /// `expected_rev`: WOR-65 — istemcinin okuduğu WFE revizyon token'ı (API body
     /// `expected_rev`). `None` = kontrol yok (bugünkü davranış). `Some(n)` ve durum
     /// bu arada ilerlediyse hiçbir şey uygulanmaz, `Conflict(StaleRevision)` döner.
+    ///
+    /// `target`: GLB hedef seçimi (API body `target`) — bkz. `Engine::apply`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply(
         &self,
         wfe_id: Uuid,
@@ -579,6 +977,7 @@ impl WfeExecutor {
         action: &str,
         input: &Value,
         node_hint: Option<&str>,
+        target: Option<&str>,
         expected_rev: Option<u32>,
     ) -> Result<WfeApplyResult, EngineError> {
         // WOR-31: paralel modda eşzamanlı kol hareketleri (BranchMoveTo/
@@ -611,7 +1010,7 @@ impl WfeExecutor {
             let commit = self
                 .engine_for(&wfes)
                 .await?
-                .apply(&wfd, &wfes, actor, action, input, node_hint)
+                .apply(&wfd, &wfes, actor, action, input, node_hint, target)
                 .await?;
             match self.wfe.commit(&commit).await {
                 Ok(()) => {
@@ -628,7 +1027,7 @@ impl WfeExecutor {
                     return Ok(WfeApplyResult {
                         wfe_id,
                         terminal,
-                        current_node,
+                        current_node: current_node.map(|n| Ref::node(&wfd, &n)),
                         end_response,
                         current_c_a: commit.resolved_c_a,
                     });
@@ -908,11 +1307,7 @@ impl WfeExecutor {
             } else {
                 None
             };
-            branch_views.push(BranchView {
-                state: b.clone(),
-                c_a,
-                claim_as,
-            });
+            branch_views.push(BranchView::new(&wfd, b, c_a, claim_as));
         }
 
         // Madde 6: tek-kol modda (join_target yok) viewer current_node'u claim
@@ -934,25 +1329,51 @@ impl WfeExecutor {
 
         // K7 (Faz 0): WFAH akış izi — store bunu desteklemiyorsa (`NoWfahPath`)
         // boş döner, alan hiç yazılmaz (calls/caller ile aynı davranış deseni).
-        let path = self.wfah_path.load_wfah_path(wfe_id).await?;
+        let path_rows = self.wfah_path.load_wfah_path(wfe_id).await?;
+        // Aksiyon satırlarının node bağlamı akış izinden ödünç alınır (bkz. `to_wfah_view`).
+        let from_nodes: std::collections::HashMap<u32, String> = path_rows
+            .iter()
+            .filter_map(|r| r.from_node.clone().map(|n| (r.seq, n)))
+            .collect();
+        let path: Vec<PathStep> = path_rows
+            .iter()
+            .map(|r| PathStep {
+                seq: r.seq,
+                action: Ref::action(&wfd, &r.action),
+                from: r.from_node.as_deref().map(|n| Ref::node(&wfd, n)),
+                to: r.to_node.as_deref().map(|n| Ref::node(&wfd, n)),
+                at: r.at,
+            })
+            .collect();
+        let wfah: Vec<WfahView> = wfes
+            .wfah
+            .entries()
+            .iter()
+            .map(|e| to_wfah_view(&wfd, e, &from_nodes))
+            .collect();
         // Sıradaki escalation adımı (vade gerekmez) — WF Admin'in göreceği sayaç.
         let next_escalation = engine
             .next_escalation(&wfd, &wfes, now, None)?
             .map(|f| EscalationView {
                 step_idx: f.step_idx,
-                node: wfes.current_node.clone().unwrap_or_default(),
+                node: Ref::node(&wfd, wfes.current_node.as_deref().unwrap_or_default()),
                 entered_at: f.entered_at,
                 deadline: f.deadline,
                 overdue: f.overdue,
             });
+        let current_node = wfes.current_node.as_deref().map(|n| Ref::node(&wfd, n));
+        let join_target = wfes
+            .join_target
+            .as_ref()
+            .map(|t| JoinTargetView::new(&wfd, t));
 
         Ok(WfeView {
             wfe_id,
             status: wfes.status,
-            current_node: wfes.current_node,
+            current_node,
             claimed_by: wfes.assigned_to,
             dynctx: filtered,
-            wfah: wfes.wfah.entries().to_vec(),
+            wfah,
             end_response: wfes.end_response,
             deadline: wfes.deadline,
             claimed_at: wfes.claimed_at,
@@ -973,7 +1394,7 @@ impl WfeExecutor {
                 JoinRule::Expr(e) => Some(e.clone()),
                 _ => None,
             },
-            join_target: wfes.join_target,
+            join_target,
             claim_as,
             calls,
             caller,

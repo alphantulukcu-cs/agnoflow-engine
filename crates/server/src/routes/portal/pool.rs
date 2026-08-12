@@ -36,6 +36,18 @@ fn to_actor(actor: &PortalActor) -> Actor {
     }
 }
 
+/// Havuz satırının node `Ref`i. WFD çözülemediyse etiket anahtarın okunur hâline
+/// düşer — `label`ın DAİMA dolu olması sözleşmedir, tek bozuk satır onu bozmamalı.
+fn node_ref(wfd: Option<&wfe_core::types::wfd_v22::Wfd>, key: &str) -> wf_wfe::executor::Ref {
+    match wfd {
+        Some(w) => wf_wfe::executor::Ref::node(w, key),
+        None => wf_wfe::executor::Ref {
+            id: key.to_string(),
+            label: wfe_core::v22::display::humanize_key(key),
+        },
+    }
+}
+
 /// One item in the pool list. Bir SQL row'u — `wfd_version` yalnızca
 /// `claim_deadline` hesabı için tutulur, response'a serialize edilmez.
 #[derive(Debug, sqlx::FromRow)]
@@ -74,18 +86,21 @@ pub struct PoolTask {
     pub title: String,
     pub workflow_id: Uuid,
     pub status: String,
-    pub current_node: Option<String>,
+    /// Anahtar + gösterim (`{id, label}`) — istemci `id`yi geri gönderir, `label`ı basar.
+    #[schema(value_type = Object)]
+    pub current_node: Option<wf_wfe::executor::Ref>,
     pub created_at: DateTime<Utc>,
     pub claimed_by: Option<Value>,
     pub deadline: Option<DateTime<Utc>>,
     pub claimed_at: Option<DateTime<Utc>>,
     pub claim_deadline: Option<DateTime<Utc>>,
     pub priority: i32,
-    /// WOR-31 T4: paralel mod kol node'u — `Some` ise bu satır belirli bir
-    /// aktif kolu temsil eder (claim/action bu `node`'u geri geçirmelidir).
-    /// Paralel değilse `None` (geriye uyumlu — eski istemciler bu alanı yok sayar).
+    /// WOR-31 T4: paralel mod kolu — `Some` ise bu satır belirli bir aktif kolu
+    /// temsil eder (claim `node`, aksiyon `branch` olarak bu `id`yi geri geçirir).
+    /// Paralel değilse alan hiç çıkmaz.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub node: Option<String>,
+    #[schema(value_type = Object)]
+    pub node: Option<wf_wfe::executor::Ref>,
     /// WOR-65: WFE revizyon token'ı. Havuz listesinde AÇIKÇA döner çünkü burada
     /// `wfah` YOKTUR — portal'ın revizyonu türetebileceği başka alan yok.
     /// **WFE-seviyesidir:** aynı paralel WFE'nin farklı kolları için üretilen
@@ -199,18 +214,17 @@ async fn list_pool(
     let mut tasks = Vec::with_capacity(rows.len());
     for row in rows {
         let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
+        // WFD artık HER satır için çözülür: `current_node` etiketi de ondan gelir.
+        // Çözülemezse (silinmiş/bozuk sürüm) etiket anahtarın okunur hâline düşer,
+        // satır havuzdan DÜŞMEZ.
+        let key = (row.workflow_id, row.wfd_version);
+        if !wfd_cache.contains_key(&key) {
+            if let Ok(w) = s.wfd.fetch(row.workflow_id, row.wfd_version).await {
+                wfd_cache.insert(key, w);
+            }
+        }
+        let wfd = wfd_cache.get(&key);
         let claim_deadline = if row.claimed_at.is_some() && row.current_node.is_some() {
-            let key = (row.workflow_id, row.wfd_version);
-            let wfd = match wfd_cache.get(&key) {
-                Some(w) => Some(w),
-                None => match s.wfd.fetch(row.workflow_id, row.wfd_version).await {
-                    Ok(w) => {
-                        wfd_cache.insert(key, w);
-                        wfd_cache.get(&key)
-                    }
-                    Err(_) => None,
-                },
-            };
             wfd.and_then(|wfd| {
                 wf_wfe::executor::compute_claim_deadline(
                     wfd,
@@ -221,12 +235,13 @@ async fn list_pool(
         } else {
             None
         };
+        let current_node = row.current_node.as_deref().map(|n| node_ref(wfd, n));
         tasks.push(PoolTask {
             id: row.id,
             title: row.title,
             workflow_id: row.workflow_id,
             status: row.status,
-            current_node: row.current_node,
+            current_node,
             created_at: row.created_at,
             claimed_by: row.claimed_by,
             deadline: row.deadline,
@@ -349,14 +364,14 @@ async fn list_pool(
             title: row.title,
             workflow_id: row.workflow_id,
             status: "active".into(),
-            current_node: Some(row.branch_node.clone()),
+            current_node: Some(node_ref(Some(wfd), &row.branch_node)),
             created_at: row.created_at,
             claimed_by: row.claimed_by,
             deadline: row.deadline,
             claimed_at: row.claimed_at,
             claim_deadline,
             priority,
-            node: Some(row.branch_node),
+            node: Some(node_ref(Some(wfd), &row.branch_node)),
             rev: 0,         // aşağıda doldurulur
             note_count: 0,  // aşağıda doldurulur
             unread_note_count: 0, // aşağıda doldurulur

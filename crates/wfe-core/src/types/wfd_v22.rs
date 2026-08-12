@@ -99,6 +99,9 @@ impl Wfd {
     }
 
     pub fn from_json(s: &str) -> Result<Wfd, EngineError> {
+        // Çift node id'si YALNIZ ham metinde görülebilir (bkz. `crate::dupkeys`):
+        // `Value`ya dönüşen belgede çakışan anahtar zaten silinmiş olur.
+        crate::dupkeys::assert_no_duplicate_node_ids(s.as_bytes())?;
         let v: Value =
             serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
         Wfd::from_value(v)
@@ -130,6 +133,7 @@ impl Wfd {
 
     /// `from_json` + şema kapısı — bkz. `from_value_checked`.
     pub fn from_json_checked(s: &str) -> Result<Wfd, EngineError> {
+        crate::dupkeys::assert_no_duplicate_node_ids(s.as_bytes())?;
         let v: Value =
             serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
         Wfd::from_value_checked(v)
@@ -750,8 +754,8 @@ impl CatchDef {
     }
 }
 
-/// WFT dört formdan biridir (M3, WOR-31): {node} / {terminal} /
-/// {conditions, default?} / {parallel}. Inline `wft.c_a` YOKTUR.
+/// WFT formlardan biridir (M3, WOR-31): {node} / {terminal} / {targets} /
+/// {conditions, default?} / {parallel} / {collapse}. Inline `wft.c_a` YOKTUR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Wft {
@@ -760,6 +764,20 @@ pub enum Wft {
     },
     Terminal {
         terminal: String,
+    },
+    /// Global aksiyon (GLB): hedefi BELGE değil, aksiyonu alan KİŞİ seçer.
+    ///
+    /// Eskiden hedef, aksiyon ANAHTARINA kodlanıyordu (`Geri_Gonder__gt__self__mudur`)
+    /// ve hedef başına ayrı bir aksiyon + ayrı bir transition üretiliyordu. Bu, wire
+    /// kimliğini ayrıştırılması gereken bir metne çeviriyordu: istemci hedefi görmek
+    /// için anahtarı bölmek, motor da aynı `when`/`c_a`/`wfes_effects`/`trigger`
+    /// üçlüsünü her hedefe kopyalamak zorundaydı. Artık TEK aksiyon, TEK transition
+    /// var; seçim çalışma anında `Engine::apply(..., target)` ile gelir.
+    ///
+    /// Seçim bir action input DEĞİLDİR: `$ctx`'e yazılmaz, `wfes_effects` gerektirmez,
+    /// `$wfah` izdüşümüne girmez. Hedef bilgisi geçişin kendisinde (`path[].to`) görünür.
+    Targets {
+        targets: Vec<GlobalTarget>,
     },
     Conditional {
         conditions: Vec<WftCondition>,
@@ -782,6 +800,17 @@ pub enum Wft {
     Collapse {
         collapse: WftTarget,
     },
+}
+
+/// `Wft::Targets` öğesi — seçilebilir TEK bir hedef.
+///
+/// Bugün yalnız `node` taşır ama düz `Vec<String>` yerine obje olmasının gerekçesi
+/// var: hedef başına `when` guard'ı / etiket gibi alanlar eklenirse şekil kırılmadan
+/// büyür. `deny_unknown_fields` — yazım hatası sessizce yutulmaz.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalTarget {
+    pub node: String,
 }
 
 /// WOR-31: `Wft::Parallel`'in gövdesi.
@@ -955,7 +984,15 @@ impl FromNodes {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Terminal {
+    /// MAKİNE kimliği (`^[a-zA-Z0-9_]+$`, belge içinde benzersiz). Kullanıcı metni
+    /// DEĞİLDİR — ekrana `label` basılır. Eskiden id'nin kendisi kullanıcı metniydi
+    /// ve bu yüzden case-insensitive benzersizlik gibi bir "isim" kuralı taşıyordu;
+    /// artık kimlik ile gösterim ayrı alanlardır (node'lardaki `key`/`label` ayrımı).
     pub id: String,
+    /// Gösterim adı. Verilmezse motor anahtarın okunur hâlini üretir
+    /// (`display::humanize_key`) — istemci ASLA fallback yazmak zorunda kalmaz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
     pub wfe_end_response: BTreeMap<String, Value>,

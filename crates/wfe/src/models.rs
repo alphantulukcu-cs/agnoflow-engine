@@ -13,6 +13,12 @@ pub struct WfeRow {
     pub wfd_version: i32,
     pub status: String,
     /// v2.2: aktif WFE'nin beklediği node slug'ı (WOR-24).
+    ///
+    /// SERİLEŞMEZ: dışarı çıkan hâli `{id, label}` çiftidir (`executor::Ref`) ve
+    /// etiket ancak WFD elde varken üretilebilir — o da satırın değil, listeleyen
+    /// rotanın (wfd cache'i orada) işidir. Ham anahtarı ayrıca yollamak istemciye
+    /// "hangisini basayım" sorusunu geri verirdi.
+    #[serde(skip_serializing)]
     pub current_node: Option<String>,
     pub current_c_a: serde_json::Value,
     pub claimed_by: Option<serde_json::Value>,

@@ -165,8 +165,15 @@ struct UploadBody {
 async fn upload_wfd(
     State(s): State<AppState>,
     auth: AppAuth,
-    Json(body): Json<UploadBody>,
+    // `Json<UploadBody>` DEĞİL ham bayt: çift node id'si yalnız burada görülebilir.
+    // `serde_json` çift anahtarı hata saymaz, sessizce sonuncuyu alır — `Value`ya
+    // dönüşmüş gövdede çakışma çoktan silinmiş olur (bkz. `wfe_core::dupkeys`).
+    // Elle yazılıp POST edilen JSON'un kapısı bu uçtur.
+    raw: axum::body::Bytes,
 ) -> Result<Json<Value>, AppError> {
+    let body: UploadBody = serde_json::from_slice(&raw)
+        .map_err(|e| AppError(format!("gövde ayrıştırılamadı: {e}"), StatusCode::BAD_REQUEST))?;
+    wfe_core::dupkeys::assert_no_duplicate_node_ids(&raw).map_err(AppError::from)?;
     let project_id = resolve_project_for_write(&s, &auth, body.orgtnt_id, body.project_id).await?;
     // Lokal DB bağlantıları WFD'ye aittir: doküman başkasının lokalini taşıyamaz.
     if let Some(name) = body.wfd.get("name").and_then(Value::as_str) {

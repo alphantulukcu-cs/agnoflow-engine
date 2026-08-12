@@ -157,12 +157,14 @@ async fn engine_error_stops_the_run_and_becomes_a_failure() {
             actor: Some(sc_actor("creditAnalyst")),
             input: json!({}),
             node: None,
+            target: None,
         },
         ScenarioStep::Action {
             action: "ikinci".into(),
             actor: Some(sc_actor("creditAnalyst")),
             input: json!({}),
             node: None,
+            target: None,
         },
     ];
     let res = run(&engine(), &wfd, &json_doc, &s, None).await;
@@ -225,12 +227,14 @@ async fn parallel_branch_step_targets_its_branch_via_node() {
             actor: Some(sc_actor("coordinator")),
             input: json!({}),
             node: None,
+            target: None,
         },
         ScenarioStep::Action {
             action: "approve".into(),
             actor: Some(sc_actor("financeApprover")),
             input: json!({}),
             node: Some("self__financeApprover".into()),
+            target: None,
         },
     ];
     let res = run(&engine(), &wfd, &json_doc, &s, None).await;
@@ -251,12 +255,14 @@ async fn parallel_branch_step_without_node_fails() {
             actor: Some(sc_actor("coordinator")),
             input: json!({}),
             node: None,
+            target: None,
         },
         ScenarioStep::Action {
             action: "approve".into(),
             actor: Some(sc_actor("financeApprover")),
             input: json!({}),
             node: None,
+            target: None,
         },
     ];
     let res = run(&engine(), &wfd, &json_doc, &s, None).await;
@@ -285,6 +291,7 @@ async fn call_return_step_resumes_a_waiting_call_through_to_terminal() {
             actor: Some(sc_actor("branchManager")),
             input: json!({ "kullandirim_tutari": 50000 }),
             node: None,
+            target: None,
         },
     ];
     s.expect = Some(Expect {

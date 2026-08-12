@@ -367,6 +367,9 @@ pub mod step {
 
     /// `POST /wfe/simulate/apply` gövdesi — claim YAZILMAZ ama uygunluk
     /// çağıranın sorumluluğundadır (route `sim_eligible` ile denetler).
+    ///
+    /// `target`: GLB hedef seçimi — gerçek akıştaki `ApplyBody.target`ın karşılığı.
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply(
         engine: &Engine<'_>,
         wfd: &Wfd,
@@ -375,9 +378,12 @@ pub mod step {
         action: &str,
         input: &Value,
         node: Option<&str>,
+        target: Option<&str>,
     ) -> Result<(), EngineError> {
         let wfes = state.to_wfes(Some(actor.user_id));
-        let commit = engine.apply(wfd, &wfes, actor, action, input, node).await?;
+        let commit = engine
+            .apply(wfd, &wfes, actor, action, input, node, target)
+            .await?;
         state.apply_commit(&commit);
         Ok(())
     }

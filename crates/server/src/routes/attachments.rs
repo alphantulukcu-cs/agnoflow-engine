@@ -146,8 +146,8 @@ async fn authorized_nodes(
         .await
         .map_err(AppError::from)?;
     let nodes = match view.current_node {
-        Some(n) => vec![n],
-        None => view.branches.iter().map(|b| b.state.branch_node.clone()).collect(),
+        Some(n) => vec![n.id],
+        None => view.branches.iter().map(|b| b.node.id.clone()).collect(),
     };
     Ok(nodes)
 }

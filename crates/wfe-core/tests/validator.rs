@@ -56,6 +56,98 @@ fn golden_fixture_is_valid() {
     );
 }
 
+// ---- GLB (global aksiyon) — `wft: {targets}` ----
+//
+// Hedef artık aksiyon ANAHTARINA kodlanmıyor (`__gt__` kalktı); tek transition,
+// tek aksiyon, hedefi çalışma anında kişi seçiyor. Aşağıdaki kurallar o menünün
+// tasarım-zamanı denetimidir.
+
+/// `t_manager_decide`ın wft'sini verilen hedef listesiyle GLB'ye çevirir.
+/// `from` iki node taşır (`self__branchManager`, `parent__creditDeptManager`) —
+/// `global_action_target_self` kuralı için de elverişli.
+fn with_global_targets(targets: Value) -> Value {
+    let mut v = fixture_value();
+    v["transitions"][1]["wft"] = json!({ "targets": targets });
+    // Bu transition `terminal_rejected`a giden TEK yoldu; wft'si GLB menüsüne
+    // dönünce o terminal yetim kalır ve `unreachable` GLB ile ilgisiz bir hata
+    // olarak testleri kirletir. Belgeyi tutarlı bırakmak için terminali de
+    // düşürüyoruz — GLB hedefleri node'dur, terminal hedefleyemez.
+    if let Some(terminals) = v["terminals"].as_array_mut() {
+        terminals.retain(|t| t["id"] != json!("terminal_rejected"));
+    }
+    v
+}
+
+#[test]
+fn global_action_targets_are_valid_edges() {
+    let report = with_global_targets(json!([{"node": "self__creditAnalyst"}]));
+    let report = validate_value(report);
+    assert!(
+        report.errors.is_empty(),
+        "geçerli GLB temiz geçmeli: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn global_action_with_no_targets_is_error() {
+    let report = validate_value(with_global_targets(json!([])));
+    assert!(
+        has_error(&report, "global_action_no_targets"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn global_action_unknown_target_is_error() {
+    let report = validate_value(with_global_targets(json!([{"node": "self__yok"}])));
+    assert!(
+        has_error(&report, "global_action_target_unknown"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+    // Aynı sorun ikinci kez jenerik `cross_ref` olarak BASILMAZ.
+    assert!(!has_error(&report, "cross_ref"), "{:#?}", report.errors);
+}
+
+#[test]
+fn duplicate_global_action_target_is_error() {
+    let report = validate_value(with_global_targets(
+        json!([{"node": "self__creditAnalyst"}, {"node": "self__creditAnalyst"}]),
+    ));
+    assert!(
+        has_error(&report, "global_action_target_dup"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Kendine dönen hedef sessiz bir tuzaktır: aksiyon uygulanır, WFE aynı node'da
+/// kalır, yalnız claim düşer.
+#[test]
+fn global_action_target_pointing_at_its_own_from_node_is_error() {
+    let report = validate_value(with_global_targets(json!([{"node": "self__branchManager"}])));
+    assert!(
+        has_error(&report, "global_action_target_self"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Start kuralında hedefi seçecek bir aktör yoktur — kapı yayında, runtime'da değil.
+#[test]
+fn global_action_outside_a_transition_is_error() {
+    let mut v = fixture_value();
+    v["start"][0]["wft"] = json!({ "targets": [{"node": "self__branchManager"}] });
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "global_action_placement"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
 // ---- §1 cross-reference ----
 
 #[test]
@@ -120,15 +212,43 @@ fn node_key_colliding_with_terminal_id_is_error() {
     assert!(has_error(&validate_value(v), "unique"));
 }
 
+/// Terminal id'si artık MAKİNE kimliğidir: yalnız case farkı iki AYRI kimliktir
+/// (node key'lerdeki kural). Kullanıcı metni `label` alanına yazılır.
 #[test]
-fn terminal_ids_differing_only_by_case_is_error() {
+fn terminal_ids_differing_only_by_case_are_two_distinct_ids() {
     let mut v = fixture_value();
-    // "terminal_approved" ile "Terminal_Approved" — sadece case farklı, aynı isim sayılır
     v["terminals"][1]["id"] = json!("Terminal_Approved");
+    v["terminals"][1]["label"] = json!("Onaylandı (büyük harfli)");
     v["transitions"][1]["wft"]["default"]["terminal"] = json!("Terminal_Approved");
     let report = validate_value(v);
     assert!(
-        has_error(&report, "unique"),
+        !has_error(&report, "terminal_id_dup"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn terminal_id_outside_the_pattern_is_error() {
+    let mut v = fixture_value();
+    v["terminals"][1]["id"] = json!("Onaylandı!");
+    v["transitions"][1]["wft"]["default"]["terminal"] = json!("Onaylandı!");
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "terminal_id_pattern"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn duplicate_terminal_id_is_error() {
+    let mut v = fixture_value();
+    v["terminals"][1]["id"] = json!("terminal_approved");
+    v["transitions"][1]["wft"]["default"]["terminal"] = json!("terminal_approved");
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "terminal_id_dup"),
         "hatalar: {:#?}",
         report.errors
     );
@@ -136,58 +256,58 @@ fn terminal_ids_differing_only_by_case_is_error() {
 
 // ---- §2b slug / canonical uniqueness ----
 
-#[test]
-fn node_key_not_matching_slug_is_error() {
-    let mut v = fixture_value();
-    let node = v["nodes"]["parent__creditDeptManager"].clone();
-    v["nodes"]
-        .as_object_mut()
-        .unwrap()
-        .remove("parent__creditDeptManager");
-    v["nodes"]["parent__wrongKey"] = node;
-    // referansları düzelt ki sadece slug hatası kalsın
-    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] = json!({"node": "parent__wrongKey"});
-    v["transitions"][1]["from"] = json!(["self__branchManager", "parent__wrongKey"]);
-    let report = validate_value(v);
-    assert!(has_error(&report, "slug"), "hatalar: {:#?}", report.errors);
-}
+// §2b KALDIRILDI (2026-08-12): node kimliğini tasarımcı verir. Aşağıdaki üç test —
+// `node_key_not_matching_slug_is_error`, `collision_hash_suffix_is_accepted`,
+// `duplicate_canonical_c_a_is_error` — kaldırılan kuralı doğruluyordu. Yerlerine
+// kuralın GERÇEKTEN kalktığını doğrulayan testler kondu; sessizce silmek, kısıtın
+// yanlışlıkla geri gelmesini fark ettirmezdi.
 
 #[test]
-fn collision_hash_suffix_is_accepted() {
+fn node_key_need_not_match_slug_of_its_c_a() {
     let mut v = fixture_value();
     let node = v["nodes"]["parent__creditDeptManager"].clone();
     v["nodes"]
         .as_object_mut()
         .unwrap()
         .remove("parent__creditDeptManager");
-    v["nodes"]["parent__creditDeptManager_a3f9"] = node;
-    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] =
-        json!({"node": "parent__creditDeptManager_a3f9"});
-    v["transitions"][1]["from"] = json!(["self__branchManager", "parent__creditDeptManager_a3f9"]);
+    // Tasarımcının verdiği, c_a ile HİÇ ilgisi olmayan bir kimlik.
+    v["nodes"]["nihai_onay"] = node;
+    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] = json!({"node": "nihai_onay"});
+    v["transitions"][1]["from"] = json!(["self__branchManager", "nihai_onay"]);
     let report = validate_value(v);
     assert!(
-        !has_error(&report, "slug"),
-        "hash'li key kabul edilmeli: {:#?}",
+        report.errors.is_empty(),
+        "serbest node kimliği kabul edilmeli: {:#?}",
         report.errors
     );
 }
 
 #[test]
-fn duplicate_canonical_c_a_is_error() {
+fn two_nodes_may_share_the_same_c_a() {
+    // "Müdür inceler" + "müdür onaylar": aynı kişi, İKİ AYRI adım. Eski `duplicate_c_a`
+    // kuralı bunu yasaklıyordu, çünkü ikisinin anahtarı aynı düşerdi.
     let mut v = fixture_value();
-    // parent__creditDeptManager'ın c_a'sını self__branchManager ile aynı yap
-    // (key'i de yeni slug'ın collision-hash'li haline getir ki yalnızca duplicate hatası kalsın)
     let ca = v["nodes"]["self__branchManager"]["c_a"].clone();
-    let node = json!({"label": "Kopya", "c_a": ca});
     v["nodes"]
         .as_object_mut()
         .unwrap()
         .remove("parent__creditDeptManager");
-    v["nodes"]["self__branchManager_0000"] = node;
-    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] =
-        json!({"node": "self__branchManager_0000"});
-    v["transitions"][1]["from"] = json!(["self__branchManager", "self__branchManager_0000"]);
-    assert!(has_error(&validate_value(v), "duplicate_c_a"));
+    v["nodes"]["ikinci_inceleme"] = json!({"label": "İkinci İnceleme", "c_a": ca});
+    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] = json!({"node": "ikinci_inceleme"});
+    v["transitions"][1]["from"] = json!(["self__branchManager", "ikinci_inceleme"]);
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "aynı c_a iki node'da HATA olmamalı: {:#?}",
+        report.errors
+    );
+    // ...ama sessiz de geçmemeli: paralel kolda gerekli, ardışık adımda modelleme
+    // hatası. Motor ikisini ayırt edemez → karar tasarımcıya, uyarı olarak.
+    assert!(
+        report.warnings.iter().any(|w| w.code == "shared_c_a"),
+        "aynı c_a uyarı üretmeli: {:#?}",
+        report.warnings
+    );
 }
 
 // ---- §5 graf ----

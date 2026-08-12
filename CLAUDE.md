@@ -17,8 +17,22 @@ Alınan tasarım kararları: `docs/spec/decisions.md`.
 
 ## Değişmezler (spec'ten)
 
+- **Node kimliğini TASARIMCI verir** (2026-08-12, KIRICI): `node key == slug(c_a)` kuralı
+  ve `duplicate_c_a` (hata olarak) KALDIRILDI (`validator.rs` §2b notu). `c_a` node'un bir ALANIDIR,
+  kimliği değil → org yolu (ORGTRVLANG) artık anahtara sızmıyor, "kim yapar"ı değiştirmek
+  adımın kimliğini bozmuyor ve aynı kişinin İKİ farklı adımı olabiliyor ("müdür inceler" +
+  "müdür onaylar"). Biçim kısıtı şemada duruyor (`nodes` propertyNames: `idName`).
+  **Veri taşıması YOK** — yalnız kısıt kalktı, mevcut anahtarlar deseni zaten sağlıyor.
+  `duplicate_c_a` UYARIYA döndü (`shared_c_a`): paralel kolda GEREKLİ (kol kimliği node
+  anahtarıdır — K-of-N quorum aynı havuzdan N kol ister), ardışık adımda ise modelleme
+  hatası (tek node + aksiyonların `when`i).
+- **Ham JSON'da ÇİFT node anahtarı REDDEDİLİR** (`wfe_core::dupkeys`): `serde_json` çift
+  anahtarı hata saymaz, sessizce SONUNCUYU alır — kimlik tasarımcıya geçtiği için iki
+  adım aynı adı alırsa biri iz bırakmadan kaybolur ve akış çizilenden başka bir şey
+  yapardı. Kapı ancak HAM METİNDE kurulabilir (`Value`ya dönmüş belgede çakışma zaten
+  silinmiştir): `Wfd::from_json`/`from_json_checked` + `POST /wfd` (bu uç bu yüzden
+  `Json<UploadBody>` değil `Bytes` alır).
 - C_A **TEK KURALDIR**, iki biçim: **çapalı** `{c_orgu, c_r?, c_u?}` → match = `resolved(c_orgu) AND (rol OR c_u)`; **çapasız** `{c_u}` (c_orgu HİÇ yok) → match = `c_u`, kişi tenant genelinde eşleşir. Çapasızda `c_u` zorunlu, **`c_r` YASAK** (şema `oneOf` + validator `c_a_anchorless_role` + matcher rol kanalını hiç sormaz). Verilmeyen alan **false** (wildcard değil); c_u rol-agnostik. Çapasız aday cache girdisi birim taşımaz (`any_orgu: true`), havuz sorgusunda ayrı filtre.
-- Node key = `slug(c_a)` (§2a); aynı canonical c_a ikinci node'da OLAMAZ.
 - Transition: `from` + `action`; aynı (node, action) için array sırasında İLK when-match.
 - wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`.
 - Pipeline atomiktir: tüm diff'ler staged, `WfeStore::commit` tek transaction; unhandled fail'de hiçbir şey yazılmaz. Node değişiminde assignment (claimed_by) sıfırlanır.
@@ -268,6 +282,13 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
   Gizleme YALNIZ yazarı yapabilir (WFE'yi görebilen herkes değil — aksi halde karar delili
   hedefi tarafından ekrandan kaldırılabilirdi). Gizli notta gövde VE dosyalar API'den
   SIZMAZ (dosyalar notun içeriğinin parçasıdır).
+- **Gizleme GERİ ALINABİLİR** (2026-08-12): `POST .../notes/{note_id}/unhide`
+  (`notes::unhide`, iki route ağacında da), kapı `hide` ile AYNI — yalnız yazarı; zaten
+  görünür notta 409 `note.not_hidden`, draft'ta da aynı kod (draft gizlenmez, silinir).
+  Claim İSTEMEZ (`delete_note` ile aynı gerekçe). K3 delinmez: değişmez olan GÖVDEDİR,
+  görünürlüğün tek yönlü olması değil — gövde hâlâ hiç UPDATE edilmiyor, yalnız bayrak
+  çevriliyor ve `hidden_by` her seferinde kimin çevirdiğini yazıyor. Tek yönlü gizleme
+  yanlışlıkla basılan bir düğmeyi kalıcı veri kaybına çeviriyordu.
 - **Kapsam/IDOR**: `find_note` DAİMA `wfe_id`+`note_id` ile arar (yol parametresi +
   mutasyon hedefi bağlanmazsa bir WFE'yi görebilen aktör başka WFE'nin notunu
   düzenleyebilirdi); dosyalar `(wfe_id, note_id, file_id)` üçlüsüyle. Kapsam dışı = `404`
@@ -309,6 +330,53 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
   süpürücü durmaz.
 - Detay/reddedilen alternatifler için spec dosyasına bak; kod ile spec çeliştiğinde KOD
   esastır.
+
+## API sözleşmesi v2 — kimlik ile gösterim ayrıdır (2026-08-12, KIRICI)
+
+Amaç: **partner kendi frontend'ini yazarken hiçbir string kodlaması çözmek zorunda
+kalmasın.** Geriye uyumluluk YOK; eski biçimi okuyan kod ve migration yolu bilerek
+yazılmadı. Sözleşme: `docs/spec/schema.json` + `wfe_core::v22::display`.
+
+- **`Ref { id, label }` her yerde.** `id` motorun kimliğidir — istemci GERİ GÖNDERİR,
+  ayrıştırmaz, ekrana basmaz; `label` ekrana basılan tek şeydir ve **asla null/eksik
+  dönmez** (belgede yoksa `display::humanize_key` üretir, istemci fallback yazmaz).
+  Ref dönen yüzeyler: `PossibleAction` · `WfeView.current_node`/`branches[]`/`path[]`/
+  `join_target` · `WfeApplyResult.current_node` · `WfahView`.
+- **GLB: `__gt__` anahtar kodlaması KALKTI.** Hedef artık aksiyon ANAHTARINA
+  gömülmüyor; tek aksiyon + tek transition, menü `wft: { targets: [{node}, ...] }`
+  içinde (`Wft::Targets`, schema `wftGlobalTargets`, `minItems: 1`). Seçim
+  `POST /wfe/{id}/actions` gövdesindeki **`target`** ile gelir.
+  - `Engine::apply` `target: Option<&str>` alır. Zorunlu olduğu yerde yoksa
+    `TargetRequired` (400 `action.target_required`), menüde olmayan hedef
+    `TargetInvalid` (400 `action.target_invalid`), GLB olmayan aksiyonda gönderilmişse
+    `TargetUnexpected` (400 `action.target_unexpected`). **Sessizce yok saymak yasak** —
+    istemci hedef seçtiğini sanıp motor başka yere götürürdü.
+  - **`target` bir action input DEĞİLDİR**: `$ctx`'e yazılmaz, `wfes_effects`
+    gerektirmez, `$wfah` izdüşümüne girmez. Eski iki şeklin (anahtar ailesi ve
+    `$action.input.hedef` fan-out'u) sebebi buydu; ikisi de kalktı.
+  - Validator: `global_action_no_targets` · `_target_unknown` · `_target_dup` ·
+    `_target_self` · `global_action_placement` (yalnız `transitions[].wft` içinde).
+- **Paralel kol seçimi `ApplyBody.node` → `branch`.** Değer kolun node anahtarıdır ama
+  istemci için OPAKTIR; sentetik id tablosu AÇILMADI (istemci onu zaten ayrıştırmıyor,
+  yeni bir DB kolonu sıfır fayda için karmaşa olurdu).
+- **Terminal: `id` makine anahtarı (`^[a-zA-Z0-9_]+$`), `label` kullanıcı metni.**
+  Eskiden id'nin kendisi label'dı; bu yüzden label'lara case-insensitive benzersizlik
+  kısıtı biniyordu. O kısıt KALKTI (`terminal_id_pattern` / `terminal_id_dup` geldi).
+- **`wfah[]` artık sınıflandırılmış geliyor** (`WfahView`): `kind` (14 değerli KAPALI
+  liste) + hazır `label` + `action`/`node` Ref'leri + `system` + `from_call` + `step`.
+  İstemci bir daha `call:<key>/`, `escalate:<node>:<idx>[:skipped]`, `_branch_*`
+  metinlerini AYRIŞTIRMAZ — o iş motora taşındı (portalda `classifyWfahAction` silindi).
+  **Motorun İÇİNDEKİ marker adları ve `$wfah` izdüşümü (`{seq, action, actor, input,
+  at}`) DEĞİŞMEDİ** — yayınlanmış akışlar `count($wfah, #.action == "...")` ile sayıyor.
+  `input` payload'u AYNEN taşınır; ekranda anlam taşıyan alanlar (collapse `reason`)
+  etikete ÇEKİLİR ki istemci payload içindeki ham anahtarları basmak zorunda kalmasın.
+
+### `wfe_core::v22::display` (saf, birim testli)
+
+`action_label` · `node_label` · `humanize_key`. Etiketlerin üretildiği TEK yer burasıdır;
+`to_possible_action` ile simülasyon rotaları da aynı çeviriyi kullanır (sim ile gerçek
+akış aynı şekli döndürmek zorunda). `_` ile başlayan anahtarlar (`_branch_cancelled`)
+olduğu gibi kalır. Editör aynası: `utils/globalAction.humanizeKey`.
 
 ## WFD taslak kilidi (T‑B4, pessimistic)
 

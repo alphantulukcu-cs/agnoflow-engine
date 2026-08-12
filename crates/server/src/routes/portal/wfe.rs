@@ -16,7 +16,6 @@ use utoipa::ToSchema;
 use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
-use wfe_core::types::wfd_v22::WftTarget;
 use wf_wfe::executor::BranchView;
 use wfe_core::v22::ports::WfdStore;
 
@@ -47,14 +46,21 @@ struct ActionInputSchema {
 
 #[derive(Debug, Serialize, ToSchema)]
 struct AvailableAction {
-    name: String,
-    label: Option<String>,
+    /// Aksiyonun kimlik+gösterim çifti (`{id, label}`) — `id` istekte AYNEN geri gider.
+    #[schema(value_type = Object)]
+    action: wf_wfe::executor::Ref,
     input: ActionInputSchema,
-    /// WOR-31 T4: paralel modda bu aksiyonun ait olduğu kol node'u — action
-    /// gönderiminde `node` olarak geri geçilmelidir (aksiyon ≥2 kolla eşleşirse
+    /// GLB (global aksiyon) hedef seçimi — yalnız `wft: {targets}` aksiyonlarında
+    /// bulunur. İstemci seçilen `options[].id`yi gövdede `target` olarak yollar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Object)]
+    target: Option<wf_wfe::executor::TargetChoice>,
+    /// WOR-31 T4: paralel modda bu aksiyonun ait olduğu kol — action
+    /// gönderiminde `branch` olarak geri geçilmelidir (aksiyon ≥2 kolla eşleşirse
     /// disambiguasyon için zorunlu). Paralel değilse `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    node: Option<String>,
+    #[schema(value_type = Object)]
+    branch: Option<wf_wfe::executor::Ref>,
     /// Bu aksiyonun kaynak node'una bağlı ek-belge grupları ve item bazlı yükleme
     /// durumu. Boşsa attachment gate yok. Portal, `attachments_satisfied=false`
     /// iken submit butonunu disable eder ve eksik dosyalar için upload gösterir.
@@ -69,8 +75,10 @@ struct AvailableAction {
 struct WfeDetailResponse {
     wfe_id: Uuid,
     wfd_name: String,
-    current_node: Option<String>,
-    node_label: Option<String>,
+    /// Kimlik + gösterim (`{id, label}`) — ayrı bir `node_label` alanı YOK,
+    /// etiket kimliğin yanında taşınır.
+    #[schema(value_type = Object)]
+    current_node: Option<wf_wfe::executor::Ref>,
     dynctx: Value,
     claimed_by: Option<Uuid>,
     available_actions: Vec<AvailableAction>,
@@ -80,9 +88,9 @@ struct WfeDetailResponse {
     #[schema(value_type = Vec<Object>)]
     branches: Vec<BranchView>,
     /// WOR-31 T4: fork'ta persist edilen AND-join hedefi; `Some` = paralel mod
-    /// (bu durumda `current_node` `None`'dur).
+    /// (bu durumda `current_node` `None`'dur). `{kind, node|terminal}` — hedef `Ref`.
     #[schema(value_type = Object)]
-    join_target: Option<WftTarget>,
+    join_target: Option<wf_wfe::executor::JoinTargetView>,
     /// Madde 6: tek-kol modda viewer'ın claim provenance'ı (direct/delegated); paralel
     /// modda `None` — kol-bazlı `branches[].claim_as`'e bakılır.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,24 +152,22 @@ async fn get_wfe_detail(
         .await
         .map_err(AppError::from)?;
 
-    let node_label = view
-        .current_node
-        .as_ref()
-        .and_then(|n| wfd.nodes.get(n))
-        .and_then(|n| n.label.clone());
-
     // WOR-31 T4: paralel modda aynı aksiyon adı birden fazla kolda tekrar edebilir
-    // (ör. üç kolun da `approve`'u) — her tekrar kendi `node`'uyla ayrı satırdır,
-    // istemci hangi kolu onayladığını `node`'u geri göndererek belirtir.
+    // (ör. üç kolun da `approve`'u) — her tekrar kendi `branch`'iyle ayrı satırdır,
+    // istemci hangi kolu onayladığını `branch`i geri göndererek belirtir.
     // Depo WFD başına çözülür ($env) — döngü başına değil, bir kez.
     let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
     let mut available_actions: Vec<AvailableAction> = Vec::with_capacity(possible.len());
     for pa in &possible {
-        let Some(def) = wfd.actions.get(&pa.action) else {
+        let Some(def) = wfd.actions.get(&pa.action.id) else {
             continue;
         };
         // Aksiyonun kaynak node'u: paralelde kol node'u, aksi halde current_node.
-        let src_node = pa.node.clone().or_else(|| view.current_node.clone());
+        let src_node = pa
+            .branch
+            .as_ref()
+            .map(|b| b.id.clone())
+            .or_else(|| view.current_node.as_ref().map(|n| n.id.clone()));
         let attachments = match &src_node {
             // Durum AKSIYON BAŞINA sorulur: aynı node'da "Onayla" belge isterken
             // "Reddet" istemeyebilir — `attachments_satisfied` o aksiyonun cevabıdır.
@@ -170,7 +176,7 @@ async fn get_wfe_detail(
                 &wfd,
                 wfe_id,
                 n,
-                Some(pa.action.as_str()),
+                Some(pa.action.id.as_str()),
             )
             .await
                 .map_err(|e| {
@@ -193,13 +199,13 @@ async fn get_wfe_detail(
         }
         let attachments_satisfied = super::attachments::satisfied(&attachments);
         available_actions.push(AvailableAction {
-            name: pa.action.clone(),
-            label: def.label.clone(),
+            action: pa.action.clone(),
             input: ActionInputSchema {
                 required: def.input.required.clone(),
                 optional: def.input.optional.clone(),
             },
-            node: pa.node.clone(),
+            target: pa.target.clone(),
+            branch: pa.branch.clone(),
             attachments,
             attachments_satisfied,
         });
@@ -209,7 +215,6 @@ async fn get_wfe_detail(
         wfe_id,
         wfd_name: row.wfd_name,
         current_node: view.current_node,
-        node_label,
         dynctx: view.dynctx,
         claimed_by: view.claimed_by,
         available_actions,
@@ -225,9 +230,13 @@ struct ActionRequest {
     action: String,
     #[serde(default)]
     input: Value,
-    /// WOR-31 T4: paralel modda kol seçimi (bkz. `AvailableAction.node`).
+    /// WOR-31 T4: paralel modda kol seçimi (bkz. `AvailableAction.branch`).
     #[serde(default)]
-    node: Option<String>,
+    branch: Option<String>,
+    /// GLB hedef seçimi (bkz. `AvailableAction.target`) — `wft: {targets}`
+    /// aksiyonlarında ZORUNLU, diğerlerinde YASAK.
+    #[serde(default)]
+    target: Option<String>,
     /// WOR-65: `WfeDetailResponse.rev`'den okunan revizyon token'ı. OPSİYONEL —
     /// göndermeyen istemci bugünkü davranışı görür. Uyuşmazlıkta hiçbir yan etki
     /// üretilmeden 409 + `code: "conflict.stale_revision"`.
@@ -243,7 +252,8 @@ struct ActionRequest {
 #[derive(Serialize, ToSchema)]
 struct ActionResponse {
     wfe_status: String,
-    current_node: Option<String>,
+    #[schema(value_type = Object)]
+    current_node: Option<wf_wfe::executor::Ref>,
     #[serde(skip_serializing_if = "Option::is_none")]
     end_response: Option<Value>,
     /// K5: yalnız `note_id` gönderilip yayınlama başarısız olduğunda dolar —
@@ -272,8 +282,11 @@ async fn submit_action(
         .query(wfe_id, &to_actor(&actor))
         .await
         .map_err(AppError::from)?;
-    // Paralelde current_node None'dur; kol seçimi body.node ile gelir.
-    let target_node = body.node.clone().or(view.current_node.clone());
+    // Paralelde current_node None'dur; kol seçimi body.branch ile gelir.
+    let target_node = body
+        .branch
+        .clone()
+        .or_else(|| view.current_node.as_ref().map(|n| n.id.clone()));
     if let Some(node) = &target_node {
         let store = crate::attachment_store::store_for_wfe(&s, wfe_id).await?;
         let groups =
@@ -311,7 +324,8 @@ async fn submit_action(
             &to_actor(&actor),
             &body.action,
             &body.input,
-            body.node.as_deref(),
+            body.branch.as_deref(),
+            body.target.as_deref(),
             body.expected_rev,
         )
         .await

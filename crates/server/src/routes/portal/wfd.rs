@@ -120,7 +120,9 @@ struct StartRequest {
 #[derive(Serialize, ToSchema)]
 struct StartResponse {
     wfe_id: Uuid,
-    current_node: Option<String>,
+    /// Varılan node — anahtar + gösterim (`{id, label}`); terminalde `None`.
+    #[schema(value_type = Object)]
+    current_node: Option<wf_wfe::executor::Ref>,
 }
 
 #[utoipa::path(post, path = "/{wfd_id}/start", tag = "portal",

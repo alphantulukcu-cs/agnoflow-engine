@@ -111,7 +111,7 @@ async fn fork_setup(eng: &Engine<'_>, wfd: &Wfd) -> SimState {
     let coord = actor("coordinator");
     let wfes = sim_state.to_wfes(Some(coord.user_id));
     let commit = eng
-        .apply(wfd, &wfes, &coord, "start_review", &json!({}), None)
+        .apply(wfd, &wfes, &coord, "start_review", &json!({}), None, None)
         .await
         .unwrap();
     sim_state.apply_commit(&commit);
@@ -145,7 +145,7 @@ async fn sim_happy_path_fork_join_finalize() {
         let a = actor(role);
         let wfes = sim_state.to_wfes(Some(a.user_id));
         let commit = eng
-            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node))
+            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node), None)
             .await
             .unwrap();
         sim_state.apply_commit(&commit);
@@ -167,7 +167,7 @@ async fn sim_happy_path_fork_join_finalize() {
     let a = actor(role);
     let wfes = sim_state.to_wfes(Some(a.user_id));
     let commit = eng
-        .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node))
+        .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node), None)
         .await
         .unwrap();
     sim_state.apply_commit(&commit);
@@ -197,7 +197,7 @@ async fn sim_happy_path_fork_join_finalize() {
     let rc = actor("resultCoordinator");
     let wfes = sim_state.to_wfes(Some(rc.user_id));
     let commit = eng
-        .apply(&wfd, &wfes, &rc, "finalize", &json!({}), None)
+        .apply(&wfd, &wfes, &rc, "finalize", &json!({}), None, None)
         .await
         .unwrap();
     sim_state.apply_commit(&commit);
@@ -226,6 +226,7 @@ async fn sim_branch_reject_terminates_and_cancels_siblings() {
             "reject",
             &json!({}),
             Some("self__legalApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -263,7 +264,7 @@ async fn sim_apply_without_node_hint_is_ambiguous() {
     let a = actor("financeApprover");
     let wfes = sim_state.to_wfes(Some(a.user_id));
     let err = eng
-        .apply(&wfd, &wfes, &a, "approve", &json!({}), None)
+        .apply(&wfd, &wfes, &a, "approve", &json!({}), None, None)
         .await
         .unwrap_err();
     match err {
@@ -291,8 +292,8 @@ async fn sim_possible_actions_unions_active_branches() {
 
     let nodes: std::collections::BTreeSet<_> = actions
         .iter()
-        .filter(|pa| pa.action == "approve")
-        .filter_map(|pa| pa.node.clone())
+        .filter(|pa| pa.action.id == "approve")
+        .filter_map(|pa| pa.branch.as_ref().map(|b| b.id.clone()))
         .collect();
     assert_eq!(
         nodes,
@@ -339,6 +340,7 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
             "approve",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -355,6 +357,7 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
             "approve",
             &json!({}),
             Some("self__legalApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -426,6 +429,7 @@ async fn sim_join_expr_or_side_completes_alone() {
             "approve",
             &json!({}),
             Some("self__hrApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -463,7 +467,7 @@ async fn sim_join_expr_and_side_needs_both() {
         let a = actor(role);
         let wfes = sim_state.to_wfes(Some(a.user_id));
         let commit = eng
-            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node))
+            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node), None)
             .await
             .unwrap();
         sim_state.apply_commit(&commit);

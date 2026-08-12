@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 use wf_wfe::{
-    executor::{active_branch_nodes, PossibleAction},
+    executor::{active_branch_nodes, to_possible_action, PossibleAction},
     sim::SimState,
     LiveAutoexecRunner, OrgAdapter,
 };
@@ -119,27 +119,28 @@ async fn sim_actions_for(
             if !sim_eligible(engine, wfd, sim_state, actor, Some(&node)).await? {
                 continue;
             }
-            let actions = engine
+            let choices = engine
                 .possible_actions(wfd, &wfes_owned, actor, Some(&node))
                 .await
                 .map_err(AppError::from)?;
-            out.extend(actions.into_iter().map(|action| PossibleAction {
-                action,
-                node: Some(node.clone()),
-            }));
+            out.extend(
+                choices
+                    .into_iter()
+                    .map(|c| to_possible_action(wfd, c, Some(&node))),
+            );
         }
         Ok(out)
     } else {
         if !sim_eligible(engine, wfd, sim_state, actor, None).await? {
             return Ok(vec![]);
         }
-        let actions = engine
+        let choices = engine
             .possible_actions(wfd, &wfes_owned, actor, None)
             .await
             .map_err(AppError::from)?;
-        Ok(actions
+        Ok(choices
             .into_iter()
-            .map(|action| PossibleAction { action, node: None })
+            .map(|c| to_possible_action(wfd, c, None))
             .collect())
     }
 }
@@ -208,9 +209,12 @@ struct SimApplyBody {
     action: String,
     #[serde(default)]
     input: Value,
-    /// WOR-31 T4: paralel modda kol seçimi (bkz. `routes/wfe.rs::ApplyBody.node`).
+    /// WOR-31 T4: paralel modda kol seçimi (bkz. `routes/wfe.rs::ApplyBody.branch`).
     #[serde(default)]
-    node: Option<String>,
+    branch: Option<String>,
+    /// GLB hedef seçimi (bkz. `routes/wfe.rs::ApplyBody.target`).
+    #[serde(default)]
+    target: Option<String>,
     /// `$env.*` çözümü — editör header'ındaki ortam seçicisi. Verilmezse boş ortam.
     #[serde(default)]
     orgtnt_id: Option<uuid::Uuid>,
@@ -252,7 +256,7 @@ async fn sim_apply(
 
     // Claim YAZIMI atlanır ama uygunluk atlanmaz: gerçek akışta bu aktör claim
     // alamayacaksa sim'de de aksiyon uygulayamamalı (yetki delik olmasın).
-    if !sim_eligible(&engine, &wfd, &sim_state, &body.actor, body.node.as_deref()).await? {
+    if !sim_eligible(&engine, &wfd, &sim_state, &body.actor, body.branch.as_deref()).await? {
         return Err(AppError(
             "aktör bu adım için yetkili değil (c_a eşleşmiyor) — gerçek akışta claim reddedilirdi"
                 .into(),
@@ -268,7 +272,8 @@ async fn sim_apply(
         &body.actor,
         &body.action,
         &body.input,
-        body.node.as_deref(),
+        body.branch.as_deref(),
+        body.target.as_deref(),
     )
     .await
     .map_err(AppError::from)?;

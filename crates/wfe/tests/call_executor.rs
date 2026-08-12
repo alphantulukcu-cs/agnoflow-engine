@@ -518,7 +518,7 @@ async fn start_caller(h: &Harness, clerk: &Actor) -> Uuid {
         )
         .await
         .expect("çağıran başlamalı");
-    assert_eq!(res.current_node.as_deref(), Some("self__creditAnalyst"));
+    assert_eq!(res.current_node.as_ref().map(|n| n.id.as_str()), Some("self__creditAnalyst"));
     res.wfe_id
 }
 
@@ -574,6 +574,7 @@ async fn wait_call_starts_callee_and_resumes_caller_on_completion() {
             &json!({ "skor": 780 }),
             None,
             None,
+            None,
         )
         .await
         .expect("skor girilmeli");
@@ -613,6 +614,7 @@ async fn successor_starts_after_caller_completes_and_caller_stays_completed() {
             &json!({ "skor": 800 }),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -628,6 +630,7 @@ async fn successor_starts_after_caller_completes_and_caller_stays_completed() {
             &boss,
             "manager_decide",
             &json!({ "kullandirim_tutari": 25000 }),
+            None,
             None,
             None,
         )
@@ -682,6 +685,7 @@ async fn successor_failure_leaves_the_caller_completed() {
             &json!({ "skor": 800 }),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -695,6 +699,7 @@ async fn successor_failure_leaves_the_caller_completed() {
             &boss,
             "manager_decide",
             &json!({ "kullandirim_tutari": 10 }),
+            None,
             None,
             None,
         )
@@ -742,6 +747,7 @@ async fn next_depth_cap_skips_the_successor() {
             &json!({ "skor": 800 }),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -754,6 +760,7 @@ async fn next_depth_cap_skips_the_successor() {
             &boss,
             "manager_decide",
             &json!({ "kullandirim_tutari": 10 }),
+            None,
             None,
             None,
         )
@@ -856,6 +863,7 @@ async fn start_as_system_uses_the_flow_initiator() {
             &json!({ "skor": 800 }),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -869,6 +877,7 @@ async fn start_as_system_uses_the_flow_initiator() {
             &boss,
             "manager_decide",
             &json!({ "kullandirim_tutari": 25000 }),
+            None,
             None,
             None,
         )

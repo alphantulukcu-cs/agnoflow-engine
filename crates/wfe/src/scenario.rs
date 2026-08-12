@@ -107,6 +107,10 @@ pub enum ScenarioStep {
         /// WOR-31: paralel modda kol seçimi.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<String>,
+        /// GLB (`wft: {targets}`) hedef seçimi — senaryo da gerçek akışın kapısından
+        /// geçsin diye: hedefsiz bir GLB adımı burada da 400 karşılığı hata verir.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
     },
     CallReturn {
         call_return: CallReturn,
@@ -338,14 +342,24 @@ pub async fn run(
                 actor,
                 input,
                 node,
+                target,
             } => match resolve(actor) {
                 None => Err(format!(
                     "Adım {} (\"{action}\") için aktör çözülemedi",
                     i + 1
                 )),
-                Some(a) => step::apply(engine, wfd, &mut state, &a, action, input, node.as_deref())
-                    .await
-                    .map_err(|e| format!("Adım {} (\"{action}\"): {e}", i + 1)),
+                Some(a) => step::apply(
+                    engine,
+                    wfd,
+                    &mut state,
+                    &a,
+                    action,
+                    input,
+                    node.as_deref(),
+                    target.as_deref(),
+                )
+                .await
+                .map_err(|e| format!("Adım {} (\"{action}\"): {e}", i + 1)),
             },
             // Her iki başarısızlık da (bekleyen çağrı yok / motor hatası) senaryoyu
             // kaldırır — koşucu için ikisi arasında fark yok, HTTP durumu yok.

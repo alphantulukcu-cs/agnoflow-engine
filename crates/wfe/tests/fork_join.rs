@@ -565,12 +565,12 @@ async fn fork_setup(exec: &WfeExecutor) -> Uuid {
         .await
         .unwrap();
     let wfe_id = started.wfe_id;
-    assert_eq!(started.current_node.as_deref(), Some("self__coordinator"));
+    assert_eq!(started.current_node.as_ref().map(|n| n.id.as_str()), Some("self__coordinator"));
     let coord = actor("coordinator");
     let c = exec.claim(wfe_id, &coord, None, None).await.unwrap();
     assert!(c.success, "coordinator claim");
     let res = exec
-        .apply(wfe_id, &coord, "start_review", &json!({}), None, None)
+        .apply(wfe_id, &coord, "start_review", &json!({}), None, None, None)
         .await
         .unwrap();
     assert!(!res.terminal);
@@ -611,7 +611,7 @@ async fn happy_path_fork_join_finalize() {
             ..a
         };
         let r = exec
-            .apply(wfe_id, &a, "approve", &json!({}), Some(node), None)
+            .apply(wfe_id, &a, "approve", &json!({}), Some(node), None, None)
             .await
             .unwrap();
         assert!(!r.terminal);
@@ -627,7 +627,7 @@ async fn happy_path_fork_join_finalize() {
         ..a
     };
     let r = exec
-        .apply(wfe_id, &a, "approve", &json!({}), Some(node), None)
+        .apply(wfe_id, &a, "approve", &json!({}), Some(node), None, None)
         .await
         .unwrap();
     assert!(!r.terminal, "join node terminal değil");
@@ -645,7 +645,7 @@ async fn happy_path_fork_join_finalize() {
     let c = exec.claim(wfe_id, &rc, None, None).await.unwrap();
     assert!(c.success, "resultCoordinator claim");
     let r = exec
-        .apply(wfe_id, &rc, "finalize", &json!({}), None, None)
+        .apply(wfe_id, &rc, "finalize", &json!({}), None, None, None)
         .await
         .unwrap();
     assert!(r.terminal, "finalize terminal olmalı");
@@ -671,6 +671,7 @@ async fn branch_reject_terminates_and_cancels_siblings() {
             "reject",
             &json!({}),
             Some("self__financeApprover"),
+            None,
             None,
         )
         .await
@@ -729,6 +730,7 @@ async fn collapse_drops_sibling_claims_and_records_them() {
             "reject",
             &json!({}),
             Some("self__financeApprover"),
+            None,
             None,
         )
         .await
@@ -824,6 +826,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
             &json!({}),
             Some("self__legalApprover"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -849,6 +852,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         "reject",
         &json!({}),
         Some("self__financeApprover"),
+        None,
         None,
     )
     .await
@@ -976,6 +980,7 @@ async fn apply_retries_on_conflict_then_succeeds() {
             &json!({}),
             Some("self__financeApprover"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1008,6 +1013,7 @@ async fn apply_gives_up_after_three_conflicts() {
             "approve",
             &json!({}),
             Some("self__financeApprover"),
+            None,
             None,
         )
         .await
@@ -1136,6 +1142,7 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
         &input,
         Some("self__financeApprover"),
         None,
+        None,
     );
     let sibling = exec.apply(
         wfe_id,
@@ -1144,13 +1151,14 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
         &input,
         Some("self__legalApprover"),
         None,
+        None,
     );
     let (collapse_res, sibling_res) = tokio::join!(collapse, sibling);
 
     // KAZANAN: collapse — WFE hedef node'a taşındı, paralel mod bitti.
     let r = collapse_res.expect("collapse kazanmalı");
     assert!(!r.terminal);
-    assert_eq!(r.current_node.as_deref(), Some("self__coordinator"));
+    assert_eq!(r.current_node.as_ref().map(|n| n.id.as_str()), Some("self__coordinator"));
 
     // KAYBEDEN: kardeş varışı — NET Conflict(Collapsed) (409 conflict.collapsed).
     let err = sibling_res.expect_err("kaybeden kardeş Conflict almalı");
@@ -1211,6 +1219,7 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
         &input,
         Some("self__legalApprover"),
         None,
+        None,
     );
     let collapse = exec.apply(
         wfe_id,
@@ -1219,12 +1228,13 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
         &input,
         Some("self__financeApprover"),
         None,
+        None,
     );
     let (sibling_res, collapse_res) = tokio::join!(sibling, collapse);
 
     sibling_res.expect("kardeş varışı önce commit etti, başarılı olmalı");
     let r = collapse_res.expect("collapse hâlâ paralel modda, kazanmalı");
-    assert_eq!(r.current_node.as_deref(), Some("self__coordinator"));
+    assert_eq!(r.current_node.as_ref().map(|n| n.id.as_str()), Some("self__coordinator"));
 
     let w = store.snapshot(wfe_id);
     assert!(w.join_target.is_none());
@@ -1258,6 +1268,7 @@ async fn two_concurrent_collapses_exactly_one_wins() {
         &input,
         Some("self__financeApprover"),
         None,
+        None,
     );
     let b = exec.apply(
         wfe_id,
@@ -1265,6 +1276,7 @@ async fn two_concurrent_collapses_exactly_one_wins() {
         "reject",
         &input,
         Some("self__legalApprover"),
+        None,
         None,
     );
     let (a_res, b_res) = tokio::join!(a, b);
@@ -1301,6 +1313,7 @@ async fn collapsed_conflict_is_not_retried() {
         &input,
         Some("self__financeApprover"),
         None,
+        None,
     );
     let sibling = exec.apply(
         wfe_id,
@@ -1308,6 +1321,7 @@ async fn collapsed_conflict_is_not_retried() {
         "approve",
         &input,
         Some("self__legalApprover"),
+        None,
         None,
     );
     let (_, sibling_res) = tokio::join!(collapse, sibling);
@@ -1621,7 +1635,7 @@ async fn rev_is_monotonic_across_transitions() {
         "claim WFAH'a yazmaz → revizyon ARTMAZ (bilinçli kapsam istisnası)"
     );
 
-    exec.apply(wfe_id, &coord, "start_review", &json!({}), None, None)
+    exec.apply(wfe_id, &coord, "start_review", &json!({}), None, None, None)
         .await
         .unwrap();
     let after_fork = store.snapshot(wfe_id).rev();
@@ -1648,6 +1662,7 @@ async fn omitted_and_fresh_rev_both_apply_normally() {
         "approve",
         &json!({}),
         Some("self__financeApprover"),
+        None,
         Some(rev),
     )
     .await
@@ -1660,6 +1675,7 @@ async fn omitted_and_fresh_rev_both_apply_normally() {
         "approve",
         &json!({}),
         Some("self__legalApprover"),
+        None,
         None,
     )
     .await
@@ -1685,6 +1701,7 @@ async fn stale_rev_apply_is_rejected_without_side_effects() {
         &json!({}),
         Some("self__financeApprover"),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1699,6 +1716,7 @@ async fn stale_rev_apply_is_rejected_without_side_effects() {
             "approve",
             &json!({}),
             Some("self__legalApprover"),
+            None,
             Some(stale_rev),
         )
         .await
@@ -1747,6 +1765,7 @@ async fn stale_rev_after_collapse_is_distinguishable() {
         &json!({}),
         Some("self__financeApprover"),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -1762,6 +1781,7 @@ async fn stale_rev_after_collapse_is_distinguishable() {
             "approve",
             &json!({}),
             Some("self__legalApprover"),
+            None,
             Some(stale_rev),
         )
         .await
@@ -1789,6 +1809,7 @@ async fn stale_rev_claim_is_rejected_but_untokened_claim_is_untouched() {
         "reject",
         &json!({}),
         Some("self__financeApprover"),
+        None,
         None,
     )
     .await
@@ -1851,8 +1872,8 @@ async fn concurrent_single_mode_applies_exactly_one_wins() {
     let rev = store.snapshot(wfe_id).rev();
     store.commit_delays_ms.lock().unwrap().extend([100, 200]);
     let input = json!({});
-    let a = exec.apply(wfe_id, &coord, "start_review", &input, None, Some(rev));
-    let b = exec.apply(wfe_id, &coord, "start_review", &input, None, Some(rev));
+    let a = exec.apply(wfe_id, &coord, "start_review", &input, None, None, Some(rev));
+    let b = exec.apply(wfe_id, &coord, "start_review", &input, None, None, Some(rev));
     let (a_res, b_res) = tokio::join!(a, b);
 
     let (winner, loser) = match (a_res, b_res) {
@@ -1941,6 +1962,7 @@ async fn or_join_first_arrival_completes_and_cancels_siblings() {
             &json!({}),
             Some("self__financeApprover"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2009,6 +2031,7 @@ async fn quorum_2_of_3_completes_on_second_arrival() {
             &json!({}),
             Some("self__financeApprover"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2025,6 +2048,7 @@ async fn quorum_2_of_3_completes_on_second_arrival() {
             "approve",
             &json!({}),
             Some("self__legalApprover"),
+            None,
             None,
         )
         .await
@@ -2065,7 +2089,7 @@ async fn cancelled_branch_cannot_act_after_quorum() {
         (&actors[0], "self__financeApprover"),
         (&actors[1], "self__legalApprover"),
     ] {
-        exec.apply(wfe_id, a, "approve", &json!({}), Some(node), None)
+        exec.apply(wfe_id, a, "approve", &json!({}), Some(node), None, None)
             .await
             .unwrap();
     }
@@ -2077,6 +2101,7 @@ async fn cancelled_branch_cannot_act_after_quorum() {
             "approve",
             &json!({}),
             Some("self__hrApprover"),
+            None,
             None,
         )
         .await
@@ -2106,6 +2131,7 @@ async fn concurrent_arrivals_in_quorum_resolve_to_single_join() {
         &input,
         Some("self__financeApprover"),
         None,
+        None,
     );
     let b = exec.apply(
         wfe_id,
@@ -2113,6 +2139,7 @@ async fn concurrent_arrivals_in_quorum_resolve_to_single_join() {
         "approve",
         &input,
         Some("self__legalApprover"),
+        None,
         None,
     );
     let (ra, rb) = tokio::join!(a, b);
@@ -2177,6 +2204,7 @@ async fn expr_join_hr_alone_completes_and_cancels_siblings() {
         &json!({}),
         Some("self__hrApprover"),
         None,
+        None,
     )
     .await
     .unwrap();
@@ -2212,6 +2240,7 @@ async fn expr_join_finance_alone_waits_then_legal_completes() {
             &json!({}),
             Some("self__financeApprover"),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -2224,6 +2253,7 @@ async fn expr_join_finance_alone_waits_then_legal_completes() {
         "approve",
         &json!({}),
         Some("self__legalApprover"),
+        None,
         None,
     )
     .await

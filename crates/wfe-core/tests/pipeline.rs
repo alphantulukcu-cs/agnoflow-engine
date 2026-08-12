@@ -337,6 +337,7 @@ async fn absent_optional_input_nulls_the_field() {
             "manager_decide",
             &json!({"manager_decision": "reject"}),
             None,
+            None,
         )
         .await
         .expect("aksiyon uygulanmalı");
@@ -616,6 +617,7 @@ async fn apply_target_resolves_wfah_anchor_to_applying_actor_orgu() {
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 90000}}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -673,6 +675,7 @@ async fn wft_conditions_do_not_see_the_action_being_applied() {
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 90000}}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -708,6 +711,7 @@ async fn apply_on_unclaimed_wfe_is_rejected() {
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 30000}}),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -735,6 +739,7 @@ async fn apply_by_non_owner_is_rejected() {
             &a,
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
             None,
         )
         .await
@@ -765,6 +770,7 @@ async fn analyst_approve_within_limit_reaches_terminal_approved() {
             &a,
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
             None,
         )
         .await
@@ -820,6 +826,7 @@ async fn analyst_approve_over_limit_routes_to_branch_manager() {
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 90000}}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -862,6 +869,7 @@ async fn failing_score_fetch_is_retried_then_caught_and_routed() {
             &a,
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 30000}}),
+            None,
             None,
         )
         .await
@@ -912,6 +920,7 @@ async fn hanging_autoexec_times_out_and_is_caught() {
             "analyst_approve",
             &json!({"credit_info": {"amount_requested": 30000}}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -953,6 +962,7 @@ async fn manager_reject_takes_default_terminal() {
             "manager_decide",
             &json!({"manager_decision": "reject"}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -988,6 +998,7 @@ async fn manager_approve_condition_hits_terminal_approved() {
             "manager_decide",
             &json!({"manager_decision": "approve"}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1020,6 +1031,7 @@ async fn undeclared_input_path_is_rejected() {
             "manager_decide",
             &json!({"manager_decision": "approve", "credit_score": 999}),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1041,7 +1053,7 @@ async fn missing_required_input_is_rejected() {
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({}), None)
+        .apply(&golden(), &wfes, &m, "manager_decide", &json!({}), None, None)
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -1088,6 +1100,7 @@ async fn first_matching_when_wins_in_array_order() {
             "manager_decide",
             &json!({"manager_decision": "approve"}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1127,6 +1140,7 @@ async fn conditional_without_default_and_no_match_errors() {
             &m,
             "manager_decide",
             &json!({"manager_decision": "approve"}),
+            None,
             None,
         )
         .await
@@ -1191,7 +1205,12 @@ async fn owner_sees_available_actions() {
         .possible_actions(&golden(), &wfes, &m, None)
         .await
         .unwrap();
-    assert_eq!(actions, vec!["manager_decide"]);
+    assert_eq!(
+        actions.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(),
+        vec!["manager_decide"]
+    );
+    // Düz aksiyon: hedef seçimi YOK (alan API'de de hiç çıkmaz).
+    assert!(actions[0].targets.is_none());
 
     // owner olmayan boş liste alır
     let other = manager(Uuid::new_v4());
@@ -1200,6 +1219,191 @@ async fn owner_sees_available_actions() {
         .await
         .unwrap();
     assert!(actions.is_empty());
+}
+
+// ============================================== GLB — `wft: {targets}` runtime (api-contract-v2)
+//
+// Tasarım-zamanı kuralları `tests/validator.rs`te. Buradakiler ÇALIŞMA ANI sözleşmesi:
+// hedefi artık aksiyon anahtarı değil, isteğin `target` alanı taşır. Menü aksiyonun
+// PARÇASIDIR — bu yüzden "hedef verilmedi" ile "hedef uydurulmuş" AYRI hatalardır,
+// ikisi de commit'e hiç ulaşmaz.
+
+/// `t_manager_decide`ı GLB'ye çevirir (validator testindeki `with_global_targets`in
+/// ikizi): tek transition, hedef menüsü `self__creditAnalyst`. Yetim kalan
+/// `terminal_rejected` düşürülür — GLB hedefleri node'dur, terminal hedefleyemez.
+fn golden_with_global_targets() -> Wfd {
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    v["transitions"][1]["wft"] = json!({ "targets": [{"node": "self__creditAnalyst"}] });
+    if let Some(terminals) = v["terminals"].as_array_mut() {
+        terminals.retain(|t| t["id"] != json!("terminal_rejected"));
+    }
+    Wfd::from_value_checked(v).expect("GLB belgesi şema kapısından geçmeli")
+}
+
+fn glb_engine_parts() -> (MockOrg, MockRunner) {
+    (
+        MockOrg {
+            role_assigned: true,
+        },
+        MockRunner::ok(0, "-", false),
+    )
+}
+
+#[tokio::test]
+async fn global_action_moves_to_the_chosen_target() {
+    let (org, runner) = glb_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    let commit = engine
+        .apply(
+            &golden_with_global_targets(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "reject"}),
+            None,
+            Some("self__creditAnalyst"),
+        )
+        .await
+        .expect("geçerli hedef uygulanmalı");
+
+    match commit.outcome {
+        CommitOutcome::MoveTo { ref node } => assert_eq!(node, "self__creditAnalyst"),
+        ref other => panic!("seçilen hedefe gitmeliydi: {other:?}"),
+    }
+    // Seçim CONTEXT'E yazılmaz — `target` bir action input DEĞİLDİR.
+    assert_eq!(commit.new_dynctx.get("target"), None);
+    assert_eq!(commit.new_dynctx.get("hedef"), None);
+    // WFAH'a yazılan ad TABAN aksiyondur; hedef anahtara kodlanmaz (`__gt__` kalktı) —
+    // yayınlanmış akışların `count($wfah, #.action == "manager_decide")` sayımı bozulmaz.
+    assert!(commit
+        .wfah_entries
+        .iter()
+        .any(|e| e.action == "manager_decide"));
+}
+
+#[tokio::test]
+async fn global_action_without_a_target_is_rejected() {
+    let (org, runner) = glb_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    let err = engine
+        .apply(
+            &golden_with_global_targets(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "reject"}),
+            None,
+            None,
+        )
+        .await
+        .expect_err("hedefsiz GLB uygulanmamalı");
+    assert!(
+        matches!(err, EngineError::TargetRequired),
+        "beklenen TargetRequired, gelen: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn global_action_with_an_unlisted_target_is_rejected() {
+    let (org, runner) = glb_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    // `self__branchManager` belgede GERÇEK bir node — ama bu aksiyonun menüsünde YOK.
+    // Kapı "node var mı"ya değil "menüde mi"ye bakmalı, aksi halde istemci istediği
+    // node'a atlayarak grafı dolanırdı.
+    let err = engine
+        .apply(
+            &golden_with_global_targets(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "reject"}),
+            None,
+            Some("self__branchManager"),
+        )
+        .await
+        .expect_err("menüde olmayan hedef reddedilmeli");
+    assert!(
+        matches!(err, EngineError::TargetInvalid(_)),
+        "beklenen TargetInvalid, gelen: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_plain_action_rejects_a_target() {
+    let (org, runner) = glb_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    // Sessizce YOK SAYMAK yanlış olurdu: istemci hedef seçtiğini sanır, motor
+    // başka yere götürür. Açık hata, sessiz sapmadan iyidir.
+    let err = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "reject"}),
+            None,
+            Some("self__creditAnalyst"),
+        )
+        .await
+        .expect_err("düz aksiyonda hedef reddedilmeli");
+    assert!(
+        matches!(err, EngineError::TargetUnexpected),
+        "beklenen TargetUnexpected, gelen: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn possible_actions_offers_the_target_menu() {
+    let (org, runner) = glb_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    let actions = engine
+        .possible_actions(&golden_with_global_targets(), &wfes, &m, None)
+        .await
+        .unwrap();
+    let glb = actions
+        .iter()
+        .find(|a| a.action == "manager_decide")
+        .expect("GLB aksiyonu listede olmalı");
+    assert_eq!(
+        glb.targets.as_deref(),
+        Some(["self__creditAnalyst".to_string()].as_slice()),
+        "hedef menüsü aksiyonun parçası olarak sunulmalı"
+    );
 }
 
 // ================================================================ escalation (M6)
@@ -2021,6 +2225,7 @@ async fn terminal_wfe_rejects_actions() {
             "manager_decide",
             &json!({"manager_decision": "approve"}),
             None,
+            None,
         )
         .await
         .unwrap_err();
@@ -2055,6 +2260,7 @@ async fn terminated_wfe_is_treated_like_terminal() {
             &m,
             "manager_decide",
             &json!({"manager_decision": "approve"}),
+            None,
             None,
         )
         .await
@@ -2126,6 +2332,7 @@ async fn expired_but_not_yet_swept_wfe_rejects_claim_and_apply() {
             &m,
             "manager_decide",
             &json!({"manager_decision": "approve"}),
+            None,
             None,
         )
         .await
@@ -2230,7 +2437,7 @@ async fn start_review_forks_into_three_branches() {
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
 
     let commit = engine
-        .apply(&paralel(), &wfes, &coord, "start_review", &json!({}), None)
+        .apply(&paralel(), &wfes, &coord, "start_review", &json!({}), None, None)
         .await
         .unwrap();
 
@@ -2289,6 +2496,7 @@ async fn single_mode_node_hint_must_match_current_node() {
             "start_review",
             &json!({}),
             Some("self__hrApprover"),
+            None,
         )
         .await
         .unwrap_err();
@@ -2329,6 +2537,7 @@ async fn branch_approve_arrives_without_occupying_join() {
             "approve",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -2377,7 +2586,7 @@ async fn ambiguous_action_without_node_hint_is_rejected() {
 
     // `approve` üç kolun da transition'ıyla eşleşir — node ipucu yoksa belirsiz
     let err = engine
-        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), None)
+        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), None, None)
         .await
         .unwrap_err();
     match err {
@@ -2398,6 +2607,7 @@ async fn ambiguous_action_without_node_hint_is_rejected() {
             "approve",
             &json!({}),
             Some("self__coordinator"),
+            None,
         )
         .await
         .unwrap_err();
@@ -2435,6 +2645,7 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
             "approve",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap_err();
@@ -2462,6 +2673,7 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
             "approve",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap_err();
@@ -2492,7 +2704,7 @@ async fn last_branch_arrival_completes_join_to_node() {
 
     // tek aktif kol kaldığından node ipucu GEREKMEZ (belirsizlik yok)
     let commit = engine
-        .apply(&paralel(), &wfes, &hr, "approve", &json!({}), None)
+        .apply(&paralel(), &wfes, &hr, "approve", &json!({}), None, None)
         .await
         .unwrap();
 
@@ -2548,7 +2760,7 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     );
 
     let commit = engine
-        .apply(&wfd, &wfes, &hr, "approve", &json!({}), None)
+        .apply(&wfd, &wfes, &hr, "approve", &json!({}), None, None)
         .await
         .unwrap();
 
@@ -2599,6 +2811,7 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
             "reject",
             &json!({}),
             Some("self__legalApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -2686,6 +2899,7 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
             "reject",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -2770,6 +2984,7 @@ async fn collapse_marker_carries_dropped_claim_owner() {
             "reject",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -2829,6 +3044,7 @@ async fn collapse_summary_marker_describes_whole_event() {
             "reject",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap();
@@ -3014,7 +3230,7 @@ async fn collapse_outside_parallel_is_rejected() {
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
 
     let err = engine
-        .apply(&wfd, &wfes, &coord, "collapse_here", &json!({}), None)
+        .apply(&wfd, &wfes, &coord, "collapse_here", &json!({}), None, None)
         .await
         .unwrap_err();
     assert!(
@@ -3085,6 +3301,7 @@ async fn branch_moves_to_normal_node_and_stays_parallel() {
             "delegate",
             &json!({}),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -3151,6 +3368,7 @@ async fn nested_parallel_at_runtime_is_rejected() {
             "approve",
             &json!({}),
             Some("self__financeApprover"),
+            None,
         )
         .await
         .unwrap_err();
@@ -3691,6 +3909,7 @@ async fn optional_input_sent_as_value_is_written() {
             "manager_decide",
             &json!({"manager_decision": "approve", "internal_notes": "müdür notu"}),
             None,
+            None,
         )
         .await
         .expect("aksiyon uygulanmalı");
@@ -3721,7 +3940,7 @@ async fn apply_approve(wfes: &Wfes, actor: &Actor, node: &str) -> CommitOutcome 
         env: Default::default(),
     };
     engine
-        .apply(&paralel(), wfes, actor, "approve", &json!({}), Some(node))
+        .apply(&paralel(), wfes, actor, "approve", &json!({}), Some(node), None)
         .await
         .expect("aksiyon uygulanmalı")
         .outcome

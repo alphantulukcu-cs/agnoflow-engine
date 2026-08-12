@@ -95,6 +95,20 @@ pub enum EngineError {
     Unauthorized,
     #[error("reassign target is not eligible for the current node's candidate actor")]
     TargetNotEligible,
+    /// GLB (`wft: {targets}`) — hedef seçimi ZORUNLU ama gönderilmedi.
+    /// Üçü de HTTP 400'dür ve `action.target_*` kodlarıyla dışa çıkar: istemci
+    /// "hedef seç" ekranını hangi durumda göstereceğini koddan bilir, hata
+    /// METNİNİ ayrıştırmaz.
+    #[error("action.target_required: bu aksiyon bir hedef seçimi ister (`target`)")]
+    TargetRequired,
+    /// Gönderilen hedef transition'ın `targets` listesinde yok. Listeyi
+    /// `GET /wfe/:id/possible-actions` verir; oradaki `id`'ler AYNEN geri gönderilir.
+    #[error("action.target_invalid: '{0}' bu aksiyonun hedef listesinde yok")]
+    TargetInvalid(String),
+    /// Hedef seçimi kabul etmeyen bir aksiyona `target` gönderildi. Sessizce yok
+    /// saymak, istemcinin yanlış transition'ı seçtiğini gizlerdi.
+    #[error("action.target_unexpected: bu aksiyon hedef seçimi kabul etmez")]
+    TargetUnexpected,
     #[error("WFD.NoConditionMatched: no wft condition matched and no default given")]
     NoConditionMatched,
     #[error("invalid action input: {0}")]

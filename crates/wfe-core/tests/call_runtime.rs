@@ -354,6 +354,7 @@ async fn successful_terminal_stages_the_successor_call() {
             "manager_decide",
             &json!({ "kullandirim_tutari": 25000 }),
             None,
+            None,
         )
         .await
         .expect("müdür kararı uygulanmalı");
@@ -392,6 +393,7 @@ async fn terminal_without_a_successor_stages_nothing() {
             &boss,
             "manager_decide",
             &json!({ "kullandirim_tutari": 0 }),
+            None,
             None,
         )
         .await

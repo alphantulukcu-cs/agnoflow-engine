@@ -503,6 +503,48 @@ pub async fn hide(
     Ok(())
 }
 
+/// Gizlemeyi GERİ ALIR (`hidden_at`/`hidden_by` → NULL) — gövde ve dosyalar
+/// yeniden görünür olur. Yalnız YAZARI, yani gizleyebilen kişinin ta kendisi
+/// (`hide` ile aynı kapı): gizleme geri alınamaz olsaydı yanlışlıkla basılan bir
+/// düğme notu kalıcı olarak ekrandan silerdi — oysa K3'ün koruduğu şey gövdenin
+/// DEĞİŞMEZLİĞİDİR, görünürlüğün tek yönlülüğü değil. Gövde zaten hiç UPDATE
+/// edilmiyor; gizle/göster yalnız bir bayrağı çevirir ve `hidden_by` her seferinde
+/// kimin çevirdiğini yazar.
+///
+/// Draft'ta anlamsızdır (draft gizlenmez, SİLİNİR) → 409 `note.not_hidden`;
+/// zaten görünür bir notta da aynı kod döner (yutulan no-op yerine açık cevap).
+pub async fn unhide(
+    pool: &PgPool,
+    wfe_id: Uuid,
+    note_id: Uuid,
+    actor: &Actor,
+) -> Result<(), AppError> {
+    let row = find_note(pool, wfe_id, note_id).await?;
+    if !is_author(&row, actor) {
+        return Err(AppError(
+            "bu not size ait değil".into(),
+            StatusCode::FORBIDDEN,
+        ));
+    }
+    if row.hidden_at.is_none() {
+        return Err(AppError {
+            message: "not zaten görünür".into(),
+            status: StatusCode::CONFLICT,
+            code: Some("note.not_hidden"),
+            items: None,
+        });
+    }
+    sqlx::query(
+        "UPDATE wf.wfe_note SET hidden_at = NULL, hidden_by = NULL \
+          WHERE note_id = $1 AND hidden_at IS NOT NULL",
+    )
+    .bind(note_id)
+    .execute(pool)
+    .await
+    .map_err(db_err)?;
+    Ok(())
+}
+
 /// Görünür notlar: (`status='published'` VE `audience` aktöre/yazara açık) +
 /// aktörün KENDİ draft'ları, `created_at ASC`. `audience` süzgeci (K9)
 /// draft'a UYGULANMAZ — draft kuralı değişmez, hâlâ "yalnız yazarı" (K6).
@@ -1047,8 +1089,8 @@ pub fn assert_actor_holds_claim(
     let active_branch_claimers: Vec<Uuid> = view
         .branches
         .iter()
-        .filter(|b| b.state.status == BranchStatus::Active)
-        .filter_map(|b| b.state.claimed_by)
+        .filter(|b| b.status == BranchStatus::Active)
+        .filter_map(|b| b.claimed_by)
         .collect();
     let holds = holds_claim(
         view.join_target.is_some(),

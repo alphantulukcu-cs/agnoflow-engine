@@ -35,6 +35,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(create_note, list_notes))
         .routes(routes!(update_note, delete_note))
         .routes(routes!(publish_note))
+        .routes(routes!(unhide_note))
         .routes(routes!(mark_notes_read))
         .routes(routes!(upload_note_file, download_note_file, remove_note_file))
 }
@@ -212,6 +213,34 @@ async fn publish_note(
         .await
         .map_err(AppError::from)?;
     notes::republish_after_apply(&s.pool, wfe_id, note_id, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Gizlemeyi geri alır — `DELETE .../notes/{note_id}`in tam simetriği, aynı kapı
+/// (yalnız yazarı). Claim İSTEMEZ: `delete_note` gibi, kendi notunun görünürlüğünü
+/// claim düştükten sonra da yönetebilmeli.
+#[utoipa::path(post, path = "/{id}/notes/{note_id}/unhide", tag = "notes",
+    params(
+        ("id" = Uuid, Path, description = "WFE id"),
+        ("note_id" = Uuid, Path, description = "Not id"),
+    ),
+    responses(
+        (status = 204, description = "Not yeniden görünür"),
+        (status = 403, description = "Not bu aktöre ait değil"),
+        (status = 409, description = "Not zaten görünür (`note.not_hidden`)"),
+    ),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn unhide_note(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path((wfe_id, note_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let actor = super::wfe::extract_actor(&headers)?;
+    s.executor
+        .query(wfe_id, &actor)
+        .await
+        .map_err(AppError::from)?;
+    notes::unhide(&s.pool, wfe_id, note_id, &actor).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

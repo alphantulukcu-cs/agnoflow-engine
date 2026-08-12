@@ -34,6 +34,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(create_note, list_notes))
         .routes(routes!(update_note, delete_note))
         .routes(routes!(publish_note))
+        .routes(routes!(unhide_note))
         .routes(routes!(mark_notes_read))
         .routes(routes!(upload_note_file, download_note_file, remove_note_file))
 }
@@ -196,6 +197,31 @@ async fn publish_note(
     let a = to_actor(&actor);
     s.executor.query(wfe_id, &a).await.map_err(AppError::from)?;
     notes::republish_after_apply(&s.pool, wfe_id, note_id, &a).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Gizlemeyi geri alır — `DELETE .../notes/{note_id}`in tam simetriği, aynı kapı
+/// (yalnız yazarı). Claim İSTEMEZ (bkz. direkt ağaçtaki ikizi).
+#[utoipa::path(post,
+    operation_id = "portal_note_unhide", path = "/{wfe_id}/notes/{note_id}/unhide", tag = "notes",
+    params(
+        ("wfe_id" = Uuid, Path, description = "WFE id"),
+        ("note_id" = Uuid, Path, description = "Not id"),
+    ),
+    responses(
+        (status = 204, description = "Not yeniden görünür"),
+        (status = 403, description = "Not bu aktöre ait değil"),
+        (status = 409, description = "Not zaten görünür (`note.not_hidden`)"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn unhide_note(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path((wfe_id, note_id)): Path<(Uuid, Uuid)>,
+) -> Result<StatusCode, AppError> {
+    let a = to_actor(&actor);
+    s.executor.query(wfe_id, &a).await.map_err(AppError::from)?;
+    notes::unhide(&s.pool, wfe_id, note_id, &a).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

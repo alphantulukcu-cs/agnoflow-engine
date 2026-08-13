@@ -676,7 +676,7 @@ async fn create_orgu(
     repo::orgu_type::require_active(&pool, orgtnt_id, &body.type_key)
         .await
         .map_err(AppError::from)?;
-    repo::orgu::create(
+    let created = repo::orgu::create(
         &pool,
         orgtnt_id,
         orgt_id,
@@ -685,8 +685,11 @@ async fn create_orgu(
         &body.type_key,
     )
     .await
-    .map(Json)
-    .map_err(Into::into)
+    .map_err(AppError::from)?;
+    // Yeni birim, `*:[type:x]` / `self,children` gibi çözülmüş grant kümelerini
+    // eskitir — görünürlük projeksiyonu yeniden üretilmeli (asenkron kuyruk).
+    crate::visibility_queue::enqueue(&pool, orgtnt_id, "orgu.create").await;
+    Ok(Json(created))
 }
 
 #[utoipa::path(get, path = "/users/{id}/orgu", tag = "org",
@@ -758,10 +761,12 @@ async fn update_orgu(
     repo::orgu_type::require_active(&pool, orgtnt_id, &body.type_key)
         .await
         .map_err(AppError::from)?;
-    repo::orgu::update(&pool, orgu_id, &body.name, &body.type_key)
+    let updated = repo::orgu::update(&pool, orgu_id, &body.name, &body.type_key)
         .await
-        .map(Json)
-        .map_err(Into::into)
+        .map_err(AppError::from)?;
+    // Tip değişimi `*:[type:x]` filtrelerinin sonucunu değiştirir.
+    crate::visibility_queue::enqueue(&pool, orgtnt_id, "orgu.update").await;
+    Ok(Json(updated))
 }
 
 #[derive(Serialize, ToSchema)]
@@ -777,9 +782,14 @@ async fn delete_orgu(
     State(pool): State<PgPool>,
     Path(orgu_id): Path<Uuid>,
 ) -> Result<Json<DeleteOrguResponse>, AppError> {
+    // Tenant kimliği SİLMEDEN ÖNCE çözülür — cascade sonrası satır pasif olur.
+    let orgtnt_id = repo::orgu::get_orgtnt_id(&pool, orgu_id).await.ok();
     let deactivated_count = repo::orgu::delete_cascade(&pool, orgu_id)
         .await
         .map_err(AppError::from)?;
+    if let Some(orgtnt_id) = orgtnt_id {
+        crate::visibility_queue::enqueue(&pool, orgtnt_id, "orgu.deactivate").await;
+    }
     Ok(Json(DeleteOrguResponse { deactivated_count }))
 }
 

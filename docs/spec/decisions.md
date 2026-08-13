@@ -1850,3 +1850,78 @@ açılmış KOŞAN WFE'ler kendiliğinden dolmaz.
 Testler: `wfe-core/tests/pipeline.rs::start_target_resolves_wfah_anchor_to_start_actor_orgu`,
 `::apply_target_resolves_wfah_anchor_to_applying_actor_orgu`,
 `::wft_conditions_do_not_see_the_action_being_applied`.
+
+## Görünürlük: kural belgede, cevap projeksiyonda — ve ORGTRVLANG çapası WFE'nin birimi (2026-08-13)
+
+**Sorun.** "Bu aktör bu WFE'yi görebilir mi?" sorusu üç yerde üç farklı şekilde
+cevaplanıyordu: detay ucu `can_view` ile (belge + org portu, satır satır), portal havuzu
+`current_c_a` containment'ı ile (YAKLAŞIK: `listable[].when` yok sayılıyor, `wf_admin` hiç
+bilinmiyor), simülasyon konsolunun liste ucu ise hiç cevaplamayıp işi istemciye bırakıyordu
+— satır başına bir `GET /wfe/:id` probu, yani N+1 ve 4 sn'lik poll'da 28 istek. Üç cevap
+ayrı düştüğünde kullanıcı ya göremediği satırı listede görür ya da görebileceği satırı hiç
+göremez; üstelik prob, 403 (yetki yok) ile 500'ü (motor hatası) ayırt etmeden ikisini de
+satırı sessizce düşürerek yutuyordu.
+
+**Karar 1 — kararın kendisi denormalize edilir.** `wf.wfe.view_c_a` (yeni kolon):
+`listable[] ∪ wf_admin[]` kurallarının ÇÖZÜLMÜŞ hâli, `when` guard'ı UYGULANMIŞ olarak,
+her commit'te yeniden yazılır ve **terminal'de SİLİNMEZ**. `current_c_a` adının söylediği
+şeye indirgendi (yalnız node adayları); `listable` katlaması oradan KALKTI — o katlama iki
+yanlış üretiyordu: guard yok sayılıyordu ve iş bitince kalıcı olması gereken grant
+`current_c_a` ile birlikte boşaltılıyordu. Kol adayları da artık cache'li
+(`wf.wfe_branch.c_a`); havuzun kol kol canlı çözen gizli N+1'i böylece kalktı.
+
+**Karar 2 — kural TEK bir SQL parçasıdır.** `wf_wfe::visibility::sql` üç tüketicinin
+ortak cümlesidir: liste ucu (`GET /wfe?viewable=true`), detay kapısı (`VisibilityPort`,
+`WfeExecutor::query`) ve portal havuzu. Ayrışma yapısal olarak imkânsız. Çekirdeğin saf
+`can_view`'i referans okuma olarak KALIR (sim/testler, I/O'suz); iki okumanın eşitliği
+`visibility_report` kontrat denetçisiyle ölçülür — bu repoda DB'li test koşulmadığı için
+kontratın bekçisi odur.
+
+**Karar 3 — bitmiş işi yalnız `listable`/`wf_admin` gösterir.** Eski `can_view` kriteri (b)
+("WFAH'ta eylemi olan görür") KALDIRILDI. Ölçüm: 205 (aktör × WFE) çiftinin 57'si yalnız o
+kritere dayanıyordu, 46'sı bitmiş işlerdi. Gerekçe: takip edilmesi istenen akış belgede
+AÇIKÇA işaretlenir; yetki geçmişten türetilmez. Bedeli kabul edildi ve backfill komutu
+"listable grant'ı yok, bitmiş iş artık listelenmez" satırlarını tek tek raporlar.
+
+**Karar 4 (KIRICI) — ORGTRVLANG çapası WFE'nin KENDİ birimidir.** `c_orgu` ifadeleri
+bugüne kadar SORAN KİŞİNİN birimine çapalanıyordu (`resolve_c_orgu`nun `default_anchor`ı).
+Sonuç: `{"c_orgu":"self","c_r":["personel"]}` birim karşılaştırmasını kendisiyle yapıp
+DAİMA geçiyordu — tasarımcının yazdığı "kendi birimimdekiler" cümlesi sessizce "tenant'ta
+o roldeki herkes"e dönüşüyordu. Çapa artık `wf.wfe.origin_orgu_id`: akışı BAŞLATAN aktörün
+birimi, WFE ömrü boyunca sabit (`matcher::authorize_anchored` ve türevleri). Uygulandığı
+yerler: `listable`/`wf_admin` grant'ları, node `c_a` görünürlüğü **ve aksiyon/claim/reassign
+kapıları**. Aksiyon kapısının da dahil olması şart: eskiden başka şubedeki aynı roldeki kişi
+işi havuzunda GÖRMÜYOR (fotoğraf dar) ama id'yi bilse aksiyon ALABİLİYORDU (canlı kural
+geniş) — görünürlük ile yetki artık aynı çapayı okur. `origin_orgu_id` NULL ise (backfill
+bekleyen eski satır) eski davranışa düşülür, böylece geçiş sırasında hiçbir akışın
+görünürlüğü kendiliğinden değişmez.
+
+**Karar 5 — grant guard'ında `$actor` YASAK** (`validator::grant_when_actor_ref`).
+`listable`/`wf_admin` guard'ları projeksiyona viewer bilinmezken yazılır; `$actor` referansı
+guard'ı viewer'a bağlar ve tek bir kolona yazılamaz hale getirir. Kişi/rol kısıtı zaten
+`c_a`'nın işidir. Node aksiyonlarının `when`'i bu kısıttan ETKİLENMEZ.
+
+**Sayfalama.** Süzgeç SQL'e indiği için sayfalama da SQL'de: `GET /wfe?viewable=true&limit&offset`
++ `X-Total-Count` (gövde dizi kaldı; başlık CORS'ta expose edilir). Sayfalar TAM DOLU gelir
+ve toplam GERÇEK görünür sayıdır.
+
+**Öksüz WFD.** Görünürlük kapısı artık belge okumadan ÖNCE koşuyor (projeksiyon WFD'ye
+ihtiyaç duymaz). WFD'si silinmiş WFE'ler yetkisiz aktöre `500 wfd not found` yerine 403
+döner — hem doğru kod hem de varlık sızıntısının kapanması.
+
+**Araçlar.** `visibility_backfill` (varsayılan kuru koşum, `--apply` ile yazar; çapayı eski
+satırlarda ilk İNSAN WFAH kaydından türetir) · `visibility_report` (kontrat denetçisi:
+belge okuması vs projeksiyon, satır satır fark).
+
+**Yeniden projeksiyon (aynı karar, 2026-08-13).** Grant'lar ORGTRVLANG selector'larını somut
+`orgu_id` kümesine dondurduğu için org AĞACI değişince (birim ekleme/tip değişimi/pasifleştirme)
+eskir. Org ucu senkron yeniden projeksiyon YAPMAZ — büyük tenant'ta istek dakikalar sürer ve
+yarıda kalırsa görünürlük tutarsız kalır; uç yalnız `wf.visibility_reprojection` kuyruğuna
+"bu tenant bayatladı" yazar (tenant başına TEK satır: bir bakım penceresinde 50 birim taşınırsa
+50 tarama değil bir tarama olur). İşi saatlik süpürücü 500'lük partilerle yapar, ilerleme
+`wf.wfe.grants_built_at` damgasındadır (yarıda kesilen tur işi baştan başlatmaz), kuyruk satırı
+ancak parti dolmadığında — yani bayat satır kalmadığında — silinir. Kuyruk yazımı BAŞARISIZ
+OLURSA org mutasyonu geri alınmaz, yüksek sesle loglanır: org yönetimini görünürlük
+altyapısının uptime'ına bağlamak yanlış eksende bir bağımlılık olurdu. **Rol ataması bu sınıfa
+girmez** — satırlar kullanıcı değil (birim, rol) çifti tuttuğu için role sonradan atanan kişi
+işi ANINDA görür.

@@ -179,6 +179,7 @@ pub fn spawn_sweeper(state: crate::state::AppState) {
             if n > 0 {
                 tracing::info!("{n} süresi geçmiş wfe rezervasyonu temizlendi");
             }
+            crate::visibility_worker::run_once(&state).await;
             tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
         }
     });

@@ -1,0 +1,132 @@
+//! Faz 3 — görünürlük projeksiyonunun MEVCUT WFE'ler için üretilmesi.
+//!
+//! `wf.wfe.view_c_a` / `origin_orgu_id` / `wf.wfe_branch.c_a` kolonları
+//! 2026-08-13'te eklendi; bu tarihten ÖNCE yaratılmış satırlarda boştur. SQL
+//! görünürlük süzgeci bu kolonlara dayandığı için, backfill koşmadan o satırlar
+//! süzgeçten SESSİZCE düşerdi — bu yüzden liste ucu `grants_built_at IS NULL`
+//! satırları ayrıca sayar ve backfill bitmeden SQL yoluna geçilmez.
+//!
+//! Çapa (`origin_orgu_id`) eski satırlarda İLK WFAH kaydının aktöründen
+//! türetilir: akışı başlatan odur. Sistem aktörlü (nil user) kayıtlar atlanır —
+//! motorun kendi yazdığı marker'lar bir birimi temsil etmez.
+//!
+//! VARSAYILAN KURU KOŞUMDUR. Yazmak için `--apply` verin:
+//!   `DATABASE_URL=... cargo run -p wf-server --bin visibility_backfill -- --apply`
+
+use std::sync::Arc;
+
+use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
+use uuid::Uuid;
+use wfe_core::v22::pipeline::Engine;
+use wfe_core::OrgPort;
+
+#[derive(sqlx::FromRow)]
+struct Row {
+    wfe_id: Uuid,
+}
+
+#[tokio::main]
+async fn main() {
+    let apply = std::env::args().any(|a| a == "--apply");
+    let db = std::env::var("DATABASE_URL").expect("DATABASE_URL gerekli");
+    let pool: PgPool = PgPoolOptions::new()
+        .max_connections(5)
+        .after_connect(|c, _| {
+            Box::pin(async move {
+                c.execute("SET search_path TO org, public").await?;
+                Ok(())
+            })
+        })
+        .connect(&db)
+        .await
+        .expect("db connect");
+
+    let storage =
+        wf_wfd::build_operator(&wf_wfd::StorageConfig::from_env()).expect("storage init");
+    let wfd_store = Arc::new(wf_wfd::WfdAdapter::new(pool.clone(), storage));
+    let wfe_store = wf_wfe::WfeAdapter::new(pool.clone());
+    let org: Arc<dyn OrgPort> = Arc::new(wf_wfe::OrgAdapter::new(pool.clone()));
+    // Grant çözümü autoexec ÇALIŞTIRMAZ (yalnız c_a + when okur) — runner yalnız
+    // `Engine`in alan sözleşmesini karşılamak için var.
+    let runner = wf_wfe::LiveAutoexecRunner::new(None);
+    let engine = Engine {
+        org: &*org,
+        exec: &runner,
+        env: Default::default(),
+    };
+
+    let rows: Vec<Row> =
+        sqlx::query_as("SELECT wfe_id FROM wf.wfe ORDER BY created_at")
+    .fetch_all(&pool)
+    .await
+    .expect("wfe list");
+
+    println!(
+        "=== GÖRÜNÜRLÜK BACKFILL === ({} satır, mod: {})\n",
+        rows.len(),
+        if apply { "YAZ" } else { "KURU KOŞUM" }
+    );
+
+    let (mut ok, mut skipped_wfd, mut skipped_origin, mut empty_grant) = (0, 0, 0, 0);
+
+    for row in &rows {
+        // Projeksiyonun üretimi TEK yerde: `wf_wfe::reproject` (worker da aynı
+        // fonksiyonu çağırır). Bu komut yalnız sürücü + rapor katmanıdır.
+        let outcome = wf_wfe::reproject::reproject_wfe(
+            &pool,
+            &*wfd_store,
+            &wfe_store,
+            &engine,
+            row.wfe_id,
+            !apply,
+        )
+        .await
+        .expect("reproject");
+
+        match outcome {
+            wf_wfe::reproject::Outcome::WfdMissing => {
+                skipped_wfd += 1;
+                println!("  ATLANDI {} — WFD çözülemedi", &row.wfe_id.to_string()[..8]);
+                continue;
+            }
+            wf_wfe::reproject::Outcome::NoAnchor => {
+                skipped_origin += 1;
+                println!(
+                    "  ATLANDI {} — çapa türetilemedi (insan WFAH kaydı yok)",
+                    &row.wfe_id.to_string()[..8]
+                );
+                continue;
+            }
+            wf_wfe::reproject::Outcome::Written { .. } => {}
+        }
+
+        // Kararın faturası: grant'ı olmayan BİTMİŞ iş bundan sonra hiç kimsenin
+        // listesinde görünmez. Hata değil (WFD'de listable yoksa beklenen), ama
+        // sessiz de kalmamalı — bu yüzden kolon DOĞRUDAN okunur (projeksiyonun
+        // gerçeği DB'dedir; kuru koşumda kolon henüz yazılmamış olabilir).
+        let (status, view_len): (String, i64) = sqlx::query_as(
+            "SELECT status, jsonb_array_length(view_c_a) FROM wf.wfe WHERE wfe_id = $1",
+        )
+        .bind(row.wfe_id)
+        .fetch_one(&pool)
+        .await
+        .expect("status okunamadı");
+        if status != "active" && view_len == 0 {
+            empty_grant += 1;
+            println!(
+                "  UYARI  {} [{status}] — listable/wf_admin grant'ı YOK, bitmiş iş artık listelenmez",
+                &row.wfe_id.to_string()[..8]
+            );
+        }
+        ok += 1;
+    }
+
+    println!("\n--- ÖZET ---");
+    println!("işlenen           : {ok}");
+    println!("atlandı (WFD yok) : {skipped_wfd}");
+    println!("atlandı (çapa yok): {skipped_origin}");
+    println!("grant'sız bitmiş  : {empty_grant}");
+    if !apply {
+        println!("\nKURU KOŞUM — hiçbir şey yazılmadı. Yazmak için: --apply");
+    }
+}

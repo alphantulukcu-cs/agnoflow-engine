@@ -234,6 +234,33 @@ uygulanır) ve `WFE_START_DEDUPE_WINDOW_SECS` (varsayılan 60) — 2026-08-11, a
   `MAX_INLINE_REQUEST_BYTES` (`workflows/api.ts`) `ATTACHMENT_MAX_REQUEST_MB` (200) ile
   eşleşmeli tutulur — aradaki pay payload+multipart boundary içindir.
 
+## Görünürlük: projeksiyon + tek SQL predicate (2026-08-13)
+
+Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap projeksiyonda".
+
+- **Kural**: `görünür = view_c_a @> viewer OR (status='active' AND (current_c_a @> viewer
+  OR claimed_by @> viewer OR aktif kol c_a/claim))`. İş bitince `current_c_a` boşalır →
+  bitmiş işi YALNIZ `listable`/`wf_admin` gösterir. "WFAH'ta eylemi olmak" (eski `can_view`
+  kriteri (b)) yetki ÜRETMEZ.
+- **Tek yer**: `wf_wfe::visibility::sql`. Liste ucu, detay kapısı (`VisibilityPort` →
+  `WfeExecutor::query`) ve portal havuzu AYNI parçayı koşar. Çekirdeğin `can_view`'i
+  referans okumadır (sim/testler); eşitliği `visibility_report` ölçer.
+- **ORGTRVLANG çapası WFE'nin birimidir** (`wf.wfe.origin_orgu_id`, start'ta donar), soran
+  kişinin DEĞİL — `matcher::authorize_anchored`. Görünürlük, aksiyon, claim ve reassign
+  kapılarının HEPSİ bu çapayı kullanır. `NULL` = backfill bekliyor → eski davranış.
+- `listable`/`wf_admin` guard'ında **`$actor` YASAK** (`grant_when_actor_ref`).
+- **Projeksiyonu yazan tek yol**: `WfeExecutor::fill_view_grants` (+ start'ta `create`).
+  Yeni bir commit yolu eklendiğinde ORAYA bağlanır; adapter kolonları outcome match'inin
+  DIŞINDA, aynı transaction'da yazar.
+- Şema/kural değişince **`visibility_backfill --apply`** koşulur, sonra
+  **`visibility_report`** ile kontrat doğrulanır (hedef: "KONTRAT SAĞLAM").
+- Sayfalama: `GET /wfe?viewable=true&limit&offset` + `X-Total-Count` (CORS'ta expose).
+- **Org AĞACI değişince** (birim ekle/güncelle/pasifleştir) uç `wf.visibility_reprojection`
+  kuyruğuna yazar (tenant başına tek satır), saatlik süpürücü `visibility_worker::run_once`
+  ile 500'lük partiler hâlinde yeniden projelendirir; ilerleme `grants_built_at`te kalıcıdır.
+  Rol ATAMASI kuyruğa girmez — satırlar (birim, rol) tuttuğu için yeni atama anında etkilidir.
+  Yeniden üretimin TEK kod yolu `wf_wfe::reproject` (backfill komutu da onu çağırır).
+
 ## WFE not defteri (ad-hoc not + belge)
 
 Tasarım: `docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md` (K1–K9).

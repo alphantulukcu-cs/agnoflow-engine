@@ -1925,3 +1925,15 @@ OLURSA org mutasyonu geri alınmaz, yüksek sesle loglanır: org yönetimini gö
 altyapısının uptime'ına bağlamak yanlış eksende bir bağımlılık olurdu. **Rol ataması bu sınıfa
 girmez** — satırlar kullanıcı değil (birim, rol) çifti tuttuğu için role sonradan atanan kişi
 işi ANINDA görür.
+
+**Öksüz WFE'ler ve FK (2026-08-13).** `wf.wfe.wfd_id` düz bir uuid kolonuydu; DB işaret
+edilen WFD satırının varlığını kontrol etmiyordu. Üretimde bir WFD satırı silinip 4 WFE
+öksüz kaldı: detay ucu `500 wfd not found` veriyor (yetkisiz aktöre bile — hem yanlış kod
+hem varlık sızıntısı), projeksiyon üretilemiyor, etiket/c_a/graf bilgisi kalıcı olarak
+kayıp. Öksüz satırlar `orphan_wfe_cleanup --apply` ile silindi (4 WFE, 17 WFAH, 12 dynctx;
+not/kol/belge yok) ve `wfe_wfd_fk` kısıtı eklendi — sınıf tekrar edemez. `ON DELETE`
+verilmedi (NO ACTION): koşan/bitmiş iş varken WFD sürümünü silmek REDDEDİLİR; CASCADE
+denetim izini bir DDL hatasıyla silmenin en kısa yolu olurdu. Araç ayrıca "WFD satırı YOK"
+ile "satır DURUYOR ama pasif/yayında değil" durumlarını ayırır: motor ikisini de
+`wfd not found` diye bildirdiği için karıştırılması kolaydır, ama ikincisinde çözüm silmek
+değil yayın durumunu düzeltmektir.

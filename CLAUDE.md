@@ -257,6 +257,10 @@ Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap pro
 - Şema/kural değişince **`visibility_backfill --apply`** koşulur, sonra
   **`visibility_report`** ile kontrat doğrulanır (hedef: "KONTRAT SAĞLAM").
 - Sayfalama: `GET /wfe?viewable=true&limit&offset` + `X-Total-Count` (CORS'ta expose).
+- **`wf.wfe.wfd_id` → `wf.wfd_meta` FK'lidir** (2026-08-13): tarifi silinmiş WFE
+  ("öksüz") ARTIK OLUŞAMAZ. Teşhis/temizlik: `orphan_wfe_cleanup` (kuru koşum
+  varsayılan; "WFD satırı yok" ile "pasif/yayında değil" durumlarını AYRI raporlar —
+  ikincisi silinmez, yayın durumu düzeltilir).
 - **Org AĞACI değişince** (birim ekle/güncelle/pasifleştir) uç `wf.visibility_reprojection`
   kuyruğuna yazar (tenant başına tek satır), saatlik süpürücü `visibility_worker::run_once`
   ile 500'lük partiler hâlinde yeniden projelendirir; ilerleme `grants_built_at`te kalıcıdır.

@@ -21,6 +21,15 @@ pub struct WfeRow {
     #[serde(skip_serializing)]
     pub current_node: Option<String>,
     pub current_c_a: serde_json::Value,
+    /// Görünürlük projeksiyonu (2026-08-13): `listable ∪ wf_admin` grant'ları.
+    /// `current_c_a`dan farkı: terminal'de SİLİNMEZ ve `when` uygulanmıştır.
+    /// SERİLEŞMEZ — istemcinin işi değil, SQL süzgecinin dayanağıdır.
+    #[serde(skip_serializing)]
+    pub view_c_a: serde_json::Value,
+    /// `listable`/`wf_admin` ORGTRVLANG çapası (akışı başlatanın birimi).
+    /// NULL = backfill bekleyen eski satır (bkz. `Wfes::origin_orgu_id`).
+    #[serde(skip_serializing)]
+    pub origin_orgu_id: Option<Uuid>,
     pub claimed_by: Option<serde_json::Value>,
     pub end_response: Option<serde_json::Value>,
     /// SLA-3: çözülmüş mutlak workflow deadline'ı; NULL = yok (2026-07-16).

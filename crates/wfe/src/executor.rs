@@ -15,7 +15,7 @@ use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
 use wfe_core::v22::pipeline::{ActionChoice, ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallView, CommitOutcome, EnvPort, NoEnv,
-    PendingCall, WfdStore, WfeStore, Wfes,
+    PendingCall, VisibilityPort, WfdStore, WfeStore, Wfes,
 };
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
 use wfe_core::{ConflictKind, EngineError, OrgPort};
@@ -219,6 +219,11 @@ pub struct WfeExecutor {
     /// sonrası dürtülür; timer servisi next-due'yu yeniden hesaplar. `notify_one`
     /// permit biriktirdiği için sweep sırasında gelen sinyal KAYBOLMAZ.
     timer_notify: Arc<tokio::sync::Notify>,
+    /// Görünürlük projeksiyonu kaynağı (2026-08-13). `None` = store'suz kurulum
+    /// (sim, birim testleri) → çekirdeğin canlı hesabına (`can_view`) düşülür.
+    /// Üretimde DAİMA takılıdır (`main.rs`), böylece detay kapısı liste ucuyla
+    /// AYNI SQL cümlesini okur.
+    visibility: Option<Arc<dyn VisibilityPort>>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -800,7 +805,16 @@ impl WfeExecutor {
             env: Arc::new(NoEnv),
             wfah_path: Arc::new(NoWfahPath),
             timer_notify: Arc::new(tokio::sync::Notify::new()),
+            visibility: None,
         }
+    }
+
+    /// Görünürlük projeksiyonu kaynağını bağlar (`WfeAdapter`). Takılmazsa
+    /// `query` çekirdeğin canlı `can_view` hesabını kullanır — aynı kural, daha
+    /// yavaş yol (sim/testler için).
+    pub fn with_visibility(mut self, src: Arc<dyn VisibilityPort>) -> Self {
+        self.visibility = Some(src);
+        self
     }
 
     /// Ortam konfigürasyonu kaynağını bağlar (`crate::env_adapter::EnvAdapter`).
@@ -948,6 +962,21 @@ impl WfeExecutor {
         new.wfd_id = wfd_id;
         new.wfd_version = version;
         new.environment_id = environment_id;
+        // Görünürlük projeksiyonu start'ta da yazılır — aksi halde yeni WFE
+        // `listable` grant'ı olmadan doğar ve ilk aksiyona kadar (o da gelmeyebilir)
+        // hiç kimsenin listesinde görünmez. Çapa start aktörünün birimidir ve
+        // WFE ömrü boyunca bu kalır (`NewWfe::origin_orgu_id` ile aynı değer).
+        new.view_c_a = engine
+            .view_grants(
+                &wfd,
+                &new.initial_dynctx,
+                &wfe_core::types::wfah::Wfah(new.wfah_entries.clone()),
+                outcome_view(&new.outcome).1.as_deref(),
+                wfe_id,
+                new.origin_orgu_id,
+                orgtnt_id,
+            )
+            .await?;
 
         self.wfe.create(&new).await?;
         self.nudge_timers(); // deadline / node dwell / claim_timeout vadesi değişti
@@ -1007,10 +1036,12 @@ impl WfeExecutor {
             check_rev(&wfes, expected_rev)?;
             let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
 
-            let commit = self
+            let mut commit = self
                 .engine_for(&wfes)
                 .await?
                 .apply(&wfd, &wfes, actor, action, input, node_hint, target)
+                .await?;
+            self.fill_view_grants(&wfd, &wfes, Some(actor.orgu_id), &mut commit)
                 .await?;
             match self.wfe.commit(&commit).await {
                 Ok(()) => {
@@ -1200,12 +1231,14 @@ impl WfeExecutor {
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
         require_branch_hint(&wfes, node)?;
         let engine = self.engine_for(&wfes).await?;
-        let Some((step_idx, commit)) = engine
+        let Some((step_idx, mut commit)) = engine
             .admin_fire_escalation(&wfd, &wfes, admin, node, Utc::now())
             .await?
         else {
             return Ok(EscalationAdminOutcome::NonePending);
         };
+        self.fill_view_grants(&wfd, &wfes, Some(admin.orgu_id), &mut commit)
+            .await?;
         self.wfe.commit(&commit).await?;
         self.after_wfe_settled(wfe_id, &commit.outcome).await?;
         self.nudge_timers();
@@ -1246,16 +1279,107 @@ impl WfeExecutor {
         })
     }
 
+    /// Görünürlük projeksiyonunu (`view_c_a` + kol `c_a`) commit'e doldurur.
+    ///
+    /// Saf pipeline bunu üretemez: `listable`/`wf_admin` kurallarını çözmek org
+    /// portu ister ve çapa olarak WFE'nin KENDİ birimini (`origin_orgu_id`) ister
+    /// — ikisi de I/O ve durum. Bu yüzden tek doldurma noktası burasıdır; her
+    /// `WfeStore::commit` çağrısından ÖNCE koşar.
+    ///
+    /// `origin` yoksa (projeksiyondan önce yaratılmış satır, backfill bekliyor)
+    /// çapa eski davranışa — işlemi yapan aktörün birimine — düşer: backfill
+    /// tamamlanana kadar hiçbir akışın görünürlüğü değişmesin.
+    async fn fill_view_grants(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        actor_orgu: Option<Uuid>,
+        commit: &mut wfe_core::v22::ports::TransitionCommit,
+    ) -> Result<(), EngineError> {
+        let engine = self.engine();
+        // Çapa: WFE'nin kendi birimi. Yoksa (backfill bekleyen eski satır) işlemi
+        // yapan aktörünki — eski davranış. Sistem yollarında (timer, escalation)
+        // aktör de yoksa projeksiyon HİÇ yazılmaz: yanlış çapayla yazmaktansa
+        // dokunmamak doğrudur, backfill zaten o satırı düzeltecek.
+        let Some(origin) = wfes.origin_orgu_id.or(actor_orgu) else {
+            return Ok(());
+        };
+        // Guard'lar ve c_a çözümü commit SONRASI ctx'i görmeli — grant'lar yeni
+        // duruma göre yazılır (`when` bir sonraki adımda değişebilir).
+        let ctx = &commit.new_dynctx;
+        commit.view_c_a = engine
+            .view_grants(
+                wfd,
+                ctx,
+                &wfes.wfah,
+                wfes.current_node.as_deref(),
+                wfes.wfe_id,
+                origin,
+                wfes.orgtnt_id,
+            )
+            .await?;
+        // Kol c_a'ları: fork tüm kolları doğurur, kol hareketi tek kolu taşır.
+        // Diğer sonuçlarda kol satırlarına dokunulmaz → boş bırakılır.
+        let branch_nodes: Vec<String> = match &commit.outcome {
+            CommitOutcome::ForkTo { branches, .. } => branches.clone(),
+            CommitOutcome::BranchMoveTo { node, .. } => vec![node.clone()],
+            _ => Vec::new(),
+        };
+        for node_key in branch_nodes {
+            // Kol c_a'sı node c_a'sıdır; çapası node yolundakiyle AYNI kalır
+            // (geçişi yapan aktör) — bu kolon havuz eşleşmesi içindir, kalıcı
+            // görünürlük grant'ı DEĞİLDİR.
+            let c_a = engine
+                .resolve_node_c_a(
+                    wfd,
+                    &node_key,
+                    ctx,
+                    &wfes.wfah,
+                    &Actor {
+                        orgu_id: origin,
+                        user_id: Uuid::nil(),
+                        role: String::new(),
+                    },
+                    wfes.orgtnt_id,
+                )
+                .await?;
+            commit.branch_c_a.push((node_key, c_a));
+        }
+        Ok(())
+    }
+
     /// WFE görünümü — önce WFE-seviyesi VIEW kapısı (owner / node c_a / listable,
     /// spec Terminology VISIBILITY+LISTABLE), sonra DynCtx `x-visibility` field
     /// filtrelemesi (M13). Kapı geçilmezse WFE'nin varlığı bile sızmaz.
     pub async fn query(&self, wfe_id: Uuid, viewer: &Actor) -> Result<WfeView, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
-        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
 
-        if !can_view(&wfd, &wfes, viewer, &*self.org).await? {
-            return Err(EngineError::Unauthorized);
-        }
+        // Görünürlük kapısı: üretimde DENORMALIZE projeksiyondan (liste ucunun
+        // koştuğu SQL parçasının aynısı), aksi halde çekirdeğin canlı hesabından.
+        // İki yol aynı kuralı ifade eder; projeksiyon olanı hem hızlıdır hem de
+        // listeyle ayrışamaz.
+        //
+        // SIRA ÖNEMLİ: projeksiyon yolu WFD'ye İHTİYAÇ DUYMAZ, bu yüzden kapı
+        // belge okumadan ÖNCE koşar. WFD'si silinmiş (öksüz) WFE'lerde eski sıra
+        // yetkisiz aktöre bile `500 wfd not found` döndürüyordu — yani hem yanlış
+        // kod hem de görme yetkisi olmayan kişiye varlık sızıntısı.
+        let wfd = match &self.visibility {
+            Some(port) => {
+                let filters =
+                    crate::visibility::ViewerFilters::build(viewer, &*self.org).await?;
+                if !port.can_view_projection(wfe_id, &filters.as_binds()).await? {
+                    return Err(EngineError::Unauthorized);
+                }
+                self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?
+            }
+            None => {
+                let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+                if !can_view(&wfd, &wfes, viewer, &*self.org).await? {
+                    return Err(EngineError::Unauthorized);
+                }
+                wfd
+            }
+        };
 
         let ctx = wfes.dynctx.as_value();
         let env = MatchEnv {
@@ -1643,7 +1767,7 @@ impl WfeExecutor {
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        let commit = self
+        let mut commit = self
             .engine_for(&caller)
             .await?
             .fire_call_return(
@@ -1656,6 +1780,8 @@ impl WfeExecutor {
                 chrono::Utc::now(),
             )
             .await?;
+        // Sistem yolu: aktör yok → çapa yalnız `origin_orgu_id`den gelir.
+        self.fill_view_grants(&wfd, &caller, None, &mut commit).await?;
         self.wfe.commit(&commit).await?;
         self.wfe.set_call_status(call.id, "consumed", None).await?;
         self.after_wfe_settled(caller.wfe_id, &commit.outcome)
@@ -1742,7 +1868,8 @@ impl WfeExecutor {
 
         // SLA-3 deadline wfe-seviyesidir (paralel modda da) — tüm kolları iptal eder.
         if engine.deadline_due(&wfes, now) {
-            let commit = engine.fire_deadline_timeout(&wfes, now);
+            let mut commit = engine.fire_deadline_timeout(&wfes, now);
+            self.fill_view_grants(&wfd, &wfes, None, &mut commit).await?;
             self.wfe.commit(&commit).await?;
             // SLA-3 ile sonlanma da bir sonlanmadır: bekleyen çağrı `terminated`
             // olarak döner (çağıran karar verir), alt akışlar iptal edilir.
@@ -1762,7 +1889,8 @@ impl WfeExecutor {
             let b = branch.as_deref();
             if engine.claim_timeout_due(&wfd, &wfes, now, b)? {
                 match engine.fire_claim_timeout(&wfd, &wfes, now, b).await? {
-                    ClaimTimeoutOutcome::Move(commit) => {
+                    ClaimTimeoutOutcome::Move(mut commit) => {
+                        self.fill_view_grants(&wfd, &wfes, None, &mut commit).await?;
                         self.wfe.commit(&commit).await?;
                         self.after_wfe_settled(wfe_id, &commit.outcome).await?;
                     }
@@ -1781,7 +1909,8 @@ impl WfeExecutor {
                 return Ok(true);
             }
             if let Some(idx) = engine.due_escalation(&wfd, &wfes, now, b)? {
-                let commit = engine.fire_escalation(&wfd, &wfes, idx, now, b).await?;
+                let mut commit = engine.fire_escalation(&wfd, &wfes, idx, now, b).await?;
+                self.fill_view_grants(&wfd, &wfes, None, &mut commit).await?;
                 self.wfe.commit(&commit).await?;
                 self.after_wfe_settled(wfe_id, &commit.outcome).await?;
                 return Ok(true);
@@ -1878,6 +2007,7 @@ mod branch_hint_tests {
             wfe_id: Uuid::nil(),
             orgtnt_id: Uuid::nil(),
             environment_id: None,
+            origin_orgu_id: None,
             wfd_id: Uuid::nil(),
             wfd_version: 1,
             dynctx: DynCtx(serde_json::json!({})),

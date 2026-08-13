@@ -280,6 +280,7 @@ impl WfeStore for MemStore {
                 branches: vec![],
                 join_target: None,
             join_rule: JoinRule::All,
+            origin_orgu_id: None,
             },
         );
         self.stage(new.orgtnt_id, new.wfe_id, &new.staged_calls);

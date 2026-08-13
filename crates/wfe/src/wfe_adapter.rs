@@ -15,7 +15,7 @@ use wfe_core::types::{
 };
 use wfe_core::v22::ports::{
     BranchState, BranchStatus, CallView, CommitOutcome, NewWfe, PendingCall, TransitionCommit,
-    WfeStore, Wfes,
+    VisibilityPort, WfeStore, Wfes,
 };
 use wfe_core::{ConflictKind, EngineError};
 
@@ -391,6 +391,7 @@ impl WfeStore for WfeAdapter {
             created_at: row.created_at,
             branches,
             join_target,
+            origin_orgu_id: row.origin_orgu_id,
             // WOR-72/WOR-73: iki kolon → tek çözülmüş kural. Negatif/0 eşik DB
             // CHECK'iyle, "ikisi birden dolu" hâli `wfe_join_rule_single` ile
             // engellenir; yine de eşik önce okunur (deterministik).
@@ -426,8 +427,9 @@ impl WfeStore for WfeAdapter {
 
         sqlx::query(
             "INSERT INTO wf.wfe
-               (wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+               (wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline,
+                view_c_a, origin_orgu_id, grants_built_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())",
         )
         .bind(new.wfe_id)
         .bind(new.orgtnt_id)
@@ -439,6 +441,9 @@ impl WfeStore for WfeAdapter {
         .bind(&c_a_json)
         .bind(end_response)
         .bind(new.deadline)
+        .bind(serde_json::to_value(&new.view_c_a).map_err(db_err)?)
+        // Görünürlük çapası start'ta donar (bkz. `NewWfe::origin_orgu_id`).
+        .bind(new.origin_orgu_id)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -861,6 +866,42 @@ impl WfeStore for WfeAdapter {
             .map_err(db_err)?;
         }
 
+        // Görünürlük projeksiyonu — outcome kollarının HEPSİ için tek yerde, aynı
+        // transaction'da. Kol kol yazılsaydı yeni bir outcome eklendiğinde
+        // unutulur ve o geçişten sonra WFE sessizce görünmez olurdu.
+        //
+        // `view_c_a` yalnız DOLU geldiğinde yazılır: `WfeExecutor::fill_view_grants`
+        // doldurmadan çağıran bir yol (store'suz test, sim) mevcut satırı SIFIRLAMASIN.
+        if !commit.view_c_a.is_empty() {
+            let view_json = serde_json::to_value(&commit.view_c_a).map_err(db_err)?;
+            sqlx::query(
+                "UPDATE wf.wfe SET view_c_a = $1, grants_built_at = now()
+                 WHERE wfe_id = $2 AND orgtnt_id = $3",
+            )
+            .bind(&view_json)
+            .bind(commit.wfe_id)
+            .bind(commit.orgtnt_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+        // Kol adayları: fork'ta tüm kollar, kol hareketinde hareket eden kol.
+        // Kol satırları yukarıdaki outcome kollarında zaten yaratılmış/taşınmış
+        // olur; burada yalnız cache kolonu doldurulur.
+        for (branch_node, c_a) in &commit.branch_c_a {
+            let c_a_json = serde_json::to_value(c_a).map_err(db_err)?;
+            sqlx::query(
+                "UPDATE wf.wfe_branch SET c_a = $1, updated_at = now()
+                 WHERE wfe_id = $2 AND branch_node = $3",
+            )
+            .bind(&c_a_json)
+            .bind(commit.wfe_id)
+            .bind(branch_node)
+            .execute(&mut *tx)
+            .await
+            .map_err(db_err)?;
+        }
+
         tx.commit().await.map_err(db_err)
     }
 
@@ -1203,5 +1244,33 @@ impl crate::executor::WfahPathSource for WfeAdapter {
                 at: r.applied_at,
             })
             .collect())
+    }
+}
+
+/// Görünürlük projeksiyonunun sorgulanması (2026-08-13).
+///
+/// Liste ucunun kullandığı `visibility::sql` parçasının TA KENDİSİ tek WFE'ye
+/// daraltılarak koşar — detay kapısı ile liste süzgeci böylece aynı cümleyi
+/// okur, ayrı düşmeleri imkânsızdır.
+#[async_trait]
+impl VisibilityPort for WfeAdapter {
+    async fn can_view_projection(
+        &self,
+        wfe_id: Uuid,
+        filters: &[Option<Value>],
+    ) -> Result<bool, EngineError> {
+        let stmt = format!(
+            "SELECT EXISTS (SELECT 1 FROM wf.wfe e WHERE e.wfe_id = ${} AND {})",
+            filters.len() + 1,
+            crate::visibility::sql(0)
+        );
+        let mut q = sqlx::query_scalar::<_, bool>(&stmt);
+        for f in filters {
+            q = q.bind(f);
+        }
+        q.bind(wfe_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(db_err)
     }
 }

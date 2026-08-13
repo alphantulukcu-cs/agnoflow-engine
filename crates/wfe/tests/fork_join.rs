@@ -94,6 +94,11 @@ struct ParStore {
     /// Gerçek adapter'da bu pencereyi `SELECT ... FOR UPDATE` kapatır; burada
     /// aynı rolü mutex + paralel-mod kapısı üstlenir.
     commit_delays_ms: Mutex<std::collections::VecDeque<u64>>,
+    /// 2026-08-13: son commit'in görünürlük projeksiyonu — `WfeExecutor::
+    /// fill_view_grants`in kol başına yazdığı `branch_c_a` kaydı. Gerçek adapter
+    /// bunu `wf.wfe_branch.c_a` kolonuna yazar; testte doğrulanabilmesi için
+    /// mock yalnız KAYDEDER (kolon taklidi gereksiz karmaşa olurdu).
+    last_branch_c_a: Mutex<Vec<(String, usize)>>,
 }
 
 impl ParStore {
@@ -232,12 +237,18 @@ impl WfeStore for ParStore {
             branches: vec![],
             join_target: None,
             join_rule: JoinRule::All,
+            origin_orgu_id: None,
         };
         self.seed(w);
         Ok(())
     }
 
     async fn commit(&self, commit: &TransitionCommit) -> Result<(), EngineError> {
+        *self.last_branch_c_a.lock().unwrap() = commit
+            .branch_c_a
+            .iter()
+            .map(|(node, c_a)| (node.clone(), c_a.len()))
+            .collect();
         if self.fail_commits.load(Ordering::SeqCst) > 0 {
             self.fail_commits.fetch_sub(1, Ordering::SeqCst);
             return Err(EngineError::Conflict(ConflictKind::BranchArrival));
@@ -1400,6 +1411,7 @@ fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claima
             node: "self__resultCoordinator".into(),
         }),
         join_rule: JoinRule::All,
+        origin_orgu_id: None,
     });
     wfe_id
 }
@@ -2287,4 +2299,35 @@ async fn fork_marker_records_join_expression() {
         .expect("join_when")
         .contains("$branches.self__hrApprover"));
     assert_eq!(fork["join_threshold"], Value::Null);
+}
+
+// ======================= 2026-08-13: kol c_a projeksiyonu (fill_view_grants)
+
+/// Fork commit'i HER kol için aday listesi taşır.
+///
+/// Kol c_a'sı `wf.wfe_branch.c_a` kolonuna yazılır ve görünürlük SQL'i (aktif kol
+/// kanalı) onu okur. Fork'ta yazılmazsa paralel moda giren iş, kolların
+/// havuzunda GÖRÜNMEZ — kol satırı var, adayı yok. Bu testin işi o boşluğu
+/// kapatmaktır.
+#[tokio::test(start_paused = true)]
+async fn fork_commit_carries_candidate_list_per_branch() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    let recorded = store.last_branch_c_a.lock().unwrap().clone();
+    let w = store.snapshot(wfe_id);
+    let active: Vec<&str> = w
+        .branches
+        .iter()
+        .filter(|b| b.status == BranchStatus::Active)
+        .map(|b| b.branch_node.as_str())
+        .collect();
+
+    assert!(!active.is_empty(), "fork sonrası aktif kol beklenir");
+    for node in &active {
+        let entry = recorded.iter().find(|(n, _)| n == node);
+        let (_, len) = entry.unwrap_or_else(|| panic!("kol '{node}' için c_a yazılmamış: {recorded:?}"));
+        assert!(*len > 0, "kol '{node}' aday listesi BOŞ yazılmış");
+    }
 }

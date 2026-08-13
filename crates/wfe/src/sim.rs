@@ -142,6 +142,9 @@ impl SimState {
             wfe_id: self.wfe_id,
             orgtnt_id: self.orgtnt_id,
             environment_id: None,
+            // Simülasyonun store'u yok → görünürlük projeksiyonu da yok; çapa
+            // eski davranışa (soruyu soran aktörün birimi) düşer.
+            origin_orgu_id: None,
             wfd_id: Uuid::nil(),
             wfd_version: 0,
             dynctx: DynCtx(self.dynctx.clone()),

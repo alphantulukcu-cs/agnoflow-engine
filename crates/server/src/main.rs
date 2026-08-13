@@ -11,6 +11,9 @@ mod routes;
 mod staging;
 mod start_dedupe;
 mod state;
+mod visibility;
+mod visibility_queue;
+mod visibility_worker;
 mod wfe_attachment;
 
 use axum::response::IntoResponse;
@@ -67,7 +70,9 @@ async fn main() {
         .with_env(Arc::new(wf_wfe::env_adapter::EnvAdapter::new(pool.clone())))
         // K7 (Faz 0, WFE not tasarımı): WFAH akış izi (`from_node`/`to_node`)
         // aynı adaptörden okunur — ayrı bağlantı/pool gerekmez.
-        .with_wfah_path(wfe_adapter),
+        .with_wfah_path(wfe_adapter.clone())
+        // 2026-08-13: detay kapısı da liste ucuyla AYNI SQL parçasını okusun.
+        .with_visibility(wfe_adapter),
     );
 
     // M5/M6 — escalation & root-timeout süpürücüsü (WOR-46/47).
@@ -212,4 +217,7 @@ fn cors_layer(cfg: &config::Config) -> CorsLayer {
             Method::DELETE,
         ])
         .allow_headers(tower_http::cors::Any)
+        // Sayfalama toplamı yanıt BAŞLIĞINDA gider; expose edilmezse tarayıcı
+        // (portal ayrı origin'de) onu okuyamaz ve sayfa sayısı hesaplanamaz.
+        .expose_headers([axum::http::HeaderName::from_static("x-total-count")])
 }

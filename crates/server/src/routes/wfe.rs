@@ -1857,6 +1857,15 @@ async fn possible_actions(
 struct WfeListQuery {
     limit: Option<i64>,
     offset: Option<i64>,
+    /// `true` ise liste aktörün GÖREBİLECEĞİ satırlara süzülür — kapı
+    /// `GET /wfe/{id}`in kullandığı `can_view`'ın aynısı (`filter_viewable`).
+    /// Verilmezse (varsayılan) tenant'ın TÜM satırları döner: bu uç bir yönetim/
+    /// simülasyon görünümüdür ve süzgeç EKLENİR, davranış değişmez.
+    ///
+    /// Süzme sayfalamadan SONRA koşar: `limit` ham satır sayısını sınırlar,
+    /// dönen dizi ondan KISA olabilir. Süzgeci SQL'e indirmek `can_view`ı
+    /// containment'la yaklaştırmak demekti (bkz. `filter_viewable` doc'u).
+    viewable: Option<bool>,
 }
 
 /// `WfeRow` + SLA görünüm alanları (2026-07-16): `priority` (1-10, otomatik) ve
@@ -1959,7 +1968,7 @@ async fn list_wfe(
     State(s): State<AppState>,
     headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<WfeListQuery>,
-) -> Result<Json<Vec<WfeListItem>>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     let actor = extract_actor(&headers)?;
     // WOR-5 fix: orgu_id tenant DEĞİLDİR — orgtnt_id org katmanından çözülür
     let orgtnt_id = s
@@ -1970,9 +1979,31 @@ async fn list_wfe(
         .map_err(AppError::from)?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0).max(0);
-    let rows = wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id, limit, offset)
+    // Görünürlük süzgeci SQL'de (2026-08-13): süzme sayfalamadan ÖNCE, veritabanı
+    // içinde koşar — sayfalar TAM DOLU gelir ve `total` gerçek görünür sayıdır.
+    // Kural tek yerde: `crate::visibility::sql` (detay ucu ve portal havuzu da
+    // aynı parçayı kullanır).
+    let (rows, total) = if q.viewable.unwrap_or(false) {
+        let filters = crate::visibility::ViewerFilters::build(&actor, &*s.executor.org).await?;
+        wf_wfe::repo::wfe::list_viewable_page(
+            &s.pool,
+            orgtnt_id,
+            limit,
+            offset,
+            &crate::visibility::sql(1),
+            &filters.as_binds(),
+        )
         .await
-        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?
+    } else {
+        let rows = wf_wfe::repo::wfe::list_by_tenant(&s.pool, orgtnt_id, limit, offset)
+            .await
+            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+        let total = wf_wfe::repo::wfe::count_by_tenant(&s.pool, orgtnt_id)
+            .await
+            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+        (rows, total)
+    };
 
     // WOR-65: revizyonlar TEK toplu sorguda (satır başına sorgu YOK).
     let wfe_ids: Vec<Uuid> = rows.iter().map(|r| r.wfe_id).collect();
@@ -2057,5 +2088,14 @@ async fn list_wfe(
             row,
         });
     }
-    Ok(Json(out))
+    // Sayfalama sözleşmesi (2026-08-13): gövde DİZİ kalır (kıran değişiklik yok),
+    // toplam sayı `X-Total-Count` başlığında gider. `viewable=true` iken bu sayı
+    // SÜZÜLMÜŞ toplamdır — istemci son sayfayı ondan hesaplar.
+    let mut res = axum::response::IntoResponse::into_response(Json(out));
+    res.headers_mut().insert(
+        "X-Total-Count",
+        axum::http::HeaderValue::from_str(&total.to_string())
+            .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?,
+    );
+    Ok(res)
 }

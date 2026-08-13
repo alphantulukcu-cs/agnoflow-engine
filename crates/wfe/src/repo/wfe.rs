@@ -3,7 +3,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const WFE_COLUMNS: &str = "wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status,
-                current_node, current_c_a, claimed_by, end_response,
+                current_node, current_c_a, view_c_a, origin_orgu_id, claimed_by, end_response,
                 deadline, claimed_at, join_target, join_threshold, join_when,
                 created_at, updated_at";
 
@@ -33,6 +33,61 @@ pub async fn list_by_tenant(
     .fetch_all(pool)
     .await
     .map_err(WfeError::Database)
+}
+
+/// Tenant'ın TOPLAM WFE sayısı — sayfalama göstergesi (`X-Total-Count`) için.
+pub async fn count_by_tenant(pool: &PgPool, orgtnt_id: Uuid) -> Result<i64, WfeError> {
+    sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wf.wfe WHERE orgtnt_id = $1")
+        .bind(orgtnt_id)
+        .fetch_one(pool)
+        .await
+        .map_err(WfeError::Database)
+}
+
+/// Görünürlük süzgeçli sayfa + TOPLAM sayı — sayfalamanın SQL'de yapılabilmesi
+/// için süzgecin de SQL'de olması gerekir (2026-08-13). `where_sql` çağıranın
+/// verdiği görünürlük parçasıdır (`server::visibility::sql`), parametreleri
+/// `bind` closure'ı ile bağlanır: repo katmanı kuralın İÇERİĞİNİ bilmez, yalnız
+/// yerini bilir — kural tek bir yerde (server/visibility.rs) yaşar.
+///
+/// `total` süzgeçten SONRAKİ sayıdır: UI "1-200 / 512" diyebilsin ve son sayfayı
+/// hesaplayabilsin diye. Aynı `WHERE` iki kez koşar (sayfa + COUNT); tek sorguda
+/// window fonksiyonuyla birleştirmek satır başına toplam taşımak demekti.
+pub async fn list_viewable_page(
+    pool: &PgPool,
+    orgtnt_id: Uuid,
+    limit: i64,
+    offset: i64,
+    where_sql: &str,
+    binds: &[Option<serde_json::Value>],
+) -> Result<(Vec<WfeRow>, i64), WfeError> {
+    // $1 orgtnt, $2..$N görünürlük filtreleri, sonra limit/offset.
+    let n = binds.len();
+    let rows_sql = format!(
+        "SELECT {WFE_COLUMNS} FROM wf.wfe e WHERE e.orgtnt_id = $1 AND {where_sql}
+         ORDER BY e.created_at DESC LIMIT ${} OFFSET ${}",
+        n + 2,
+        n + 3
+    );
+    let mut q = sqlx::query_as::<_, WfeRow>(&rows_sql).bind(orgtnt_id);
+    for b in binds {
+        q = q.bind(b);
+    }
+    let rows = q
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await
+        .map_err(WfeError::Database)?;
+
+    let count_sql =
+        format!("SELECT count(*) FROM wf.wfe e WHERE e.orgtnt_id = $1 AND {where_sql}");
+    let mut cq = sqlx::query_scalar::<_, i64>(&count_sql).bind(orgtnt_id);
+    for b in binds {
+        cq = cq.bind(b);
+    }
+    let total = cq.fetch_one(pool).await.map_err(WfeError::Database)?;
+    Ok((rows, total))
 }
 
 /// Escalation / root-timeout süpürücüsü için tüm aktif WFE id'leri.

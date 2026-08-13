@@ -190,6 +190,16 @@ async fn list_pool(
               OR e.claimed_by @> $5::jsonb
               OR e.current_c_a @> $6::jsonb
               OR ($7::jsonb IS NOT NULL AND e.current_c_a @> $7::jsonb)
+              -- 2026-08-13: `listable` katlaması `current_c_a`dan KALKTI (kolon
+              -- artık yalnız node adaylarını taşıyor); grant'lar kalıcı
+              -- `view_c_a` kolonunda ve `when` guard'ı UYGULANMIŞ hâlde duruyor.
+              -- Havuzun eski over-inclusive kabulu (guard yok sayiliyordu)
+              -- boylece kalkti: guardi false olan kural artik satir getirmez.
+              OR e.view_c_a @> $2::jsonb
+              OR e.view_c_a @> $3::jsonb
+              OR ($4::jsonb IS NOT NULL AND e.view_c_a @> $4::jsonb)
+              OR e.view_c_a @> $6::jsonb
+              OR ($7::jsonb IS NOT NULL AND e.view_c_a @> $7::jsonb)
            )
          ORDER BY e.created_at ASC",
     )

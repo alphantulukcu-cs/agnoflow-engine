@@ -19,6 +19,7 @@ use crate::v22::matcher::{authorize_or_delegated, authorize_or_delegated_anchore
 use crate::v22::ports::{BranchStatus, Wfes};
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use serde::Deserialize;
+use uuid::Uuid;
 use serde_json::Value;
 
 /// `x-visibility` bloğu — context şemasındaki bir property üzerinde.
@@ -37,15 +38,31 @@ pub struct XVisibility {
     pub c_a: Option<CandidateActor>,
 }
 
+/// `anchor`: ORGTRVLANG çapası — WFE'nin birimi (`origin_orgu_id`), soran kişinin
+/// DEĞİL (2026-08-13, WFE-seviyesi görünürlükle AYNI kural). Çapa viewer olduğunda
+/// `{c_orgu:"self"}` birim karşılaştırmasını kendisiyle yapıp DAİMA geçiyordu:
+/// tasarımcının "bu alanı yalnız kendi birimim görsün" diye yazdığı kural sessizce
+/// "her birim görsün"e dönüşüyordu. `None` = eski davranış (backfill bekleyen satır).
+///
+/// `c_r` kanalı birim kısıtı TAŞIMAZ ve bu değişiklikten etkilenmez — orada
+/// "bu rol, hangi birimde olursa olsun" kastı zaten açıktır.
 pub async fn visible(
     vis: &XVisibility,
     actor: &Actor,
+    anchor: Option<Uuid>,
     env: MatchEnv<'_>,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
     if let Some(c_orgu) = &vis.c_orgu {
-        let resolved =
-            resolve_c_orgu(c_orgu, actor.orgu_id, env.ctx, env.wfah, env.orgtnt_id, org).await?;
+        let resolved = resolve_c_orgu(
+            c_orgu,
+            anchor.unwrap_or(actor.orgu_id),
+            env.ctx,
+            env.wfah,
+            env.orgtnt_id,
+            org,
+        )
+        .await?;
         if resolved.iter().any(|u| u.orgu_id == actor.orgu_id) {
             return Ok(true);
         }
@@ -78,7 +95,7 @@ pub async fn visible(
         }
     }
     if let Some(c_a) = &vis.c_a {
-        if authorize_or_delegated(c_a, actor, env, org).await? {
+        if authorize_or_delegated_anchored(c_a, actor, anchor, env, org).await? {
             return Ok(true);
         }
     }
@@ -92,6 +109,7 @@ pub async fn filter_dynctx(
     context_schema: &Value,
     dynctx: &Value,
     actor: &Actor,
+    anchor: Option<Uuid>,
     env: MatchEnv<'_>,
     org: &dyn OrgPort,
 ) -> Result<Value, EngineError> {
@@ -107,13 +125,14 @@ pub async fn filter_dynctx(
             if let Some(vis_value) = schema.get("x-visibility") {
                 let vis: XVisibility = serde_json::from_value(vis_value.clone())
                     .map_err(|e| EngineError::InvalidWfd(format!("x-visibility parse: {e}")))?;
-                if !visible(&vis, actor, env, org).await? {
+                if !visible(&vis, actor, anchor, env, org).await? {
                     continue;
                 }
             }
             // nested obje şeması varsa recursive filtrele
             if schema.get("properties").is_some() && value.is_object() {
-                let filtered = Box::pin(filter_dynctx(schema, value, actor, env, org)).await?;
+                let filtered =
+                    Box::pin(filter_dynctx(schema, value, actor, anchor, env, org)).await?;
                 out.insert(key.clone(), filtered);
                 continue;
             }
@@ -281,10 +300,10 @@ mod tests {
             ..Default::default()
         };
         let a = actor(Uuid::new_v4(), "branchManager");
-        assert!(visible(&vis, &a, env(), &org).await.unwrap());
+        assert!(visible(&vis, &a, None, env(), &org).await.unwrap());
 
         let b = actor(Uuid::new_v4(), "clerk");
-        assert!(!visible(&vis, &b, env(), &org).await.unwrap());
+        assert!(!visible(&vis, &b, None, env(), &org).await.unwrap());
     }
 
     #[tokio::test]
@@ -307,9 +326,9 @@ mod tests {
             ..Default::default()
         };
         let a = actor(orgu, "auditor");
-        assert!(visible(&vis, &a, env(), &org).await.unwrap());
+        assert!(visible(&vis, &a, None, env(), &org).await.unwrap());
         let b = actor(orgu, "clerk");
-        assert!(!visible(&vis, &b, env(), &org).await.unwrap());
+        assert!(!visible(&vis, &b, None, env(), &org).await.unwrap());
     }
 
     #[tokio::test]
@@ -331,13 +350,13 @@ mod tests {
         let ctx = json!({"amount": 5000, "internal_notes": "gizli"});
 
         let manager = actor(Uuid::new_v4(), "branchManager");
-        let filtered = filter_dynctx(&schema, &ctx, &manager, env(), &org)
+        let filtered = filter_dynctx(&schema, &ctx, &manager, None, env(), &org)
             .await
             .unwrap();
         assert_eq!(filtered["internal_notes"], json!("gizli"));
 
         let clerk = actor(Uuid::new_v4(), "branchClerk");
-        let filtered = filter_dynctx(&schema, &ctx, &clerk, env(), &org)
+        let filtered = filter_dynctx(&schema, &ctx, &clerk, None, env(), &org)
             .await
             .unwrap();
         assert!(
@@ -356,8 +375,105 @@ mod tests {
         let schema = json!({"type": "object", "properties": {"x": {"type": "string"}}});
         let ctx = json!({"x": "açık", "undeclared": 1});
         let a = actor(Uuid::new_v4(), "anyone");
-        let filtered = filter_dynctx(&schema, &ctx, &a, env(), &org).await.unwrap();
+        let filtered = filter_dynctx(&schema, &ctx, &a, None, env(), &org).await.unwrap();
         assert_eq!(filtered["x"], json!("açık"));
         assert_eq!(filtered["undeclared"], json!(1));
+    }
+
+    // ---- 2026-08-13: alan bazlı gizlilikte de çapa WFE'nin birimi ----
+
+    /// Her ifadeyi ÇAPAYA çözen org (gerçek `self` davranışı).
+    struct AnchorOrg;
+
+    #[async_trait]
+    impl OrgPort for AnchorOrg {
+        async fn resolve_c_orgu(
+            &self,
+            anchor: Uuid,
+            _: &str,
+            _: Uuid,
+        ) -> Result<Vec<OrgUnit>, EngineError> {
+            Ok(vec![OrgUnit {
+                orgu_id: anchor,
+                orgu_type: json!({"type": "branch"}),
+                path: "1".into(),
+            }])
+        }
+        async fn check_user_role(&self, _: Uuid, _: Uuid, _: &str) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+        async fn orgtnt_for_orgu(&self, _: Uuid) -> Result<Uuid, EngineError> {
+            Ok(Uuid::nil())
+        }
+    }
+
+    fn secret_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "internal_notes": {
+                    "type": "string",
+                    "x-visibility": {"c_orgu": "self"}
+                }
+            }
+        })
+    }
+
+    /// Çapa WFE'nin birimi: alan YALNIZ o birimdekilere görünür.
+    #[tokio::test]
+    async fn field_visibility_anchors_at_wfe_origin_unit() {
+        let origin = Uuid::new_v4();
+        let ctx = json!({"amount": 5000, "internal_notes": "gizli"});
+
+        // Aynı birim → görür.
+        let inside = actor(origin, "clerk");
+        let f = filter_dynctx(&secret_schema(), &ctx, &inside, Some(origin), env(), &AnchorOrg)
+            .await
+            .unwrap();
+        assert_eq!(f["internal_notes"], json!("gizli"));
+
+        // Başka birim → GÖRMEZ. Eski davranışta (çapa = viewer) `self` daima
+        // geçtiği için bu alan HERKESE görünüyordu; regresyon burada patlar.
+        let outside = actor(Uuid::new_v4(), "clerk");
+        let f = filter_dynctx(&secret_schema(), &ctx, &outside, Some(origin), env(), &AnchorOrg)
+            .await
+            .unwrap();
+        assert!(f.get("internal_notes").is_none(), "başka birime sızdı");
+        assert_eq!(f["amount"], json!(5000), "kısıtsız alan görünmeli");
+    }
+
+    /// Çapa yoksa (backfill bekleyen satır) eski davranış: `self` viewer'a çözülür
+    /// ve alan herkese görünür. Geçiş sırasında hiçbir alan KAYBOLMASIN diye.
+    #[tokio::test]
+    async fn field_visibility_without_anchor_keeps_legacy_behaviour() {
+        let ctx = json!({"amount": 1, "internal_notes": "gizli"});
+        let anyone = actor(Uuid::new_v4(), "clerk");
+        let f = filter_dynctx(&secret_schema(), &ctx, &anyone, None, env(), &AnchorOrg)
+            .await
+            .unwrap();
+        assert_eq!(f["internal_notes"], json!("gizli"));
+    }
+
+    /// `c_r` kanalı birim kısıtı TAŞIMAZ — çapa değişikliği onu ETKİLEMEZ.
+    /// ("bu rol, hangi birimde olursa olsun" kastı zaten açık.)
+    #[tokio::test]
+    async fn role_only_field_visibility_is_unit_agnostic() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "internal_notes": {
+                    "type": "string",
+                    "x-visibility": {"c_r": ["mudur"]}
+                }
+            }
+        });
+        let ctx = json!({"internal_notes": "gizli"});
+        let origin = Uuid::new_v4();
+        let elsewhere_manager = actor(Uuid::new_v4(), "mudur");
+        let f = filter_dynctx(&schema, &ctx, &elsewhere_manager, Some(origin), env(), &AnchorOrg)
+            .await
+            .unwrap();
+        assert_eq!(f["internal_notes"], json!("gizli"));
     }
 }

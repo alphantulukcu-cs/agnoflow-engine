@@ -249,6 +249,8 @@ Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap pro
   kişinin DEĞİL — `matcher::authorize_anchored`. Görünürlük, aksiyon, claim ve reassign
   kapılarının HEPSİ bu çapayı kullanır. `NULL` = backfill bekliyor → eski davranış.
 - `listable`/`wf_admin` guard'ında **`$actor` YASAK** (`grant_when_actor_ref`).
+- Alan bazlı gizlilik (`context.*.x-visibility`) AYNI çapayı kullanır (`filter_dynctx`'in
+  `anchor` parametresi); `c_r` kanalı birim kısıtı taşımadığı için etkilenmez.
 - **Projeksiyonu yazan tek yol**: `WfeExecutor::fill_view_grants` (+ start'ta `create`).
   Yeni bir commit yolu eklendiğinde ORAYA bağlanır; adapter kolonları outcome match'inin
   DIŞINDA, aynı transaction'da yazar.

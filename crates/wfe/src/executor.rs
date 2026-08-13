@@ -1387,7 +1387,10 @@ impl WfeExecutor {
             wfah: &wfes.wfah,
             orgtnt_id: wfes.orgtnt_id,
         };
-        let filtered = filter_dynctx(&wfd.context, ctx, viewer, env, &*self.org).await?;
+        // Alan bazlı gizlilik de WFE-seviyesi görünürlükle AYNI çapayı kullanır
+        // (2026-08-13): `x-visibility: {c_orgu:"self"}` "işin birimi" demektir.
+        let filtered =
+            filter_dynctx(&wfd.context, ctx, viewer, wfes.origin_orgu_id, env, &*self.org).await?;
 
         let now = Utc::now();
         let priority = crate::priority::compute_priority(wfes.created_at, wfes.deadline, now);

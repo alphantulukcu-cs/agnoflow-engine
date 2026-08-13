@@ -13,7 +13,7 @@ use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::CaGrantRule;
 use crate::v22::eval::{evaluate_bool, EvalEnv};
-use crate::v22::matcher::{authorize_or_delegated, MatchEnv};
+use crate::v22::matcher::{authorize_or_delegated_anchored, MatchEnv};
 use crate::v22::ports::Wfes;
 
 /// Kurallardan HERHANGİ biri aktörü yetkilendiriyor mu (OR).
@@ -34,7 +34,14 @@ pub async fn matches_grant_rules(
             wfah: &wfes.wfah,
             orgtnt_id: wfes.orgtnt_id,
         };
-        if !authorize_or_delegated(&rule.c_a, actor, env, org).await? {
+        // ÇAPA: WFE'nin kendi birimi (`origin_orgu_id`). Viewer'ın birimi
+        // DEĞİL — aksi halde `{"c_orgu":"self"}` gibi bir kural birim
+        // karşılaştırmasını kendisiyle yapıp daima geçer ve sessizce "tenant'ta
+        // o roldeki herkes" anlamına gelir. `None` (backfill bekleyen eski
+        // satır) → eski davranış korunur.
+        if !authorize_or_delegated_anchored(&rule.c_a, actor, wfes.origin_orgu_id, env, org)
+            .await?
+        {
             continue;
         }
         let when_ok = match &rule.when {

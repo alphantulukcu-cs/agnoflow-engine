@@ -11,6 +11,12 @@
 //!     listable) CANNOT view — active or terminal
 //! (e) a listable-matching actor can view; the golden fixture's second
 //!     listable entry carries a `when` guard — tested true and false.
+//!
+//! 2026-08-13 kararları (bkz. `docs/spec/decisions.md` "Görünürlük"):
+//! * kriter (b) KALDIRILDI — "işe dokunmuş olmak" yetki üretmez,
+//! * bitmiş işi YALNIZ `listable`/`wf_admin` gösterir,
+//! * ORGTRVLANG çapası WFE'nin birimidir (`origin_orgu_id`), soran kişinin DEĞİL.
+//! Bu üçünün bekçisi dosyanın sonundaki `anchor_*` / `terminal_*` testleridir.
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -127,6 +133,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         branches: vec![],
         join_target: None,
         join_rule: JoinRule::All,
+        origin_orgu_id: None,
     }
 }
 
@@ -149,12 +156,17 @@ async fn owner_can_view_regardless_of_role() {
     assert!(can_view(&golden(), &wfes, &owner, &org).await.unwrap());
 }
 
-// ============================================================ (b) participant
+// ================================================ (b) katılımcı — KALDIRILDI
 
-/// Terminal commit `assigned_to` ve `current_node`'u temizler; WFAH'ta eylemi
-/// olan kullanıcı yine de sonucu (dynctx/end_response) görebilmeli.
+/// 2026-08-13 ürün kararı: "bu işe dokunmuş olmak" görünürlük ÜRETMEZ.
+///
+/// Eskiden bu senaryo `true` dönerdi (kriter (b)). Artık iş bittiğinde geriye
+/// yalnız kalıcı grant'lar (`listable`/`wf_admin`) kalır; golden fixture'ın
+/// `listable`'ı bu aktörü kapsamadığı için katılımcı da göremez. Takip
+/// edilmesi istenen akış `listable[]` ile AÇIKÇA işaretlenir — yetki belgeden
+/// okunur, geçmişten türetilmez. Ölçüm: `visibility_report` (57 çift).
 #[tokio::test]
-async fn wfah_participant_can_view_terminal_wfe() {
+async fn wfah_participant_cannot_view_terminal_wfe() {
     let org = MockOrg {
         role_assigned: false,
     };
@@ -170,7 +182,7 @@ async fn wfah_participant_can_view_terminal_wfe() {
     wfes.status = WfeStatus::Terminal;
     wfes.current_node = None;
 
-    assert!(can_view(&golden(), &wfes, &participant, &org)
+    assert!(!can_view(&golden(), &wfes, &participant, &org)
         .await
         .unwrap());
 }
@@ -462,4 +474,142 @@ async fn wf_admin_when_guard_gates_visibility() {
         can_view(&gated, &big, &admin, &org).await.unwrap(),
         "when true iken görünmeli"
     );
+}
+
+// ============================================ 2026-08-13: çapa + terminal kuralı
+//
+// MockOrg her ifadeyi ANCHOR'a çözer (`resolve_c_orgu` → `[anchor]`), yani
+// golden fixture'ın `listable[0]` kuralı (`{c_orgu:"self", c_r:["branchManager"]}`)
+// "çapa biriminin branchManager'ı" demektir. Çapa `origin_orgu_id`den geldiği
+// için bu, "işin ait olduğu şubenin müdürü" olur.
+
+/// Çapa WFE'nin birimi: İŞİN şubesindeki müdür bitmiş işi görür.
+#[tokio::test]
+async fn listable_grant_anchors_at_wfe_origin_unit() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let origin = Uuid::new_v4();
+
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(origin);
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+
+    // Aynı birimin müdürü → görür (listable[0]).
+    assert!(can_view(&golden(), &wfes, &manager(origin), &org)
+        .await
+        .unwrap());
+}
+
+/// Aynı kural, BAŞKA birimin müdürü: görmez.
+///
+/// Bu testin varlık sebebi tam olarak eski bug'dır: çapa SORAN KİŞİ olduğunda
+/// `self` birim karşılaştırmasını kendisiyle yapıp daima geçiyordu, yani kural
+/// sessizce "tenant'taki her branchManager" anlamına geliyordu. Çapa WFE'ye
+/// bağlandığı için artık yalnız işin şubesi geçer — regresyon burada patlar.
+#[tokio::test]
+async fn listable_grant_does_not_leak_to_other_units() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let origin = Uuid::new_v4();
+    let elsewhere = Uuid::new_v4();
+
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(origin);
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+
+    assert!(!can_view(&golden(), &wfes, &manager(elsewhere), &org)
+        .await
+        .unwrap());
+}
+
+/// `origin_orgu_id` NULL (backfill bekleyen eski satır) → çapa aktöre düşer,
+/// yani ESKİ davranış korunur. Geçiş sırasında hiçbir akış görünürlük
+/// kaybetmesin diye bilinçli olarak böyle.
+#[tokio::test]
+async fn missing_origin_falls_back_to_actor_anchor() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = None;
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+
+    // Çapa yok → aktörün kendi birimi çapa olur → her birimin müdürü geçer.
+    assert!(can_view(&golden(), &wfes, &manager(Uuid::new_v4()), &org)
+        .await
+        .unwrap());
+}
+
+/// Bitmiş işte node c_a'sı yetki ÜRETMEZ — aktif node zaten yok, ama kural
+/// açıkça sınanır: aynı aktör AKTİF WFE'de görür, TERMINAL'de görmez.
+#[tokio::test]
+async fn node_c_a_grants_view_only_while_active() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let origin = Uuid::new_v4();
+    let viewer = analyst(origin);
+
+    let mut active = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    active.origin_orgu_id = Some(origin);
+    assert!(can_view(&golden(), &active, &viewer, &org).await.unwrap());
+
+    // Terminal: current_node temizlenir, geriye yalnız kalıcı grant'lar kalır.
+    // Bu aktör branchManager DEĞİL → listable[0] onu kapsamaz.
+    let mut done = active.clone();
+    done.status = WfeStatus::Terminal;
+    done.current_node = None;
+    assert!(!can_view(&golden(), &done, &viewer, &org).await.unwrap());
+}
+
+/// Sahiplik de yalnız AKTİF işte yetki üretir: bitmiş işte `claimed_by` artık
+/// "iş kimin havuzundaydı" sorusunun cevabıdır, görünürlük kuralı değil.
+#[tokio::test]
+async fn ownership_grants_view_only_while_active() {
+    let org = MockOrg {
+        role_assigned: false,
+    };
+    let owner_id = Uuid::new_v4();
+    let owner = Actor {
+        orgu_id: Uuid::new_v4(),
+        user_id: owner_id,
+        role: "branchClerk".into(),
+    };
+    let mut wfes = wfes_at("self__creditAnalyst", Some(owner_id), start_input(30_000));
+    wfes.origin_orgu_id = Some(Uuid::new_v4());
+    assert!(can_view(&golden(), &wfes, &owner, &org).await.unwrap());
+
+    wfes.status = WfeStatus::Terminal;
+    wfes.current_node = None;
+    assert!(!can_view(&golden(), &wfes, &owner, &org).await.unwrap());
+}
+
+/// `listable[1]`in `when` guard'ı (`amount_requested >= 100000`) çapadan
+/// BAĞIMSIZ olarak işler: guard false ise çapa doğru olsa da grant yok.
+#[tokio::test]
+async fn listable_when_guard_still_gates_after_anchor_change() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let origin = Uuid::new_v4();
+    let dept = credit_dept_manager(origin);
+
+    // 30k < 100k → guard false → görmez.
+    let mut low = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    low.origin_orgu_id = Some(origin);
+    low.status = WfeStatus::Terminal;
+    low.current_node = None;
+    assert!(!can_view(&golden(), &low, &dept, &org).await.unwrap());
+
+    // 150k ≥ 100k → guard true → görür (çapa `parent`, MockOrg anchor'a çözer).
+    let mut high = wfes_at("self__creditAnalyst", None, start_input(150_000));
+    high.origin_orgu_id = Some(origin);
+    high.status = WfeStatus::Terminal;
+    high.current_node = None;
+    assert!(can_view(&golden(), &high, &dept, &org).await.unwrap());
 }

@@ -107,6 +107,7 @@ fn wfes_owned(node: &str, ctx: Value, owner: Option<Uuid>) -> Wfes {
         branches: vec![],
         join_target: None,
         join_rule: JoinRule::All,
+        origin_orgu_id: None,
     }
 }
 

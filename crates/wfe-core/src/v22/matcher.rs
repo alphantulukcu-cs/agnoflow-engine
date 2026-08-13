@@ -34,12 +34,36 @@ pub async fn authorize(
     env: MatchEnv<'_>,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
+    authorize_anchored(rule, actor, None, env, org).await
+}
+
+/// `authorize`ın çapa (ORGTRVLANG `self`/`parent`/… başlangıcı) ÜSTÜNDEN
+/// belirlenebilen hâli (2026-08-13).
+///
+/// `anchor = None` → aktörün kendi birimi (node `c_a`'sının davranışı: kural
+/// "geçişi yapanın konumuna göre" çözülür).
+///
+/// `anchor = Some(u)` → verilen birim. `listable`/`wf_admin` grant'ları bunu
+/// WFE'nin kendi birimiyle (`origin_orgu_id`) kullanır. Aksi halde `self` gibi
+/// bir selector, çapası SORAN KİŞİ olduğu için birim karşılaştırmasını
+/// kendisiyle yapar ve daima true döner — yani kural sessizce "tenant'taki o
+/// roldeki herkes"e dönüşür. Aynı sebeple viewer'a bağlı bir grant
+/// PROJEKSİYONA da yazılamaz (`Engine::view_grants`); iki okumanın aynı cevabı
+/// vermesi bu parametreye bağlıdır.
+pub async fn authorize_anchored(
+    rule: &CandidateActor,
+    actor: &Actor,
+    anchor: Option<Uuid>,
+    env: MatchEnv<'_>,
+    org: &dyn OrgPort,
+) -> Result<bool, EngineError> {
+    let anchor = anchor.unwrap_or(actor.orgu_id);
     // 1. ORGU kanalı: actor.orgu resolve edilen kümede olmalı.
     //    `c_orgu` HİÇ verilmemişse (çapasız biçim) bu kanal kısıtsızdır — kural yalnız
     //    kişi kanalıyla yaşar (aşağıda 3), kapı "şu kişi, hangi birimde olursa olsun".
     if let Some(c_orgu) = &rule.c_orgu {
         let resolved =
-            resolve_c_orgu(c_orgu, actor.orgu_id, env.ctx, env.wfah, env.orgtnt_id, org).await?;
+            resolve_c_orgu(c_orgu, anchor, env.ctx, env.wfah, env.orgtnt_id, org).await?;
         if !resolved.iter().any(|u| u.orgu_id == actor.orgu_id) {
             return Ok(false);
         }
@@ -124,7 +148,22 @@ pub async fn authorize_with_delegation(
     org: &dyn OrgPort,
     now: DateTime<Utc>,
 ) -> Result<AuthDecision, EngineError> {
-    if authorize(rule, actor, env, org).await? {
+    authorize_with_delegation_anchored(rule, actor, None, env, org, now).await
+}
+
+/// `authorize_with_delegation`ın çapa üstünden belirlenebilen hâli — bkz.
+/// `authorize_anchored`. Vekâlet kanalında `grantee` kuralı DAİMA aktörün kendi
+/// birimine çapalanır (o kural "vekili kim" sorusudur, WFE'nin birimiyle ilgisi
+/// yoktur); çapa yalnız ASIL kurala uygulanır.
+pub async fn authorize_with_delegation_anchored(
+    rule: &CandidateActor,
+    actor: &Actor,
+    anchor: Option<Uuid>,
+    env: MatchEnv<'_>,
+    org: &dyn OrgPort,
+    now: DateTime<Utc>,
+) -> Result<AuthDecision, EngineError> {
+    if authorize_anchored(rule, actor, anchor, env, org).await? {
         return Ok(AuthDecision::Direct);
     }
     let grants = org
@@ -141,7 +180,7 @@ pub async fn authorize_with_delegation(
             user_id: g.delegator_user_id,
             role: g.seat_role.clone(),
         };
-        if authorize(rule, &synthetic, env, org).await? {
+        if authorize_anchored(rule, &synthetic, anchor, env, org).await? {
             return Ok(AuthDecision::Delegated {
                 delegation_id: g.delegation_id,
                 delegator_user_id: g.delegator_user_id,
@@ -161,9 +200,23 @@ pub async fn authorize_or_delegated(
     env: MatchEnv<'_>,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
-    Ok(authorize_with_delegation(rule, actor, env, org, Utc::now())
-        .await?
-        .is_authorized())
+    authorize_or_delegated_anchored(rule, actor, None, env, org).await
+}
+
+/// `authorize_or_delegated`ın çapalı hâli — `listable`/`wf_admin` grant'ları
+/// (bkz. `authorize_anchored`).
+pub async fn authorize_or_delegated_anchored(
+    rule: &CandidateActor,
+    actor: &Actor,
+    anchor: Option<Uuid>,
+    env: MatchEnv<'_>,
+    org: &dyn OrgPort,
+) -> Result<bool, EngineError> {
+    Ok(
+        authorize_with_delegation_anchored(rule, actor, anchor, env, org, Utc::now())
+            .await?
+            .is_authorized(),
+    )
 }
 
 #[cfg(test)]
@@ -641,5 +694,106 @@ mod tests {
         )
         .await
         .unwrap());
+    }
+
+    // ---- 2026-08-13: çapa (anchor) üstünden belirlenen yetki ----
+
+    /// Her ifadeyi ÇAPAYA çözen org: `self` → `[anchor]`. Gerçek ORGTRVLANG'ın
+    /// `self` davranışının aynısı, dolayısıyla çapanın hangi birim olduğunu
+    /// doğrudan sınayabiliyoruz.
+    struct AnchorOrg;
+
+    #[async_trait]
+    impl OrgPort for AnchorOrg {
+        async fn resolve_c_orgu(
+            &self,
+            anchor: Uuid,
+            _: &str,
+            _: Uuid,
+        ) -> Result<Vec<OrgUnit>, EngineError> {
+            Ok(vec![OrgUnit {
+                orgu_id: anchor,
+                orgu_type: json!({"type": "branch"}),
+                path: "1".into(),
+            }])
+        }
+        async fn check_user_role(&self, _: Uuid, _: Uuid, _: &str) -> Result<bool, EngineError> {
+            Ok(true)
+        }
+        async fn orgtnt_for_orgu(&self, _: Uuid) -> Result<Uuid, EngineError> {
+            Ok(Uuid::nil())
+        }
+    }
+
+    /// Çapa verilince `self` YALNIZ o birimi kapsar: başka birimdeki aynı rol
+    /// eşleşmez.
+    ///
+    /// Bu, görünürlük projeksiyonunun (`view_c_a`) dayandığı garantidir —
+    /// `listable`/`wf_admin` grant'ları WFE'nin birimine çapalanır.
+    #[tokio::test]
+    async fn anchored_self_matches_only_the_anchor_unit() {
+        let origin = Uuid::new_v4();
+        let elsewhere = Uuid::new_v4();
+        let ctx = json!({});
+
+        let in_origin = actor(origin, "clerk");
+        assert!(authorize_anchored(
+            &rule(Some(vec!["clerk"]), None),
+            &in_origin,
+            Some(origin),
+            env(&ctx, &EMPTY_WFAH),
+            &AnchorOrg
+        )
+        .await
+        .unwrap());
+
+        let outsider = actor(elsewhere, "clerk");
+        assert!(!authorize_anchored(
+            &rule(Some(vec!["clerk"]), None),
+            &outsider,
+            Some(origin),
+            env(&ctx, &EMPTY_WFAH),
+            &AnchorOrg
+        )
+        .await
+        .unwrap());
+    }
+
+    /// ÇAPASIZ çağrı (node c_a'sının eski davranışı) `self`i aktörün kendi
+    /// birimine çözer → karşılaştırma kendisiyle yapılır ve HERKES geçer.
+    ///
+    /// Test bu dejenerasyonu BELGELEMEK için var: `{c_orgu:"self"}` çapasız
+    /// sorulduğunda "tenant'ta o roldeki herkes" demektir. Grant ve node
+    /// kapılarının çapa vermesi bu yüzden zorunludur (bkz. `docs/spec/decisions.md`).
+    #[tokio::test]
+    async fn unanchored_self_matches_every_unit() {
+        let ctx = json!({});
+        for _ in 0..3 {
+            let a = actor(Uuid::new_v4(), "clerk");
+            assert!(authorize_anchored(
+                &rule(Some(vec!["clerk"]), None),
+                &a,
+                None,
+                env(&ctx, &EMPTY_WFAH),
+                &AnchorOrg
+            )
+            .await
+            .unwrap());
+        }
+    }
+
+    /// `authorize` = `authorize_anchored(None)` — kısayolun sözleşmesi.
+    #[tokio::test]
+    async fn authorize_is_anchorless_alias() {
+        let ctx = json!({});
+        let a = actor(Uuid::new_v4(), "clerk");
+        let r = rule(Some(vec!["clerk"]), None);
+        let direct = authorize(&r, &a, env(&ctx, &EMPTY_WFAH), &AnchorOrg)
+            .await
+            .unwrap();
+        let anchorless = authorize_anchored(&r, &a, None, env(&ctx, &EMPTY_WFAH), &AnchorOrg)
+            .await
+            .unwrap();
+        assert_eq!(direct, anchorless);
     }
 }

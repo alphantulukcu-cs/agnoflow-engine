@@ -87,6 +87,13 @@ pub struct Wfes {
     /// içindeyiz" bilgisi yalnızca WFE satırında durur (aynı join hedefine giden iki
     /// fork mümkündür), dolayısıyla kural da kol durumlarıyla aynı yerde yaşar.
     pub join_rule: JoinRule,
+    /// `listable`/`wf_admin` ORGTRVLANG çapası — start'ta yazılan `origin_orgu_id`.
+    ///
+    /// `None` = bu satır görünürlük projeksiyonundan ÖNCE yaratılmış (backfill
+    /// bekliyor). O hâlde çapa eski davranışa düşer: soruyu soran/işlemi yapan
+    /// aktörün birimi. Böylece backfill tamamlanana kadar hiçbir akışın
+    /// görünürlüğü DEĞİŞMEZ.
+    pub origin_orgu_id: Option<Uuid>,
 }
 
 impl BranchState {
@@ -260,6 +267,15 @@ pub struct TransitionCommit {
     pub resolved_c_a: Vec<ResolvedCandidate>,
     /// WFC outbox — bu commit ile aynı tx'te `queued` olarak yazılır.
     pub staged_calls: Vec<StagedCall>,
+    /// Görünürlük projeksiyonu (2026-08-13): `listable ∪ wf_admin` kurallarının
+    /// çözülmüş hâli → `wf.wfe.view_c_a`. `resolved_c_a`dan farkı: terminal'de de
+    /// yazılır (silinmez) ve `when` guard'ı uygulanmıştır. Saf pipeline bunu
+    /// DOLDURMAZ — org portuna ve WFE'nin çapasına ihtiyaç duyduğu için
+    /// `WfeExecutor::fill_view_grants` doldurur (store'suz sim/testlerde boş kalır).
+    pub view_c_a: Vec<ResolvedCandidate>,
+    /// Kol başına çözülmüş aday listesi (`wf.wfe_branch.c_a`) — fork'ta tüm
+    /// kollar, kol hareketinde yalnız hareket eden kol. Aynı doldurucu yazar.
+    pub branch_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
 }
 
 /// Yeni WFE oluşturma isteği — wfe_id ENGINE tarafından üretilir ve effects
@@ -283,6 +299,15 @@ pub struct NewWfe {
     pub staged_calls: Vec<StagedCall>,
     /// Bu WFE bir WFC ile yaratıldıysa çağıran bağlantısı; kök WFE'de `None`.
     pub caller: Option<CallLink>,
+    /// Görünürlük projeksiyonu — bkz. `TransitionCommit::view_c_a`.
+    pub view_c_a: Vec<ResolvedCandidate>,
+    /// Kol başına aday listesi — start doğrudan fork'a inebilir (start kuralının
+    /// wft'si parallel hedef alabilir), o hâlde kol satırları burada doğar.
+    pub branch_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
+    /// `listable`/`wf_admin` ORGTRVLANG çapası: akışı BAŞLATAN aktörün birimi.
+    /// WFE ömrü boyunca sabittir ve `view_c_a` her yeniden hesaplandığında aynı
+    /// çapa kullanılır — yoksa akışa dokunan her kişi görünürlüğü kaydırırdı.
+    pub origin_orgu_id: Uuid,
 }
 
 /// Çağıran ↔ çağrılan bağı. `depth`/`next_depth` çağıranın satırından +1 taşınır —
@@ -364,6 +389,30 @@ pub trait WfdStore: Send + Sync {
         let (_, _, _) = (orgtnt_id, doc_id, doc_version);
         Ok(None)
     }
+}
+
+/// Görünürlük PROJEKSİYONUNU sorgulayan port (2026-08-13).
+///
+/// "Bu aktör bu WFE'yi görebilir mi?" sorusunun cevabı iki yerden okunabilir:
+/// belgeden CANLI hesaplayarak (`visibility::can_view` — saf, I/O'suz, sim ve
+/// testlerin yolu) ya da commit anında yazılmış DENORMALIZE projeksiyondan
+/// (`wf.wfe.view_c_a` + `current_c_a`, tek jsonb containment sorgusu).
+///
+/// Üretimde İKİNCİSİ kullanılır ve liste ucu da AYNI SQL parçasını koşar —
+/// böylece "listede gördüğüm satırı açamıyorum" sınıfı ayrışmalar yapısal
+/// olarak imkânsızdır. Port takılmadıysa (`WfeExecutor` bunu `Option` tutar)
+/// çekirdeğin canlı hesabına düşülür; iki yol aynı kuralı ifade eder ve
+/// kontrat testiyle bağlıdır.
+///
+/// `filters` opak bırakıldı (`Option<Value>` dizisi): çekirdek containment
+/// filtrelerinin ŞEKLİNİ bilmek zorunda değil, yalnız taşımakla yükümlü.
+#[async_trait]
+pub trait VisibilityPort: Send + Sync {
+    async fn can_view_projection(
+        &self,
+        wfe_id: Uuid,
+        filters: &[Option<Value>],
+    ) -> Result<bool, EngineError>;
 }
 
 #[async_trait]

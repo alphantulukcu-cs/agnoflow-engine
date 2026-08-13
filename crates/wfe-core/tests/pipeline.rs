@@ -201,6 +201,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         branches: vec![],
         join_target: None,
         join_rule: JoinRule::All,
+        origin_orgu_id: None,
     }
 }
 
@@ -2405,6 +2406,7 @@ fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfe
         join_target: Some(join),
         // WOR-72: bu yardımcı AND-join kurar; quorum/expr testleri kendi kuralını verir.
         join_rule: JoinRule::All,
+        origin_orgu_id: None,
     }
 }
 

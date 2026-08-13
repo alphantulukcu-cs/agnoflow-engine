@@ -115,6 +115,28 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
 /// Yürüyüş ANAHTAR bazlıdır (`c_a` / `reassign`) — `x-visibility` objeleri de
 /// `c_orgu`/`c_r`/`c_u` taşır ama SEMANTİĞİ farklıdır (kriterler arası OR, scope'suz
 /// rol/kişi meşru), o yüzden bu kuralın dışında kalmaları gerekir.
+/// `listable[]`/`wf_admin[]` guard'ında `$actor` YASAK (2026-08-13).
+///
+/// Bu guard'lar görünürlük projeksiyonuna (`wf.wfe.view_c_a`) commit anında,
+/// yani soruyu soracak kişi HENÜZ BİLİNMEZKEN yazılır. `$actor` referansı
+/// guard'ı viewer'a bağlar: aynı WFE iki kişiye iki farklı cevap verirdi ve
+/// tek bir kolona yazılamazdı. Aynı ihtiyaç `c_a`'nın kendisiyle karşılanır
+/// (kural zaten "kim" sorusunun cevabıdır).
+///
+/// Node aksiyonlarının `when`'i bu kısıttan ETKİLENMEZ — orada `$actor`
+/// geçişi yapan kişidir ve karar anında bilinir.
+fn grant_when_actor_ref(when: &str, path: String, report: &mut ValidationReport) {
+    if when.contains("$actor") {
+        report.error(
+            "grant_when_actor_ref",
+            path,
+            "listable/wf_admin guard'ında $actor kullanılamaz: bu kurallar görünürlük \
+             projeksiyonuna viewer bilinmezken yazılır. Kişi/rol kısıtını c_a ile ifade edin."
+                .into(),
+        );
+    }
+}
+
 fn check_c_a_shape(wfd: &Wfd, report: &mut ValidationReport) {
     let Ok(doc) = serde_json::to_value(wfd) else {
         return;
@@ -2250,6 +2272,7 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     for (i, l) in wfd.listable.iter().enumerate() {
         if let Some(when) = &l.when {
             check(when, format!("listable[{i}].when"), report);
+            grant_when_actor_ref(when, format!("listable[{i}].when"), report);
         }
     }
     // T‑A5: `wf_admin[]` kuralları `listable` ile aynı şekli taşır (`CaGrantRule`) ve
@@ -2258,6 +2281,7 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     for (i, a) in wfd.wf_admin.iter().enumerate() {
         if let Some(when) = &a.when {
             check(when, format!("wf_admin[{i}].when"), report);
+            grant_when_actor_ref(when, format!("wf_admin[{i}].when"), report);
         }
     }
     // WOR-84: `calc` autoexec ifadeleri. `config` şemasız `Value` olduğu için upload

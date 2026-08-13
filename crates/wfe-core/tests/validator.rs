@@ -2818,3 +2818,66 @@ fn empty_wf_admin_rule_is_rejected() {
         report.errors
     );
 }
+
+// ================================ görünürlük grant guard'ları (2026-08-13)
+
+/// `listable[].when` içinde `$actor` YASAK.
+///
+/// Gerekçe: bu guard'lar görünürlük projeksiyonuna (`wf.wfe.view_c_a`) commit
+/// anında, soruyu soracak kişi HENÜZ BİLİNMEZKEN yazılır. `$actor` guard'ı
+/// viewer'a bağlar → aynı WFE iki kişiye iki farklı cevap verir ve tek bir
+/// kolona yazılamaz. Kapı yayında keser, yoksa hata üretim zamanında ve sessizce
+/// (grant hiç yazılmayarak) ortaya çıkardı.
+#[test]
+fn listable_when_rejects_actor_reference() {
+    let mut v = fixture_value();
+    v["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+          "when": "$actor.role == \"branchManager\"" }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "grant_when_actor_ref"),
+        "grant_when_actor_ref beklenmişti, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Aynı kısıt `wf_admin[].when` için de geçerli — iki kural aynı şekli
+/// (`CaGrantRule`) taşır ve aynı projeksiyona yazılır.
+#[test]
+fn wf_admin_when_rejects_actor_reference() {
+    let mut v = fixture_value();
+    v["wf_admin"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+          "when": "$actor.orgu_id != null" }
+    ]);
+    let report = validate_value(v);
+    assert!(has_error(&report, "grant_when_actor_ref"));
+}
+
+/// `$actor` İÇERMEYEN guard serbest: kısıt yalnız viewer bağımlılığınadır,
+/// guard'ın kendisine değil. (Aksi halde `when` özelliği işlevsiz kalırdı.)
+#[test]
+fn listable_when_allows_ctx_reference() {
+    let mut v = fixture_value();
+    v["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+          "when": "$ctx.credit_info.amount_requested >= 100000" }
+    ]);
+    let report = validate_value(v);
+    assert!(!has_error(&report, "grant_when_actor_ref"));
+}
+
+/// Node AKSİYONLARININ `when`i bu kısıttan ETKİLENMEZ: orada `$actor` geçişi
+/// yapan kişidir ve karar anında bilinir. Kapının kapsamını sabitler.
+#[test]
+fn transition_when_still_allows_actor_reference() {
+    let mut v = fixture_value();
+    let t = v["transitions"][0].clone();
+    let mut t2 = t.clone();
+    t2["when"] = json!("$actor.role == \"branchClerk\"");
+    v["transitions"][0] = t2;
+    let report = validate_value(v);
+    assert!(!has_error(&report, "grant_when_actor_ref"));
+}

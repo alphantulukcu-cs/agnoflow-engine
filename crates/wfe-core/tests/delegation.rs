@@ -125,6 +125,7 @@ fn wfes_at(node: &str) -> Wfes {
         branches: vec![],
         join_target: None,
         join_rule: JoinRule::All,
+        origin_orgu_id: None,
     }
 }
 

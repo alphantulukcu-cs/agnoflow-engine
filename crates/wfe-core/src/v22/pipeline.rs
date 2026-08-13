@@ -30,7 +30,9 @@ use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
 use crate::v22::env::RunEnv;
 use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv, JoinEnv};
 use crate::v22::grants::matches_grant_rules;
-use crate::v22::matcher::{authorize, authorize_with_delegation, AuthDecision, MatchEnv};
+use crate::v22::matcher::{
+    authorize, authorize_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
+};
 use crate::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallSite, CommitOutcome, ExecEnv, ExecFailure,
     NewWfe, StagedCall, TransitionCommit, Wfes,
@@ -311,7 +313,8 @@ impl<'a> Engine<'a> {
                 wfd,
                 &final_ctx,
                 &wfah,
-                actor,
+                // Start: WFE henüz yok → çapa başlatanın birimi (= origin_orgu_id).
+                actor.orgu_id,
                 orgtnt_id,
             )
             .await?;
@@ -337,6 +340,14 @@ impl<'a> Engine<'a> {
             resolved_c_a,
             deadline: resolved_deadline,
             staged_calls,
+            // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+            // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+            view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
+            // Görünürlük çapası: akışı BAŞLATAN aktörün birimi. Start'ın kendisi
+            // zaten bu aktörle çözüm yapıyor; WFE ömrü boyunca sabit kalacak olan
+            // değer burada donar.
+            origin_orgu_id: actor.orgu_id,
             // Çağıran bağı store/executor katmanında doldurulur: `Engine::start` saf bir
             // hesaptır ve `wf.wfe_call` satırının id'sini bilmez.
             caller: None,
@@ -434,7 +445,13 @@ impl<'a> Engine<'a> {
                 wfah: &wfes.wfah,
                 orgtnt_id: wfes.orgtnt_id,
             };
-            if !authorize(extra_rule, actor, env, self.org).await? {
+            // Çapa WFE'nin kendi birimi (2026-08-13): `self` gibi bir selector
+            // aksiyon kapısında da "işin ait olduğu birim" demektir. Eskiden
+            // çapa SORAN KİŞİYDİ, yani `self` karşılaştırmayı kendisiyle yapıp
+            // daima geçiyordu — başka şubedeki aynı roldeki kişi işi havuzunda
+            // GÖRMEZ ama id'yi bilse aksiyon ALABİLİYORDU. Görünürlük ile yetki
+            // artık aynı çapayı kullanır.
+            if !authorize_anchored(extra_rule, actor, wfes.origin_orgu_id, env, self.org).await? {
                 return Err(EngineError::PermissionDenied(action.to_string()));
             }
         }
@@ -518,7 +535,8 @@ impl<'a> Engine<'a> {
                 wfd,
                 &final_ctx,
                 &wfah,
-                actor,
+                // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
+                wfes.origin_orgu_id.unwrap_or(actor.orgu_id),
                 wfes.orgtnt_id,
             )
             .await?;
@@ -549,6 +567,10 @@ impl<'a> Engine<'a> {
             outcome,
             resolved_c_a,
             staged_calls,
+            // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+            // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+            view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
         })
     }
 
@@ -643,7 +665,13 @@ impl<'a> Engine<'a> {
                 wfah: &wfes.wfah,
                 orgtnt_id: wfes.orgtnt_id,
             };
-            if !authorize(extra_rule, actor, env, self.org).await? {
+            // Çapa WFE'nin kendi birimi (2026-08-13): `self` gibi bir selector
+            // aksiyon kapısında da "işin ait olduğu birim" demektir. Eskiden
+            // çapa SORAN KİŞİYDİ, yani `self` karşılaştırmayı kendisiyle yapıp
+            // daima geçiyordu — başka şubedeki aynı roldeki kişi işi havuzunda
+            // GÖRMEZ ama id'yi bilse aksiyon ALABİLİYORDU. Görünürlük ile yetki
+            // artık aynı çapayı kullanır.
+            if !authorize_anchored(extra_rule, actor, wfes.origin_orgu_id, env, self.org).await? {
                 return Err(EngineError::PermissionDenied(action.to_string()));
             }
         }
@@ -737,7 +765,8 @@ impl<'a> Engine<'a> {
                 wfd,
                 &final_ctx,
                 &wfah,
-                actor,
+                // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
+                wfes.origin_orgu_id.unwrap_or(actor.orgu_id),
                 wfes.orgtnt_id,
             )
             .await?;
@@ -768,6 +797,10 @@ impl<'a> Engine<'a> {
             outcome,
             resolved_c_a,
             staged_calls,
+            // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+            // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+            view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
         })
     }
 
@@ -834,9 +867,16 @@ impl<'a> Engine<'a> {
             orgtnt_id: wfes.orgtnt_id,
         };
         // Madde 6: doğrudan VEYA vekaleten uygun (vekil işi görür + claim'ler).
-        if authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now())
-            .await?
-            .is_authorized()
+        if authorize_with_delegation_anchored(
+            &node.c_a,
+            actor,
+            wfes.origin_orgu_id,
+            env,
+            self.org,
+            Utc::now(),
+        )
+        .await?
+        .is_authorized()
         {
             Ok(ClaimCheck::Ok)
         } else {
@@ -877,7 +917,15 @@ impl<'a> Engine<'a> {
             wfah: &wfes.wfah,
             orgtnt_id: wfes.orgtnt_id,
         };
-        authorize_with_delegation(&node.c_a, actor, env, self.org, Utc::now()).await
+        authorize_with_delegation_anchored(
+            &node.c_a,
+            actor,
+            wfes.origin_orgu_id,
+            env,
+            self.org,
+            Utc::now(),
+        )
+        .await
     }
 
     /// Query-time: bir node'un c_a'sını çözülmüş aday listesine (orgu × rol / orgu ×
@@ -899,8 +947,56 @@ impl<'a> Engine<'a> {
             .nodes
             .get(node_key)
             .ok_or_else(|| EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'")))?;
-        self.resolve_candidates(&node.c_a, ctx, wfah, viewer, orgtnt_id)
+        self.resolve_candidates(&node.c_a, ctx, wfah, viewer.orgu_id, orgtnt_id)
             .await
+    }
+
+    /// Görünürlük projeksiyonu (2026-08-13): `wfd.listable[] ∪ wfd.wf_admin[]`
+    /// kurallarının ÇÖZÜLMÜŞ aday listesi — `wf.wfe.view_c_a` kolonuna yazılır.
+    ///
+    /// Neden ayrı bir kolon: bu grant'lar WFE bittiğinde de geçerlidir
+    /// (`current_c_a` terminal'de boşaltılır), ve `when` guard'ı UYGULANMIŞ
+    /// olarak yazılır — havuzun bugünkü "when'i yok say, over-inclusive kabul"
+    /// yaklaşıklığı böylece kalkar.
+    ///
+    /// İKİ VIEWER BAĞIMSIZLIK ŞARTI (grant'lar viewer bilinmezken yazılır):
+    ///   1. `c_orgu` çapası `origin_orgu` — WFE'nin kendi birimi, viewer'ın
+    ///      birimi DEĞİL. Eskiden viewer'a çapalanıyordu ve `{c_orgu:"self"}`
+    ///      birim karşılaştırmasını kendisiyle yapıp her zaman true dönüyordu
+    ///      (yani sessizce "tenant genelinde o rol" anlamına geliyordu).
+    ///   2. `when` guard'ı AKTÖRSÜZ değerlendirilir; `$actor` referansı bu
+    ///      guard'larda YASAKTIR (validator `grant_when_actor_ref` ile yayında
+    ///      keser) — aksi halde guard viewer'a bağlı olur ve projeksiyona sığmaz.
+    pub async fn view_grants(
+        &self,
+        wfd: &Wfd,
+        ctx: &Value,
+        wfah: &Wfah,
+        current_node: Option<&str>,
+        wfe_id: Uuid,
+        origin_orgu: Uuid,
+        orgtnt_id: Uuid,
+    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
+        let mut out: Vec<ResolvedCandidate> = Vec::new();
+        for rule in wfd.listable.iter().chain(wfd.wf_admin.iter()) {
+            if let Some(expr) = &rule.when {
+                let env = EvalEnv::new(ctx)
+                    .with_wfah(wfah)
+                    .with_node(current_node)
+                    .with_wfe_id(wfe_id);
+                if !evaluate_bool(expr, &env)? {
+                    continue;
+                }
+            }
+            let mut extra = self
+                .resolve_candidates(&rule.c_a, ctx, wfah, origin_orgu, orgtnt_id)
+                .await?;
+            // Aynı aday iki kuraldan da gelebilir (listable + wf_admin); kolon
+            // containment ile sorgulandığı için tekrar zararsız ama gereksiz.
+            extra.retain(|c| !out.contains(c));
+            out.append(&mut extra);
+        }
+        Ok(out)
     }
 
     // -------------------------------------------------------------- reassign
@@ -964,7 +1060,9 @@ impl<'a> Engine<'a> {
             orgtnt_id: wfes.orgtnt_id,
         };
         let by_node_rule = match node.reassign.as_ref() {
-            Some(rule) => authorize(rule, reassigner, env, self.org).await?,
+            Some(rule) => {
+                authorize_anchored(rule, reassigner, wfes.origin_orgu_id, env, self.org).await?
+            }
             None => false,
         };
         let by_wf_admin = if by_node_rule {
@@ -978,7 +1076,7 @@ impl<'a> Engine<'a> {
 
         // 3. Hedef (varsa) node.c_a'ya uygun olmalı.
         if let Some(t) = target {
-            if !authorize(&node.c_a, t, env, self.org).await? {
+            if !authorize_anchored(&node.c_a, t, wfes.origin_orgu_id, env, self.org).await? {
                 return Err(EngineError::TargetNotEligible);
             }
         }
@@ -1078,7 +1176,10 @@ impl<'a> Engine<'a> {
                     wfah: &wfes.wfah,
                     orgtnt_id: wfes.orgtnt_id,
                 };
-                if !authorize(extra_rule, actor, env, self.org).await? {
+                // Aksiyon kapısıyla AYNI çapa — liste ile gerçek kapı ayrı düşmesin.
+                if !authorize_anchored(extra_rule, actor, wfes.origin_orgu_id, env, self.org)
+                    .await?
+                {
                     continue;
                 }
             }
@@ -1450,7 +1551,8 @@ impl<'a> Engine<'a> {
                 wfd,
                 &final_ctx,
                 &wfah,
-                &anchored,
+                // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
+                wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
                 wfes.orgtnt_id,
             )
             .await?;
@@ -1479,6 +1581,10 @@ impl<'a> Engine<'a> {
             outcome,
             resolved_c_a,
             staged_calls,
+            // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+            // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+            view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
         })
     }
 
@@ -1533,6 +1639,10 @@ impl<'a> Engine<'a> {
             // SLA-3 sonlanması `Terminated`'dır — BAŞARILI bitiş değildir, bu yüzden
             // ardıl akış TETİKLENMEZ (bkz. decisions.md → WFC, "ardılın üç sert kuralı").
             staged_calls: vec![],
+            // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+            // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+            view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
         }
     }
 
@@ -1736,7 +1846,8 @@ impl<'a> Engine<'a> {
                         wfd,
                         &final_ctx,
                         &wfah,
-                        &anchored,
+                        // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
+                        wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
                         wfes.orgtnt_id,
                     )
                     .await?;
@@ -1762,6 +1873,10 @@ impl<'a> Engine<'a> {
                     outcome,
                     resolved_c_a,
                     staged_calls,
+                    // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+                    // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+                    view_c_a: Vec::new(),
+                    branch_c_a: Vec::new(),
                 }))
             }
         }
@@ -2119,7 +2234,8 @@ impl<'a> Engine<'a> {
                 wfd,
                 &final_ctx,
                 &wfah,
-                &anchored,
+                // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
+                wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
                 wfes.orgtnt_id,
             )
             .await?;
@@ -2154,6 +2270,10 @@ impl<'a> Engine<'a> {
             outcome,
             resolved_c_a,
             staged_calls,
+            // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
+            // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
+            view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
         })
     }
 
@@ -2568,6 +2688,11 @@ impl<'a> Engine<'a> {
     /// Aday YOKTUR: terminal (iş bitti), kol varışı ve join-doldurmama (WFE bir
     /// node'a inmedi).
     #[allow(clippy::too_many_arguments)]
+    /// `anchor_orgu`: node c_a'sındaki ORGTRVLANG selector'larının çapası — WFE'nin
+    /// KENDİ birimi (`origin_orgu_id`), geçişi yapan aktörünki DEĞİL (2026-08-13).
+    /// Aksi halde aynı akış, ona dokunan kişiye göre farklı bir aday kümesi
+    /// yazardı: `self` çapası kaydıkça iş bir sonraki adımda başka bir şubenin
+    /// havuzuna düşerdi.
     async fn candidates_at(
         &self,
         outcome: &CommitOutcome,
@@ -2575,7 +2700,7 @@ impl<'a> Engine<'a> {
         wfd: &Wfd,
         ctx: &Value,
         wfah: &Wfah,
-        actor: &Actor,
+        anchor_orgu: Uuid,
         orgtnt_id: Uuid,
     ) -> Result<Vec<ResolvedCandidate>, EngineError> {
         // Fork TEK bir node'a inmez (`landed` de bu yüzden None): cache tüm kol giriş
@@ -2588,13 +2713,7 @@ impl<'a> Engine<'a> {
                     EngineError::InvalidWfd(format!("parallel branch bilinmeyen node '{b}'"))
                 })?;
                 let mut extra = self
-                    .resolve_candidates(&node.c_a, ctx, wfah, actor, orgtnt_id)
-                    .await?;
-                resolved.append(&mut extra);
-            }
-            for listable in &wfd.listable {
-                let mut extra = self
-                    .resolve_candidates(&listable.c_a, ctx, wfah, actor, orgtnt_id)
+                    .resolve_candidates(&node.c_a, ctx, wfah, anchor_orgu, orgtnt_id)
                     .await?;
                 resolved.append(&mut extra);
             }
@@ -2602,7 +2721,7 @@ impl<'a> Engine<'a> {
         }
         match landed {
             Some(CallSite::Node(node_key)) => {
-                self.node_candidates(node_key, wfd, ctx, wfah, actor, orgtnt_id)
+                self.node_candidates(node_key, wfd, ctx, wfah, anchor_orgu, orgtnt_id)
                     .await
             }
             _ => Ok(vec![]),
@@ -2612,28 +2731,29 @@ impl<'a> Engine<'a> {
     /// Node hedefinin aday cache'i: node c_a + WOR-44 listable[] union'ı
     /// (VIEW-only; `when` guard'ları burada yok sayılır — over-inclusive cache
     /// kabul edilir, claim/act gerçek kuralda matcher-gated kalır).
+    /// Bir node'un aday listesi — `wf.wfe.current_c_a` cache'ine yazılır.
+    ///
+    /// 2026-08-13: `listable[]` katlaması BURADAN KALKTI. Katlanmış hâli iki
+    /// yanlış üretiyordu: (1) `when` guard'ı yok sayılıyordu (havuz over-inclusive
+    /// kabul ediyordu), (2) terminal'de kolon boşaltıldığı için kalıcı olması
+    /// gereken grant kayboluyordu. Görünürlük grant'ları artık AYRI ve KALICI bir
+    /// kolonda: `view_c_a` (bkz. `Engine::view_grants`). Bu kolon adının söylediği
+    /// şeydir: yalnız node'un adayları.
     async fn node_candidates(
         &self,
         node_key: &str,
         wfd: &Wfd,
         staged: &Value,
         wfah: &Wfah,
-        actor: &Actor,
+        anchor_orgu: Uuid,
         orgtnt_id: Uuid,
     ) -> Result<Vec<ResolvedCandidate>, EngineError> {
         let node = wfd.nodes.get(node_key).ok_or_else(|| {
             EngineError::InvalidWfd(format!("wft hedefi bilinmeyen node '{node_key}'"))
         })?;
-        let mut resolved = self
-            .resolve_candidates(&node.c_a, staged, wfah, actor, orgtnt_id)
-            .await?;
-        for listable in &wfd.listable {
-            let mut extra = self
-                .resolve_candidates(&listable.c_a, staged, wfah, actor, orgtnt_id)
-                .await?;
-            resolved.append(&mut extra);
-        }
-        Ok(resolved)
+        // `listable` katlaması 2026-08-13'te kalktı → union kalmadı, doğrudan döner.
+        self.resolve_candidates(&node.c_a, staged, wfah, anchor_orgu, orgtnt_id)
+            .await
     }
 
     /// Terminal hedefi: terminal.wfes_effects uygulanır, wfe_end_response
@@ -2686,12 +2806,18 @@ impl<'a> Engine<'a> {
     /// (user_ident) — pool sorgusu actor'ün kendi ident'ini org.user_ident ile
     /// çözüp aynı kanaldan eşler. Claim yetkisi HER ZAMAN matcher ile
     /// runtime'da yeniden doğrulanır; bu cache yalnızca liste görünürlüğü içindir.
+    /// `anchor_orgu`: ORGTRVLANG selector'larının çapası (`self`, `parent`, …).
+    ///
+    /// Node c_a'sında bu, geçişi yapan AKTÖRün birimidir (kural "geçişi yapanın
+    /// birimine göre" çözülür). `listable`/`wf_admin` grant'larında ise WFE'nin
+    /// KENDİ birimidir (`view_grants`) — o kurallar viewer'a bağlı çözülemez,
+    /// çünkü grant'lar viewer bilinmezken (commit anında) yazılır.
     async fn resolve_candidates(
         &self,
         rule: &CandidateActor,
         ctx: &Value,
         wfah: &Wfah,
-        actor: &Actor,
+        anchor_orgu: Uuid,
         orgtnt_id: Uuid,
     ) -> Result<Vec<ResolvedCandidate>, EngineError> {
         // Çapasız kural (c_orgu yok): birim kümesi YOK — aday tek satır, `any_orgu` işaretli
@@ -2700,7 +2826,7 @@ impl<'a> Engine<'a> {
         // node'a girişte donar.
         let units = match &rule.c_orgu {
             Some(c_orgu) => {
-                Some(resolve_c_orgu(c_orgu, actor.orgu_id, ctx, wfah, orgtnt_id, self.org).await?)
+                Some(resolve_c_orgu(c_orgu, anchor_orgu, ctx, wfah, orgtnt_id, self.org).await?)
             }
             None => None,
         };
@@ -3317,7 +3443,7 @@ mod tests {
         };
 
         let out = engine
-            .resolve_candidates(&anchorless, &json!({}), &wfah, &actor, Uuid::nil())
+            .resolve_candidates(&anchorless, &json!({}), &wfah, actor.orgu_id, Uuid::nil())
             .await
             .unwrap();
 
@@ -3353,7 +3479,7 @@ mod tests {
                 &rule(Some(vec!["branchClerk"]), None),
                 &json!({}),
                 &wfah,
-                &actor,
+                actor.orgu_id,
                 Uuid::nil(),
             )
             .await
@@ -3389,7 +3515,7 @@ mod tests {
                 &rule(None, Some(vec![target_user_str.as_str()])),
                 &json!({}),
                 &wfah,
-                &actor,
+                actor.orgu_id,
                 Uuid::nil(),
             )
             .await
@@ -3423,7 +3549,7 @@ mod tests {
                 &rule(None, Some(vec!["jdoe"])),
                 &json!({}),
                 &wfah,
-                &actor,
+                actor.orgu_id,
                 Uuid::nil(),
             )
             .await
@@ -3456,7 +3582,7 @@ mod tests {
                 &rule(Some(vec!["creditAnalyst"]), Some(vec!["jdoe"])),
                 &json!({}),
                 &wfah,
-                &actor,
+                actor.orgu_id,
                 Uuid::nil(),
             )
             .await
@@ -3469,5 +3595,149 @@ mod tests {
         assert!(out
             .iter()
             .any(|c| c.role.is_empty() && c.user_ident.as_deref() == Some("jdoe")));
+    }
+
+    // ---- 2026-08-13: görünürlük projeksiyonunun yazıcısı ----
+
+    /// `view_grants` için minimum WFD: iki grant kuralı (biri guard'lı) + bir node.
+    /// Ham JSON kullanılır çünkü şema kapısı (`from_json`) de birlikte sınanmış olur.
+    fn grants_wfd(when: Option<&str>) -> Wfd {
+        let guard = match when {
+            Some(w) => format!(r#", "when": "{w}""#),
+            None => String::new(),
+        };
+        let doc = format!(
+            r#"{{
+              "wfd_version": "2.2",
+              "id": "grant-test",
+              "name": "Grant Test",
+              "version": "1.0.0",
+              "context": {{ "type": "object", "properties": {{}} }},
+              "listable": [
+                {{ "c_a": {{ "c_orgu": "self", "c_r": ["mudur"] }}{guard} }}
+              ],
+              "wf_admin": [
+                {{ "c_a": {{ "c_orgu": "self", "c_r": ["wfAdmin"] }} }}
+              ],
+              "start": [
+                {{ "id": "start__adim", "action": "basla", "from": "adim",
+                   "wft": {{ "terminal": "bitti" }} }}
+              ],
+              "nodes": {{ "adim": {{ "c_a": {{ "c_orgu": "self", "c_r": ["memur"] }} }} }},
+              "actions": {{ "basla": {{ "input": {{ "required": [], "optional": [] }} }} }},
+              "terminals": [
+                {{ "id": "bitti", "label": "Bitti", "wfe_end_response": {{ "status": "ok" }} }}
+              ],
+              "transitions": []
+            }}"#
+        );
+        Wfd::from_json(&doc).expect("fixture geçerli olmalı")
+    }
+
+    fn grants_engine<'a>(org: &'a MockOrg, runner: &'a DummyRunner) -> Engine<'a> {
+        Engine {
+            org,
+            exec: runner,
+            env: Default::default(),
+        }
+    }
+
+    /// `listable` ∪ `wf_admin` BİRLEŞİR ve çapa (origin) her ikisine uygulanır.
+    #[tokio::test]
+    async fn view_grants_unions_listable_and_wf_admin() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let origin = Uuid::new_v4();
+
+        let out = engine
+            .view_grants(
+                &grants_wfd(None),
+                &json!({}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        // MockOrg `self`i çapaya çözer → iki kural da origin birimine yazılır.
+        let roles: Vec<&str> = out.iter().map(|c| c.role.as_str()).collect();
+        assert!(roles.contains(&"mudur"), "listable grant'ı yok: {roles:?}");
+        assert!(roles.contains(&"wfAdmin"), "wf_admin grant'ı yok: {roles:?}");
+        assert!(out.iter().all(|c| c.orgu_id == Some(origin)));
+        // Node c_a'sı (memur) BURAYA GİRMEZ: o `current_c_a`nın işi, ve iş
+        // bitince silinir. Karıştırılırsa bitmiş işin görünürlüğü sızar.
+        assert!(!roles.contains(&"memur"), "node c_a grant'a karışmış: {roles:?}");
+    }
+
+    /// `when` guard'ı FALSE olan kural grant ÜRETMEZ — havuzun eski
+    /// "guard'ı yok say, over-inclusive kabul et" davranışının kapandığı yer.
+    #[tokio::test]
+    async fn view_grants_applies_when_guard() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let origin = Uuid::new_v4();
+        let wfd = grants_wfd(Some("$ctx.tutar >= 100"));
+
+        let low = engine
+            .view_grants(
+                &wfd,
+                &json!({"tutar": 10}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !low.iter().any(|c| c.role == "mudur"),
+            "guard false iken listable grant'ı yazılmamalı: {low:?}"
+        );
+        // wf_admin guard'sız → o kalır (guard kural BAŞINA işler).
+        assert!(low.iter().any(|c| c.role == "wfAdmin"));
+
+        let high = engine
+            .view_grants(
+                &wfd,
+                &json!({"tutar": 250}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        assert!(high.iter().any(|c| c.role == "mudur"));
+    }
+
+    /// Çapa değişince grant'ın BİRİMİ değişir — projeksiyonun WFE'ye bağlı
+    /// olduğunun kanıtı (aynı belge, iki farklı WFE → iki farklı grant kümesi).
+    #[tokio::test]
+    async fn view_grants_are_anchored_per_wfe() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let wfd = grants_wfd(None);
+
+        let ga = engine
+            .view_grants(&wfd, &json!({}), &Wfah::empty(), None, Uuid::new_v4(), a, Uuid::nil())
+            .await
+            .unwrap();
+        let gb = engine
+            .view_grants(&wfd, &json!({}), &Wfah::empty(), None, Uuid::new_v4(), b, Uuid::nil())
+            .await
+            .unwrap();
+
+        assert!(ga.iter().all(|c| c.orgu_id == Some(a)));
+        assert!(gb.iter().all(|c| c.orgu_id == Some(b)));
     }
 }

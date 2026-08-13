@@ -31,7 +31,9 @@ pub struct OrgUnit {
 /// listing has a dedicated containment filter for these (`portal/pool.rs`). The marker is
 /// explicit rather than "orgu_id missing" so that `@> [{"user_id": U}]` can never
 /// accidentally match a SCOPED entry for the same person in a different unit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `PartialEq`: `view_grants` aynı adayı iki kuraldan (listable + wf_admin)
+/// üretebiliyor, projeksiyon kolonuna tekrar yazmamak için karşılaştırılır.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CandidateActor {
     /// `None` yalnız `any_orgu = true` girdilerde — çapalı girdilerde daima yazılır
     /// (eski satırların JSON'u birebir aynı kalır).

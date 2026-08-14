@@ -171,6 +171,14 @@ pub struct NodeDef {
     /// DURUMdur; bu yüzden çağrı transition'da değil node'da durur.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call: Option<CallRef>,
+    /// 2026-08-13: node-seviyesi görünürlük grant'ı — kök `listable` (satır ~52) ile
+    /// AYNI tip ve AYNI matcher (`matches_grant_rules`). Fark ÖMÜRDÜR: kök `listable`
+    /// KALICIDIR (WFE terminal'de de görünür), bu alan DURUMA BAĞLIDIR — WFE bu
+    /// node'da İKEN kurallardan birine uyan aktör görür, node'dan çıkınca görünürlük
+    /// biter. `wf_admin` gibi (satır ~64) ikisi de **ACT/claim VERMEZ**, portal
+    /// havuzuna GİRMEZ — yalnız görme (bkz. `v22::visibility::can_view` (f)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listable: Vec<ListableRule>,
 }
 
 /// SLA-1 — claim timeout (havuz node'u üzerinde). `wft` yoksa aynı havuza döner
@@ -239,7 +247,9 @@ pub struct EscalationStep {
 /// `COrgu`'nun aynası — o da `#[serde(untagged)]` bir birleşimdir
 /// (`Selector(String) | Anchor{from, traverse}`) ve aynı `from` anahtar adını kullanır.
 /// Düz string'ler AYNEN çalışır: eski belgeler `Literal`'a deserialize olur, migration
-/// gerekmez, node key'leri değişmez (bkz. `CandidateActor::slug`).
+/// gerekmez. Node key'leri de etkilenmez — kimliği TASARIMCI verir (2026-08-12), motor
+/// `c_a`'dan anahtar TÜRETMEZ. Tekillik karşılaştırması (`CandidateActor::canonical`) ise
+/// iki variant'ı AYIRIR: `Literal("x")` ile `Ref { from: "x" }` aynı `c_a` sayılmaz.
 ///
 /// Neden sihirli önek (`"$ctx.x.user_id"` düz string olarak) DEĞİL: `c_u` büyüyecek bir
 /// alandır (aday havuzunu kişiyle daraltma birinci sınıf bir yetenek olacak). Büyüyecek
@@ -260,17 +270,6 @@ pub enum CuItem {
 }
 
 impl CuItem {
-    /// Slug/canonical için kaynak metin. `sanitize()` `$` ve `.` karakterlerini attığı için
-    /// `Literal("$ctx.x.user_id")` ile `Ref{from:"$ctx.x.user_id"}` AYNI slug'ı üretir —
-    /// yani §2a node key'i bu birleşimden etkilenmez. (Belirsizlik doğmaz: `Literal`'ın
-    /// `$` ile başlaması validator tarafından yasaklıdır.)
-    pub fn slug_source(&self) -> &str {
-        match self {
-            CuItem::Literal(s) => s,
-            CuItem::Ref { from } => from,
-        }
-    }
-
     /// Sabit kimlik (varsa) — `matcher`/`resolve_candidates` bunu doğrudan karşılaştırır.
     pub fn literal(&self) -> Option<&str> {
         match self {
@@ -342,38 +341,15 @@ impl CandidateActor {
         role_hit || user_hit
     }
 
-    /// Canonical node slug (runtime-semantics §2a):
-    /// orgu_slug [+ "__" + sıralı_roller] [+ "__u_" + sıralı_userlar]
-    ///
-    /// Çapasız kuralda orgu parçası `ANCHORLESS_SLUG`'dır. Bir Selector bu metni ÜRETEMEZ:
-    /// ORGTRVLANG ifadesi `self` ya da `*:` ile başlamak zorundadır (`ParseError::MissingSelf`),
-    /// yani çapasız slug hiçbir çapalı kuralla çakışmaz.
-    pub fn slug(&self) -> String {
-        let mut parts = vec![match &self.c_orgu {
-            Some(c) => c.slug(),
-            None => ANCHORLESS_SLUG.to_string(),
-        }];
-        if let Some(r) = &self.c_r {
-            let mut r: Vec<String> = r.iter().map(|x| sanitize(x)).collect();
-            r.sort();
-            parts.push(r.join("-"));
-        }
-        if let Some(u) = &self.c_u {
-            // `slug_source()` üzerinden: `Literal("x")` ve `Ref{from:"x"}` aynı slug'ı verir.
-            // Düz string c_u taşıyan ESKİ belgelerin node key'leri byte-byte aynı kalır.
-            let mut u: Vec<String> = u.iter().map(|x| sanitize(x.slug_source())).collect();
-            u.sort();
-            parts.push(format!("u_{}", u.join("-")));
-        }
-        parts.join("__")
-    }
-
     /// Uniqueness karşılaştırması için canonical form (rol/user sıraları normalize).
     ///
+    /// `duplicate_c_a` (validator §2b, 2026-08-14) değişmezinin TEMELİ — bir canonical c_a
+    /// belgede EN FAZLA BİR node'da bulunabilir. Kimlik ÜRETMEZ: node anahtarı
+    /// TASARIMCININDIR (2026-08-12) ve bu form hiçbir yere yazılmaz, yalnız doküman
+    /// İÇİNDE karşılaştırılır — biçimi değişse kalıcı veri etkilenmez.
+    ///
     /// `CuItem`'ın `Debug`'ı variant'ı ayırır (`Literal("x")` ≠ `Ref { from: "x" }`), yani
-    /// sabit kimlik ile aynı metni taşıyan bir referans aynı c_a sayılmaz. Bu form yalnız
-    /// doküman İÇİNDE karşılaştırılır, hiçbir yere yazılmaz — biçim değişikliği kalıcı
-    /// veriyi etkilemez (`slug` etkiler, o korundu).
+    /// sabit kimlik ile aynı metni taşıyan bir referans aynı c_a sayılmaz.
     pub fn canonical(&self) -> String {
         let mut r = self.c_r.clone().unwrap_or_default();
         r.sort();
@@ -382,18 +358,20 @@ impl CandidateActor {
         // `Option`'ın Debug'ı çapasızı ayırır: `None` ≠ `Some("...")`.
         format!(
             "{:?}|r:{:?}|u:{:?}",
-            self.c_orgu.as_ref().map(COrgu::slug),
+            self.c_orgu.as_ref().map(COrgu::canonical_key),
             r,
             u
         )
     }
 }
 
-/// Çapasız (`c_orgu` yok) kuralın node key parçası — bkz. `CandidateActor::slug`.
-pub const ANCHORLESS_SLUG: &str = "any";
-
 /// §2a sanitize: [A-Za-z0-9] korunur, diğerleri '_', ardışık '_' tekilleştirilir,
 /// baş/son '_' kırpılır. Case korunur.
+///
+/// Motorda TEK tüketicisi `COrgu::canonical_key`'dir (yani `CandidateActor::canonical`
+/// üzerinden `duplicate_c_a`). Anahtar üretmez — spec'teki §2a slug algoritması artık
+/// yalnız EDİTÖRÜN varsayılan anahtar önerisidir (`docs/spec/runtime-semantics.md` §2a,
+/// referans implementasyon `docs/spec/reference-types.rs`).
 pub fn sanitize(s: &str) -> String {
     let mut out = String::new();
     for c in s.chars() {
@@ -416,7 +394,15 @@ pub enum COrgu {
 }
 
 impl COrgu {
-    pub fn slug(&self) -> String {
+    /// `c_orgu` kanalının normalize METNİ — `CandidateActor::canonical` bunu tekillik
+    /// karşılaştırmasında kullanır. **Kimlik DEĞİLDİR:** node anahtarı tasarımcınındır
+    /// (2026-08-12), motor `c_a`'dan anahtar türetmez.
+    ///
+    /// Hesap spec §2a'daki `orgu_slug(c_orgu)` ile aynıdır (aynı `sanitize`), ama işi
+    /// artık yalnız karşılaştırmadır. Sanitize kayıplıdır: iki FARKLI selector aynı
+    /// metne düşerse (`*:[type:branch]` ↔ `type_branch`) canonical form onları aynı
+    /// sayar, yani `duplicate_c_a` tarafında BİRLEŞTİRİCİ (daha katı) davranır.
+    pub fn canonical_key(&self) -> String {
         match self {
             COrgu::Selector(s) => sanitize(s),
             COrgu::Anchor { from, traverse } => match from {

@@ -966,17 +966,37 @@ impl WfeExecutor {
         // `listable` grant'ı olmadan doğar ve ilk aksiyona kadar (o da gelmeyebilir)
         // hiç kimsenin listesinde görünmez. Çapa start aktörünün birimidir ve
         // WFE ömrü boyunca bu kalır (`NewWfe::origin_orgu_id` ile aynı değer).
+        let start_wfah = wfe_core::types::wfah::Wfah(new.wfah_entries.clone());
+        let landed = outcome_view(&new.outcome).1;
         new.view_c_a = engine
             .view_grants(
                 &wfd,
                 &new.initial_dynctx,
-                &wfe_core::types::wfah::Wfah(new.wfah_entries.clone()),
-                outcome_view(&new.outcome).1.as_deref(),
+                &start_wfah,
+                landed.as_deref(),
                 wfe_id,
                 new.origin_orgu_id,
                 orgtnt_id,
             )
             .await?;
+        // Node listable de start'ta yazılır (aynı gerekçe): start doğrudan bir
+        // node'a inebilir ve o node'un `listable[]`ı ilk aksiyona kadar (o da
+        // gelmeyebilir) kimseye görünmezdi. Terminal'e inen start'ta `landed`
+        // yoktur → kolon boş doğar, doğru olan da bu.
+        if let Some(node) = landed.as_deref() {
+            new.current_view_c_a = engine
+                .node_view_grants(
+                    &wfd,
+                    node,
+                    &new.initial_dynctx,
+                    &start_wfah,
+                    Some(node),
+                    wfe_id,
+                    new.origin_orgu_id,
+                    orgtnt_id,
+                )
+                .await?;
+        }
 
         self.wfe.create(&new).await?;
         self.nudge_timers(); // deadline / node dwell / claim_timeout vadesi değişti
@@ -1084,21 +1104,98 @@ impl WfeExecutor {
     ) -> Result<(bool, Option<String>), EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
         // İdempotent re-claim: zaten sahipse (kol veya wfe-seviyesi) başarı.
+        // Kararın GÖVDESİ `can_claim_loaded`'dır; buradaki erken çıkış yalnız WFD
+        // okumasını atlar (yayından çekilmiş sürümde de sahibi kendi claim'ini
+        // görebilsin) — aynı soruya aynı cevap, ikinci bir kural değil.
         if branch_owner_is(&wfes, node, actor.user_id) {
             return Ok((true, None));
         }
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        Ok(
-            match self.engine().can_claim(&wfd, &wfes, actor, node).await? {
-                ClaimCheck::Ok => (true, None),
-                ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
-                ClaimCheck::Terminal => (false, Some("terminal".into())),
-                ClaimCheck::Expired => (false, Some("expired".into())),
-                ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
-                // WFC: alt akış sürüyor — iş görünür ama claim edilemez.
-                ClaimCheck::CallInProgress => (false, Some("call_in_progress".into())),
-            },
-        )
+        self.can_claim_loaded(&wfes, &wfd, actor, node).await
+    }
+
+    /// `can_claim`in DURUM YÜKLEMESİZ gövdesi — claim kararının TEK yeri.
+    ///
+    /// Ayrı durmasının sebebi havuz listesidir (2026-08-14): `PoolTask.can_claim`
+    /// satır başına `load`/`fetch` yapmadan aynı kararı üretmek zorundaydı ve bunu
+    /// İKİNCİ bir kural yazarak değil bu gövdeyi ödünç alarak yapar
+    /// (`can_claim_many`). Burada karar üretimi saf CPU'dur — hiç sorgu atılmaz,
+    /// yalnız `Engine::can_claim` (matcher → node `c_a`) koşar; projeksiyon
+    /// kolonlarına (`current_c_a`/`view_c_a`) BAKILMAZ.
+    pub async fn can_claim_loaded(
+        &self,
+        wfes: &Wfes,
+        wfd: &Wfd,
+        actor: &Actor,
+        node: Option<&str>,
+    ) -> Result<(bool, Option<String>), EngineError> {
+        // İdempotent re-claim: zaten sahipse (kol veya wfe-seviyesi) başarı —
+        // havuzda da kendi işi `can_claim: true` görünür, "Devam et" düğmesi
+        // gerekçesiz kilitlenmesin. Başkasının claim'i `AlreadyClaimed` → false.
+        if branch_owner_is(wfes, node, actor.user_id) {
+            return Ok((true, None));
+        }
+        Ok(match self.engine().can_claim(wfd, wfes, actor, node).await? {
+            ClaimCheck::Ok => (true, None),
+            ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
+            ClaimCheck::Terminal => (false, Some("terminal".into())),
+            ClaimCheck::Expired => (false, Some("expired".into())),
+            ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
+            // WFC: alt akış sürüyor — iş görünür ama claim edilemez.
+            ClaimCheck::CallInProgress => (false, Some("call_in_progress".into())),
+        })
+    }
+
+    /// TOPLU claim uygunluğu — havuz listesinin `can_claim` alanı (2026-08-14).
+    ///
+    /// **İkinci bir claim kuralı DEĞİL**: satır başına `can_claim_loaded`'ı, yani
+    /// `can_claim`/`claim`'in kullandığı gövdeyi çağırır. Tek fark durum
+    /// yüklemesindedir — satır başına `load` yerine TEK `load_many`, WFD'ler
+    /// `(wfd_id, version)` başına bir kez (adapter cache'inden). Yani N+1 yok:
+    /// sorgu sayısı satır sayısından BAĞIMSIZ.
+    ///
+    /// `targets`: `(wfe_id, kol node'u)`. Kol `Some` ise karar O KOLUN node'una
+    /// göre verilir (kolun kendi `c_a`'sı + kendi claim durumu), WFE seviyesine
+    /// göre DEĞİL; `None` tek-kol davranışıdır. Anahtar aynen geri döner.
+    ///
+    /// Durumu ya da WFD'si okunamayan satır `false` olur (fail-closed): görünmeyen
+    /// bir düğme, çalışmayan bir düğmeden iyidir — gerekçeyi tekil uç
+    /// (`GET /portal/pool/{wfe_id}/can-claim`) hâlâ verebilir.
+    pub async fn can_claim_many(
+        &self,
+        targets: &[(Uuid, Option<String>)],
+        actor: &Actor,
+    ) -> Result<std::collections::HashMap<(Uuid, Option<String>), bool>, EngineError> {
+        use std::collections::HashMap;
+        let mut ids: Vec<Uuid> = targets.iter().map(|(id, _)| *id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let states = self.wfe.load_many(&ids).await?;
+        // Sürüm başına EN FAZLA bir `fetch`; `None` = belge okunamadı (bir kez
+        // denenir, satır başına tekrar denenmez).
+        let mut wfds: HashMap<(Uuid, i32), Option<Wfd>> = HashMap::new();
+        let mut out = HashMap::with_capacity(targets.len());
+        for (wfe_id, node) in targets {
+            let key = (*wfe_id, node.clone());
+            let Some(wfes) = states.get(wfe_id) else {
+                out.insert(key, false);
+                continue;
+            };
+            let vk = (wfes.wfd_id, wfes.wfd_version);
+            if !wfds.contains_key(&vk) {
+                let doc = self.wfd.fetch(vk.0, vk.1).await.ok();
+                wfds.insert(vk, doc);
+            }
+            let Some(wfd) = wfds.get(&vk).and_then(|w| w.as_ref()) else {
+                out.insert(key, false);
+                continue;
+            };
+            let (ok, _) = self
+                .can_claim_loaded(wfes, wfd, actor, node.as_deref())
+                .await?;
+            out.insert(key, ok);
+        }
+        Ok(out)
     }
 
     /// Atomik claim: uygunluk matcher ile doğrulanır, yazım CAS ile yapılır.
@@ -1279,7 +1376,8 @@ impl WfeExecutor {
         })
     }
 
-    /// Görünürlük projeksiyonunu (`view_c_a` + kol `c_a`) commit'e doldurur.
+    /// Görünürlük projeksiyonunu (`view_c_a` + `current_view_c_a` + kol `c_a`/
+    /// `view_c_a`) commit'e doldurur.
     ///
     /// Saf pipeline bunu üretemez: `listable`/`wf_admin` kurallarını çözmek org
     /// portu ister ve çapa olarak WFE'nin KENDİ birimini (`origin_orgu_id`) ister
@@ -1318,6 +1416,28 @@ impl WfeExecutor {
                 wfes.orgtnt_id,
             )
             .await?;
+        // Node listable (2026-08-13): VARILAN node'un `listable[]`ı → tek-kol
+        // `current_view_c_a`. Terminal/error/terminated ve fork'ta varılan bir
+        // node YOKTUR (`outcome_view` `None` verir) → liste boş kalır ve adapter
+        // kolonu `current_c_a` ile birlikte boşaltır: node'dan çıkan iş o node'un
+        // görme hakkını da bırakır.
+        //
+        // `$node` guard'ı varılan node'dur — `can_view` (f) okuma anında
+        // `wfes.current_node`'u görecek, o da bu node olacak.
+        if let Some(landed) = outcome_view(&commit.outcome).1 {
+            commit.current_view_c_a = engine
+                .node_view_grants(
+                    wfd,
+                    &landed,
+                    ctx,
+                    &wfes.wfah,
+                    Some(&landed),
+                    wfes.wfe_id,
+                    origin,
+                    wfes.orgtnt_id,
+                )
+                .await?;
+        }
         // Kol c_a'ları: fork tüm kolları doğurur, kol hareketi tek kolu taşır.
         // Diğer sonuçlarda kol satırlarına dokunulmaz → boş bırakılır.
         let branch_nodes: Vec<String> = match &commit.outcome {
@@ -1343,7 +1463,25 @@ impl WfeExecutor {
                     wfes.orgtnt_id,
                 )
                 .await?;
-            commit.branch_c_a.push((node_key, c_a));
+            // Kolun node listable'ı — `c_a` ile AYNI kol kümesi, AYNI anda.
+            // `$node` guard'ı burada `None`'dır: paralel modda wfe-seviyesi
+            // `current_node` NULL'dır ve `can_view` (f) okuma anında guard'ı o
+            // NULL ile değerlendirir. Kol adını versek kolon ile referans okuma
+            // `$node`e bakan bir guard'da sessizce ayrışırdı.
+            let view = engine
+                .node_view_grants(
+                    wfd,
+                    &node_key,
+                    ctx,
+                    &wfes.wfah,
+                    None,
+                    wfes.wfe_id,
+                    origin,
+                    wfes.orgtnt_id,
+                )
+                .await?;
+            commit.branch_c_a.push((node_key.clone(), c_a));
+            commit.branch_view_c_a.push((node_key, view));
         }
         Ok(())
     }

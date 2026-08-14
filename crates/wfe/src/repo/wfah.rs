@@ -24,6 +24,26 @@ pub async fn max_seq_by_wfe(
     Ok(rows.into_iter().collect())
 }
 
+/// `load_all`in TOPLU hâli — verilen WFE'lerin TÜM WFAH satırları, TEK sorguda
+/// (`WfeStore::load_many` için). Sıra `wfe_id` ile başlar (tek geçişte gruplama),
+/// içinde `seq ASC` — tek-WFE yolunun sırasıyla aynı.
+pub async fn load_all_for_wfes(
+    pool: &PgPool,
+    wfe_ids: &[Uuid],
+) -> Result<Vec<WfahRow>, WfeError> {
+    if wfe_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, WfahRow>(
+        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at, from_node, to_node
+         FROM wf.wfah WHERE wfe_id = ANY($1) ORDER BY wfe_id, seq ASC",
+    )
+    .bind(wfe_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(WfeError::Database)
+}
+
 pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<WfahRow>, WfeError> {
     sqlx::query_as::<_, WfahRow>(
         "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at, from_node, to_node

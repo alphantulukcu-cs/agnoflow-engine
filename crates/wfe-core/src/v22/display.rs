@@ -1,8 +1,10 @@
 //! Aksiyon/node/terminal **GÖSTERİM adları** — `Ref.label`'ın TEK kaynağı.
 //!
-//! Motor kimlikleri makine anahtarlarıdır: node key `slug(c_a)`dır ve ORGTRVLANG
-//! yolunu taşır (`self__mudur`, `parent.up__gm`), terminal id'si `^[a-zA-Z0-9_]+$`
-//! bir sabittir. Bunlar **wire sözleşmesidir, kullanıcı metni DEĞİLDİR** — istemci
+//! Motor kimlikleri makine anahtarlarıdır: node key'i TASARIMCI verir (2026-08-12;
+//! `c_a`'dan TÜRETİLMEZ, biçim kısıtı şemada: `^[A-Za-z_][A-Za-z0-9_-]*$`), terminal
+//! id'si `^[a-zA-Z0-9_]+$` bir sabittir. Eski belgelerde anahtarlar tarihsel olarak
+//! `slug(c_a)` biçiminde olabilir (`self__mudur`) — bu bir SÖZLEŞME DEĞİL, yalnız veri.
+//! Bunlar **wire sözleşmesidir, kullanıcı metni DEĞİLDİR** — istemci
 //! onları GERİ GÖNDERİR, ASLA AYRIŞTIRMAZ ve ASLA EKRANA BASMAZ.
 //!
 //! Kimlik ile gösterimi ayırmanın gerekçesi: anahtar isteğe (`POST /wfe/:id/actions`)

@@ -1,4 +1,5 @@
-//! WOR-23 kabul testleri — golden fixture v2.2 parse + slug + uniqueness + versiyon kapısı.
+//! WOR-23 kabul testleri — golden fixture v2.2 parse + anahtar biçimi + canonical c_a
+//! tekilliği + versiyon kapısı.
 //! Spec: docs/spec/migration-notes.md, runtime-semantics.md §2.
 
 use wfe_core::types::wfd_v22::{COrgu, CandidateActor, Wfd};
@@ -31,12 +32,16 @@ fn golden_fixture_parses_losslessly() {
     assert!(!t.trigger[2].required);
 }
 
-// NOT: "node key == slug(c_a)" ve "canonical c_a benzersiz" KURALLARI 2026-08-12'de
-// KALDIRILDI (bkz. validator.rs §2b notu) — kimliği artık tasarımcı verir. Bu fixture'ın
-// anahtarları TARİHSEL olarak slug biçimindedir ve öyle kalır (geriye uyumluluk kanıtı:
-// eski belgeler geçerliliğini korur), ama bu bir sözleşme DEĞİLDİR; kuralı doğrulayan
-// iki test bilerek silindi. `slug()`/`canonical()` yardımcıları duruyor: editörün eski
-// taslaklar için kullandığı varsayılan anahtar üretiminin motor tarafındaki aynasıdır.
+// NOT: "node key == slug(c_a)" kuralı 2026-08-12'de KALDIRILDI (bkz. validator.rs §2b
+// notu) — kimliği artık tasarımcı verir. Bu fixture'ın anahtarları TARİHSEL olarak slug
+// biçimindedir ve öyle kalır (geriye uyumluluk kanıtı: eski belgeler geçerliliğini korur),
+// ama bu bir sözleşme DEĞİLDİR; kuralı doğrulayan iki test bilerek silindi.
+//
+// 2026-08-14: TEKİLLİK kısıtı `duplicate_c_a` HATASI olarak geri geldi ve `canonical()`
+// üzerinden ölçülüyor — aşağıdaki canonical testi onun tabanını sabitler. Motorun
+// `slug()` yardımcısı ise 2026-08-14'te SİLİNDİ: kimlik üretmiyordu ve tek çağıranı
+// kendi testiydi. §2a slug algoritması editörün varsayılan anahtar önerisi olarak
+// spec'te durur (`docs/spec/runtime-semantics.md` §2a + `reference-types.rs`).
 
 #[test]
 fn golden_node_keys_still_satisfy_the_schema_id_pattern() {
@@ -114,47 +119,43 @@ fn legacy_inline_c_a_start_is_rejected() {
 }
 
 #[test]
-fn slug_algorithm_matches_spec_examples() {
-    // runtime-semantics §2a örnekleri
-    let simple = CandidateActor {
-        c_orgu: Some(COrgu::Selector("self".into())),
-        c_r: Some(vec!["creditAnalyst".into()]),
-        c_u: None,
-    };
-    assert_eq!(simple.slug(), "self__creditAnalyst");
-
-    let typed = CandidateActor {
-        c_orgu: Some(COrgu::Selector("*:[type:branch]".into())),
-        c_r: Some(vec!["branchClerk".into()]),
-        c_u: None,
-    };
-    assert_eq!(typed.slug(), "type_branch__branchClerk");
-
+fn canonical_c_a_normalizes_order_but_separates_channels() {
+    // `duplicate_c_a` (validator §2b, 2026-08-14) bu formla ölçülür — kimlik üretmez.
     let cu_only = CandidateActor {
         c_orgu: Some(COrgu::Selector("self".into())),
         c_r: None,
         c_u: Some(vec!["user_ayse".into()]),
     };
-    assert_eq!(cu_only.slug(), "self__u_user_ayse");
 
-    // roller sıralanır, deterministiktir
-    let two_roles = CandidateActor {
+    // Rol/kişi SIRASI normalize edilir: aynı havuz, aynı canonical → tek node.
+    let roles_ab = CandidateActor {
+        c_orgu: Some(COrgu::Selector("parent".into())),
+        c_r: Some(vec!["alpha".into(), "zeta".into()]),
+        c_u: None,
+    };
+    let roles_ba = CandidateActor {
         c_orgu: Some(COrgu::Selector("parent".into())),
         c_r: Some(vec!["zeta".into(), "alpha".into()]),
         c_u: None,
     };
-    assert_eq!(two_roles.slug(), "parent__alpha-zeta");
+    assert_eq!(roles_ab.canonical(), roles_ba.canonical());
 
-    // Çapasız biçim: orgu parçası `ANCHORLESS_SLUG`. Bir ORGTRVLANG ifadesi bu metni
-    // üretemez (`self`/`*:` ile başlamak zorunda), yani çakışma imkânsız.
+    // Çapasız biçim, çapalı eşdeğeriyle AYNI c_a sayılmaz: `None` ≠ `Some("self")`,
+    // yani ikisi ayrı node'da durabilir.
     let anchorless = CandidateActor {
         c_orgu: None,
         c_r: None,
         c_u: Some(vec!["user_ayse".into()]),
     };
-    assert_eq!(anchorless.slug(), "any__u_user_ayse");
-    // ...ve çapalı eşdeğeriyle AYNI c_a sayılmaz (uniqueness ayrı node'lara izin verir).
     assert_ne!(anchorless.canonical(), cu_only.canonical());
+
+    // Farklı kanallar (rol ↔ kişi) da ayrışır.
+    let r_rule = CandidateActor {
+        c_orgu: Some(COrgu::Selector("self".into())),
+        c_r: Some(vec!["user_ayse".into()]),
+        c_u: None,
+    };
+    assert_ne!(r_rule.canonical(), cu_only.canonical());
 }
 
 #[test]

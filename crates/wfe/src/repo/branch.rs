@@ -14,10 +14,34 @@ use uuid::Uuid;
 /// için taşınır. entered_at'a göre sıralı — deterministik görünüm.
 pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<BranchRow>, WfeError> {
     sqlx::query_as::<_, BranchRow>(
-        "SELECT branch_node, entry_node, status, claimed_by, claimed_at, entered_at
+        "SELECT wfe_id, branch_node, entry_node, status, claimed_by, claimed_at, entered_at
          FROM wf.wfe_branch WHERE wfe_id = $1 ORDER BY entered_at, branch_node",
     )
     .bind(wfe_id)
+    .fetch_all(pool)
+    .await
+    .map_err(WfeError::Database)
+}
+
+/// `load_all`in TOPLU hâli — verilen WFE'lerin TÜM kolları, TEK sorguda.
+///
+/// `load_active_for_wfes`ten farkı bilinçlidir: o havuz/liste GÖRÜNÜMÜ içindir ve
+/// yalnız aktif kolları taşır; bu ise `Wfes` KURMAK içindir, dolayısıyla `load_all`
+/// ile aynı kümeyi (active + arrived + cancelled) ve aynı sırayı döndürmek
+/// ZORUNDADIR — `WfeStore::load_many` sözleşmesi "load ile tıpatıp aynı" der.
+/// Sıralama `wfe_id` ile başlar ki gruplama tek geçişte yapılabilsin.
+pub async fn load_all_for_wfes(
+    pool: &PgPool,
+    wfe_ids: &[Uuid],
+) -> Result<Vec<BranchRow>, WfeError> {
+    if wfe_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, BranchRow>(
+        "SELECT wfe_id, branch_node, entry_node, status, claimed_by, claimed_at, entered_at
+         FROM wf.wfe_branch WHERE wfe_id = ANY($1) ORDER BY wfe_id, entered_at, branch_node",
+    )
+    .bind(wfe_ids)
     .fetch_all(pool)
     .await
     .map_err(WfeError::Database)

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://workflow.example/schemas/wfd.schema.v2_2.json",
   "title": "WFD JSON Schema - Named Nodes Model v2.2",
-  "description": "v2.2 (v2.1 uzerine): (1) C_A tek kuraldir - array/OR-listesi KALDIRILDI. Eslesme semantigi: resolved(c_orgu) AND (rol_match OR user_match); alan yoksa o kanal false'dur (wildcard degil); c_u match'i rol-agnostiktir. (2) Bir canonical c_a workflow'da en fazla BIR node'da bulunur; node key c_a'dan turetilen canonical slug'dir (bkz. runtime-semantics), 'label' display icindir. (3) x-visibility kriterleri bagimsizdir ve aralarinda OR vardir; V hicbir zaman ACT/claim vermez. v2.1 ozellikleri korunur: nodes+from, retry/catch, timeout, default branch, escalation, $exec.result, $node, WFD.* hata taksonomisi, atomik pipeline.",
+  "description": "v2.2 (v2.1 uzerine): (1) C_A tek kuraldir - array/OR-listesi KALDIRILDI. Eslesme semantigi: resolved(c_orgu) AND (rol_match OR user_match); alan yoksa o kanal false'dur (wildcard degil); c_u match'i rol-agnostiktir. (2) Bir canonical c_a workflow'da en fazla BIR node'da bulunur ve ayni node key daima ayni c_a'yi tasir (validator duplicate_c_a, HATA); node key TASARIMCI verir, c_a'dan turetilen slug DEGILDIR (bkz. runtime-semantics), 'label' display icindir. (3) x-visibility kriterleri bagimsizdir ve aralarinda OR vardir; V hicbir zaman ACT/claim vermez. v2.1 ozellikleri korunur: nodes+from, retry/catch, timeout, default branch, escalation, $exec.result, $node, WFD.* hata taksonomisi, atomik pipeline.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -933,9 +933,16 @@
         "call": {
           "$ref": "#/$defs/callRef",
           "description": "WFC - alt akis cagrisi (mode: wait | detached). Bu blogu tasiyan node bir WFC node'udur: insan ACT'i ALINAMAZ (transitions[].from icinde yer alamaz), cikisi call.wft'dir, escalation/claim_timeout/attachments/reassign tasiyamaz. Bekleme bir DURUMdur (current_node), transition adimi degil - bu yuzden cagri node'da durur. c_a hala zorunludur ama anlami daralir: alt akis surerken bu WFE'yi kim gorur."
+        },
+        "listable": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/listableRule"
+          },
+          "description": "2026-08-13: node-seviyesi gorunurluk grant'i - WFE bu node'dayken kurallardan birine uyan aktor onu gorebilir. Kok 'listable[]' ile AYNI sekli tasir ama DURUMA BAGLIDIR: WFE bu node'dan cikinca gorunurluk biter (kok listable KALICIDIR, terminal'de de gorur). ACT/claim VERMEZ, havuza girmez."
         }
       },
-      "description": "Node key = c_a'dan turetilen canonical slug (validator yeniden hesaplayip karsilastirir). Ayni canonical c_a ikinci bir node'da BULUNAMAZ."
+      "description": "Node key TASARIMCIYA aittir (2026-08-12) - slug(c_a) DEGILDIR; bicim kisiti sema propertyNames: idName ile verilir. Kimlik ile c_a BIRE BIRDIR (2026-08-14): ayni canonical c_a ikinci bir node'da BULUNAMAZ (validator duplicate_c_a, HATA) ve ayni kimlik daima ayni c_a'yi tasir. Paralel kolda ayni havuzdan iki kol acmak bu yuzden simdilik DESTEKLENMEZ - bilincli, gecici kisit."
     },
     "claimTimeout": {
       "type": "object",
@@ -1467,7 +1474,7 @@
       "description": "2026-08-03 (WOR-56/SLA-2): node hedefli collapse. SLA-2'de kullanilinca sure dolunca kardes kollar cancelled, paralel mod kapanir ve WFE bu node'a gider. Kaynak node bir paralel KOLUN ICINDE olmak ZORUNDA (validator escalation_collapse_outside_parallel). Paralel baglam yoksa duz {node} devrine duser (runtime savunmasi)."
     },
     "caGrantRule": {
-      "description": "C_A tabanlı grant kaydı: kural + opsiyonel when guard'ı. listable[] (görme) ve wf_admin[] (akış-içi yetkili) bu şekli paylaşır.",
+      "description": "C_A tabanlı grant kaydı: kural + opsiyonel when guard'ı. Üç yer bu şekli paylaşır: kök `listable[]` (kalıcı görme), `nodes.<key>.listable[]` (2026-08-13, duruma bağlı — WFE o node'da iken görme) ve `wf_admin[]` (akış-içi yetkili).",
       "type": "object",
       "additionalProperties": false,
       "required": [

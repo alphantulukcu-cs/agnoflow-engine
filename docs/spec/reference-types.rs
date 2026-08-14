@@ -1,6 +1,13 @@
-// reference-types.rs — Engine icin v2.2 referans serde modeli + canonical slug turetme.
-// Kabul testleri (main): (1) golden fixture kayipsiz parse, (2) her node key == slug(c_a),
-// (3) canonical c_a uniqueness.
+// reference-types.rs — v2.2 referans serde modeli + canonical c_a formu + §2a slug.
+// Kabul testleri (main): (1) golden fixture kayipsiz parse, (2) node key + slug DOKUMU
+// (kimlik TASARIMCININ - 2026-08-12'den beri key == slug(c_a) BEKLENMEZ, slug yalniz bilgi),
+// (3) canonical c_a uniqueness (2026-08-14: validator duplicate_c_a ile HATA).
+//
+// SLUG'IN YERI (2026-08-14): `CandidateActor::slug` burada spec §2a'nin referans
+// implementasyonu olarak DURUR - tuketicisi EDITORDUR (yeni node'a varsayilan anahtar
+// onerir), motor DEGIL. agnoflow-backend'deki ikizi (`wfe_core::types::wfd_v22`) bu
+// yuzden SILINDI: orada kimlik uretmiyordu, cagirani yoktu. Motorda duran tek sey
+// `canonical()` (tekillik) ve onun `COrgu::canonical_key` parcasidir.
 #![allow(dead_code)]
 use serde::Deserialize;
 use serde_json::Value;
@@ -57,6 +64,11 @@ pub struct NodeDef {
     pub claim_timeout: Option<ClaimTimeout>, // SLA-1: claim eden aktor zamaninda aksiyon almazsa
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>, // root attachments katalogundaki grup referanslari
+    // 2026-08-13: node-seviyesi gorunurluk grant'i - kok `listable` ile AYNI tip. WFE bu
+    // node'dayken kurallardan birine uyan aktor gorebilir; kok listable KALICIDIR (terminal'de
+    // de gorur), bu DURUMA BAGLIDIR (node'dan cikinca biter). ACT/claim VERMEZ.
+    #[serde(default)]
+    pub listable: Vec<ListableRule>,
 }
 
 /// Node'un ek-belge referansi. Iki bicim de "bu grup burada TOPLANIR" der; fark KAPIDIR.
@@ -165,7 +177,12 @@ impl CandidateActor {
         in_orgu && (role_hit || user_hit)
     }
 
-    /// Canonical node slug: orgu_slug [+ "__" + sirali_roller] [+ "__u_" + sirali_userlar]
+    /// §2a slug: orgu_slug [+ "__" + sirali_roller] [+ "__u_" + sirali_userlar].
+    ///
+    /// KIMLIK DEGILDIR (2026-08-12): node anahtarini tasarimci yazar. Bu hesap yalnizca
+    /// EDITORUN yeni node'a onerdigi VARSAYILAN anahtardir; motor `c_a`'dan anahtar
+    /// turetmez ve bu fonksiyonun motor tarafinda karsiligi da yoktur. Tekillik
+    /// karsilastirmasi `canonical()` ile yapilir, slug ile DEGIL.
     pub fn slug(&self) -> String {
         let mut parts = vec![match &self.c_orgu {
             Some(c) => c.slug(),
@@ -452,10 +469,17 @@ fn main() {
     let mut ok = true;
     let mut seen = std::collections::HashMap::new();
     for (key, node) in &wfd.nodes {
-        let slug = node.c_a.slug();
-        let m = if *key == slug { "OK " } else { ok = false; "FAIL" };
-        println!("2) [{}] key={:<28} slug={:<28} label={:?}",
-            m, key, slug, node.label.as_deref().unwrap_or("-"));
+        // 2026-08-12: kimlik TASARIMCININ — `key == slug(c_a)` ARTIK BEKLENMEZ. Slug yalnız
+        // BİLGİ olarak basılır: editörün aynı c_a için önereceği varsayılan anahtarı
+        // gösterir, doğrulanan bir şey değildir. (2026-08-14 düzeltmesi: burada eskiden
+        // "aday cache ve eski belgelerin okunuşu için üretiliyor" yazıyordu — İKİSİ DE
+        // YANLIŞTI. Aday cache'i `resolve_candidates` kurar ve satırları
+        // {orgu_id, role, user_id, any_orgu}'dur, slug HİÇ geçmez; eski belgelerin parse'ı
+        // da slug'a dokunmaz, yalnız anahtarları tarihsel olarak slug biçimindedir.)
+        println!("2) key={:<28} slug(bilgi)={:<28} label={:?}",
+            key, node.c_a.slug(), node.label.as_deref().unwrap_or("-"));
+        // 2026-08-14: tekillik kısıtı HATA olarak geri geldi (validator `duplicate_c_a`) —
+        // aynı canonical c_a ikinci bir node'da bulunamaz, aynı key daima aynı c_a'yı taşır.
         if let Some(prev) = seen.insert(node.c_a.canonical(), key.clone()) {
             ok = false;
             println!("3) [FAIL] canonical c_a tekrari: {} == {}", prev, key);

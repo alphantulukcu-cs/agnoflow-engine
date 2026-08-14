@@ -12,10 +12,10 @@ Aynı dizin `agnoflow-backend/docs/spec/` ve `agnoflow-frontend/docs/spec/` alt�
 |---|---|---|
 | [`terminology.md`](terminology.md) | Domain sözlüğü — ORGT/ORGU, ORGTRVLANG, C_A, WFE/WFES/WFAH, node/transition/wft, visibility | "Bu kavram ne demek?" |
 | [`schema.json`](schema.json) | JSON Schema 2020-12 — yapısal doğrulama | "Bu alan geçerli mi, tipi ne?" |
-| [`runtime-semantics.md`](runtime-semantics.md) | Davranış — matcher'lar, slug algoritması, pipeline, graf kuralları | "Çalışma anında ne olur?" |
+| [`runtime-semantics.md`](runtime-semantics.md) | Davranış — matcher'lar, node kimliği + c_a tekilliği (§2b), pipeline, graf kuralları | "Çalışma anında ne olur?" |
 | [`decisions.md`](decisions.md) | WOR-* karar kaydı — neden böyle, alternatifler neden elendi | "Bu neden böyle yapılmış?" |
 | [`migration-notes.md`](migration-notes.md) | v2 / v2.1 → v2.2 delta (M1–M14) | "Eski model neydi, ne değişti?" |
-| [`reference-types.rs`](reference-types.rs) | Doğrulanmış referans serde modeli + slug + matcher | "Rust tarafı nasıl modellenir?" |
+| [`reference-types.rs`](reference-types.rs) | Doğrulanmış referans serde modeli + `canonical()` + matcher (§2a slug'ı EDİTÖR önerisi olarak taşır, motorda yoktur) | "Rust tarafı nasıl modellenir?" |
 | [`examples/`](examples/) | Örnek WFD'ler (aşağı bak) | "Gerçek bir WFD neye benzer?" |
 
 ### examples/
@@ -37,9 +37,9 @@ Detay gerektiğinde bu dosyaları oku; içeriklerini başka yere kopyalama.
 - state = `nodes` kataloğundaki bekleme havuzu; `$ctx.status` konvansiyonu YOK
 - **C_A TEK KURALDIR** (object, array DEĞİL): `{ c_orgu, c_r?, c_u? }`
 - matcher: `resolved(c_orgu) AND (rol_match OR user_match)`; verilmeyen alan = false (wildcard değil); c_u rol-agnostik
-- node key = slug(c_a) (runtime-semantics §2a), `label` = UI ismi; aynı canonical c_a ikinci node'da OLAMAZ
+- node key **TASARIMCININDIR** (2026-08-12: `slug(c_a)` DEĞİL; biçim kısıtı şemada), `label` = UI ismi; **aynı canonical c_a ikinci node'da OLAMAZ** (2026-08-14, `duplicate_c_a` = HATA) — bkz. runtime-semantics §2b
 - claim/assignment node'u değiştirmeyen runtime metadata
-- transition: `from` (slug/array) + `action`; `when` sadece ek veri guard'ı; aynı (node,action) = ilk-match
+- transition: `from` (node anahtarı/array) + `action`; `when` sadece ek veri guard'ı; aynı (node,action) = ilk-match
 - **start artık transition ile simetrik** (amended v2.2 in place): `{ id, from, action:"start", wfes_effects?, trigger?, wft }`; `c_a` startRule'da DEĞİL, `start[].from` ile referans edilen node'da; start-node kimliği referanstan türetilir (node'da `kind` alanı yok)
 - wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`
 - trigger: `use` + `when?`/`required?`(true)/`retry[]?`/`catch?`; catch routing yapmaz
@@ -59,13 +59,13 @@ Detay gerektiğinde bu dosyaları oku; içeriklerini başka yere kopyalama.
 
 ## Engine (Rust) Hedefleri
 
-- `docs/spec/reference-types.rs` → `src/wfd/` entegrasyonu; fixture parse + slug doğrulama kabul testi
+- `docs/spec/reference-types.rs` → `src/wfd/` entegrasyonu; fixture parse + canonical c_a tekilliği kabul testi
 - İki ayrı matcher: `authorize(c_a, actor, wfe)` ve `visible(x_visibility, actor, wfe)` (§3 ve §4)
-- validator: cross-ref + slug/uniqueness + graf (BFS, escalation kenarları DAHİL) + çıkışsız node
+- validator: cross-ref + c_a tekilliği (`duplicate_c_a`) + graf (BFS, escalation kenarları DAHİL) + çıkışsız node
 - runtime: current_node, ilk-match seçim, atomik commit, retry/catch/timeout, escalation scheduler, `$node`
 
 ## Editor (React Flow) Hedefleri
 
-- nodes→humanPool node (başlık=label, altyazı=slug), transitions→edge, escalation→kesikli edge
-- c_a editörü tek-kural formu (orgu + roller + kişiler); slug otomatik üretilir, c_a değişince referanslar yeniden bağlanır
+- nodes→humanPool node (başlık=label, altyazı=node anahtarı), transitions→edge, escalation→kesikli edge
+- c_a editörü tek-kural formu (orgu + roller + kişiler); node anahtarını TASARIMCI verir (editör §2a slug'ını yalnız VARSAYILAN olarak önerir), referanslar step id taşıdığı için yeniden adlandırma hiçbir bağı koparmaz
 - export ajv ile v2.2 şemasına valide; `ui_*` alanları export'ta yok; import(export(x)) == x round-trip testi

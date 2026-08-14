@@ -283,9 +283,11 @@ fn node_key_need_not_match_slug_of_its_c_a() {
 }
 
 #[test]
-fn two_nodes_may_share_the_same_c_a() {
-    // "Müdür inceler" + "müdür onaylar": aynı kişi, İKİ AYRI adım. Eski `duplicate_c_a`
-    // kuralı bunu yasaklıyordu, çünkü ikisinin anahtarı aynı düşerdi.
+fn two_nodes_sharing_the_same_c_a_is_an_error() {
+    // 2026-08-14: "aynı c_a = aynı kimlik" GERİ GELDİ, HATA seviyesinde. "Müdür inceler"
+    // + "müdür onaylar" aynı havuzsa TEK node'dur; fark aksiyonların `when`i ($wfah) ile
+    // verilir. 2026-08-12'de bu kural `shared_c_a` UYARISINA çevrilmişti — geri alındı.
+    // Kimliği yine tasarımcı verir; geri gelen tek şey TEKİLLİK kısıtıdır.
     let mut v = fixture_value();
     let ca = v["nodes"]["self__branchManager"]["c_a"].clone();
     v["nodes"]
@@ -297,16 +299,14 @@ fn two_nodes_may_share_the_same_c_a() {
     v["transitions"][1]["from"] = json!(["self__branchManager", "ikinci_inceleme"]);
     let report = validate_value(v);
     assert!(
-        report.errors.is_empty(),
-        "aynı c_a iki node'da HATA olmamalı: {:#?}",
+        report.errors.iter().any(|e| e.code == "duplicate_c_a"),
+        "aynı c_a HATA üretmeli: {:#?}",
         report.errors
     );
-    // ...ama sessiz de geçmemeli: paralel kolda gerekli, ardışık adımda modelleme
-    // hatası. Motor ikisini ayırt edemez → karar tasarımcıya, uyarı olarak.
+    // ...ve HATA olduğu için yayını gerçekten durdurmalı.
     assert!(
-        report.warnings.iter().any(|w| w.code == "shared_c_a"),
-        "aynı c_a uyarı üretmeli: {:#?}",
-        report.warnings
+        !report.is_valid(),
+        "duplicate_c_a yayını durdurmalı: {report:#?}"
     );
 }
 
@@ -2193,8 +2193,9 @@ fn unknown_dollar_ref_in_effects_is_error() {
 // KİMSE yetkilenmez, yani akış sessizce kilitlenir.
 //
 // Mutasyonlar `listable[0]` / `transitions[0].c_a` / `x-visibility` üzerinde yapılır —
-// node `c_a`'sı değiştirilirse node key = slug(c_a) değişmezi ayrıca `slug` hatası üretir
-// ve testin ölçtüğü şey bulanıklaşır.
+// node `c_a`'sı değiştirilirse `duplicate_c_a` (§2b tekilliği) tetiklenebilir ve testin
+// ölçtüğü şey bulanıklaşır. (Eski gerekçe "node key = slug(c_a)" değişmeziydi; o kural
+// 2026-08-12'de kalktı, kaçınma sebebi değişti ama DURUYOR.)
 
 /// Anchor'ı verilen yola bağlanmış bir `listable` kuralı kurar.
 fn with_listable_anchor(from: &str) -> Value {
@@ -2483,8 +2484,8 @@ fn selector_and_wfah_forms_are_untouched() {
 // kimlik motorda "böyle bir kullanıcı adı" sanılıp hiç eşleşmez; `actor` kind'lı olmayan
 // bir yola bakan referans runtime'da çözülemez ve havuz sessizce daralır.
 
-/// `c_u`'yu verilen öğelerle kuran bir listable kuralı (node c_a'sı DEĞİL — orada
-/// node key = slug(c_a) değişmezi ayrıca `slug` hatası üretir ve ölçüm bulanıklaşır).
+/// `c_u`'yu verilen öğelerle kuran bir listable kuralı (node c_a'sı DEĞİL — orada §2b
+/// tekilliği `duplicate_c_a` tetiklenebilir ve ölçüm bulanıklaşır).
 fn with_listable_cu(items: Value) -> Value {
     let mut v = fixture_value();
     v["listable"][0]["c_a"]["c_u"] = items;
@@ -2611,14 +2612,11 @@ fn x_visibility_c_u_is_checked_too() {
     assert!(has_error(&validate_value(v), "c_u_ref_not_actor_kind"));
 }
 
-#[test]
-fn node_key_unchanged_by_cu_item_union() {
-    // §2a: node key = slug(c_a) ve KALICIDIR (WFD'de + wfes.current_node'da). Düz string
-    // c_u taşıyan golden fixture'ın node key'leri birleşimden ETKİLENMEMELİ — bu test
-    // fixture'ın kendi slug kuralıyla doğrulanmasına dayanır (`check_slugs`).
-    let report = validate_value(fixture_value());
-    assert!(!has_error(&report, "slug"), "slug hatası: {:#?}", report.errors);
-}
+// NOT (2026-08-14): `node_key_unchanged_by_cu_item_union` SİLİNDİ. Kalkmış bir kuralı
+// ölçüyordu (`check_slugs` → `slug` hata kodu, 2026-08-12'de kaldırıldı), dolayısıyla
+// assert'i boşa geçiyordu; koştuğu şey (değiştirilmemiş golden fixture'ın temiz
+// doğrulanması) `golden_fixture_is_valid` ile birebir aynıydı. Node anahtarı artık
+// `c_u` biçiminden ETKİLENEMEZ: anahtarı tasarımcı yazar, motor türetmez.
 
 // ─── Sayısal agregat (sum/avg/min/max/median/mode) ────────────────
 //
@@ -2687,8 +2685,9 @@ fn sum_over_whole_history_does_not_warn() {
 // ---- Çapasız C_A (c_orgu yok) — biçim kuralları -------------------------------------
 
 /// Golden fixture'ın bir node'unu çapasız (yalnız c_u) biçime çevirir. Node key de
-/// yeniden yazılır (`slug` çapasız kuralda `any__u_...` üretir), yoksa `node_key_slug`
-/// kuralı bu testlerin ölçtüğü şeyi gölgeler.
+/// `any__u_ayse` olarak yeniden yazılır — bu ARTIK ZORUNLU DEĞİL (kimliği tasarımcı
+/// verir, `slug`/`node_key_slug` kuralları 2026-08-12'de kalktı); anahtar yalnız
+/// okunurluk için c_a ile aynı hikâyeyi anlatsın diye değiştirilmeye devam ediyor.
 fn fixture_with_anchorless_node(c_a: Value) -> Value {
     let mut v = fixture_value();
     let nodes = v["nodes"].as_object_mut().unwrap();
@@ -2880,4 +2879,121 @@ fn transition_when_still_allows_actor_reference() {
     v["transitions"][0] = t2;
     let report = validate_value(v);
     assert!(!has_error(&report, "grant_when_actor_ref"));
+}
+
+// ============================================ node-seviyesi `listable[]` (2026-08-13)
+// node-listable-design.md: `nodes.<key>.listable[]` kök `listable`/`wf_admin` ile AYNI
+// şekli (`CaGrantRule`) ve AYNI denetimlerden geçer — tek fark ömür (duruma bağlı).
+
+/// Geçerli bir node `listable[]` kuralı temiz geçer.
+#[test]
+fn valid_node_listable_rule_passes() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } },
+        { "c_a": { "c_u": ["ahmet"] }, "when": "$ctx.credit_info.amount_requested > 100000" }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "geçerli node listable hata üretmemeli: {:#?}",
+        report.errors
+    );
+}
+
+/// `nodes.<key>.listable[].when` ifade denetimine girer — kök `listable[].when`
+/// ile AYNI kapı (expr_types tip denetimi dahil, runtime-semantics.md §6a-1).
+#[test]
+fn node_listable_when_expression_is_validated() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] = json!([{
+        "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+        // count'un iki argümanlı olması gerekir (WOR-84) — bu form parse hatası verir.
+        "when": "count(filter($wfah, #.action == \"Onayla\")) > 0"
+    }]);
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.path.starts_with("nodes[self__creditAnalyst].listable[0].when")),
+        "nodes.<key>.listable[].when denetlenmeli, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// `nodes.<key>.listable[].when` içinde `$actor` YASAK — kök `listable`/`wf_admin`
+/// guard'ıyla AYNI gerekçe: bu kural görünürlük projeksiyonuna viewer henüz
+/// bilinmezken yazılır.
+#[test]
+fn node_listable_when_rejects_actor_reference() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+          "when": "$actor.role == \"branchManager\"" }
+    ]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "grant_when_actor_ref"),
+        "grant_when_actor_ref beklenmişti, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// `$actor` İÇERMEYEN guard serbest — node listable'da da `when` işlevsiz kalmamalı.
+#[test]
+fn node_listable_when_allows_ctx_reference() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] },
+          "when": "$ctx.credit_info.amount_requested >= 100000" }
+    ]);
+    let report = validate_value(v);
+    assert!(!has_error(&report, "grant_when_actor_ref"), "{:#?}", report.errors);
+}
+
+/// Çapasız (`c_orgu` yok) node `listable[]` kuralında `c_r` YASAK — `check_c_a_shape`
+/// dokümanı doc-geniş (`serde_json::to_value(wfd)`) tarar, node listable otomatik dahildir.
+#[test]
+fn node_listable_anchorless_rule_cannot_carry_role() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] =
+        json!([{ "c_a": { "c_r": ["branchManager"], "c_u": ["ahmet"] } }]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "c_a_anchorless_role"),
+        "çapasız node listable kuralı rol taşımamalı: {:#?}",
+        report.errors
+    );
+}
+
+/// Ne çapa ne kişi taşıyan node `listable[]` kuralı HİÇ KİMSEYLE eşleşmez → hata.
+#[test]
+fn node_listable_empty_rule_is_rejected() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] = json!([{ "c_a": {} }]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "c_a_anchorless_needs_user"),
+        "boş node listable kuralı reddedilmeli: {:#?}",
+        report.errors
+    );
+}
+
+/// `c_orgu` anchor'ı context şemasında olmayan bir alanı işaret ediyorsa node
+/// `listable[]` de kök `listable` ile AYNI kapıdan geçer (`check_c_orgu_anchor_kinds`
+/// — doc-geniş tarama, `x-wf-kind` bilgisi context şemasından okunur).
+#[test]
+fn node_listable_bad_c_orgu_anchor_is_caught() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["listable"] = json!([{
+        "c_a": { "c_orgu": { "from": "$ctx.no_such_field", "traverse": "self" },
+                 "c_u": ["ahmet"] }
+    }]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "c_orgu_anchor_unknown_field"),
+        "node listable c_orgu anchor'ı context şemasıyla doğrulanmalı: {:#?}",
+        report.errors
+    );
 }

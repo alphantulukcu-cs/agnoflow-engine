@@ -17,6 +17,22 @@ pub async fn get(pool: &PgPool, wfe_id: Uuid) -> Result<WfeRow, WfeError> {
     .ok_or_else(|| WfeError::NotFound(wfe_id.to_string()))
 }
 
+/// `get`in TOPLU hâli — TEK sorgu, `WfeStore::load_many` için. Bulunamayan id
+/// sonuçta YER ALMAZ (tek-WFE yolundaki `NotFound`un karşılığı); çağıran eksik
+/// satırı "durumu okuyamadım" olarak yorumlar.
+pub async fn get_many(pool: &PgPool, wfe_ids: &[Uuid]) -> Result<Vec<WfeRow>, WfeError> {
+    if wfe_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query_as::<_, WfeRow>(&format!(
+        "SELECT {WFE_COLUMNS} FROM wf.wfe WHERE wfe_id = ANY($1)"
+    ))
+    .bind(wfe_ids)
+    .fetch_all(pool)
+    .await
+    .map_err(WfeError::Database)
+}
+
 pub async fn list_by_tenant(
     pool: &PgPool,
     orgtnt_id: Uuid,

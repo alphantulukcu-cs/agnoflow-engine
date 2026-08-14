@@ -9,7 +9,7 @@ Alınan tasarım kararları: `docs/spec/decisions.md`.
 
 | Crate | Sorumluluk |
 |---|---|
-| `wfe-core` | Saf engine. `types/wfd_v22` (model+slug), `validator` (cross-ref/slug/graf/expression), `v22/` runtime: `eval` (ZEN namespace'leri), `resolver` (c_orgu), `matcher` (§3 authorize), `visibility` (§4 AYRI matcher), `effects` ($-string), `pipeline` (§7 atomik transition + trigger retry/catch/timeout + escalation), `ports` (WfdStore/WfeStore/AutoexecRunner). I/O YOK. |
+| `wfe-core` | Saf engine. `types/wfd_v22` (model + `canonical()` tekillik formu; **slug ÜRETİMİ 2026-08-14'te SİLİNDİ** — kimlik tasarımcının, slug önerisi editörün işi), `validator` (cross-ref/`duplicate_c_a`/graf/expression), `v22/` runtime: `eval` (ZEN namespace'leri), `resolver` (c_orgu), `matcher` (§3 authorize), `visibility` (§4 AYRI matcher), `effects` ($-string), `pipeline` (§7 atomik transition + trigger retry/catch/timeout + escalation), `ports` (WfdStore/WfeStore/AutoexecRunner). I/O YOK. |
 | `org` | ORGT/ORGU/ORGTNT/UR repo + ORGTRVLANG parser/executor (ltree SQL). |
 | `wfd` | WFD depolama: meta PostgreSQL, JSON OpenDAL. Upload/fetch'te v2.2 kapısı + validator; (wfd_id,version) immutable cache. |
 | `wfe` | Adapter'lar: `WfeAdapter` (WfeStore — create/commit TEK transaction, claim CAS), `OrgAdapter`, `LiveAutoexecRunner` (rest/sql/calc), `WfeExecutor` (orkestrasyon + `tick_timers`), `sim` (store'suz simülasyon durumu). |
@@ -18,21 +18,26 @@ Alınan tasarım kararları: `docs/spec/decisions.md`.
 ## Değişmezler (spec'ten)
 
 - **Node kimliğini TASARIMCI verir** (2026-08-12, KIRICI): `node key == slug(c_a)` kuralı
-  ve `duplicate_c_a` (hata olarak) KALDIRILDI (`validator.rs` §2b notu). `c_a` node'un bir ALANIDIR,
-  kimliği değil → org yolu (ORGTRVLANG) artık anahtara sızmıyor, "kim yapar"ı değiştirmek
-  adımın kimliğini bozmuyor ve aynı kişinin İKİ farklı adımı olabiliyor ("müdür inceler" +
-  "müdür onaylar"). Biçim kısıtı şemada duruyor (`nodes` propertyNames: `idName`).
+  KALDIRILDI (`validator.rs` §2b notu). `c_a` node'un bir ALANIDIR, kimliği değil → org
+  yolu (ORGTRVLANG) artık anahtara sızmıyor ve "kim yapar"ı değiştirmek adımın kimliğini
+  bozmuyor. Biçim kısıtı şemada duruyor (`nodes` propertyNames: `idName`).
   **Veri taşıması YOK** — yalnız kısıt kalktı, mevcut anahtarlar deseni zaten sağlıyor.
-  `duplicate_c_a` UYARIYA döndü (`shared_c_a`): paralel kolda GEREKLİ (kol kimliği node
-  anahtarıdır — K-of-N quorum aynı havuzdan N kol ister), ardışık adımda ise modelleme
-  hatası (tek node + aksiyonların `when`i).
+- **Aynı `c_a` = aynı kimlik** (2026-08-14, KIRICI — geri getirildi): `duplicate_c_a`
+  yeniden **HATA** (2026-08-12'de `shared_c_a` uyarısına çevrilmişti). Bir canonical `c_a`
+  belgede EN FAZLA BİR node'da bulunabilir; aynı kimlik daima aynı `c_a`'yı taşır. Kimlik
+  hâlâ tasarımcınındır — geri gelen tek şey TEKİLLİK. Ardışık adımların ("müdür inceler" +
+  "müdür onaylar") farkı TEK node + aksiyonların `when`iyle (`$wfah`) verilir. **Paralel
+  kolda "aynı havuzdan iki kol" ŞİMDİLİK DESTEKLENMEZ** (kol kimliği node anahtarıdır →
+  K-of-N quorum'un N kolu aynı havuza bakamaz) — bilinçli, GEÇİCİ kısıt. Gerekçe ve feda
+  edilenler: `docs/spec/decisions.md` 2026-08-14; kırıcılık + düzeltme reçetesi:
+  `docs/spec/migration-notes.md` M18.
 - **Ham JSON'da ÇİFT node anahtarı REDDEDİLİR** (`wfe_core::dupkeys`): `serde_json` çift
   anahtarı hata saymaz, sessizce SONUNCUYU alır — kimlik tasarımcıya geçtiği için iki
   adım aynı adı alırsa biri iz bırakmadan kaybolur ve akış çizilenden başka bir şey
   yapardı. Kapı ancak HAM METİNDE kurulabilir (`Value`ya dönmüş belgede çakışma zaten
   silinmiştir): `Wfd::from_json`/`from_json_checked` + `POST /wfd` (bu uç bu yüzden
   `Json<UploadBody>` değil `Bytes` alır).
-- C_A **TEK KURALDIR**, iki biçim: **çapalı** `{c_orgu, c_r?, c_u?}` → match = `resolved(c_orgu) AND (rol OR c_u)`; **çapasız** `{c_u}` (c_orgu HİÇ yok) → match = `c_u`, kişi tenant genelinde eşleşir. Çapasızda `c_u` zorunlu, **`c_r` YASAK** (şema `oneOf` + validator `c_a_anchorless_role` + matcher rol kanalını hiç sormaz). Verilmeyen alan **false** (wildcard değil); c_u rol-agnostik. Çapasız aday cache girdisi birim taşımaz (`any_orgu: true`), havuz sorgusunda ayrı filtre.
+- C_A **TEK KURALDIR**, iki biçim: **çapalı** `{c_orgu, c_r?, c_u?}` → match = `resolved(c_orgu) AND (rol OR c_u)`; **çapasız** `{c_u}` (c_orgu HİÇ yok) → match = `c_u`, kişi tenant genelinde eşleşir. Çapasızda `c_u` zorunlu, **`c_r` YASAK** (şema `oneOf` + validator `c_a_anchorless_role` + matcher rol kanalını hiç sormaz). Verilmeyen alan **false** (wildcard değil); c_u rol-agnostik. Çapasız aday cache girdisi birim taşımaz (`any_orgu: true`), görünürlük predicate'inde ayrı kanal (`ViewerFilters`).
 - Transition: `from` + `action`; aynı (node, action) için array sırasında İLK when-match.
 - wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`.
 - Pipeline atomiktir: tüm diff'ler staged, `WfeStore::commit` tek transaction; unhandled fail'de hiçbir şey yazılmaz. Node değişiminde assignment (claimed_by) sıfırlanır.
@@ -245,6 +250,30 @@ Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap pro
 - **Tek yer**: `wf_wfe::visibility::sql`. Liste ucu, detay kapısı (`VisibilityPort` →
   `WfeExecutor::query`) ve portal havuzu AYNI parçayı koşar. Çekirdeğin `can_view`'i
   referans okumadır (sim/testler); eşitliği `visibility_report` ölçer.
+  **Havuz 2026-08-14'te bağlandı** (`routes::portal::pool`, İKİ sorgu da): kendi
+  `WHERE`'i vardı ve node listable kolonlarını tanımıyordu. Kol başına CANLI adaylık
+  çözümü (`authorize` + kök `listable` fold'u) kalktı — karşılığı `wfe_branch.c_a`
+  projeksiyonu, parçanın kol EXISTS'i onu sorar. Havuzun kendi süzgeçleri
+  (`status='active'`, `deadline`, `current_node IS NOT NULL`) görünürlük DEĞİL,
+  "bu satır bir havuz görevi mi" sorusudur; sonuncusu paralel WFE'nin hem node'suz
+  WFE satırı hem kol satırlarıyla iki kez listelenmesini önler.
+- **Havuzda görünmek claim edebilmek DEĞİLDİR**: claim kapısı node `c_a`'sına bakar
+  (`WfeExecutor::can_claim`/`claim`; projeksiyon kolonu okumaz) ve görünürlük filtresi
+  genişledikçe gevşemez. **Havuz cevabı artık bu ayrımı TAŞIR** (2026-08-14):
+  `PoolTask.can_claim` (alan EKLENDİ, hiçbir mevcut alan değişmedi). Sebep: görünürlük
+  tek predicate'e bağlanınca kapsam genişledi (kök `listable`, node `listable`,
+  `wf_admin` de satır üretiyor) ve kullanıcı claim edemeyeceği satırı diğerlerinden
+  ayırt edemiyor, düğmeye basıp `403` yiyordu. Alan kararı ÜRETMEZ, ÖDÜNÇ ALIR:
+  `WfeExecutor::can_claim_many` → `can_claim_loaded`, yani `can_claim`/`claim`
+  uçlarının GÖVDESİ (`Engine::can_claim` → matcher → node `c_a`). Havuzda ikinci bir
+  claim kuralı YOKTUR; ayrışırlarsa `can_claim_many_matches_can_claim_row_by_row`
+  patlar. Kol satırında karar KOLUN node'una göre verilir, WFE seviyesine göre DEĞİL.
+  Claim başkasındaysa `false`, sahibi çağıran ise `true` (idempotent re-claim);
+  durumu/WFD'si okunamayan satırda `false` (fail-closed). **N+1 yok**: `rev`/not
+  sayaçlarıyla aynı desen — tek `WfeStore::load_many` + sürüm başına bir WFD
+  (adapter cache'i), karar üretimi saf CPU. Tekil uç
+  `GET /portal/pool/{wfe_id}/can-claim` DURUYOR (gerekçe `reason` oradan okunur),
+  ama istemcinin satır başına çağırmasına gerek YOK.
 - **ORGTRVLANG çapası WFE'nin birimidir** (`wf.wfe.origin_orgu_id`, start'ta donar), soran
   kişinin DEĞİL — `matcher::authorize_anchored`. Görünürlük, aksiyon, claim ve reassign
   kapılarının HEPSİ bu çapayı kullanır. `NULL` = backfill bekliyor → eski davranış.

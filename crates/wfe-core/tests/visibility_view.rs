@@ -26,11 +26,12 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::{CaGrantRule, COrgu, CandidateActor, JoinRule};
+use wfe_core::types::wfd_v22::{AutoexecDef, CaGrantRule, COrgu, CandidateActor, JoinRule};
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::types::wfd_v22::WftTarget;
 use wfe_core::types::wfe::WfeStatus;
-use wfe_core::v22::ports::{BranchState, BranchStatus, Wfes};
+use wfe_core::v22::pipeline::{ClaimCheck, Engine};
+use wfe_core::v22::ports::{AutoexecRunner, BranchState, BranchStatus, ExecEnv, ExecFailure, Wfes};
 use wfe_core::v22::visibility::can_view;
 
 const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
@@ -612,4 +613,283 @@ async fn listable_when_guard_still_gates_after_anchor_change() {
     high.status = WfeStatus::Terminal;
     high.current_node = None;
     assert!(can_view(&golden(), &high, &dept, &org).await.unwrap());
+}
+
+// ============================================ (f) node-seviyesi `listable[]`
+//
+// node-listable-design.md: kök `listable[]`in DURUMA BAĞLI karşılığı — WFE bu
+// node'da İKEN kurallardan birine uyan aktör görür, node'dan çıkınca (b) gibi
+// görünürlük de biter. ACT/claim VERMEZ.
+
+/// `self__creditAnalyst` node'una `listable[]` ekler, kök `listable`'ı KAPATIR
+/// (yalnız (f) tek başına sınansın) — `golden_with_wf_admin` ile aynı desen.
+fn golden_with_node_listable(when: Option<&str>) -> Wfd {
+    let mut wfd = golden();
+    wfd.listable.clear();
+    wfd.nodes.get_mut("self__creditAnalyst").unwrap().listable = vec![CaGrantRule {
+        c_a: CandidateActor {
+            c_orgu: Some(COrgu::Selector("self".into())),
+            c_r: Some(vec!["branchManager".into()]),
+            c_u: None,
+        },
+        when: when.map(String::from),
+    }];
+    wfd
+}
+
+/// (a) WFE `self__creditAnalyst` node'undayken, node `listable[]` kuralına uyan
+/// aktör (branchManager, node c_a'sı olan creditAnalyst DEĞİL) WFE'yi görür.
+#[tokio::test]
+async fn node_listable_actor_can_view_while_wfe_is_at_that_node() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let m = manager(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(orgu);
+
+    assert!(can_view(&golden_with_node_listable(None), &wfes, &m, &org)
+        .await
+        .unwrap());
+}
+
+/// (b) Aynı aktör, AYNI WFD, ama WFE başka bir node'a geçmiş: `nodes.<key>.listable`
+/// DURUMA BAĞLIDIR — node değişince görünürlük de biter (kök `listable` KALICI
+/// olsaydı bu senaryoda da görünür kalırdı; bu test tam o farkı sınar).
+/// `parent__creditDeptManager` seçildi çünkü kendi `c_a`'sı da branchManager'ı
+/// KAPSAMAZ (creditDeptManager ister) — kriterin (c) değil (f)'in düştüğünü ölçer.
+#[tokio::test]
+async fn node_listable_actor_cannot_view_once_wfe_leaves_that_node() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let m = manager(orgu);
+    let mut wfes = wfes_at("parent__creditDeptManager", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(orgu);
+
+    assert!(!can_view(&golden_with_node_listable(None), &wfes, &m, &org)
+        .await
+        .unwrap());
+}
+
+/// (d) `when` guard'ı false ise — node c_a eşleşse de — görünmez.
+#[tokio::test]
+async fn node_listable_when_false_cannot_view() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let m = manager(orgu);
+    let gated = golden_with_node_listable(Some(
+        "$ctx.credit_info.amount_requested >= 100000",
+    ));
+
+    let mut low = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    low.origin_orgu_id = Some(orgu);
+    assert!(!can_view(&gated, &low, &m, &org).await.unwrap());
+
+    let mut high = wfes_at("self__creditAnalyst", None, start_input(150_000));
+    high.origin_orgu_id = Some(orgu);
+    assert!(can_view(&gated, &high, &m, &org).await.unwrap());
+}
+
+/// `can_claim` autoexec KOŞTURMAZ — runner'a hiç dokunulmaz.
+struct UnusedRunner;
+#[async_trait]
+impl AutoexecRunner for UnusedRunner {
+    async fn run(&self, _def: &AutoexecDef, _env: &ExecEnv) -> Result<Value, ExecFailure> {
+        unreachable!("can_claim autoexec çalıştırmaz")
+    }
+}
+
+/// Claim kararının SAF çekirdeği — `WfeExecutor::can_claim_loaded` (dolayısıyla
+/// `can_claim`/`claim` uçları VE havuzun `PoolTask.can_claim` alanı) bunu çağırır.
+async fn claim_check(
+    wfd: &Wfd,
+    wfes: &Wfes,
+    actor: &Actor,
+    branch: Option<&str>,
+    org: &MockOrg,
+) -> ClaimCheck {
+    let runner = UnusedRunner;
+    let engine = Engine {
+        org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    engine.can_claim(wfd, wfes, actor, branch).await.unwrap()
+}
+
+/// (c) node `listable[]`e uyan aktör WFE'yi GÖRÜR ama `can_claim` node `c_a`'sını
+/// (creditAnalyst) sorar — branchManager o kurala uymadığı için ACT/claim ALAMAZ.
+/// node listable "görme"dir, "yapma" değil.
+#[tokio::test]
+async fn node_listable_actor_can_view_but_cannot_claim() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let m = manager(orgu);
+    let wfd = golden_with_node_listable(None);
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(orgu);
+
+    // (f) görme hakkı VAR.
+    assert!(can_view(&wfd, &wfes, &m, &org).await.unwrap());
+
+    // ama claim YOK — node c_a'sı creditAnalyst, branchManager ona uymuyor.
+    assert_eq!(
+        claim_check(&wfd, &wfes, &m, None, &org).await,
+        ClaimCheck::NotEligible
+    );
+}
+
+// ================================ havuz cevabının taşıdığı karar (2026-08-14)
+//
+// `PoolTask.can_claim` görünürlükten AYRI olan claim kararını taşır; kararı
+// ÜRETMEZ, `WfeExecutor::can_claim_loaded` → `Engine::can_claim`'den ödünç alır.
+// Bu repoda DB'li test koşmadığı için bekçiler o SAF çekirdeğin üstünde durur:
+// havuz alanı yalnız bu cevabın aktarımıdır.
+
+/// (a) Node `c_a`'sına uyan aktör claim EDEBİLİR → havuzda `can_claim: true`.
+#[tokio::test]
+async fn pool_claim_decision_true_for_node_c_a_actor() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    // self__creditAnalyst node c_a = {c_orgu: self, c_r: [creditAnalyst]}
+    let a = analyst(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(orgu);
+
+    assert_eq!(
+        claim_check(&golden(), &wfes, &a, None, &org).await,
+        ClaimCheck::Ok
+    );
+}
+
+/// (b) KRİTİK İDDİA: satırı YALNIZ `listable` / `wf_admin` üzerinden gören aktör
+/// claim EDEMEZ. Havuz görünürlüğü tek predicate'e bağlanınca kapsam tam bu iki
+/// kanalla genişledi; alan bu yüzden var — kullanıcı görebildiği ama
+/// alamayacağı satırı ayırt edebilsin, düğmeye basıp 403 yemesin.
+#[tokio::test]
+async fn pool_claim_decision_false_for_listable_and_wf_admin_only_viewers() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    // Kök `listable[0]` = branchManager (guard'sız), `wf_admin` = creditDeptManager.
+    let mut wfd = golden();
+    wfd.wf_admin = vec![CaGrantRule {
+        c_a: CandidateActor {
+            c_orgu: Some(COrgu::Selector("self".into())),
+            c_r: Some(vec!["creditDeptManager".into()]),
+            c_u: None,
+        },
+        when: None,
+    }];
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
+    wfes.origin_orgu_id = Some(orgu);
+
+    let m = manager(orgu); // kök listable
+    let admin = credit_dept_manager(orgu); // wf_admin (listable[1]'in when'i 30k'da false)
+
+    // İkisi de havuzda satır ÜRETİR (görünürlük).
+    assert!(can_view(&wfd, &wfes, &m, &org).await.unwrap());
+    assert!(can_view(&wfd, &wfes, &admin, &org).await.unwrap());
+
+    // Ama HİÇBİRİ claim edemez: node `c_a`'sı creditAnalyst.
+    assert_eq!(
+        claim_check(&wfd, &wfes, &m, None, &org).await,
+        ClaimCheck::NotEligible,
+        "kök listable görünürlük verir, claim VERMEZ"
+    );
+    assert_eq!(
+        claim_check(&wfd, &wfes, &admin, None, &org).await,
+        ClaimCheck::NotEligible,
+        "wf_admin görünürlük verir, claim VERMEZ"
+    );
+}
+
+/// (c) Paralel kol satırında karar KOLUN node'una göre verilir — WFE seviyesine
+/// göre DEĞİL. Havuz kol satırı için hedef olarak kolun node'unu geçirir.
+#[tokio::test]
+async fn pool_claim_decision_is_per_branch_node() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+    let fin = role_actor(orgu, "financeApprover");
+    let mut wfes = parallel_wfes(vec![
+        branch("self__financeApprover", BranchStatus::Active, None),
+        branch("self__legalApprover", BranchStatus::Active, None),
+    ]);
+    wfes.origin_orgu_id = Some(orgu);
+    let wfd = paralel();
+
+    // Kendi kolunda uygun…
+    assert_eq!(
+        claim_check(&wfd, &wfes, &fin, Some("self__financeApprover"), &org).await,
+        ClaimCheck::Ok
+    );
+    // …kardeş kolda DEĞİL. WFE'yi görüyor olması (kol c_a kanalı) o kolu
+    // alabildiği anlamına gelmez.
+    assert!(can_view(&wfd, &wfes, &fin, &org).await.unwrap());
+    assert_eq!(
+        claim_check(&wfd, &wfes, &fin, Some("self__legalApprover"), &org).await,
+        ClaimCheck::NotEligible
+    );
+    // Kol ipucu olmadan paralel modda karar verilemez (current_node NULL).
+    assert_eq!(
+        claim_check(&wfd, &wfes, &fin, None, &org).await,
+        ClaimCheck::NotEligible
+    );
+}
+
+/// Zaten claim EDİLMİŞ satır: claim BAŞKASINDAysa uygunluk yok
+/// (`AlreadyClaimed` → havuzda `can_claim: false`). Kol claim'i KOL-bazlı
+/// okunur: kardeş kol hâlâ boşsa o kol claim edilebilir kalır.
+#[tokio::test]
+async fn pool_claim_decision_false_when_another_actor_holds_the_claim() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let orgu = Uuid::new_v4();
+
+    // Tek-kol: wfe-seviyesi assignment başkasında.
+    let a = analyst(orgu);
+    let mut single = wfes_at(
+        "self__creditAnalyst",
+        Some(Uuid::new_v4()),
+        start_input(30_000),
+    );
+    single.origin_orgu_id = Some(orgu);
+    assert_eq!(
+        claim_check(&golden(), &single, &a, None, &org).await,
+        ClaimCheck::AlreadyClaimed
+    );
+
+    // Paralel: kolu başkası tutuyor → o kol AlreadyClaimed, kardeş kol serbest.
+    let fin = role_actor(orgu, "financeApprover");
+    let leg = role_actor(orgu, "legalApprover");
+    let mut par = parallel_wfes(vec![
+        branch(
+            "self__financeApprover",
+            BranchStatus::Active,
+            Some(Uuid::new_v4()),
+        ),
+        branch("self__legalApprover", BranchStatus::Active, None),
+    ]);
+    par.origin_orgu_id = Some(orgu);
+    assert_eq!(
+        claim_check(&paralel(), &par, &fin, Some("self__financeApprover"), &org).await,
+        ClaimCheck::AlreadyClaimed
+    );
+    assert_eq!(
+        claim_check(&paralel(), &par, &leg, Some("self__legalApprover"), &org).await,
+        ClaimCheck::Ok
+    );
 }

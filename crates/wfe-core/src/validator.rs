@@ -76,7 +76,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     let mut report = ValidationReport::default();
     check_calls(wfd, &mut report);
     check_uniqueness(wfd, &mut report);
-    check_shared_c_a(wfd, &mut report);
+    check_duplicate_c_a(wfd, &mut report);
     check_cross_refs(wfd, &mut report);
     check_global_targets(wfd, &mut report);
     check_start_rules(wfd, &mut report);
@@ -1218,53 +1218,61 @@ fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
     }
 }
 
-// ---- §2b (KALDIRILDI): node key ARTIK `slug(c_a)`dan TÜRETİLMEZ ----
+// ---- §2b: node key `slug(c_a)`dan TÜRETİLMEZ, ama c_a ile BİRE BİRDİR ----
+//
+// TARİHÇE — iki ayrı karar, karıştırılmamalı:
 //
 // 2026-08-12: node kimliğini tasarımcı verir; `c_a` node'un bir ALANIDIR, kimliği değil.
-// Eski kural iki şeyi birden dayatıyordu ve ikisi de zarardı:
+// Eski kural iki şeyi birden dayatıyordu:
 //
 //   • `node key == slug(c_a)` → kimlik org yolunu (ORGTRVLANG) taşıyordu ve "bu adımı
 //     kim yapar"ı değiştirmek adımın KİMLİĞİNİ değiştiriyordu: koşan işler eski
-//     anahtarı gösterirken belge yeni anahtara geçiyordu.
-//   • `duplicate_c_a` → aynı kişinin iki farklı adımı olamıyordu ("müdür inceler" +
-//     "müdür onaylar" yazılamıyordu), çünkü ikisinin anahtarı aynı düşerdi.
+//     anahtarı gösterirken belge yeni anahtara geçiyordu. Bu kısıt KALKTI ve GERİ
+//     GELMEDİ — kimlik hâlâ tasarımcınındır.
+//   • `duplicate_c_a` → o gün bu da kaldırıldı (uyarıya, `shared_c_a`, döndü), gerekçe:
+//     "aynı kişinin iki farklı adımı olamıyor" ve paralel kolda aynı havuzdan iki kol
+//     açılamıyor.
 //
-// Anahtarın BİÇİMİ hâlâ zorlanıyor ama şemada: `nodes` `propertyNames: idName`
-// (`^[A-Za-z_][A-Za-z0-9_-]*$`). Benzersizlik zaten yapısaldır (JSON objesi anahtarı)
+// 2026-08-14 (GERİ GETİRİLDİ, HATA): `duplicate_c_a` yeniden HATA. Sebep: uyarı
+// döneminde tasarımcılar aynı havuzu iki node olarak çizdiğinde motor iki AYRI bekleme
+// noktası üretiyordu — aynı kişi havuzunda iki ayrı "sıra sende" satırı, iki ayrı claim,
+// iki ayrı geçmiş dalı. Bu, çizeni de o havuzdaki insanı da yanıltıyordu. Yeni değişmez:
+// **aynı c_a = aynı kimlik, aynı kimlik = aynı c_a** → bir canonical c_a belgede EN
+// FAZLA BİR node'da bulunabilir. Ardışık adım farkı aksiyonların `when` koşuluyla
+// ($wfah) verilir. FEDA EDİLEN: paralel kolda "aynı havuzdan iki kol" (K-of-N quorum'un
+// N kolu aynı havuza bakamaz) — bilinçli ve GEÇİCİ kısıt.
+//
+// Anahtarın BİÇİMİ şemada zorlanır: `nodes` `propertyNames: idName`
+// (`^[A-Za-z_][A-Za-z0-9_-]*$`). Anahtar benzersizliği yapısaldır (JSON objesi anahtarı)
 // ve node/terminal ortak isim uzayı çakışması `check_uniqueness`te denetlenir.
-//
-// GERİYE UYUMLU: yalnız KISIT KALKTI, yeni bir kısıt gelmedi — `self__creditAnalyst`
-// gibi mevcut anahtarlar deseni zaten sağlıyor, hiçbir belge geçersizleşmez ve koşan
-// WFE'ler kendi belgelerindeki anahtarlarla çalışmaya devam eder. Veri taşıması YOK.
 
-/// Aynı `c_a`'yı taşıyan iki node — HATA DEĞİL, UYARI (2026-08-12).
+/// Aynı `c_a`'yı taşıyan iki node — HATA (2026-08-14'te geri getirildi).
 ///
-/// Eskiden hataydı, çünkü node kimliği `slug(c_a)`dan türüyordu ve iki node aynı
-/// anahtara düşerdi. Kimlik tasarımcıya geçince kural anlamını yitirdi, ama tamamen
-/// kaldırmak da yanlış: iki durumu ayırt etmek gerekiyor.
+/// Değişmez: **aynı c_a = aynı kimlik**. Bir canonical c_a belgede EN FAZLA BİR node'da
+/// bulunabilir; aynı kimlik de daima aynı c_a'yı taşır. Kimliği yine TASARIMCI verir
+/// (2026-08-12 kararı duruyor, kimlik `slug(c_a)` DEĞİLDİR) — geri gelen tek şey
+/// TEKİLLİK kısıtıdır.
 ///
-/// **Meşru:** paralel kollar. Kol kimliği node anahtarıdır (`BranchState.branch_node`);
-/// aynı havuzun İKİ KOLDA EŞZAMANLI beklemesi ancak iki ayrı node ile ifade edilebilir.
-/// Yasak olsaydı "müdür hem hukuk hem mali kolu onaylasın" çizilemezdi.
+/// **Ardışık adımlar:** "Müdür inceler" ve "müdür nihai onayı verir" aynı havuzdur →
+/// AYNI node'dur; fark alınan AKSİYONDADIR ve aksiyonun `when` koşuluyla (`$wfah`
+/// üzerinden "önceki aksiyon şuydu") ayrılır. İki node açmak motorda iki ayrı bekleme
+/// noktası üretir: aynı havuzda iki "sıra sende" satırı, iki claim, bölünmüş geçmiş.
 ///
-/// **Modelleme hatası:** ARDIŞIK adımlar. "Müdür inceler" ve "müdür nihai onayı verir"
-/// aynı havuzdur → AYNI node'dur; fark alınan AKSİYONDADIR ve aksiyonun `when`i ile
-/// (`$wfah` üzerinden "önceki aksiyon şuydu") ayrılır. İki node açmak akışı gereksizce
-/// çoğaltır ve geçmişe bakan koşulları bölerek okunmaz hale getirir.
-///
-/// Motor ikisini ayırt edemez (graf yapısına bakmadan bilinemez), bu yüzden karar
-/// tasarımcıya bırakılır: uyarı çıkar, yayın durmaz.
-fn check_shared_c_a(wfd: &Wfd, report: &mut ValidationReport) {
+/// **Paralel kolda aynı havuzdan iki kol ŞİMDİLİK DESTEKLENMEZ:** kol kimliği node
+/// anahtarıdır (`BranchState.branch_node`), dolayısıyla aynı havuza bakan iki kol iki
+/// node ister — bu kural onu yasaklar. Bilinçli, geçici kısıt (kararın gerekçesi ve
+/// feda edileni `docs/spec/decisions.md`, 2026-08-14).
+fn check_duplicate_c_a(wfd: &Wfd, report: &mut ValidationReport) {
     let mut seen: HashMap<String, &String> = HashMap::new();
     for (key, node) in &wfd.nodes {
         if let Some(prev) = seen.insert(node.c_a.canonical(), key) {
-            report.warn(
-                "shared_c_a",
+            report.error(
+                "duplicate_c_a",
                 format!("nodes[{key}]"),
                 format!(
-                    "'{prev}' ve '{key}' AYNI c_a'yı taşıyor. Paralel kollarda bu \
-                     gereklidir; ardışık adımlarsa muhtemelen TEK node olmalı ve fark \
-                     aksiyonların `when` koşuluyla ($wfah) verilmelidir."
+                    "'{prev}' ve '{key}' AYNI c_a'yı taşıyor. Aynı c_a TEK node demektir: \
+                     ardışık adımların farkı aksiyonların `when` koşuluyla ($wfah) \
+                     verilir. Paralel kolda aynı havuzdan iki kol şimdilik desteklenmiyor."
                 ),
             );
         }
@@ -2282,6 +2290,21 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         if let Some(when) = &a.when {
             check(when, format!("wf_admin[{i}].when"), report);
             grant_when_actor_ref(when, format!("wf_admin[{i}].when"), report);
+        }
+    }
+    // 2026-08-13: `nodes.<key>.listable[]` kök `listable`/`wf_admin` ile AYNI şekli
+    // (`CaGrantRule`) ve AYNI matcher'ı (`matches_grant_rules`) paylaşır — `when` guard'ı
+    // da aynı denetimden geçmeli (expr_types tip denetimi + `$actor` yasağı). `c_a` şekli
+    // ve `c_orgu` anchor denetimi zaten doc-geniş toplayıcılardan geçiyor (`check_c_a_shape`,
+    // `check_c_orgu_anchor_kinds`: `serde_json::to_value(wfd)` üzerinden yürüyorlar, yeni
+    // alan otomatik dahil olur).
+    for (key, node) in &wfd.nodes {
+        for (i, l) in node.listable.iter().enumerate() {
+            if let Some(when) = &l.when {
+                let path = format!("nodes[{key}].listable[{i}].when");
+                check(when, path.clone(), report);
+                grant_when_actor_ref(when, path, report);
+            }
         }
     }
     // WOR-84: `calc` autoexec ifadeleri. `config` şemasız `Value` olduğu için upload

@@ -273,9 +273,18 @@ pub struct TransitionCommit {
     /// DOLDURMAZ — org portuna ve WFE'nin çapasına ihtiyaç duyduğu için
     /// `WfeExecutor::fill_view_grants` doldurur (store'suz sim/testlerde boş kalır).
     pub view_c_a: Vec<ResolvedCandidate>,
+    /// Node-seviyesi görünürlük projeksiyonu (2026-08-13): VARILAN node'un
+    /// `listable[]` kurallarının çözülmüş hâli → `wf.wfe.current_view_c_a`.
+    /// `view_c_a`dan farkı ÖMÜR (terminal'de `current_c_a` ile birlikte
+    /// boşaltılır), `resolved_c_a`dan farkı YETKİ (yalnız görme, ACT/claim yok).
+    /// Aynı doldurucu yazar: `WfeExecutor::fill_view_grants`.
+    pub current_view_c_a: Vec<ResolvedCandidate>,
     /// Kol başına çözülmüş aday listesi (`wf.wfe_branch.c_a`) — fork'ta tüm
     /// kollar, kol hareketinde yalnız hareket eden kol. Aynı doldurucu yazar.
     pub branch_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
+    /// Kol başına node listable projeksiyonu (`wf.wfe_branch.view_c_a`) —
+    /// `current_view_c_a`nın kol karşılığı, `branch_c_a` ile AYNI kol kümesi.
+    pub branch_view_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
 }
 
 /// Yeni WFE oluşturma isteği — wfe_id ENGINE tarafından üretilir ve effects
@@ -301,9 +310,15 @@ pub struct NewWfe {
     pub caller: Option<CallLink>,
     /// Görünürlük projeksiyonu — bkz. `TransitionCommit::view_c_a`.
     pub view_c_a: Vec<ResolvedCandidate>,
+    /// Node listable projeksiyonu — bkz. `TransitionCommit::current_view_c_a`.
+    /// Start'ta da yazılır: aksi halde ilk node'un `listable[]`ı ilk aksiyona
+    /// kadar (o da gelmeyebilir) hiç kimseye görünmezdi.
+    pub current_view_c_a: Vec<ResolvedCandidate>,
     /// Kol başına aday listesi — start doğrudan fork'a inebilir (start kuralının
     /// wft'si parallel hedef alabilir), o hâlde kol satırları burada doğar.
     pub branch_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
+    /// Kol başına node listable projeksiyonu — bkz. `TransitionCommit::branch_view_c_a`.
+    pub branch_view_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
     /// `listable`/`wf_admin` ORGTRVLANG çapası: akışı BAŞLATAN aktörün birimi.
     /// WFE ömrü boyunca sabittir ve `view_c_a` her yeniden hesaplandığında aynı
     /// çapa kullanılır — yoksa akışa dokunan her kişi görünürlüğü kaydırırdı.
@@ -418,6 +433,32 @@ pub trait VisibilityPort: Send + Sync {
 #[async_trait]
 pub trait WfeStore: Send + Sync {
     async fn load(&self, wfe_id: Uuid) -> Result<Wfes, EngineError>;
+
+    /// TOPLU durum yüklemesi (2026-08-14). Sözleşme `load` ile AYNIdır: dönen
+    /// her `Wfes`, aynı id için `load`un döneceğinin tıpatıp aynısı olmalıdır.
+    /// Fark yalnız SORGU SAYISINDADIR — liste uçları satır başına `load`
+    /// çağırmak zorunda kalmasın (havuzun `can_claim` alanı bunun için var).
+    ///
+    /// Yüklenemeyen (silinmiş/tutarsız) WFE haritada YER ALMAZ: tek bozuk satır
+    /// tüm listeyi düşürmemeli. Çağıran "durumu okuyamadım" hâlini kendi
+    /// güvenli tarafına çevirir (havuzda `can_claim = false`).
+    ///
+    /// Varsayılan `load`u sırayla çağırır — WFC port'larıyla aynı desen: mevcut
+    /// test store'ları değişmeden derlenir, toplu okumayı yalnız gerçek adapter
+    /// (`wf_wfe::wfe_adapter::WfeAdapter`) uygular.
+    async fn load_many(
+        &self,
+        wfe_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Wfes>, EngineError> {
+        let mut out = std::collections::HashMap::with_capacity(wfe_ids.len());
+        for id in wfe_ids {
+            if let Ok(wfes) = self.load(*id).await {
+                out.insert(*id, wfes);
+            }
+        }
+        Ok(out)
+    }
+
     /// Yeni WFE'yi tüm başlangıç durumu ile TEK transaction'da yaratır.
     async fn create(&self, new: &NewWfe) -> Result<(), EngineError>;
     /// Transition sonucunu TEK transaction'da uygular:

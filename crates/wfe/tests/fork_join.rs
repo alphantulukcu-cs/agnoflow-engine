@@ -99,6 +99,11 @@ struct ParStore {
     /// bunu `wf.wfe_branch.c_a` kolonuna yazar; testte doğrulanabilmesi için
     /// mock yalnız KAYDEDER (kolon taklidi gereksiz karmaşa olurdu).
     last_branch_c_a: Mutex<Vec<(String, usize)>>,
+    /// 2026-08-13 node listable: son commit'in kol başına `branch_view_c_a`
+    /// kaydı (gerçek adapter `wf.wfe_branch.view_c_a` kolonuna yazar). `c_a`nın
+    /// YANINDA ayrı tutulur — ikisinin aynı kol kümesini kapsadığı ancak ayrı
+    /// kaydedilirse doğrulanabilir.
+    last_branch_view_c_a: Mutex<Vec<(String, usize)>>,
 }
 
 impl ParStore {
@@ -248,6 +253,11 @@ impl WfeStore for ParStore {
             .branch_c_a
             .iter()
             .map(|(node, c_a)| (node.clone(), c_a.len()))
+            .collect();
+        *self.last_branch_view_c_a.lock().unwrap() = commit
+            .branch_view_c_a
+            .iter()
+            .map(|(node, view)| (node.clone(), view.len()))
             .collect();
         if self.fail_commits.load(Ordering::SeqCst) > 0 {
             self.fail_commits.fetch_sub(1, Ordering::SeqCst);
@@ -1070,6 +1080,95 @@ async fn branch_claim_is_exclusive_per_branch() {
         .await
         .unwrap()
         .success
+    );
+}
+
+/// Havuzun `PoolTask.can_claim` alanı (2026-08-14) kararı ÜRETMEZ, ÖDÜNÇ ALIR:
+/// `can_claim_many` satır satır `can_claim` ile AYNI cevabı vermek zorundadır —
+/// ikisi de tek gövdeyi (`can_claim_loaded` → `Engine::can_claim`) çağırdığı için.
+/// Bu test o eşitliğin bekçisidir: ayrışırlarsa havuzda ikinci bir claim kuralı
+/// doğmuş olur.
+///
+/// Aynı zamanda karar KOL-bazlı olduğunu ölçer: uygun kol, kardeş kol (rol
+/// uymaz), başkasının claim'i ve KENDİ claim'i tek geçişte sorulur.
+#[tokio::test]
+async fn can_claim_many_matches_can_claim_row_by_row() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    // finance kolunu claim et: bir satır "KENDİ claim'i", aynı satır başka bir
+    // financeApprover için "başkasının claim'i" olur.
+    let owner = actor("financeApprover");
+    assert!(
+        exec.claim(wfe_id, &owner, Some("self__financeApprover"), None)
+            .await
+            .unwrap()
+            .success
+    );
+
+    let nodes = [
+        "self__financeApprover",
+        "self__legalApprover",
+        "self__hrApprover",
+    ];
+    // Havuzun kol satırları için geçirdiği hedef listesinin aynısı.
+    let targets: Vec<(Uuid, Option<String>)> =
+        nodes.iter().map(|n| (wfe_id, Some(n.to_string()))).collect();
+
+    let other_finance = actor("financeApprover");
+    let legal = actor("legalApprover");
+    let outsider = actor("requester");
+
+    for viewer in [&owner, &other_finance, &legal, &outsider] {
+        let bulk = exec.can_claim_many(&targets, viewer).await.unwrap();
+        for node in nodes {
+            let (single, reason) = exec.can_claim(wfe_id, viewer, Some(node)).await.unwrap();
+            assert_eq!(
+                bulk.get(&(wfe_id, Some(node.to_string()))).copied(),
+                Some(single),
+                "{} / {node}: toplu karar tekil karardan ayrıştı (reason={reason:?})",
+                viewer.role
+            );
+        }
+    }
+
+    // Beklenen tablo — eşitlik testinin ikisi de yanlışken de geçmesini engeller.
+    let bulk_owner = exec.can_claim_many(&targets, &owner).await.unwrap();
+    assert_eq!(
+        bulk_owner[&(wfe_id, Some("self__financeApprover".into()))],
+        true,
+        "kolun SAHİBİ kendi satırında can_claim: true görür (idempotent re-claim)"
+    );
+    assert_eq!(
+        bulk_owner[&(wfe_id, Some("self__legalApprover".into()))],
+        false,
+        "karar KOLUN node'una göre: financeApprover legal kolunu alamaz"
+    );
+
+    let bulk_other = exec.can_claim_many(&targets, &other_finance).await.unwrap();
+    assert_eq!(
+        bulk_other[&(wfe_id, Some("self__financeApprover".into()))],
+        false,
+        "claim BAŞKASINDA → can_claim: false"
+    );
+
+    let bulk_legal = exec.can_claim_many(&targets, &legal).await.unwrap();
+    assert_eq!(
+        bulk_legal[&(wfe_id, Some("self__legalApprover".into()))],
+        true
+    );
+    assert_eq!(
+        bulk_legal[&(wfe_id, Some("self__hrApprover".into()))],
+        false
+    );
+
+    let bulk_outsider = exec.can_claim_many(&targets, &outsider).await.unwrap();
+    assert!(
+        nodes
+            .iter()
+            .all(|n| !bulk_outsider[&(wfe_id, Some(n.to_string()))]),
+        "hiçbir kolun c_a'sına uymayan aktör hiçbir satırı claim edemez"
     );
 }
 
@@ -2329,5 +2428,136 @@ async fn fork_commit_carries_candidate_list_per_branch() {
         let entry = recorded.iter().find(|(n, _)| n == node);
         let (_, len) = entry.unwrap_or_else(|| panic!("kol '{node}' için c_a yazılmamış: {recorded:?}"));
         assert!(*len > 0, "kol '{node}' aday listesi BOŞ yazılmış");
+    }
+}
+
+// ============ 2026-08-13: node listable kol projeksiyonu (branch view_c_a)
+
+/// Fixture'a DOKUNMADAN (golden dosya değişmez) tek bir kol node'una
+/// `listable` enjekte eder — node listable'ın kol projeksiyonu ancak kuralı
+/// olan ve olmayan kolları YAN YANA görünce anlaşılır.
+fn paralel_with_node_listable() -> Wfd {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["nodes"]["self__hrApprover"]["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["hrObserver"] } }
+    ]);
+    Wfd::from_value(v).unwrap()
+}
+
+fn listable_executor(store: Arc<ParStore>) -> WfeExecutor {
+    WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(paralel_with_node_listable())),
+        store,
+        Arc::new(MockRunner),
+    )
+}
+
+/// Fork commit'i kol başına node listable projeksiyonunu da taşır ve o
+/// projeksiyon `c_a` ile AYNI kol kümesini kapsar.
+///
+/// Yazılmazsa `wfe_branch.view_c_a` boş kalır ve node listable'ı olan kolu
+/// izleyen aktör (`can_view` kriteri (f) ona EVET der) SQL süzgecinde satırı
+/// GÖREMEZ — iki okuma ayrışır. Kuralı olmayan kolun boş kalması ise
+/// sözleşmenin öteki yarısıdır: grant node'a özeldir, tüm kollara yayılmaz.
+#[tokio::test(start_paused = true)]
+async fn fork_commit_carries_node_listable_per_branch() {
+    let store = Arc::new(ParStore::default());
+    let exec = listable_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    let c_a = store.last_branch_c_a.lock().unwrap().clone();
+    let views = store.last_branch_view_c_a.lock().unwrap().clone();
+    let w = store.snapshot(wfe_id);
+    let active: Vec<&str> = w
+        .branches
+        .iter()
+        .filter(|b| b.status == BranchStatus::Active)
+        .map(|b| b.branch_node.as_str())
+        .collect();
+    assert!(!active.is_empty(), "fork sonrası aktif kol beklenir");
+
+    // Kapsam eşitliği: `c_a` yazılan HER kol için `view_c_a` da yazılmış olmalı.
+    let c_a_nodes: Vec<&str> = c_a.iter().map(|(n, _)| n.as_str()).collect();
+    let view_nodes: Vec<&str> = views.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(
+        c_a_nodes, view_nodes,
+        "branch_c_a ile branch_view_c_a farklı kol kümesi kapsıyor"
+    );
+
+    for node in &active {
+        let (_, len) = views
+            .iter()
+            .find(|(n, _)| n == node)
+            .unwrap_or_else(|| panic!("kol '{node}' için view_c_a yazılmamış: {views:?}"));
+        if *node == "self__hrApprover" {
+            assert!(*len > 0, "listable'ı olan kolun view_c_a'sı BOŞ yazılmış");
+        } else {
+            assert_eq!(*len, 0, "kuralı olmayan kola grant sızmış: '{node}'");
+        }
+    }
+}
+
+/// Node listable ACT VERMEZ: kolun `c_a` (claim adayları) projeksiyonu, o
+/// node'a `listable` eklenmesinden ETKİLENMEZ. Karışsaydı izleyici havuzda
+/// işi görür ve claim edebilirdi (WOR-44 katlamasının kol karşılığı).
+#[tokio::test(start_paused = true)]
+async fn node_listable_does_not_leak_into_branch_claim_candidates() {
+    let with_rule;
+    {
+        let store = Arc::new(ParStore::default());
+        let exec = listable_executor(store.clone());
+        fork_setup(&exec).await;
+        with_rule = store.last_branch_c_a.lock().unwrap().clone();
+    }
+    let without_rule;
+    {
+        let store = Arc::new(ParStore::default());
+        let exec = executor(store.clone());
+        fork_setup(&exec).await;
+        without_rule = store.last_branch_c_a.lock().unwrap().clone();
+    }
+    assert_eq!(
+        with_rule, without_rule,
+        "node listable kol claim adaylarını değiştirmiş"
+    );
+}
+
+/// Havuz cevabının `can_claim` alanının ASIL bekçisi: YALNIZ bir `listable`
+/// grant'ı üzerinden gören aktör hiçbir satırı claim EDEMEZ.
+///
+/// 2026-08-14'te havuz görünürlüğü `visibility::sql()`e bağlandı; o güne kadar
+/// havuzda görünmeyen `listable`/`wf_admin` aktörleri artık satır üretiyor.
+/// Kapı ayrı olduğu için (claim node `c_a`'sını sorar, hiçbir görünürlük
+/// projeksiyonu kolonunu OKUMAZ) bu güvenli — ama ayrım sessizdir, ancak
+/// testle sabitlenir. Buradaki `hrObserver` `self__hrApprover` kolunu GÖRÜR
+/// (fixture'daki node listable kuralı), yine de o kolu bile alamaz.
+#[tokio::test(start_paused = true)]
+async fn listable_only_viewer_can_never_claim_any_branch() {
+    let store = Arc::new(ParStore::default());
+    let exec = listable_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    let nodes = [
+        "self__financeApprover",
+        "self__legalApprover",
+        "self__hrApprover",
+    ];
+    let targets: Vec<(Uuid, Option<String>)> =
+        nodes.iter().map(|n| (wfe_id, Some(n.to_string()))).collect();
+
+    // Rolü YALNIZ node listable kuralında geçiyor; hiçbir node'un c_a'sında yok.
+    let observer = actor("hrObserver");
+    let bulk = exec.can_claim_many(&targets, &observer).await.unwrap();
+
+    for node in nodes {
+        assert_eq!(
+            bulk[&(wfe_id, Some(node.to_string()))],
+            false,
+            "listable izleyicisi '{node}' kolunu claim edebiliyor — görünürlük claim'e sızmış"
+        );
+        // Tekil uç da aynı cevabı vermeli: havuz ikinci bir kural taşımıyor.
+        let (single, _) = exec.can_claim(wfe_id, &observer, Some(node)).await.unwrap();
+        assert!(!single, "tekil can_claim '{node}' için toplu karardan ayrıştı");
     }
 }

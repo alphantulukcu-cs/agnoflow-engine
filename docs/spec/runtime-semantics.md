@@ -17,9 +17,14 @@ case-sensitive exact-match'tir — case-insensitivity SADECE bu uniqueness kural
 
 ## 2. Node Identity Validation (v2.2)
 
-### 2a. Canonical Slug Algoritması
+### 2a. Canonical Slug Algoritması (ARTIK KİMLİK DEĞİL — tarihsel/öneri)
 
-Node key, node'un `c_a`'sından şu şekilde türetilmelidir (editör üretir, validator yeniden hesaplayıp karşılaştırır):
+**2026-08-12 (KIRICI):** `node key == slug(c_a)` kuralı KALDIRILDI. Node kimliğini
+TASARIMCI verir; `c_a` node'un bir ALANIDIR, kimliği değil. Sebep: kimlik ORGTRVLANG org
+yolunu taşıyordu, "bu adımı kim yapar"ı değiştirmek adımın KİMLİĞİNİ bozuyordu. Anahtarın
+BİÇİM kısıtı şemada durur (`nodes` `propertyNames: idName`, `^[A-Za-z_][A-Za-z0-9_-]*$`).
+Aşağıdaki algoritma yalnız TARİHSEL kayıttır ve editörün anahtar ÖNERİRKEN kullanabileceği
+bir yardımcıdır — validator artık key'i yeniden hesaplayıp KARŞILAŞTIRMAZ.
 
 ```text
 sanitize(s):  [A-Za-z0-9] korunur, diger karakterler '_' olur,
@@ -46,10 +51,23 @@ slug'ıyla çakışmaz. `{ "c_u": ["ayse"] }` → `any__u_ayse`.
 
 ### 2b. Kurallar
 
-- Her node key == slug(c_a) (veya collision hash'li hali). Uymayan key = HATA.
-- Aynı canonical c_a (c_r/c_u sıraları normalize edilmiş) ikinci bir node'da bulunamaz = HATA.
+- **Node key TASARIMCININDIR** (2026-08-12) — `slug(c_a)`dan türetilmez, validator key'i
+  yeniden hesaplayıp karşılaştırmaz. Biçim kısıtı şemadadır (`propertyNames: idName`),
+  benzersizlik JSON objesi anahtarı olmasından yapısaldır; node/terminal ortak isim uzayı
+  çakışması ayrıca denetlenir (`unique`).
+- **Aynı c_a = aynı kimlik** (2026-08-14, `duplicate_c_a` = **HATA**): aynı canonical c_a
+  (c_r/c_u sıraları normalize edilmiş) ikinci bir node'da bulunamaz; aynı kimlik de daima
+  aynı c_a'yı taşır. Bir canonical c_a belgede EN FAZLA BİR node'dadır. Bu kural
+  2026-08-12'de uyarıya (`shared_c_a`) çevrilmiş, 2026-08-14'te HATA olarak GERİ
+  GETİRİLMİŞTİR (gerekçe: `decisions.md`, 2026-08-14).
+  - Ardışık adımlar ("müdür inceler" + "müdür onaylar") TEK node'dur; fark alınan
+    AKSİYONDADIR ve aksiyonun `when` koşuluyla (`$wfah`) verilir.
+  - **Paralel kolda aynı havuzdan iki kol ŞİMDİLİK DESTEKLENMEZ** — kol kimliği node
+    anahtarı olduğundan (§ fork/join) aynı havuza bakan iki kol iki node isterdi.
+    Bilinçli, geçici kısıt.
 - `label` serbesttir, kimlik değildir; validator dokunmaz.
-- Editör, c_a düzenlendiğinde slug'ı yeniden üretir ve tüm `from` / `wft.node` / `escalation.wft.node` referanslarını otomatik yeniden bağlar.
+- Editör c_a düzenlendiğinde node anahtarını DEĞİŞTİRMEZ (kimlik kalıcıdır); yalnız yeni
+  bir node açarken anahtar ÖNEREBİLİR.
 
 ## 3. C_A Matcher (Authorization) — Kanonik Semantik
 
@@ -79,7 +97,7 @@ aktörün birimiyle donar — kişi başka birimdeyse görevi havuz listesinde g
 biçim bu ikiliği ortadan kaldırır: cache girdisi birim taşımaz (`any_orgu: true`) ve havuz
 sorgusu onu ayrı bir containment filtresiyle bulur.
 - c_u match'i rol-agnostiktir; ACT yine exact `(ORGU,(U,R))` tuple ile kaydedilir.
-- Bu matcher node `c_a` (start node dahil — bkz. §"Symmetric start"), transition ek-kısıt `c_a` ve `listable[].c_a` için AYNIDIR.
+- Bu matcher node `c_a` (start node dahil — bkz. §"Symmetric start"), transition ek-kısıt `c_a`, kök (global) `listable[].c_a`, `nodes.<key>.listable[].c_a` (node listable) ve `wf_admin[].c_a` için AYNIDIR.
 
 ## 4. Visibility Matcher — AYRI Fonksiyon, OR Semantiği
 
@@ -93,6 +111,52 @@ visible(vis, actor, wfe) :=
 
 Authorization matcher'ı ile BİRLEŞTİRİLMEZ; iki ayrı fonksiyon olarak implemente edilir. V yalnızca field okunurluğunu filtreler; ACT/claim/listability üretmez. `x-visibility` yoksa field görünürdür; varsa match etmeyen actor'a field response'ta gizlenir. V, WFE'yi görebilen herkese uygulanır (owner, unassigned C_A, L observer).
 
+### 4a. `can_view` — WFE-seviyesi VIEW kapısı (`wfe-core/src/v22/visibility.rs`)
+
+`visible`/`filter_dynctx`'ten (§4) AYRIDIR: onlar field-level `x-visibility`dir, `can_view`
+WFE'nin **bütünüyle** görünür olup olmadığını belirler (liste ucu, detay kapısı ve portal
+havuzunun ortak SQL projeksiyonuyla eşleşen referans okuma — bkz. `decisions.md`
+"Görünürlük: kural belgede, cevap projeksiyonda"). Bir WFE şu durumlardan biri doğruysa
+görüntülenebilir (OR):
+
+- **(a) sahiplik** — `assigned_to == viewer.user_id`; paralel modda aktif bir kolun
+  `claimed_by`'ı da sahiplik sayılır (WOR-31). YALNIZ WFE `active` iken geçerlidir.
+- **(b) ~~KATILIMCI~~ — KALDIRILDI (2026-08-13).** "Viewer WFAH'ta eylemi bulunan gerçek
+  bir aktör mü" kriteri kaldırıldı: "bu işe dokunmuş olmak" artık görünürlük üretmez.
+  Takip edilmesi istenen akış (d)/(e) ile AÇIKÇA işaretlenir; yetki geçmişten türetilmez.
+- **(c) aktif node'un `c_a`'sı** (§3) — paralel modda (WOR-31) "aktif node" kümesi aktif
+  kolların node'larıdır (`join_target.is_some()` ise kolların `branch_node`'ları, değilse
+  `current_node`). Çapa WFE'nin kendi birimidir (`origin_orgu_id`) — görebilen ile
+  yapabilen aynı çapayı okur (2026-08-13). YALNIZ WFE `active` iken geçerlidir.
+- **(d) kök (global) `wfd.listable[]`** — kurallardan birine authorize VE `when` guard'ı
+  (varsa) staged ctx üzerinde true. KALICIDIR — WFE durumundan bağımsız, terminal'de de
+  geçerlidir.
+- **(e) `wfd.wf_admin[]`** — aynı şekil, aynı matcher; akış yöneticisi yönettiği akışı
+  görür (T‑A5). KALICIDIR — (d) ile aynı gerekçe.
+- **(f) aktif node'un `listable[]`'ı (node listable, YENİ)** — aktif node'lardan
+  HERHANGİ birinin `nodes.<key>.listable[]` kurallarından birine authorize VE `when`
+  guard'ı true. "Aktif node" kümesi (c) ile AYNIDIR (WOR-31 ile aynı küme: paralel modda
+  aktif kolların node'ları). DURUMA BAĞLIDIR — YALNIZ WFE `active` iken ve viewer'ın
+  authorize olduğu node hâlâ aktif kollardan biriyken geçerlidir; WFE o node'dan çıkınca
+  (veya terminal'e ulaşınca) bu kriter bir daha doğru olmaz. Node listable ACT/claim
+  ÜRETMEZ — `possible_actions`/claim/pool yollarına dokunmaz.
+
+Kriterler OR'dur; (d)/(e) KALICI, (a)/(c)/(f) DURUMA BAĞLI (yalnız `active`). Bu sıra
+`server::visibility::sql`in sırasıyla AYNIDIR — ikisi aynı kuralın iki okumasıdır (biri
+belgeden, biri projeksiyondan) ve eşitlikleri `visibility_report` ile korunur.
+
+**SQL projeksiyonu — node listable AYRI kolona yazılır.** (d)+(e) `wf.wfe.view_c_a`'da
+denormalize edilir (KALICI, terminal'de silinmez). (f) BU KOLONA YAZILAMAZ — node
+listable duruma bağlıdır, `view_c_a` kalıcıdır; oraya girerse WFE terminal'e ulaştıktan
+sonra da görünür kalırdı (YANLIŞ). (f) `wf.wfe.current_c_a`/`wf.wfe_branch.c_a`'ya da
+YAZILAMAZ — o kolonlar ACT adaylarıdır (claim/pool girdisi); node listable oraya girerse
+claim/ACT yetkisi kazanır ve havuzda görünür (YANLIŞ). Bu yüzden (f) için AYRI kolonlar
+vardır: `wf.wfe.current_view_c_a` / `wf.wfe_branch.view_c_a` — aktif node'un `listable[]`
+kurallarının ÇÖZÜLMÜŞ hâli (`when` uygulanmış), `current_c_a`/`branch.c_a` ile AYNI anda
+yazılır ve `current_c_a`/`branch.c_a` NEREDE boşaltılıyorsa (terminal/error/terminated)
+bunlar da ORADA boşaltılır. Havuz sorgusu (`portal/pool.rs`) bu kolonları GÖRMEZ —
+"görünen" ile "claim edilebilir" ayrımı projeksiyonda da korunur.
+
 ## 5. Graf Validation
 
 v2.1 ile aynı: start'tan BFS reachability (escalation kenarları DAHİL), erişilemeyen node/terminal = `WFD.Unreachable`; çıkışsız node (transition + escalation yok) = hata; aynı `(from, action)` için `when`'siz çoklu transition = hata, `when`'li = uyarı (runtime ilk-match).
@@ -103,7 +167,8 @@ v2.1 ile aynı: input path'leri, readonly yasağı, `wfes_effects.set` path+tip 
 
 ### 6a-1. İfade TİP denetimi (`expr_types`)
 
-Her `when` / `wft.conditions[].when` / `listable[].when` / `calc` ifadesi motorun AST'si
+Her `when` / `wft.conditions[].when` / `listable[].when` (kök/global) /
+`nodes.<key>.listable[].when` (node listable) / `calc` ifadesi motorun AST'si
 üzerinden tip denetimine girer. Kurallar `zen-expression`ın VM davranışının karşılığıdır:
 `Equal` yalnız aynı tipteki skalerleri (ve `Null`/`Date` çiftlerini) eşler — diğer her
 kombinasyon sessizce `false`, `!=` sessizce `true`; `Compare` yalnız sayı/tarih bilir,
@@ -473,9 +538,10 @@ aynı istekte işaretlenir. **Bu yüzden bloklayan bir `sync` moduna gerek yoktu
 Bekleme bir **durum**tur, transition adımı değil: `WFES = current_node + assignment +
 DynCtx + WFAH` değişmezi korunur, beklemenin kalıcı yeri `current_node`'dur.
 
-- `c_a` HÂLÂ ZORUNLUDUR — "node key = slug(c_a)" ve "aynı canonical c_a ikinci node'da
-  olamaz" değişmezlerine dokunulmadı. Anlamı daralır: *alt akış sürerken bu WFE'yi kim
-  görür ve kim iptal edebilir*. ACT/claim VERMEZ.
+- `c_a` HÂLÂ ZORUNLUDUR — WFC node'u da "aynı canonical c_a ikinci node'da olamaz"
+  değişmezine tabidir (`duplicate_c_a`, §2b). ("node key = slug(c_a)" kısıtı 2026-08-12'de
+  kalktı; kimlik tasarımcınındır.) Anlamı daralır: *alt akış sürerken bu WFE'yi kim görür
+  ve kim iptal edebilir*. ACT/claim VERMEZ.
 - Node'da `kind` alanı YOKTUR; node'u WFC node'u yapan şey `call` bloğunun varlığıdır
   (start node'un "referans ile türetilmiş kimlik" deseninin aynısı).
 - Yasak: `transitions[].from` içinde yer almak, `escalation`, `claim_timeout`,

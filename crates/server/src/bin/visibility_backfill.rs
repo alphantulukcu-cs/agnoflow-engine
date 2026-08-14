@@ -6,6 +6,14 @@
 //! süzgeçten SESSİZCE düşerdi — bu yüzden liste ucu `grants_built_at IS NULL`
 //! satırları ayrıca sayar ve backfill bitmeden SQL yoluna geçilmez.
 //!
+//! AYNI GÜN eklenen node listable kolonları (`wf.wfe.current_view_c_a` +
+//! `wf.wfe_branch.view_c_a`, migration `20260813000004_node_listable.sql`) de
+//! bu komutla dolar: kapı hâlâ `grants_built_at`tir ve projeksiyonun üretimi tek
+//! yerdedir (`wf_wfe::reproject::reproject_wfe`), yani yeni bir kolon eklemek
+//! bu dosyada bir satır değiştirmeyi gerektirmez. Kolon eksik kalırsa `[]` olur
+//! ve `can_view` (f) ile eşleşen aktör satırı süzgeçte GÖREMEZ — sessiz kayıp
+//! bu yüzden hep aynı damgaya bağlanır.
+//!
 //! Çapa (`origin_orgu_id`) eski satırlarda İLK WFAH kaydının aktöründen
 //! türetilir: akışı başlatan odur. Sistem aktörlü (nil user) kayıtlar atlanır —
 //! motorun kendi yazdığı marker'lar bir birimi temsil etmez.
@@ -68,6 +76,10 @@ async fn main() {
     );
 
     let (mut ok, mut skipped_wfd, mut skipped_origin, mut empty_grant) = (0, 0, 0, 0);
+    // Node listable kolonu DOLU çıkan aktif satır sayısı. Operatör için tek
+    // doğrulama noktası: kolon eklendi ama hiçbir satırda dolmadıysa ya belgelerde
+    // node listable yok ya da projeksiyon yolu kopmuştur — ikisi ayırt edilebilsin.
+    let mut node_grant = 0;
 
     for row in &rows {
         // Projeksiyonun üretimi TEK yerde: `wf_wfe::reproject` (worker da aynı
@@ -104,13 +116,18 @@ async fn main() {
         // listesinde görünmez. Hata değil (WFD'de listable yoksa beklenen), ama
         // sessiz de kalmamalı — bu yüzden kolon DOĞRUDAN okunur (projeksiyonun
         // gerçeği DB'dedir; kuru koşumda kolon henüz yazılmamış olabilir).
-        let (status, view_len): (String, i64) = sqlx::query_as(
-            "SELECT status, jsonb_array_length(view_c_a) FROM wf.wfe WHERE wfe_id = $1",
+        let (status, view_len, node_view_len): (String, i64, i64) = sqlx::query_as(
+            "SELECT status, jsonb_array_length(view_c_a),
+                    jsonb_array_length(current_view_c_a)
+               FROM wf.wfe WHERE wfe_id = $1",
         )
         .bind(row.wfe_id)
         .fetch_one(&pool)
         .await
         .expect("status okunamadı");
+        if status == "active" && node_view_len > 0 {
+            node_grant += 1;
+        }
         if status != "active" && view_len == 0 {
             empty_grant += 1;
             println!(
@@ -126,6 +143,7 @@ async fn main() {
     println!("atlandı (WFD yok) : {skipped_wfd}");
     println!("atlandı (çapa yok): {skipped_origin}");
     println!("grant'sız bitmiş  : {empty_grant}");
+    println!("node listable'lı  : {node_grant} (aktif, current_view_c_a dolu)");
     if !apply {
         println!("\nKURU KOŞUM — hiçbir şey yazılmadı. Yazmak için: --apply");
     }

@@ -1,6 +1,27 @@
 //! Portal havuz endpoint'leri (WOR-44 — v2.2 uyumu).
-//! Listeleme denormalize current_c_a cache'i ile SQL'de; can-claim/claim
-//! kararı engine matcher'ı ile verilir (c_u kuralları dahil), yazım CAS'tır.
+//!
+//! **Görünürlük burada ÜRETİLMEZ, ÖDÜNÇ ALINIR** (2026-08-14): iki havuz sorgusu
+//! da `wf_wfe::visibility::sql`i koşar — liste ucunun (`GET /wfe?viewable=true`)
+//! ve detay kapısının (`GET /wfe/:id`) koştuğu parçanın TA KENDİSİ. Havuzun kendi
+//! `WHERE`'i vardı ve node-seviyesi listable kolonlarını (`wfe.current_view_c_a`,
+//! `wfe_branch.view_c_a`) tanımıyordu; sonuç, 2026-08-13 kararının önlemek için
+//! yazıldığı "aynı soruya üç farklı cevap" durumuydu — node listable'a uyan aktör
+//! WFE'yi listede ve detayda görüyor, havuzda göremiyordu.
+//!
+//! **Görünmek ≠ claim edebilmek.** Havuz satırı üretmek görünürlük sorusudur;
+//! claim kapısı AYRIDIR ve node `c_a`'sına bakar (`WfeExecutor::can_claim`/
+//! `claim` → matcher, hiçbir projeksiyon kolonu okumaz). Havuzda görünen ama
+//! claim edilemeyen satır olabilir — kök `listable` için bu zaten böyleydi.
+//! can-claim/claim kararı engine matcher'ı ile verilir (c_u kuralları dahil),
+//! yazım CAS'tır.
+//!
+//! **Cevap bu ayrımı TAŞIR** (2026-08-14): `PoolTask.can_claim`. Görünürlük
+//! kapsamı genişleyince (node `listable`, `wf_admin`) kullanıcı claim
+//! edemeyeceği satırı diğerlerinden ayırt edemiyor, düğmeye basıp `403`
+//! yiyordu. Alan kararı ÜRETMEZ, ÖDÜNÇ ALIR: `WfeExecutor::can_claim_many` →
+//! `can_claim_loaded`, yani `can_claim`/`claim` uçlarının gövdesi. Hesap
+//! TOPLUdur (tek `load_many` + sürüm başına bir WFD), satır başına sorgu YOK.
+//! Tekil uç (`GET /portal/pool/{wfe_id}/can-claim`) gerekçesiyle DURUYOR.
 
 use utoipa_axum::router::OpenApiRouter;
 use super::jwt::PortalActor;
@@ -17,7 +38,6 @@ use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::routes;
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
-use wfe_core::v22::matcher::{authorize, MatchEnv};
 use wfe_core::v22::ports::WfdStore;
 
 pub fn router(state: AppState) -> OpenApiRouter {
@@ -113,60 +133,40 @@ pub struct PoolTask {
     /// Faz 3 (K9 okundu takibi): bu aktör için OKUNMAMIŞ not sayısı —
     /// `note_count`'un YANINA eklendi, onu YERİNE geçmedi.
     pub unread_note_count: i64,
+    /// **Bu satırı claim edebilir miyim?** (2026-08-14, EKLENEN alan — mevcut
+    /// alanların hiçbiri değişmedi.)
+    ///
+    /// Havuz görünürlüğü tek SQL predicate'ine bağlandığında kapsam genişledi:
+    /// kök `listable`, node `listable` ve `wf_admin` de satır üretiyor. Claim
+    /// kapısı ise AYRI ve node `c_a`'sına bakıyor — kullanıcı claim edemeyeceği
+    /// satırı diğerlerinden ayırt edemiyor, düğmeye basıp `403` yiyordu.
+    ///
+    /// Değer `WfeExecutor::can_claim_loaded`'dan gelir; yani `can_claim`/`claim`
+    /// uçlarının kullandığı GÖVDENİN kendisi (`Engine::can_claim` → matcher →
+    /// node `c_a`). Havuzda ikinci bir claim kuralı YOKTUR; bu alan kararı
+    /// TAŞIR, ÜRETMEZ. Paralel kol satırlarında karar KOLUN node'una göredir.
+    ///
+    /// Zaten claim edilmiş satır: başkasındaysa `false` (`already_claimed`),
+    /// sahibi çağıran ise `true` (idempotent re-claim semantiği). Durumu/WFD'si
+    /// okunamayan satırda `false` (fail-closed).
+    ///
+    /// Tekil uç (`GET /portal/pool/{wfe_id}/can-claim`) DURUYOR — gerekçe
+    /// (`reason`) hâlâ oradan okunur; istemcinin satır başına çağırmasına artık
+    /// gerek yok.
+    pub can_claim: bool,
 }
 
-#[utoipa::path(get, path = "/", tag = "portal",
-    responses((status = 200, description = "Aktörün havuzundaki görevler (öncelik sıralı)", body = Vec<PoolTask>)),
-    security(("bearer_jwt" = [])))]
-async fn list_pool(
-    State(s): State<AppState>,
-    actor: PortalActor,
-) -> Result<Json<Vec<PoolTask>>, AppError> {
-    // WOR-44: pool = role match OR user match (c_u-resolved candidates,
-    // including listable[] grants folded into current_c_a) OR owner match
-    // (already claimed by this actor). role/user checks are containment on
-    // the denormalized current_c_a cache; owner check is on claimed_by.
-    let role_filter = serde_json::json!([{
-        "orgu_id": actor.orgu_id.to_string(),
-        "role":    actor.role
-    }]);
-    let user_filter = serde_json::json!([{
-        "orgu_id": actor.orgu_id.to_string(),
-        "user_id": actor.user_id.to_string()
-    }]);
-    // c_u can also be a non-UUID identifier (username) — mirror matcher.rs's
-    // identity channel by resolving the actor's own ident, if any exists.
-    let ident = s
-        .executor
-        .org
-        .user_ident(actor.user_id)
-        .await
-        .map_err(AppError::from)?;
-    let ident_filter = ident.as_ref().map(|ident| {
-        serde_json::json!([{
-            "orgu_id":    actor.orgu_id.to_string(),
-            "user_ident": ident
-        }])
-    });
-    // Çapasız (c_orgu'suz) kural girdileri birim TAŞIMAZ ve `any_orgu: true` ile
-    // işaretlidir — bu yüzden orgu'lu filtreler onları YAKALAMAZ, ayrı containment gerekir.
-    // Aksi halde havuz listesi ile claim kapısı ayrı düşerdi: kişi başka birimdeyken
-    // matcher onu yetkilendirir ama görev listesinde hiç görünmezdi.
-    // `any_orgu` işareti filtreye DAHİL: çıplak `[{"user_id": U}]` sorgusu aynı kişinin
-    // BAŞKA bir birimdeki scope'lu grantını da kapsardı (jsonb containment alt küme sorar).
-    let any_orgu_user_filter = serde_json::json!([{
-        "any_orgu": true,
-        "user_id":  actor.user_id.to_string()
-    }]);
-    let any_orgu_ident_filter = ident.as_ref().map(|ident| {
-        serde_json::json!([{
-            "any_orgu":   true,
-            "user_ident": ident
-        }])
-    });
-    let owner_filter = serde_json::json!({ "user_id": actor.user_id.to_string() });
+/// Havuz sorgularının KENDİ parametre sayısı: yalnız `$1` = tenant.
+/// Görünürlük filtreleri bunun ARDINDAN gelir → `visibility::sql(TENANT_PARAMS)`.
+const TENANT_PARAMS: usize = 1;
 
-    let rows = sqlx::query_as::<_, PoolRow>(
+/// Tek-kol havuz sorgusu. `$1` tenant, `$2..$7` görünürlük filtreleri.
+///
+/// Havuzun kendi süzgeçleri (`status`, `deadline`, `current_node`) görünürlüğün
+/// DIŞINDADIR: onlar "bu satır bir havuz görevi mi" sorusunu sorar, "bu aktör bu
+/// WFE'yi görebilir mi" sorusunu değil. İkincisinin tek cevabı `visibility::sql`.
+fn pool_sql() -> String {
+    format!(
         "SELECT e.wfe_id       AS id,
                 m.name         AS title,
                 e.wfd_id       AS workflow_id,
@@ -183,36 +183,83 @@ async fn list_pool(
          WHERE e.status     = 'active'
            AND e.orgtnt_id  = $1
            AND (e.deadline IS NULL OR e.deadline > now())
-           AND (
-                 e.current_c_a @> $2::jsonb
-              OR e.current_c_a @> $3::jsonb
-              OR ($4::jsonb IS NOT NULL AND e.current_c_a @> $4::jsonb)
-              OR e.claimed_by @> $5::jsonb
-              OR e.current_c_a @> $6::jsonb
-              OR ($7::jsonb IS NOT NULL AND e.current_c_a @> $7::jsonb)
-              -- 2026-08-13: `listable` katlaması `current_c_a`dan KALKTI (kolon
-              -- artık yalnız node adaylarını taşıyor); grant'lar kalıcı
-              -- `view_c_a` kolonunda ve `when` guard'ı UYGULANMIŞ hâlde duruyor.
-              -- Havuzun eski over-inclusive kabulu (guard yok sayiliyordu)
-              -- boylece kalkti: guardi false olan kural artik satir getirmez.
-              OR e.view_c_a @> $2::jsonb
-              OR e.view_c_a @> $3::jsonb
-              OR ($4::jsonb IS NOT NULL AND e.view_c_a @> $4::jsonb)
-              OR e.view_c_a @> $6::jsonb
-              OR ($7::jsonb IS NOT NULL AND e.view_c_a @> $7::jsonb)
-           )
+           -- Paralel WFE'nin WFE-SEVİYESİ satırı havuza girmez: fork'ta
+           -- `current_node` NULL'lanır ve o WFE'yi kol satırları temsil eder
+           -- (aşağıdaki ikinci sorgu). Eskiden bunu boşalan `current_c_a`
+           -- kendiliğinden sağlıyordu; görünürlük parçası kalıcı `view_c_a`yı ve
+           -- kol EXISTS'ini de sorduğundan kural artık AÇIKÇA yazılmalı — yoksa
+           -- aynı WFE hem node'suz bir satır hem de kol satırları olarak iki kez
+           -- listelenirdi.
+           AND e.current_node IS NOT NULL
+           AND {vis}
          ORDER BY e.created_at ASC",
+        vis = crate::visibility::sql(TENANT_PARAMS)
     )
-    .bind(actor.orgtnt_id)
-    .bind(role_filter)
-    .bind(user_filter)
-    .bind(ident_filter)
-    .bind(owner_filter)
-    .bind(any_orgu_user_filter)
-    .bind(any_orgu_ident_filter)
-    .fetch_all(&s.pool)
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+}
+
+/// WOR-31 T4: paralel modda aktif kol satırları. `$1` tenant, `$2..$7` görünürlük.
+///
+/// Kol tablosunun takma adı `br`'dir, `b` DEĞİL: `visibility::sql` kendi kol
+/// EXISTS'ini `wf.wfe_branch b` ile açar, aynı harf dıştan da kullanılsaydı iç
+/// sorgu dış adı gölgelerdi (Postgres'te geçerli ama okuyanı yanıltır).
+///
+/// Satır süzgeci WFE-SEVİYESİDİR: WFE görünüyorsa AKTİF KOLLARININ HEPSİ listelenir.
+/// Kol bazında daraltmak ikinci bir görünürlük kuralı yazmak olurdu — 2026-08-13
+/// kararının yasakladığı şey tam bu. Kolu claim edebilmek ayrı bir sorudur ve
+/// `WfeExecutor::can_claim` node `c_a`'sını sorarak cevaplar.
+fn branch_pool_sql() -> String {
+    format!(
+        "SELECT e.wfe_id       AS id,
+                m.name         AS title,
+                e.wfd_id       AS workflow_id,
+                e.wfd_version,
+                br.branch_node,
+                e.created_at,
+                br.claimed_by,
+                e.deadline,
+                br.claimed_at
+         FROM wf.wfe_branch br
+         JOIN wf.wfe e
+           ON e.wfe_id = br.wfe_id
+         JOIN wf.wfd_meta m
+           ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
+         WHERE br.status    = 'active'
+           AND e.status     = 'active'
+           AND e.orgtnt_id  = $1
+           AND (e.deadline IS NULL OR e.deadline > now())
+           AND {vis}
+         ORDER BY e.created_at ASC, br.branch_node ASC",
+        vis = crate::visibility::sql(TENANT_PARAMS)
+    )
+}
+
+#[utoipa::path(get, path = "/", tag = "portal",
+    responses((status = 200, description = "Aktörün havuzundaki görevler (öncelik sıralı)", body = Vec<PoolTask>)),
+    security(("bearer_jwt" = [])))]
+async fn list_pool(
+    State(s): State<AppState>,
+    actor: PortalActor,
+) -> Result<Json<Vec<PoolTask>>, AppError> {
+    let portal_as_actor = to_actor(&actor);
+    // Görünürlük filtreleri istek başına BİR kez üretilir (satır başına değil) ve
+    // İKİ sorguya da aynı sırayla bağlanır — sıra `visibility::sql`in sözleşmesidir.
+    // Havuzun eski elle yazılmış filtre demeti (rol/user/ident/çapasız/owner) BURADAN
+    // KALKTI: aynı demeti ikinci kez kurmak, kural değiştiğinde havuzun geride
+    // kalmasının tam sebebiydi.
+    let filters = crate::visibility::ViewerFilters::build(&portal_as_actor, &*s.executor.org)
+        .await
+        .map_err(AppError::from)?;
+    let binds = filters.as_binds();
+
+    let stmt = pool_sql();
+    let mut q = sqlx::query_as::<_, PoolRow>(&stmt).bind(actor.orgtnt_id);
+    for b in &binds {
+        q = q.bind(b);
+    }
+    let rows = q
+        .fetch_all(&s.pool)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
     // priority kolon DEĞİL — okuma anında hesaplanır (2026-07-16 sözleşmesi).
     // Basitlik için Rust'ta hesaplanır ve sıralanır (SQL CASE/window ifadesi
@@ -262,129 +309,66 @@ async fn list_pool(
             rev: 0, // WOR-65: iki döngü de bittikten sonra tek toplu sorguyla doldurulur
             note_count: 0, // aşağıda doldurulur
             unread_note_count: 0, // aşağıda doldurulur
+            can_claim: false, // aşağıda TOPLU olarak doldurulur
         });
     }
 
-    // WOR-31 T4: paralel WFE'ler yukarıdaki sorguda GÖRÜNMEZ — fork'ta wfe-seviyesi
-    // current_c_a/current_node/claimed_by temizlenir (current_c_a '[]' olur, hiçbir
-    // containment filtresi eşleşmez). Paralel her AKTİF kol ayrı bir satır olarak
-    // eklenir; kolun kendi `current_c_a` cache'i YOKTUR (v1 — minimal query
-    // uzantısı: schema değişikliği yerine adaylık burada matcher ile hesaplanır).
-    let branch_rows = sqlx::query_as::<_, BranchPoolRow>(
-        "SELECT e.wfe_id       AS id,
-                m.name         AS title,
-                e.wfd_id       AS workflow_id,
-                e.wfd_version,
-                b.branch_node,
-                e.created_at,
-                b.claimed_by,
-                e.deadline,
-                b.claimed_at
-         FROM wf.wfe_branch b
-         JOIN wf.wfe e
-           ON e.wfe_id = b.wfe_id
-         JOIN wf.wfd_meta m
-           ON m.wfd_id = e.wfd_id AND m.version = e.wfd_version
-         WHERE b.status     = 'active'
-           AND e.status     = 'active'
-           AND e.orgtnt_id  = $1
-           AND (e.deadline IS NULL OR e.deadline > now())
-         ORDER BY e.created_at ASC, b.branch_node ASC",
-    )
-    .bind(actor.orgtnt_id)
-    .fetch_all(&s.pool)
-    .await
-    .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
+    // WOR-31 T4: paralel WFE'ler yukarıdaki sorguda GÖRÜNMEZ (fork'ta `current_node`
+    // NULL'lanır, bkz. `pool_sql`); onları AKTİF KOL başına bir satır temsil eder.
+    //
+    // 2026-08-14: kol başına CANLI adaylık çözümü (WFE başına `wfe.load` + kol
+    // başına `authorize` + kök `listable` fold'u) KALDIRILDI. Sebebi tek başına
+    // "N+1 pahalıydı" değil, ikinci bir görünürlük kuralı olmasıydı: `when`
+    // guard'ını yok sayıyor, `wf_admin`i ve node listable'ı hiç bilmiyordu.
+    // Karşılıkları artık projeksiyon kolonlarındadır ve `visibility::sql`in kol
+    // EXISTS'i onları SQL'de sorar — `wf.wfe_branch.c_a` (canlı `authorize`ın
+    // cache'i, commit anında `fill_view_grants` yazar), `wf.wfe_branch.view_c_a`
+    // (kolun node listable'ı), `wf.wfe.view_c_a` (kök `listable` ∪ `wf_admin`,
+    // guard UYGULANMIŞ), `br.claimed_by` (eski `owner_match`). Projeksiyonu
+    // olmayan eski satırlar için `visibility_backfill --apply` koşulur — liste ve
+    // detay uçlarının da bağlı olduğu aynı ön koşul.
+    let branch_stmt = branch_pool_sql();
+    let mut q = sqlx::query_as::<_, BranchPoolRow>(&branch_stmt).bind(actor.orgtnt_id);
+    for b in &binds {
+        q = q.bind(b);
+    }
+    let branch_rows = q
+        .fetch_all(&s.pool)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::INTERNAL_SERVER_ERROR))?;
 
-    let portal_as_actor = to_actor(&actor);
-    // WFE başına TEK `load` (kol sayısınca DEĞİL) — dynctx/wfah adaylık matcher'ının
-    // (c_orgu ifadesi $ctx/$wfah'a bakabilir) ihtiyacı olan bağlamdır.
-    let mut wfes_cache: std::collections::HashMap<Uuid, wfe_core::v22::ports::Wfes> =
-        std::collections::HashMap::new();
     for row in branch_rows {
-        if !wfes_cache.contains_key(&row.id) {
-            match s.executor.wfe.load(row.id).await {
-                Ok(w) => {
-                    wfes_cache.insert(row.id, w);
-                }
-                // silinmiş/tutarsız tek bir WFE tüm listeyi düşürmesin.
-                Err(_) => continue,
-            }
-        }
-        let wfes = wfes_cache.get(&row.id).unwrap();
-
+        // WFD yalnız GÖSTERİM için çözülür (etiket + claim deadline); çözülemezse
+        // satır havuzdan DÜŞMEZ — görünürlük kararı zaten SQL'de verildi.
         let key = (row.workflow_id, row.wfd_version);
-        let wfd = match wfd_cache.get(&key) {
-            Some(w) => w,
-            None => match s.wfd.fetch(row.workflow_id, row.wfd_version).await {
-                Ok(w) => {
-                    wfd_cache.insert(key, w);
-                    wfd_cache.get(&key).unwrap()
-                }
-                Err(_) => continue,
-            },
-        };
-        let Some(node_def) = wfd.nodes.get(&row.branch_node) else {
-            continue;
-        };
-
-        let owner_match = row
-            .claimed_by
-            .as_ref()
-            .and_then(|cb| cb.get("user_id"))
-            .and_then(|u| u.as_str())
-            .and_then(|s| Uuid::parse_str(s).ok())
-            == Some(actor.user_id);
-        // Rol/user eşleşmesi node.c_a üzerinden ANLIK hesaplanır (bkz. yukarıdaki
-        // yorum — kol-seviyesi denormalize cache yok); zaten claim edilmiş
-        // OLMASI eşleşmeyi ENGELLEMEZ (tek-node WFE'lerdeki mevcut davranışla
-        // aynı — pool "görünürlük", "claim edilebilirlik" değildir).
-        // listable[] grant'leri de tek-node yolundakiyle AYNI semantikle dahildir
-        // (pipeline::node_candidates fold'u — `when` guard'ı pool'da yok sayılır,
-        // over-inclusive cache kabulü; detay VIEW'ı can_view'da when'i değerlendirir).
-        let env = MatchEnv {
-            ctx: wfes.dynctx.as_value(),
-            wfah: &wfes.wfah,
-            orgtnt_id: wfes.orgtnt_id,
-        };
-        let mut candidate_match = owner_match
-            || authorize(&node_def.c_a, &portal_as_actor, env, &*s.executor.org)
-                .await
-                .unwrap_or(false);
-        if !candidate_match {
-            for rule in &wfd.listable {
-                if authorize(&rule.c_a, &portal_as_actor, env, &*s.executor.org)
-                    .await
-                    .unwrap_or(false)
-                {
-                    candidate_match = true;
-                    break;
-                }
+        if !wfd_cache.contains_key(&key) {
+            if let Ok(w) = s.wfd.fetch(row.workflow_id, row.wfd_version).await {
+                wfd_cache.insert(key, w);
             }
         }
-        if !candidate_match {
-            continue;
-        }
+        let wfd = wfd_cache.get(&key);
 
         let priority = wf_wfe::priority::compute_priority(row.created_at, row.deadline, now);
-        let claim_deadline =
-            wf_wfe::executor::compute_claim_deadline(wfd, Some(&row.branch_node), row.claimed_at);
+        let claim_deadline = wfd.and_then(|w| {
+            wf_wfe::executor::compute_claim_deadline(w, Some(&row.branch_node), row.claimed_at)
+        });
         tasks.push(PoolTask {
             id: row.id,
             title: row.title,
             workflow_id: row.workflow_id,
             status: "active".into(),
-            current_node: Some(node_ref(Some(wfd), &row.branch_node)),
+            current_node: Some(node_ref(wfd, &row.branch_node)),
             created_at: row.created_at,
             claimed_by: row.claimed_by,
             deadline: row.deadline,
             claimed_at: row.claimed_at,
             claim_deadline,
             priority,
-            node: Some(node_ref(Some(wfd), &row.branch_node)),
+            node: Some(node_ref(wfd, &row.branch_node)),
             rev: 0,         // aşağıda doldurulur
             note_count: 0,  // aşağıda doldurulur
             unread_note_count: 0, // aşağıda doldurulur
+            can_claim: false, // aşağıda TOPLU olarak doldurulur
         });
     }
 
@@ -405,10 +389,40 @@ async fn list_pool(
     let note_counts = crate::notes::count_by_wfe(&s.pool, &rev_ids, &portal_as_actor).await?;
     let unread_counts =
         crate::notes::unread_count_by_wfe(&s.pool, &rev_ids, &portal_as_actor).await?;
+
+    // **Görünmek ≠ claim edebilmek** — ve artık cevap bunu TAŞIR (2026-08-14).
+    // Görünürlük tek predicate'e bağlandığında havuz kapsamı genişledi (kök
+    // `listable`, node `listable`, `wf_admin` de satır üretiyor); claim kapısı ise
+    // AYRI ve node `c_a`'sına bakıyor. Alan olmadan kullanıcı claim edemeyeceği
+    // satırı ayırt edemiyor, düğmeye basıp 403 alıyordu.
+    //
+    // Karar ÖDÜNÇ ALINIR: `WfeExecutor::can_claim_many` satır başına
+    // `can_claim_loaded`'ı — yani `can_claim`/`claim` uçlarının gövdesini —
+    // çağırır. Havuzda ikinci bir claim kuralı YOK; buradaki tek iş anahtarı
+    // (WFE + kol) taşımak. Kol satırlarında hedef KOLUN node'udur (`node.id`),
+    // tek-kol satırlarında `None` — yani karar kolun kendi `c_a`'sına göre verilir.
+    //
+    // N+1 açılmaz: `rev`/not sayaçları gibi TEK toplu geçiş — durumlar tek
+    // `load_many`, WFD'ler sürüm başına bir kez (adapter cache'i) okunur, karar
+    // üretimi saf CPU'dur.
+    let claim_targets: Vec<(Uuid, Option<String>)> = tasks
+        .iter()
+        .map(|t| (t.id, t.node.as_ref().map(|n| n.id.clone())))
+        .collect();
+    let claimable = s
+        .executor
+        .can_claim_many(&claim_targets, &portal_as_actor)
+        .await
+        .map_err(AppError::from)?;
+
     for task in &mut tasks {
         task.rev = revs.get(&task.id).copied().unwrap_or(0);
         task.note_count = note_counts.get(&task.id).copied().unwrap_or(0);
         task.unread_note_count = unread_counts.get(&task.id).copied().unwrap_or(0);
+        task.can_claim = claimable
+            .get(&(task.id, task.node.as_ref().map(|n| n.id.clone())))
+            .copied()
+            .unwrap_or(false);
     }
 
     // priority DESC, deadline ASC NULLS LAST, created_at ASC (sözleşme sırası).
@@ -526,4 +540,139 @@ async fn claim(
         success: true,
         reason: None,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Havuz sorguları görünürlük parçasını GÖMMEZ, ÖDÜNÇ ALIR — ve tam olarak
+    /// `visibility::sql(TENANT_PARAMS)` metnini taşırlar. Metnin kendisi aranır
+    /// (kolon adları değil): parça değişirse iki tüketici de birlikte değişsin,
+    /// havuzun kopyası geride kalamasın. Bu repoda DB'li test koşulmuyor, o
+    /// yüzden kontrat ÜRETİLEN SQL üzerinden doğrulanır.
+    #[test]
+    fn both_pool_queries_borrow_the_visibility_predicate() {
+        let vis = crate::visibility::sql(TENANT_PARAMS);
+        for (name, stmt) in [("wfe", pool_sql()), ("branch", branch_pool_sql())] {
+            assert!(
+                stmt.contains(&vis),
+                "{name} sorgusu visibility::sql({TENANT_PARAMS}) parçasını taşımıyor:\n{stmt}"
+            );
+        }
+    }
+
+    /// Offset kayması: havuzun KENDİ parametresi `$1` (tenant), görünürlük
+    /// `$2..$7`. Fazla/eksik parametre bind sırasını sessizce kaydırır — sqlx
+    /// derleme zamanında bunu görmez, sorgu çalışma anında ya patlar ya da
+    /// YANLIŞ satır döndürür.
+    #[test]
+    fn visibility_params_start_after_the_tenant_param() {
+        let last = TENANT_PARAMS + crate::visibility::PARAM_COUNT;
+        assert_eq!(last, 7, "parametre bütçesi değişmiş");
+        for (name, stmt) in [("wfe", pool_sql()), ("branch", branch_pool_sql())] {
+            assert!(
+                stmt.contains("e.orgtnt_id  = $1"),
+                "{name}: tenant parametresi $1 değil"
+            );
+            for i in (TENANT_PARAMS + 1)..=last {
+                assert!(stmt.contains(&format!("${i}")), "{name}: ${i} parametresi yok");
+            }
+            assert!(
+                !stmt.contains(&format!("${}", last + 1)),
+                "{name}: fazladan parametre var (bind listesi eksik kalır)"
+            );
+        }
+    }
+
+    /// Kararın kendisi: node-seviyesi listable kolonları ARTIK havuzda. Bunlar
+    /// `visibility::sql`den gelir; testin işi "havuz o parçayı gerçekten
+    /// koşuyor mu"yu kolon adıyla teyit etmek (parça değişip kolon düşerse
+    /// yukarıdaki metin testi hâlâ geçerdi).
+    #[test]
+    fn pool_now_sees_node_listable_columns() {
+        for (name, stmt) in [("wfe", pool_sql()), ("branch", branch_pool_sql())] {
+            for col in ["e.current_view_c_a", "b.view_c_a", "e.view_c_a", "e.current_c_a"] {
+                assert!(stmt.contains(col), "{name}: {col} havuz sorgusunda yok");
+            }
+        }
+    }
+
+    /// Kol sorgusunda `wf.wfe_branch` takma adı `br`'dir: `visibility::sql` kendi
+    /// EXISTS'ini `wf.wfe_branch b` ile açar, dıştan da `b` kullanılsaydı iç sorgu
+    /// dış adı gölgelerdi.
+    #[test]
+    fn branch_query_does_not_shadow_the_predicate_alias() {
+        let stmt = branch_pool_sql();
+        // Görünürlük parçası çıkarılınca geriye DIŞ sorgu kalır; kol tablosuna
+        // orada TEK bir referans olmalı ve o da `br` takma adıyla.
+        let outer = stmt.replace(&crate::visibility::sql(TENANT_PARAMS), "");
+        assert!(
+            outer.contains("FROM wf.wfe_branch br"),
+            "dış sorguda kol takma adı `br` değil:\n{outer}"
+        );
+        assert_eq!(
+            outer.matches("wf.wfe_branch").count(),
+            1,
+            "dış sorgu kol tablosuna birden fazla kez dokunuyor:\n{outer}"
+        );
+    }
+
+    /// Havuz cevabı claim edilebilirliği TAŞIR (2026-08-14) ve alan EKLENMİŞtir:
+    /// mevcut alanların hiçbiri düşmemiş/yeniden adlandırılmamış olmalı
+    /// (`AppError.items` deseni — geriye uyumluluk sözleşmesi). Serileşmiş şekil
+    /// üzerinden ölçülür, alan adları istemci sözleşmesidir.
+    #[test]
+    fn pool_task_adds_can_claim_without_dropping_existing_fields() {
+        let task = PoolTask {
+            id: Uuid::nil(),
+            title: "x".into(),
+            workflow_id: Uuid::nil(),
+            status: "active".into(),
+            current_node: None,
+            created_at: DateTime::from_timestamp_nanos(0),
+            claimed_by: None,
+            deadline: None,
+            claimed_at: None,
+            claim_deadline: None,
+            priority: 1,
+            node: None,
+            rev: 0,
+            note_count: 0,
+            unread_note_count: 0,
+            can_claim: false,
+        };
+        let v = serde_json::to_value(&task).unwrap();
+        for field in [
+            "id",
+            "title",
+            "workflow_id",
+            "status",
+            "current_node",
+            "created_at",
+            "claimed_by",
+            "deadline",
+            "claimed_at",
+            "claim_deadline",
+            "priority",
+            "rev",
+            "note_count",
+            "unread_note_count",
+        ] {
+            assert!(v.get(field).is_some(), "mevcut alan düşmüş: {field}");
+        }
+        assert_eq!(
+            v.get("can_claim"),
+            Some(&Value::Bool(false)),
+            "claim edilebilirlik alanı cevapta yok"
+        );
+    }
+
+    /// Paralel WFE'nin WFE-seviyesi satırı havuza girmez — yoksa aynı WFE hem
+    /// node'suz bir satır hem de kol satırları olarak iki kez listelenir.
+    #[test]
+    fn parallel_wfes_are_represented_only_by_branch_rows() {
+        assert!(pool_sql().contains("e.current_node IS NOT NULL"));
+        assert!(!branch_pool_sql().contains("e.current_node IS NOT NULL"));
+    }
 }

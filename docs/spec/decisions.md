@@ -1937,3 +1937,125 @@ denetim izini bir DDL hatasıyla silmenin en kısa yolu olurdu. Araç ayrıca "W
 ile "satır DURUYOR ama pasif/yayında değil" durumlarını ayırır: motor ikisini de
 `wfd not found` diye bildirdiği için karıştırılması kolaydır, ama ikincisinde çözüm silmek
 değil yayın durumunu düzeltmektir.
+
+## Node-level `listable` — duruma bağlı ek görünürlük, AYRI projeksiyon kolonu (2026-08-13)
+
+**Sorun.** Kök `listable[]` bir WFE'yi durumdan bağımsız, KALICI olarak ek listeye alır.
+Ama editörde bu tek mekanizmanın YANLIŞ yerde bir UI'ı vardı: `ActionStep.listable_for`
+kullanıcıya "bu ADIMDA görsün" yazdırıyordu, ama export (`useExport.ts`
+`serializeListable`) her kaydı ayrım yapmadan kök `listable[]`e düzleştiriyordu — step
+referansı wire'a hiç çıkmıyordu. Sonuç: tasarımcının "bu node'dayken görsün" niyeti
+sessizce "her zaman görsün"e dönüşüyordu ve node bağı export'ta kaybolduğu için
+round-trip'te de geri gelmiyordu. Öte yandan motorun zaten desteklediği kök
+`wfd.listable[]`in editörde HİÇ UI'ı yoktu — import'tan gelen grant görünmez şekilde
+taşınıyordu.
+
+**Karar 1 — iki AYRI kavram, iki AYRI wire yeri.** Kök `listable[]` (global, KALICI)
+şekli/anlamı DEĞİŞMEDİ. Yeni: `$defs/nodeDef`'e opsiyonel `listable` alanı eklendi —
+`nodes.<key>.listable[]` (node listable, DURUMA BAĞLI: WFE o node'dayken geçerli, çıkınca
+biter). İkisi de AYNI `$defs/listableRule` şeklini (`{c_a, when?}`) taşır, ikisi de
+ACT/claim ÜRETMEZ (claim kapısı node `c_a`'sındadır, projeksiyon kolonlarını okumaz).
+Portal havuzunda görünme YÖNÜNDEN AYRIŞIRLAR: kök `listable` havuzda görünür (havuz
+sorgusu `view_c_a`'yı OR'lar), node listable görünmez (`current_view_c_a` /
+`wfe_branch.view_c_a` havuz sorgusuna bilerek alınmadı — bkz. `pool.rs` yorumu).
+Bu asimetri BİLİNÇLİ DEĞİL, DEVRALINMIŞTIR: havuz `visibility::sql()`'i kullanmayıp
+kendi inline `WHERE`'ini taşıyor; birleştirilmesi ayrı bir iştir. `wfd_version` **"2.2" KALIR**
+(amend in place, M15/M16 precedent'i — bkz. `migration-notes.md` M17); alan opsiyonel +
+additive olduğu için eski belgeler değişmeden yüklenir ve kök `listable[]`'ları GLOBAL
+listable olarak okunmaya devam eder (okuyucu silinmez, migration yolu YOK — bkz. proje
+hafızası "Wire formatı değişince okuyucu kalır").
+
+**Karar 2 — `can_view`e (f) kriteri: aktif node'un `listable[]`'ı.** "Aktif node" kümesi
+(c) kriteriyle (node `c_a`) AYNIDIR: paralel modda (WOR-31) aktif kolların node'ları,
+tekil modda `current_node`. (c) ile (f) arasındaki fark yalnız hangi alanın (`c_a` vs
+`listable[]`) sorgulandığıdır — "görebilen" ile "yapabilen" burada da aynı node
+kümesinden okunur, ama farklı alandan. Detay: `runtime-semantics.md` §4a.
+
+**Karar 3 — SQL projeksiyonuna AYRI kolonlar, mevcut ikisine DEĞİL.** 2026-08-13
+denormalizasyonu ("Görünürlük: kural belgede, cevap projeksiyonda") iki kolon tanır ve
+node listable ikisine de SIĞMAZ:
+
+| Mevcut kolon | Neden node listable ORAYA YAZILAMAZ |
+|---|---|
+| `wf.wfe.view_c_a` (listable∪wf_admin) | KALICI, terminal'de silinmez → node listable buraya girerse WFE bittikten sonra da görünür kalırdı (node listable duruma bağlı olmalı) |
+| `wf.wfe.current_c_a` / `wf.wfe_branch.c_a` | ACT adayları (claim/pool girdisi) → node listable buraya girerse yanlışlıkla claim/ACT yetkisi kazanır ve havuzda görünür olurdu |
+
+Bu yüzden YENİ kolonlar: `wf.wfe.current_view_c_a` ve `wf.wfe_branch.view_c_a` (aktif
+node'un `listable[]` kurallarının, `when` UYGULANMIŞ, ÇÖZÜLMÜŞ hâli). Yazma/boşaltma
+noktaları `current_c_a`/`branch.c_a` ile BİREBİR aynıdır (her transition'da birlikte
+yazılır, terminal/error/terminated'da birlikte boşalır) — ayrı bir yazma yolu icat
+edilmedi, mevcut yola eklendi. Havuz sorgusu (`portal/pool.rs`) bu kolonları okumaz:
+"görünen" ile "claim edilebilir" ayrımı projeksiyonda da korunur. `PARAM_COUNT`
+değişmedi, aynı viewer filtreleri yeniden kullanılır.
+
+**Karar 4 — ORGTRVLANG çapası GLOBAL listable ile AYNI: `origin_orgu_id`.** Node
+listable de WFE'nin kendi birimine çapalanır, soran aktörün DEĞİL — 2026-08-13'teki genel
+karar burada da geçerlidir. Gerekçe: aynı şekli (`{c_a, when}`) taşıyan iki kuralın
+`self`'i farklı şey söylemesi tasarımcı için tuzaktır; `self` = "işin ait olduğu birim",
+`parent` = "onun üstü", her iki listable türünde de aynı anlama gelir.
+
+**Karar 5 — editörde `ActionStep.listable_for` TAMAMEN KALDIRILDI, yerine node
+seviyesinde `CaGroup.listable?`/`CallStep.listable?`.** UI konumu da anlamı takip eder:
+node listable node'un kendi özellikler panelinde `c_a`'nın yanında durur (bir node'a
+özel, `c_a` gibi); global listable `Context`/`Attachments` ile aynı seviyede AYRI bir
+WFD-geneli sekmededir (`WfAdminSection.tsx`'in aynı deseni). Bu alan hiçbir zaman wire'a
+çıkmadığı için (export hep düzleştiriyordu) **yayınlanmış belgeler için veri kaybı
+YOKTUR** — düzeltilen şey editördeki niyet↔export uyuşmazlığıdır.
+
+**Reddedilenler:** node listable'ı mevcut `view_c_a`/`current_c_a` kolonlarından birine
+sıkıştırmak (Karar 3'teki tabloda gerekçelendirildi); node listable için farklı bir
+ORGTRVLANG çapası (viewer ya da parent) — global listable ile tutarsızlık üretir ve iki
+"aynı şekilli" kuralın farklı davranması tasarımcı için sürpriz olurdu; ayrı bir
+`nodeListableRule` tipi tanımlamak — `$defs/listableRule` zaten yeterli, ikinci bir tip
+yalnızca şema/kod yüzeyini büyütürdü.
+
+Detay: proje hafızası `wire-format-readers-stay.md`; SQL/runtime karşılığı
+`runtime-semantics.md` §4a.
+
+## Aynı c_a = aynı kimlik: `duplicate_c_a` HATA olarak GERİ GETİRİLDİ (2026-08-14, KIRICI)
+
+**Tarihçe.** İki ayrı karar, karıştırılmamalı:
+
+1. **2026-08-12** node kimliğini TASARIMCIYA verdi (`node key == slug(c_a)` kaldırıldı) ve
+   AYNI HAMLEDE `duplicate_c_a`yı da kaldırıp uyarıya (`shared_c_a`) çevirdi. İkinci kısmın
+   gerekçesi: paralel kolda kol kimliği node anahtarıdır, dolayısıyla "aynı havuzdan iki
+   kol" (K-of-N quorum'un N kolu) ancak iki node ile çizilebiliyordu.
+2. **2026-08-14 (bu karar)** ikinci kısmı GERİ ALIR: `duplicate_c_a` yeniden **HATA**.
+   Birinci kısım DURUYOR — kimlik hâlâ tasarımcınındır, `slug(c_a)` DEĞİLDİR.
+
+**Sorun.** Uyarı dönemi kısa sürdü ve pahalıydı. Tasarımcı aynı havuzu iki node olarak
+çizdiğinde motor iki AYRI bekleme noktası üretiyordu: aynı kişi havuzunda iki ayrı "sıra
+sende" satırı, iki ayrı claim, ikiye bölünmüş geçmiş. Çizen de o havuzdaki insan da bunu
+tek bir adım sanıyordu. Uyarı yayını durdurmadığı için hata üretime çıkıyordu; motorun
+"meşru paralel kol" ile "modelleme hatası"nı graf yapısına bakmadan ayırt edememesi de
+uyarıyı gürültüye çeviriyordu.
+
+**Karar.** Değişmez: **aynı `c_a` = aynı kimlik, aynı kimlik = aynı `c_a`.** Pratik
+sonucu: bir canonical `c_a` belgede EN FAZLA BİR node'da bulunabilir. Kod: `validator.rs`
+`check_duplicate_c_a`, kod adı `duplicate_c_a` (tarihsel adı buydu, kural geri geldiği için
+ad da geri geldi), seviye HATA → yayın durur.
+
+- **Ardışık adım farkı aksiyonlardadır.** "Müdür inceler" ve "müdür nihai onayı verir" aynı
+  havuzdur → AYNI node'dur; ayrım aksiyonun `when` koşuluyla (`$wfah` üzerinden "önceki
+  aksiyon şuydu") verilir. Bu zaten motorun desteklediği ve tavsiye ettiği desendi.
+- **Kimlik TASARIMCININ kalır.** Geri gelen tek şey TEKİLLİK kısıtıdır; `slug(c_a)` kimlik
+  değildir, anahtarın biçim kısıtı şemada durur (`nodes` `propertyNames: idName`).
+
+**FEDA EDİLEN (açıkça yazılıyor).** Paralel kolda **aynı havuzdan iki kol** artık
+çizilemez. Kol kimliği node anahtarı olduğu için (WOR-73, "kol kimliği") aynı havuza bakan
+iki eşzamanlı kol iki node ister; bu kural onu yasaklar. Somut kayıp: K-of-N quorum'un N
+kolunun hepsini AYNI havuza bağlamak ("müdür hem hukuk hem mali kolu onaylasın" tek havuz
+olarak), yani "aynı havuzdan M imza" deseni. Kullanıcı bunu bilerek feda etti; kısıt
+**BİLİNÇLİ ve GEÇİCİDİR**. İhtiyaç doğduğunda çözüm yolu node anahtarını kol kimliğinden
+ayırmaktır (kol için ayrı bir kimlik alanı) — o iş yapılmadan kısıt kaldırılmamalıdır.
+
+**Kırıcılık.** UYARI döneminde (2026-08-12 → 2026-08-14) yayınlanmış, aynı c_a'lı iki node
+taşıyan belgeler ARTIK YAYINLANAMAZ (`docs/spec/migration-notes.md` M18). Koşan WFE'ler
+kendi (id+version) belgeleriyle çalışmaya devam eder — yayın kapısı yeni sürümü keser.
+
+**Reddedilenler:** kuralı uyarı bırakıp editörde kapatmak (yayın kapısı motorda değilse
+elle yazılan JSON o boşluktan girer — şema kapısı kararının aynı gerekçesi); yalnız
+paralel-OLMAYAN belgelerde hata saymak (motor "bu iki node paralel kol mu" sorusunu graf
+yapısına bakmadan güvenilir cevaplayamaz, cevaplasa bile tasarımcıya iki farklı kural
+öğretirdi); kolların aynı havuza bakabilmesi için node anahtarını kol kimliğinden ayırmak
+(doğru çözüm, ama bu kararın kapsamının dışında — ertelendi).

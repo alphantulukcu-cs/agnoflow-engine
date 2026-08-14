@@ -4,7 +4,10 @@ Bu doküman WFD domain kavramlarının kanonik referansıdır ve önceki tüm Te
 
 v2.2'nin iki ana kararı, ilk tasarım kararlarına dönüştür:
 1. **C_A tek kuraldır** — "Candidate Actor for an ACT (C_A): Union of C_ORGU, C_R and C_U". OR'lu kural listesi (array) sonradan sızmış bir drift'ti, kaldırılmıştır.
-2. **Her C_A bir node'dur** — "Each C_A is a node." Node kimliği c_a'dan deterministik türetilir; `label` sadece görünümdür.
+2. **Her C_A bir node'dur** — "Each C_A is a node." Bir canonical c_a belgede EN FAZLA
+   BİR node'da bulunur ve aynı node key daima aynı c_a'yı taşır (validator
+   `duplicate_c_a`, HATA — 2026-08-14). Node **kimliğini TASARIMCI verir**; kimlik
+   c_a'dan türetilen slug DEĞİLDİR (2026-08-12). `label` sadece görünümdür.
 
 > **Bu doküman kendi kendine yeter (2026-07-28).** Daha önce ORGANIZATION,
 > USER/ROLE/ACTOR, ORGTRVLANG ve DynCtx/WFAH/WFES tanımları için ayrı bir
@@ -168,7 +171,8 @@ tanımlanabilir.
 ## MODEL ÖZETİ
 
 ```text
-nodes       = isimli bekleme havuzu katalogu; key = slug(c_a), label = display
+nodes       = isimli bekleme havuzu katalogu; key TASARIMCININ, label = display
+              (key != slug(c_a) -- 2026-08-12; ama bir canonical c_a EN FAZLA bir node'da)
 actions     = human ACT katalogu
 autoexec    = reusable sistem executable katalogu
 calls       = reusable WFD cagrisi katalogu (WFC: ne + hangi girdi)
@@ -248,9 +252,14 @@ Kritik kurallar:
   Sabit kimlik `$` ile **başlayamaz** (`c_u_literal_dollar_prefix`): motor onu kullanıcı adı
   sanardı ve `{from}` yazmayı unutan tasarımcının kuralı sessizce hiç eşleşmezdi.
 
-  Node key etkilenmez: `slug()` her iki biçimde de aynı metni sanitize eder (`$` ve `.`
-  düştüğü için `"$ctx.x.user_id"` ile `{from:"$ctx.x.user_id"}` aynı slug'ı verir).
-- **Alternatif havuz ("analist VEYA üst müdür")** tek kuralla İFADE EDİLEMEZ; iki ayrı node veya `listable` kaydı olarak modellenir. Bu bilinçli bir kısıttır: bir c_a = bir node.
+  Node key etkilenmez — zaten c_a'dan türetilmiyor (2026-08-12). Ama **canonical c_a**
+  etkilenir: iki biçim aynı canonical metne indiği için `"$ctx.x.user_id"` ile
+  `{from:"$ctx.x.user_id"}` AYNI c_a sayılır ve ikisi ayrı node'lara yazılırsa
+  `duplicate_c_a` HATASI çıkar (bkz. NODE / Uniqueness).
+- **Alternatif havuz ("analist VEYA üst müdür")** tek kuralla İFADE EDİLEMEZ; iki ayrı node
+  ya da (işi tek havuzda tutup ikinci role ek görünürlük vermek isteniyorsa) o node'un
+  `nodes.<key>.listable[]` kaydı olarak modellenir. Bu bilinçli bir kısıttır: bir c_a = bir
+  node — `listable` ACT/claim vermez, yalnız görünürlük ekler (bkz. LISTABLE / L).
 
 ---
 
@@ -267,16 +276,27 @@ Kritik kurallar:
 }
 ```
 
-- **Key = slug(c_a):** editör üretir, kullanıcı yazmaz; validator yeniden hesaplayıp karşılaştırır (algoritma: runtime-semantics §2a).
-- **Label:** UI'da görünen serbest metin; kimlik DEĞİLDİR. Versiyon-aşırı metrikler label üzerinden agregat edilmelidir (kural değişince slug değişir).
-- **Uniqueness:** Aynı canonical c_a workflow'da en fazla bir node'da bulunur.
+- **Key TASARIMCININDIR** (2026-08-12, KIRICI): `slug(c_a)`dan TÜRETİLMEZ, validator
+  yeniden hesaplayıp karşılaştırmaz. Biçim kısıtı şemadadır (`nodes` `propertyNames:
+  idName`, `^[A-Za-z_][A-Za-z0-9_-]*$`). "Bu adımı kim yapar"ı değiştirmek adımın
+  kimliğini bozmaz.
+- **Label:** UI'da görünen serbest metin; kimlik DEĞİLDİR. Kimlik artık c_a'ya bağlı
+  olmadığı için versiyon-aşırı metrikler doğrudan node key üzerinden de agregat
+  edilebilir (kimlik kural değişikliğinde kaymaz).
+- **Uniqueness — aynı c_a = aynı kimlik** (2026-08-14, `duplicate_c_a` = **HATA**): Bir
+  canonical c_a workflow'da EN FAZLA BİR node'da bulunur, ve aynı kimlik daima aynı
+  c_a'yı taşır. Ardışık adımlar ("müdür inceler" + "müdür onaylar") TEK node'dur; fark
+  aksiyonların `when` koşuluyla (`$wfah`) verilir. Paralel kolda **aynı havuzdan iki kol
+  şimdilik DESTEKLENMEZ** — bilinçli, geçici kısıt (bkz. `decisions.md`, 2026-08-14).
+  Bu kural 2026-08-12'de uyarıya (`shared_c_a`) çevrilmişti; 2026-08-14'te HATA olarak
+  geri getirildi.
 - **Node vs assignment:** claim node'u değiştirmez; assignment runtime metadata'dır.
 
 ```text
 WFES = current_node + assignment + DynCtx + WFAH
 ```
 
-WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, çalışan WFE'ler başladıkları versiyona sabittir (slug kararlılığı bu şekilde sağlanır).
+WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, çalışan WFE'ler başladıkları versiyona sabittir (node anahtarlarının kararlılığı bu şekilde sağlanır).
 
 ---
 
@@ -422,7 +442,27 @@ Gerekçe: authorization dar ve çapalı olmalıdır (sonucu ACT); görünürlük
 
 ## LISTABLE / L
 
-L, WFE-level ek görünürlüktür; ACT/claim vermez. v2.2'de her kayıt TEK c_a kuralı taşır; çoklu grant = çoklu bağımsız kayıt:
+L, WFE-level ek görünürlüktür; **ACT/claim VERMEZ**. Claim kapısı ayrıdır ve node
+`c_a`'sına bakar (`WfeExecutor::can_claim`), hiçbir görünürlük projeksiyonu kolonunu
+okumaz — yani listable'a uyan aktör satırı görür ama işi ÜSTLENEMEZ.
+Portal havuzunda (`routes/portal/pool.rs`) görünme davranışı İKİSİNDE FARKLIDIR:
+kök `listable[]` havuzda GÖRÜNÜR (havuz sorgusu `wfe.view_c_a`'yı da OR'lar), node
+`listable[]` GÖRÜNMEZ (`current_view_c_a` / `wfe_branch.view_c_a` havuz sorgusuna
+BİLEREK alınmadı). İkisi de `GET /wfe?viewable=true` listesinde ve detay ucunda görünür.
+v2.2'de her kayıt TEK c_a kuralı taşır (`$defs/listableRule`: `{c_a, when?}`); çoklu
+grant = çoklu bağımsız kayıt. İki AYRI kavram, iki AYRI wire yeri vardır (2026-08-13,
+node-level `listable` kararı — bkz. `decisions.md`):
+
+| Kavram | WFD yeri | Ömür |
+|---|---|---|
+| **Global listable** | kök `listable[]` (`start`/`transitions`/`nodes` ile aynı seviye) | KALICI — WFE terminal'e ulaştıktan SONRA da görür |
+| **Node listable** | `nodes.<key>.listable[]` | DURUMA BAĞLI — yalnız WFE O NODE'DA İKEN görür; WFE node'dan çıkınca görünürlük BİTER |
+
+İkisi de aynı `$defs/listableRule` şeklini taşır, ikisi de matcher/claim/ACT semantiği
+bakımından AYNIDIR — fark yalnız WFE hangi durumdayken geçerli oldukları ve nerede
+durdukları.
+
+**Global listable** örneği:
 
 ```json
 "listable": [
@@ -432,13 +472,40 @@ L, WFE-level ek görünürlüktür; ACT/claim vermez. v2.2'de her kayıt TEK c_a
 ]
 ```
 
+**Node listable** örneği — `nodes.<key>.listable[]`, node yalnızca aktif iken geçerli:
+
+```json
+"nodes": {
+  "self__creditAnalyst": {
+    "label": "Analist Havuzu",
+    "c_a": { "c_orgu": "self", "c_r": ["creditAnalyst"] },
+    "listable": [
+      { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } }
+    ]
+  }
+}
+```
+
+Bu örnekte şube müdürü, iş `self__creditAnalyst` node'undayken onu ek listesinde görür;
+iş başka bir node'a geçtiğinde (veya biterse) bu görünürlük SONA ERER — kalıcı görmek
+isteniyorsa kayıt kök `listable[]`e yazılır.
+
 Claim/owner/ACT semantiği öncekiyle aynıdır (unassigned: C_A görür+claim eder; assigned: sadece owner ACT; escalation taşırsa assignment temizlenir).
+
+**ORGTRVLANG çapası (2026-08-13 kararı):** her iki listable türünde de `c_orgu` çapası
+**WFE'nin kendi birimidir** (`wfe.origin_orgu_id` — akışı başlatan aktörün birimi),
+sorulan aktörün DEĞİL. `self` böylece daima "işin ait olduğu birim", `parent` "onun
+üstü" demektir; global ve node listable'da bu çapa AYNIDIR — aynı şekli (`{c_a, when}`)
+taşıyan iki kuralın `self`'i farklı şey söylemesi tasarımcı için tuzak olurdu.
 
 ---
 
 ## WF_ADMIN — akış-içi yetkili (T‑A5)
 
-WFD kökünde, `listable` ile AYNI şekli taşıyan bir grant dizisi. Bu kurallardan birine uyan
+WFD kökünde bir grant dizisi. Şekli (`{c_a, when?}`) artık ÜÇ yerle AYNIDIR — kök
+(global) `listable[]`, `nodes.<key>.listable[]` (node listable) ve `wf_admin[]` hepsi
+aynı `$defs/listableRule`/`caGrantRule` tipini kullanır ve aynı ORGTRVLANG çapasına
+(`origin_orgu_id`, "WFE'nin kendi birimi") bağlıdır. Bu kurallardan birine uyan
 aktör O AKIŞA müdahale edebilir: claim devri (node'un kendi `reassign` kuralı olmasa da),
 escalation sayacına müdahale (`fire` / `skip`), ve WFE'yi görme.
 
@@ -547,7 +614,8 @@ WFD JSON'ında bir `nodes.<key>` girdisine (yani bir `c_a`'ya) karşılık gelir
 
 ```text
 c_a array formu ("c_a": [ {...} ]) ve kurallar-arasi OR semantigi
-elle yazilmis node isimleri (key slug'dan turetilir; insan ismi 'label'dadir)
+(GERI ALINDI 2026-08-12: "elle yazilmis node isimleri" ARTIK GECERLI -- key tasarimcinin;
+ slug(c_a) kimlik DEGILDIR. Tekillik kisiti duruyor: bkz. NODE / Uniqueness)
 x-visibility icinde alanlar-arasi AND varsayimi
 startRule.c_a inline formu ve from/action eksikligi (c_a artik start node'da; amended v2.2 in place)
 $ctx.status state konvansiyonu, wft.c_a inline form, $exec.response.*   (v2.1'den devam)
@@ -597,7 +665,8 @@ terminal  cagiran BITER (completed) -> ardil akis baslar; donus, bekleme, cascad
 Mod ↔ yerleşim eşlemesi zorunludur: `wait`/`detached` yalnız `nodes.<k>.call`,
 `terminal` yalnız `terminals[].call`.
 
-**WFC node'unda `c_a` hâlâ zorunludur** (slug/uniqueness değişmezleri korunur); anlamı
+**WFC node'unda `c_a` hâlâ zorunludur** (uniqueness değişmezi — `duplicate_c_a` — WFC
+node'u için de geçerlidir; "key = slug(c_a)" kısıtı 2026-08-12'de kalktı); anlamı
 daralır: *alt akış sürerken bu WFE'yi kim görür ve kim iptal edebilir*. WFC node'u
 `transitions[].from` içinde yer alamaz, `escalation`/`claim_timeout`/`attachments`/
 `reassign` taşıyamaz, `start[].from` olamaz; çıkışı `call.wft`'dir (zorunlu).

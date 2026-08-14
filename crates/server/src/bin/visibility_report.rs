@@ -3,9 +3,14 @@
 //! 2026-08-13'ten önce bu araç eski/yeni KURALI karşılaştırıyordu (o geçiş bitti,
 //! ölçüm raporu: 205 → 148 erişim). Bugünkü işi kuralın İKİ OKUMASINI
 //! karşılaştırmak:
-//!   * **projeksiyon** — `wf.wfe.view_c_a`/`current_c_a` üzerinde jsonb
-//!     containment (`wf_wfe::visibility::sql`). Liste ucu ve detay kapısı bunu
-//!     koşar.
+//!   * **projeksiyon** — `wf.wfe.view_c_a`/`current_c_a`/`current_view_c_a` ve
+//!     kol `c_a`/`view_c_a` üzerinde jsonb containment
+//!     (`wf_wfe::visibility::sql`). Liste ucu, detay kapısı VE portal havuzu
+//!     (2026-08-14'ten beri, `routes::portal::pool`) bunu koşar → havuz ayrıca
+//!     ölçülmez, aynı parçayı ödünç aldığı için bu raporun kapsamındadır.
+//!     Havuzun kendi süzgeçleri (tenant, `status='active'`, `deadline`,
+//!     `current_node IS NOT NULL`) görünürlük DEĞİLDİR: "bu satır bir havuz
+//!     görevi mi" sorusunu sorarlar, kontrat onları kapsamaz.
 //!   * **belge** — `wfe_core::v22::visibility::can_view`, WFD + org portu ile
 //!     canlı hesap. Sim ve birim testlerinin yolu.
 //! İkisi AYNI kuralı ifade eder; ayrışırlarsa projeksiyon eskimiştir (backfill
@@ -19,7 +24,8 @@
 //! ```text
 //! görünür(WFE, viewer) :=
 //!      listable/wf_admin grant'i eşleşir           -- KALICI, `when` uygulanmış
-//!   OR (status = 'active' AND (node c_a  eşleşir
+//!   OR (status = 'active' AND (node c_a       eşleşir
+//!                           OR node listable  eşleşir  -- DURUMA BAĞLI (f)
 //!                           OR WFE/kol claim'i viewer'da))
 //! ```
 //! Eski kural = `wfe_core::v22::visibility::can_view` (kriter (b) KATILIMCI dahil).
@@ -27,7 +33,8 @@
 //! Bu araç iki soruyu cevaplar:
 //!   1. **Erişim farkı**: hangi (aktör, WFE) çifti eski kuralda görünürken yeni
 //!      kuralda görünmez oluyor (ve tersi). Anahtar rakam: kaybedilen erişim.
-//!   2. **Projeksiyon sağlamlığı**: `listable`/`wf_admin` kuralları VIEWER'DAN
+//!   2. **Projeksiyon sağlamlığı**: `listable`/`wf_admin` VE node
+//!      `listable` kuralları VIEWER'DAN
 //!      BAĞIMSIZ mı? Grant'lar commit anında (viewer bilinmezken) yazılacağı için
 //!      viewer'a bağlı iki form projeksiyona SIĞMAZ:
 //!        - `c_orgu` düz Selector: `resolve_c_orgu`ya default anchor olarak
@@ -134,6 +141,24 @@ async fn main() {
             Ok(wfd) => {
                 let mut reasons = viewer_relative_reasons(&wfd.listable, "listable");
                 reasons.extend(viewer_relative_reasons(&wfd.wf_admin, "wf_admin"));
+                // 2026-08-13 node listable: kök `listable` ile AYNI şekil, AYNI
+                // çapa, AYNI projeksiyon kısıtı → aynı tarama. Kapsanmazsa
+                // rapor SAPAR: viewer'a bağlı bir node kuralı `can_view` (f)'de
+                // eşleşir ama `current_view_c_a` kolonunda karşılığı olmaz ve
+                // "belgede VAR, projeksiyonda YOK" satırının sebebi görünmez
+                // kalırdı. Node anahtarları sıralı gezilir (rapor deterministik).
+                let mut node_keys: Vec<&String> = wfd.nodes.keys().collect();
+                node_keys.sort();
+                for key in node_keys {
+                    let node = &wfd.nodes[key];
+                    if node.listable.is_empty() {
+                        continue;
+                    }
+                    reasons.extend(viewer_relative_reasons(
+                        &node.listable,
+                        &format!("nodes.{key}.listable"),
+                    ));
+                }
                 if !reasons.is_empty() {
                     unsound += 1;
                     println!("  WFD {} v{}:", row.wfd_id, row.wfd_version);
@@ -147,7 +172,8 @@ async fn main() {
     }
     if unsound == 0 {
         println!(
-            "  (yok — tüm listable/wf_admin kuralları viewer'dan bağımsız, projeksiyon sağlam)"
+            "  (yok — tüm listable/wf_admin/node listable kuralları viewer'dan bağımsız, \
+             projeksiyon sağlam)"
         );
     }
     if !missing_wfd.is_empty() {

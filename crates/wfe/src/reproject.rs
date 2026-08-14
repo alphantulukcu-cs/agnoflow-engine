@@ -36,7 +36,8 @@ pub enum Outcome {
     NoAnchor,
 }
 
-/// Bir WFE'nin `view_c_a` / `current_c_a` / kol `c_a` kolonlarını yeniden üretir.
+/// Bir WFE'nin `view_c_a` / `current_c_a` / `current_view_c_a` / kol `c_a` +
+/// `view_c_a` kolonlarını yeniden üretir.
 ///
 /// `dry_run = true` iken hiçbir şey yazılmaz (backfill komutunun varsayılanı).
 /// Çapa sırası: kolon → ilk İNSAN WFAH kaydının birimi. İkincisi eski satırlar
@@ -88,13 +89,34 @@ pub async fn reproject_wfe(
 
     // `current_c_a` yalnız AKTİF tek-kol satırda anlamlıdır; bitmiş işte kolon
     // boştur ve boş KALMALIDIR (bitmiş işi `view_c_a` gösterir).
-    let current_c_a = match (&wfes.current_node, wfes.status) {
-        (Some(node), WfeStatus::Active) => Some(
-            engine
-                .resolve_node_c_a(&wfd, node, ctx, &wfes.wfah, &anchor_actor, wfes.orgtnt_id)
-                .await?,
+    //
+    // 2026-08-13 node listable: `current_view_c_a` AYNI koşula bağlıdır — durum-
+    // bağımlı grant bitmiş işte de, paralel modda da (aktif node kümesi kol
+    // satırlarıdır) WFE-seviyesinde durmaz.
+    let (current_c_a, current_view_c_a) = match (&wfes.current_node, wfes.status) {
+        (Some(node), WfeStatus::Active) => (
+            Some(
+                engine
+                    .resolve_node_c_a(&wfd, node, ctx, &wfes.wfah, &anchor_actor, wfes.orgtnt_id)
+                    .await?,
+            ),
+            Some(
+                engine
+                    .node_view_grants(
+                        &wfd,
+                        node,
+                        ctx,
+                        &wfes.wfah,
+                        // `$node` = okuma anında `can_view`in göreceği değer.
+                        Some(node.as_str()),
+                        wfes.wfe_id,
+                        origin,
+                        wfes.orgtnt_id,
+                    )
+                    .await?,
+            ),
         ),
-        _ => None,
+        _ => (None, None),
     };
 
     let mut branches = Vec::new();
@@ -113,7 +135,21 @@ pub async fn reproject_wfe(
                 wfes.orgtnt_id,
             )
             .await?;
-        branches.push((b.branch_node.clone(), c_a));
+        // Kolun node listable'ı: guard `$node` paralel modda NULL'dır (wfe-seviyesi
+        // `current_node` yok) — `fill_view_grants` ile AYNI seçim.
+        let view = engine
+            .node_view_grants(
+                &wfd,
+                &b.branch_node,
+                ctx,
+                &wfes.wfah,
+                None,
+                wfes.wfe_id,
+                origin,
+                wfes.orgtnt_id,
+            )
+            .await?;
+        branches.push((b.branch_node.clone(), c_a, view));
     }
 
     if dry_run {
@@ -127,29 +163,37 @@ pub async fn reproject_wfe(
         Some(c) => Some(serde_json::to_value(c).map_err(io_err)?),
         None => None,
     };
+    let current_view_json = match &current_view_c_a {
+        Some(c) => Some(serde_json::to_value(c).map_err(io_err)?),
+        None => None,
+    };
     sqlx::query(
         "UPDATE wf.wfe
             SET view_c_a = $1, origin_orgu_id = $2, grants_built_at = now(),
-                current_c_a = COALESCE($4, current_c_a)
+                current_c_a = COALESCE($4, current_c_a),
+                current_view_c_a = COALESCE($5, current_view_c_a)
           WHERE wfe_id = $3",
     )
     .bind(&view_json)
     .bind(origin)
     .bind(wfe_id)
     .bind(&current_json)
+    .bind(&current_view_json)
     .execute(pool)
     .await
     .map_err(io_err)?;
 
-    for (node, c_a) in &branches {
+    for (node, c_a, view) in &branches {
         let c_a_json = serde_json::to_value(c_a).map_err(io_err)?;
+        let view_json = serde_json::to_value(view).map_err(io_err)?;
         sqlx::query(
-            "UPDATE wf.wfe_branch SET c_a = $1, updated_at = now()
+            "UPDATE wf.wfe_branch SET c_a = $1, view_c_a = $4, updated_at = now()
               WHERE wfe_id = $2 AND branch_node = $3",
         )
         .bind(&c_a_json)
         .bind(wfe_id)
         .bind(node)
+        .bind(&view_json)
         .execute(pool)
         .await
         .map_err(io_err)?;

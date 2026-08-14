@@ -52,6 +52,9 @@ pub struct WfeRow {
 /// WOR-31: paralel mod kol satırı (`wf.wfe_branch`).
 #[derive(Debug, FromRow)]
 pub struct BranchRow {
+    /// TEK WFE okunurken de seçilir: aynı satır tipi TOPLU sorguda da kullanılır
+    /// (`repo::branch::load_all_for_wfes`) ve orada gruplama anahtarıdır.
+    pub wfe_id: Uuid,
     pub branch_node: String,
     /// WOR-73: kolun değişmez kimliği (fork'taki giriş node'u). WOR-73 öncesi
     /// satırlarda NULL olabilir → çağıran `branch_node`'a düşer.

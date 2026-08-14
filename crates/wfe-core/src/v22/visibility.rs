@@ -153,6 +153,11 @@ pub async fn filter_dynctx(
 ///       `when` guard'ı (varsa) staged ctx üzerinde true mü
 ///   (e) viewer `wfd.wf_admin[]` kurallarından birine authorize (aynı şekil) —
 ///       akış yöneticisi yönettiği akışı görür (T‑A5)
+///   (f) aktif node'lardan HERHANGİ birinin `node.listable[]` kurallarından birine
+///       viewer authorize VE kuralın `when` guard'ı (varsa) true — 2026-08-13, kök
+///       `listable[]`in DURUMA BAĞLI karşılığı: WFE bu node'dan çıkınca (b) gibi
+///       görünürlük de biter. ACT/claim VERMEZ (`matches_grant_rules` yalnız görme
+///       sorar), aynı "aktif node" kümesi (c) ile PAYLAŞILIR.
 /// `visible`/`filter_dynctx`'ten AYRIDIR: onlar field-level x-visibility'dir,
 /// bu fonksiyon WFE'nin bütünüyle görünür olup olmadığını belirler.
 pub async fn can_view(
@@ -229,6 +234,13 @@ pub async fn can_view(
             )
             .await?
             {
+                return Ok(true);
+            }
+            // (f) node-seviyesi `listable[]` — DURUMA BAĞLI görme (2026-08-13): aynı
+            // "aktif node" kümesi (c) ile paylaşılır, ikinci bir liste kurulmaz. Aynı
+            // ÇAPA (`origin_orgu_id`) ve aynı matcher (`matches_grant_rules`, kök
+            // `listable`/`wf_admin` (d)/(e) ile birebir) — ACT/claim'e dokunmaz.
+            if matches_grant_rules(&node.listable, viewer, wfes, org).await? {
                 return Ok(true);
             }
         }

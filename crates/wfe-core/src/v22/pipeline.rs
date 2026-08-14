@@ -21,8 +21,8 @@ use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
 use crate::types::wfd_v22::{
-    ActionDef, AutoexecDef, CallMode, CandidateActor, CuItem, EscalationStep, JoinRule, StartAs,
-    Transition, TriggerInvocation, Wfd, Wft, WftTarget,
+    ActionDef, AutoexecDef, CaGrantRule, CallMode, CandidateActor, CuItem, EscalationStep, JoinRule,
+    StartAs, Transition, TriggerInvocation, Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
@@ -343,7 +343,9 @@ impl<'a> Engine<'a> {
             // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
             // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
             view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
             // Görünürlük çapası: akışı BAŞLATAN aktörün birimi. Start'ın kendisi
             // zaten bu aktörle çözüm yapıyor; WFE ömrü boyunca sabit kalacak olan
             // değer burada donar.
@@ -570,7 +572,9 @@ impl<'a> Engine<'a> {
             // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
             // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
             view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
         })
     }
 
@@ -800,7 +804,9 @@ impl<'a> Engine<'a> {
             // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
             // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
             view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
         })
     }
 
@@ -978,11 +984,103 @@ impl<'a> Engine<'a> {
         orgtnt_id: Uuid,
     ) -> Result<Vec<ResolvedCandidate>, EngineError> {
         let mut out: Vec<ResolvedCandidate> = Vec::new();
-        for rule in wfd.listable.iter().chain(wfd.wf_admin.iter()) {
+        self.extend_grant_candidates(
+            &mut out,
+            &wfd.listable,
+            ctx,
+            wfah,
+            current_node,
+            wfe_id,
+            origin_orgu,
+            orgtnt_id,
+        )
+        .await?;
+        self.extend_grant_candidates(
+            &mut out,
+            &wfd.wf_admin,
+            ctx,
+            wfah,
+            current_node,
+            wfe_id,
+            origin_orgu,
+            orgtnt_id,
+        )
+        .await?;
+        Ok(out)
+    }
+
+    /// Node-seviyesi görünürlük projeksiyonu (2026-08-13): `nodes.<key>.listable[]`
+    /// kurallarının ÇÖZÜLMÜŞ aday listesi — `wf.wfe.current_view_c_a` (tek-kol) ve
+    /// `wf.wfe_branch.view_c_a` (kol) kolonlarına yazılır.
+    ///
+    /// Kök `listable`/`wf_admin` ile AYNI çözücüyü (`extend_grant_candidates`)
+    /// kullanır: iki yerin `when`/çapa davranışı ayrışırsa `can_view` (f) ile SQL
+    /// süzgeci sessizce farklı cevap verir. Çapa da AYNIDIR (`origin_orgu`) —
+    /// aynı `{c_a, when}` şeklini taşıyan iki kuralın `self`'i başka şey demesi
+    /// tasarımcı için tuzak olurdu.
+    ///
+    /// `guard_node` = `when` guard'ının göreceği `$node`, yani `can_view`'in OKUMA
+    /// anında `matches_grant_rules`e verdiği değer (`wfes.current_node`). Tek-kol
+    /// yolunda varılan node'un kendisidir; paralel modda wfe-seviyesi
+    /// `current_node` NULL olduğu için kol projeksiyonunda `None`'dır — kolon ile
+    /// referans okuma arasındaki eşitlik bu ayrıntıya bağlıdır.
+    ///
+    /// Bilinmeyen node = boş liste: bu bir yetki sorusu değil cache üretimidir,
+    /// eksik node'da hata atmak commit'i düşürürdü.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn node_view_grants(
+        &self,
+        wfd: &Wfd,
+        node_key: &str,
+        ctx: &Value,
+        wfah: &Wfah,
+        guard_node: Option<&str>,
+        wfe_id: Uuid,
+        origin_orgu: Uuid,
+        orgtnt_id: Uuid,
+    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
+        let Some(node) = wfd.nodes.get(node_key) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<ResolvedCandidate> = Vec::new();
+        self.extend_grant_candidates(
+            &mut out,
+            &node.listable,
+            ctx,
+            wfah,
+            guard_node,
+            wfe_id,
+            origin_orgu,
+            orgtnt_id,
+        )
+        .await?;
+        Ok(out)
+    }
+
+    /// `{c_a, when?}` grant kurallarını çözüp `out`a EKLER — kök
+    /// `listable`/`wf_admin` (`view_grants`) ve node `listable`
+    /// (`node_view_grants`) tek çözücü paylaşır.
+    ///
+    /// `when` guard'ı AKTÖRSÜZ değerlendirilir (`$actor` bu guard'larda validator
+    /// tarafından yasaklı — `grant_when_actor_ref`): projeksiyon viewer
+    /// bilinmezken yazılır.
+    #[allow(clippy::too_many_arguments)]
+    async fn extend_grant_candidates(
+        &self,
+        out: &mut Vec<ResolvedCandidate>,
+        rules: &[CaGrantRule],
+        ctx: &Value,
+        wfah: &Wfah,
+        guard_node: Option<&str>,
+        wfe_id: Uuid,
+        origin_orgu: Uuid,
+        orgtnt_id: Uuid,
+    ) -> Result<(), EngineError> {
+        for rule in rules {
             if let Some(expr) = &rule.when {
                 let env = EvalEnv::new(ctx)
                     .with_wfah(wfah)
-                    .with_node(current_node)
+                    .with_node(guard_node)
                     .with_wfe_id(wfe_id);
                 if !evaluate_bool(expr, &env)? {
                     continue;
@@ -996,7 +1094,7 @@ impl<'a> Engine<'a> {
             extra.retain(|c| !out.contains(c));
             out.append(&mut extra);
         }
-        Ok(out)
+        Ok(())
     }
 
     // -------------------------------------------------------------- reassign
@@ -1584,7 +1682,9 @@ impl<'a> Engine<'a> {
             // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
             // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
             view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
         })
     }
 
@@ -1642,7 +1742,9 @@ impl<'a> Engine<'a> {
             // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
             // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
             view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
         }
     }
 
@@ -1876,7 +1978,9 @@ impl<'a> Engine<'a> {
                     // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
                     // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
                     view_c_a: Vec::new(),
+                    current_view_c_a: Vec::new(),
                     branch_c_a: Vec::new(),
+                    branch_view_c_a: Vec::new(),
                 }))
             }
         }
@@ -2273,7 +2377,9 @@ impl<'a> Engine<'a> {
             // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
             // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
             view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
         })
     }
 
@@ -3739,5 +3845,226 @@ mod tests {
 
         assert!(ga.iter().all(|c| c.orgu_id == Some(a)));
         assert!(gb.iter().all(|c| c.orgu_id == Some(b)));
+    }
+
+    // ---- 2026-08-13: NODE listable projeksiyonu (`node_view_grants`) ----
+
+    /// Node listable'ı olan minimum WFD. Node c_a'sı (`memur`) ile node
+    /// listable'ı (`izleyen`) AYRI rollerdir: projeksiyonun ikisini karıştırıp
+    /// karıştırmadığı ancak böyle görülür. Ham JSON → şema kapısı da koşar.
+    fn node_grants_wfd(when: Option<&str>) -> Wfd {
+        let guard = match when {
+            Some(w) => format!(r#", "when": "{w}""#),
+            None => String::new(),
+        };
+        let doc = format!(
+            r#"{{
+              "wfd_version": "2.2",
+              "id": "node-grant-test",
+              "name": "Node Grant Test",
+              "version": "1.0.0",
+              "context": {{ "type": "object", "properties": {{}} }},
+              "start": [
+                {{ "id": "start__adim", "action": "basla", "from": "adim",
+                   "wft": {{ "terminal": "bitti" }} }}
+              ],
+              "nodes": {{
+                "adim": {{
+                  "c_a": {{ "c_orgu": "self", "c_r": ["memur"] }},
+                  "listable": [
+                    {{ "c_a": {{ "c_orgu": "self", "c_r": ["izleyen"] }}{guard} }}
+                  ]
+                }},
+                "sessiz": {{ "c_a": {{ "c_orgu": "self", "c_r": ["memur"] }} }}
+              }},
+              "actions": {{ "basla": {{ "input": {{ "required": [], "optional": [] }} }} }},
+              "terminals": [
+                {{ "id": "bitti", "label": "Bitti", "wfe_end_response": {{ "status": "ok" }} }}
+              ],
+              "transitions": []
+            }}"#
+        );
+        Wfd::from_json(&doc).expect("fixture geçerli olmalı")
+    }
+
+    /// Node listable ÇÖZÜLÜR, node c_a'sı KARIŞMAZ ve çapa `origin`dir.
+    /// Karışsa `current_view_c_a` ACT adayı taşır ve kolon "görme" anlamını
+    /// yitirirdi (WOR-44 katlamasının aynı hatası, node ekseninde).
+    #[tokio::test]
+    async fn node_view_grants_resolves_only_node_listable() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let origin = Uuid::new_v4();
+
+        let out = engine
+            .node_view_grants(
+                &node_grants_wfd(None),
+                "adim",
+                &json!({}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        let roles: Vec<&str> = out.iter().map(|c| c.role.as_str()).collect();
+        assert!(roles.contains(&"izleyen"), "node listable yok: {roles:?}");
+        assert!(
+            !roles.contains(&"memur"),
+            "node c_a'sı görünürlük projeksiyonuna karışmış: {roles:?}"
+        );
+        assert!(out.iter().all(|c| c.orgu_id == Some(origin)), "çapa origin değil");
+    }
+
+    /// `when` guard'ı UYGULANIR — kök `listable` ile birebir aynı semantik.
+    /// Uygulanmazsa kolon over-inclusive olur ve tam da 2026-08-13'te kapatılan
+    /// "guard'ı yok say" davranışı node ekseninde geri gelir.
+    #[tokio::test]
+    async fn node_view_grants_applies_when_guard() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let origin = Uuid::new_v4();
+        let wfd = node_grants_wfd(Some("$ctx.tutar >= 100"));
+
+        let low = engine
+            .node_view_grants(
+                &wfd,
+                "adim",
+                &json!({"tutar": 10}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            low.is_empty(),
+            "guard false iken node listable yazılmamalı: {low:?}"
+        );
+
+        let high = engine
+            .node_view_grants(
+                &wfd,
+                "adim",
+                &json!({"tutar": 250}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        assert!(high.iter().any(|c| c.role == "izleyen"));
+    }
+
+    /// Guard'ın gördüğü `$node` ÇAĞIRANDAN gelir: tek-kol yolunda varılan node,
+    /// paralel kol projeksiyonunda `None` (wfe-seviyesi `current_node` NULL'dır).
+    /// `can_view` okuma anında hangi değeri görüyorsa projeksiyon da onu
+    /// görmelidir; ayrışırsa `$node`e bakan bir guard iki okumada farklı cevap
+    /// verir ve kontrat denetçisi ayrışma raporlar.
+    #[tokio::test]
+    async fn node_view_grants_guard_sees_the_caller_supplied_node() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let origin = Uuid::new_v4();
+        // JSON içinde geçtiği için tırnaklar kaçışlıdır: guard ZEN'e
+        // `$node == "adim"` olarak varır.
+        let wfd = node_grants_wfd(Some(r#"$node == \"adim\""#));
+
+        let with_node = engine
+            .node_view_grants(
+                &wfd,
+                "adim",
+                &json!({}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        assert!(with_node.iter().any(|c| c.role == "izleyen"));
+
+        let without_node = engine
+            .node_view_grants(
+                &wfd,
+                "adim",
+                &json!({}),
+                &Wfah::empty(),
+                None,
+                Uuid::new_v4(),
+                origin,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            without_node.is_empty(),
+            "guard `$node`u çağırandan almıyor: {without_node:?}"
+        );
+    }
+
+    /// `listable`ı OLMAYAN node ve BİLİNMEYEN node boş liste verir — bu bir
+    /// yetki sorusu değil cache üretimidir, commit'i düşürmemeli.
+    #[tokio::test]
+    async fn node_view_grants_is_empty_without_rules_or_node() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let wfd = node_grants_wfd(None);
+
+        for key in ["sessiz", "hiç-yok"] {
+            let out = engine
+                .node_view_grants(
+                    &wfd,
+                    key,
+                    &json!({}),
+                    &Wfah::empty(),
+                    Some(key),
+                    Uuid::new_v4(),
+                    Uuid::new_v4(),
+                    Uuid::nil(),
+                )
+                .await
+                .unwrap();
+            assert!(out.is_empty(), "'{key}' için boş liste beklenir: {out:?}");
+        }
+    }
+
+    /// Kök `view_grants` node listable'ı TOPLAMAZ: kalıcı kolon durum-bağımlı
+    /// grant taşırsa node'dan çıkmış (hatta bitmiş) iş görünür kalır.
+    #[tokio::test]
+    async fn view_grants_does_not_pick_up_node_listable() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+
+        let out = engine
+            .view_grants(
+                &node_grants_wfd(None),
+                &json!({}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !out.iter().any(|c| c.role == "izleyen"),
+            "node listable kalıcı `view_c_a` projeksiyonuna sızmış: {out:?}"
+        );
     }
 }

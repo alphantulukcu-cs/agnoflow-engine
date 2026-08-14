@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use wfe_core::types::wfd_v22::{JoinRule, WftTarget};
 use wfe_core::types::{
-    actor::Actor,
+    actor::{Actor, CandidateActor as ResolvedCandidate},
     dynctx::DynCtx,
     wfah::{Wfah, WfahEntry},
     wfe::WfeStatus,
@@ -308,6 +308,98 @@ async fn branch_entry_node(
     Ok(row.0.unwrap_or(row.1))
 }
 
+/// Satırlar → `Wfes`. `load` ve `load_many`in ORTAK gövdesi (2026-08-14): iki
+/// yolun aynı durumu üretmesi `WfeStore::load_many` sözleşmesidir, o yüzden
+/// dönüşüm TEK yerde yaşar — yoksa toplu yol zamanla tek-WFE yolundan ayrışırdı
+/// (havuzun görünürlük `WHERE`'iyle başına gelenin aynısı).
+fn build_wfes(
+    row: crate::models::WfeRow,
+    ctx: Value,
+    wfah_rows: Vec<crate::models::WfahRow>,
+    branch_rows: Vec<crate::models::BranchRow>,
+) -> Wfes {
+    let wfe_id = row.wfe_id;
+    let entries: Vec<WfahEntry> = wfah_rows
+        .into_iter()
+        .map(|r| {
+            let actor: Actor = serde_json::from_value(r.actor).unwrap_or_else(|e| {
+                // WOR-19: bozuk kayıt sessiz kalmasın — audit izi log'a düşer
+                tracing::warn!("wfe {wfe_id} wfah seq {} actor parse edilemedi: {e}", r.seq);
+                Actor {
+                    orgu_id: Uuid::nil(),
+                    user_id: Uuid::nil(),
+                    role: "unknown".into(),
+                }
+            });
+            WfahEntry {
+                seq: r.seq as u32,
+                action: r.action,
+                actor,
+                input: r.input,
+                applied_at: r.applied_at,
+            }
+        })
+        .collect();
+
+    let status = match row.status.as_str() {
+        "terminal" => WfeStatus::Terminal,
+        "error" => WfeStatus::Error,
+        "terminated" => WfeStatus::Terminated,
+        _ => WfeStatus::Active,
+    };
+
+    let assigned_to = parse_claimed_by(row.claimed_by.as_ref());
+
+    // WOR-31: paralel mod kol satırları + join hedefi.
+    let branches: Vec<BranchState> = branch_rows
+        .into_iter()
+        .map(|b| BranchState {
+            entry_node: b.entry_node.unwrap_or_else(|| b.branch_node.clone()),
+            branch_node: b.branch_node,
+            status: match b.status.as_str() {
+                "arrived" => BranchStatus::Arrived,
+                "cancelled" => BranchStatus::Cancelled,
+                _ => BranchStatus::Active,
+            },
+            claimed_by: parse_claimed_by(b.claimed_by.as_ref()),
+            claimed_at: b.claimed_at,
+            entered_at: b.entered_at,
+        })
+        .collect();
+    let join_target: Option<WftTarget> = row
+        .join_target
+        .as_ref()
+        .and_then(|jt| serde_json::from_value(jt.clone()).ok());
+
+    Wfes {
+        wfe_id,
+        orgtnt_id: row.orgtnt_id,
+        environment_id: row.environment_id,
+        wfd_id: row.wfd_id,
+        wfd_version: row.wfd_version,
+        dynctx: DynCtx(ctx),
+        wfah: Wfah(entries),
+        status,
+        current_node: row.current_node,
+        assigned_to,
+        end_response: row.end_response,
+        deadline: row.deadline,
+        claimed_at: row.claimed_at,
+        created_at: row.created_at,
+        branches,
+        join_target,
+        origin_orgu_id: row.origin_orgu_id,
+        // WOR-72/WOR-73: iki kolon → tek çözülmüş kural. Negatif/0 eşik DB
+        // CHECK'iyle, "ikisi birden dolu" hâli `wfe_join_rule_single` ile
+        // engellenir; yine de eşik önce okunur (deterministik).
+        join_rule: match (row.join_threshold, row.join_when) {
+            (Some(k), _) => JoinRule::Quorum(k.max(1) as u32),
+            (None, Some(expr)) => JoinRule::Expr(expr),
+            (None, None) => JoinRule::All,
+        },
+    }
+}
+
 #[async_trait]
 impl WfeStore for WfeAdapter {
     async fn load(&self, wfe_id: Uuid) -> Result<Wfes, EngineError> {
@@ -318,89 +410,58 @@ impl WfeStore for WfeAdapter {
         let wfah_rows = repo::wfah::load_all(&self.pool, wfe_id)
             .await
             .map_err(db_err)?;
-
-        let entries: Vec<WfahEntry> = wfah_rows
-            .into_iter()
-            .map(|r| {
-                let actor: Actor = serde_json::from_value(r.actor).unwrap_or_else(|e| {
-                    // WOR-19: bozuk kayıt sessiz kalmasın — audit izi log'a düşer
-                    tracing::warn!("wfe {wfe_id} wfah seq {} actor parse edilemedi: {e}", r.seq);
-                    Actor {
-                        orgu_id: Uuid::nil(),
-                        user_id: Uuid::nil(),
-                        role: "unknown".into(),
-                    }
-                });
-                WfahEntry {
-                    seq: r.seq as u32,
-                    action: r.action,
-                    actor,
-                    input: r.input,
-                    applied_at: r.applied_at,
-                }
-            })
-            .collect();
-
-        let status = match row.status.as_str() {
-            "terminal" => WfeStatus::Terminal,
-            "error" => WfeStatus::Error,
-            "terminated" => WfeStatus::Terminated,
-            _ => WfeStatus::Active,
-        };
-
-        let assigned_to = parse_claimed_by(row.claimed_by.as_ref());
-
-        // WOR-31: paralel mod kol satırları + join hedefi.
         let branch_rows = repo::branch::load_all(&self.pool, wfe_id)
             .await
             .map_err(db_err)?;
-        let branches: Vec<BranchState> = branch_rows
-            .into_iter()
-            .map(|b| BranchState {
-                entry_node: b.entry_node.unwrap_or_else(|| b.branch_node.clone()),
-                branch_node: b.branch_node,
-                status: match b.status.as_str() {
-                    "arrived" => BranchStatus::Arrived,
-                    "cancelled" => BranchStatus::Cancelled,
-                    _ => BranchStatus::Active,
-                },
-                claimed_by: parse_claimed_by(b.claimed_by.as_ref()),
-                claimed_at: b.claimed_at,
-                entered_at: b.entered_at,
-            })
-            .collect();
-        let join_target: Option<WftTarget> = row
-            .join_target
-            .as_ref()
-            .and_then(|jt| serde_json::from_value(jt.clone()).ok());
+        Ok(build_wfes(row, ctx, wfah_rows, branch_rows))
+    }
 
-        Ok(Wfes {
-            wfe_id,
-            orgtnt_id: row.orgtnt_id,
-            environment_id: row.environment_id,
-            wfd_id: row.wfd_id,
-            wfd_version: row.wfd_version,
-            dynctx: DynCtx(ctx),
-            wfah: Wfah(entries),
-            status,
-            current_node: row.current_node,
-            assigned_to,
-            end_response: row.end_response,
-            deadline: row.deadline,
-            claimed_at: row.claimed_at,
-            created_at: row.created_at,
-            branches,
-            join_target,
-            origin_orgu_id: row.origin_orgu_id,
-            // WOR-72/WOR-73: iki kolon → tek çözülmüş kural. Negatif/0 eşik DB
-            // CHECK'iyle, "ikisi birden dolu" hâli `wfe_join_rule_single` ile
-            // engellenir; yine de eşik önce okunur (deterministik).
-            join_rule: match (row.join_threshold, row.join_when) {
-                (Some(k), _) => JoinRule::Quorum(k.max(1) as u32),
-                (None, Some(expr)) => JoinRule::Expr(expr),
-                (None, None) => JoinRule::All,
-            },
-        })
+    /// Toplu yükleme: `load`un 4 sorgusu satır SAYISINCA değil, TOPLAM 4 kez
+    /// koşar (`= ANY($1)`). Dönüşüm gövdesi `load` ile aynıdır (`build_wfes`),
+    /// dolayısıyla iki yol aynı durumu üretir.
+    ///
+    /// Ctx snapshot'ı olmayan WFE haritaya GİRMEZ — tek-WFE yolunda o hâl
+    /// `NotFound`tur, burada "yüklenemedi" olarak aynı anlama gelir.
+    async fn load_many(
+        &self,
+        wfe_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Wfes>, EngineError> {
+        use std::collections::HashMap;
+        if wfe_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = repo::wfe::get_many(&self.pool, wfe_ids)
+            .await
+            .map_err(db_err)?;
+        let mut ctxs: HashMap<Uuid, Value> = repo::dynctx::load_latest_many(&self.pool, wfe_ids)
+            .await
+            .map_err(db_err)?
+            .into_iter()
+            .collect();
+        let mut wfahs: HashMap<Uuid, Vec<crate::models::WfahRow>> = HashMap::new();
+        for r in repo::wfah::load_all_for_wfes(&self.pool, wfe_ids)
+            .await
+            .map_err(db_err)?
+        {
+            wfahs.entry(r.wfe_id).or_default().push(r);
+        }
+        let mut branches: HashMap<Uuid, Vec<crate::models::BranchRow>> = HashMap::new();
+        for b in repo::branch::load_all_for_wfes(&self.pool, wfe_ids)
+            .await
+            .map_err(db_err)?
+        {
+            branches.entry(b.wfe_id).or_default().push(b);
+        }
+
+        let mut out = HashMap::with_capacity(rows.len());
+        for row in rows {
+            let id = row.wfe_id;
+            let Some(ctx) = ctxs.remove(&id) else { continue };
+            let wfah_rows = wfahs.remove(&id).unwrap_or_default();
+            let branch_rows = branches.remove(&id).unwrap_or_default();
+            out.insert(id, build_wfes(row, ctx, wfah_rows, branch_rows));
+        }
+        Ok(out)
     }
 
     async fn create(&self, new: &NewWfe) -> Result<(), EngineError> {
@@ -428,8 +489,8 @@ impl WfeStore for WfeAdapter {
         sqlx::query(
             "INSERT INTO wf.wfe
                (wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline,
-                view_c_a, origin_orgu_id, grants_built_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())",
+                view_c_a, origin_orgu_id, grants_built_at, current_view_c_a)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)",
         )
         .bind(new.wfe_id)
         .bind(new.orgtnt_id)
@@ -444,6 +505,9 @@ impl WfeStore for WfeAdapter {
         .bind(serde_json::to_value(&new.view_c_a).map_err(db_err)?)
         // Görünürlük çapası start'ta donar (bkz. `NewWfe::origin_orgu_id`).
         .bind(new.origin_orgu_id)
+        // Node listable: `current_c_a` ile AYNI satırda, aynı anda (terminal'e
+        // inen start'ta ikisi de boştur).
+        .bind(serde_json::to_value(&new.current_view_c_a).map_err(db_err)?)
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -526,17 +590,23 @@ impl WfeStore for WfeAdapter {
         match &commit.outcome {
             CommitOutcome::MoveTo { node } => {
                 let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
+                // 2026-08-13: node listable projeksiyonu `current_c_a` ile AYNI
+                // UPDATE'te yazılır — iki kolonun aynı anda yazılması sözleşmedir
+                // (ayrı ifadelere bölünse yeni bir outcome kolunda biri unutulur
+                // ve o geçişten sonra node listable sessizce kaybolurdu).
+                let view_json = serde_json::to_value(&commit.current_view_c_a).map_err(db_err)?;
                 // M8: yeni node'a UNASSIGNED giriş — claimed_by/claimed_at temizlenir
                 sqlx::query(
                     "UPDATE wf.wfe
-                     SET current_node = $1, current_c_a = $2, claimed_by = NULL,
-                         claimed_at = NULL, updated_at = now()
+                     SET current_node = $1, current_c_a = $2, current_view_c_a = $5,
+                         claimed_by = NULL, claimed_at = NULL, updated_at = now()
                      WHERE wfe_id = $3 AND orgtnt_id = $4",
                 )
                 .bind(node)
                 .bind(&c_a_json)
                 .bind(commit.wfe_id)
                 .bind(commit.orgtnt_id)
+                .bind(&view_json)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;
@@ -554,6 +624,7 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'terminal', current_node = NULL, current_c_a = '[]'::jsonb,
+                         current_view_c_a = '[]'::jsonb,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
                          join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
@@ -574,6 +645,7 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'error', current_node = NULL, current_c_a = '[]'::jsonb,
+                         current_view_c_a = '[]'::jsonb,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
                          join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
@@ -594,6 +666,7 @@ impl WfeStore for WfeAdapter {
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'terminated', current_node = NULL, current_c_a = '[]'::jsonb,
+                         current_view_c_a = '[]'::jsonb,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
                          join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
@@ -613,6 +686,10 @@ impl WfeStore for WfeAdapter {
                 join,
                 join_rule,
             } => {
+                // WFE-seviyesi `current_view_c_a` de `current_c_a` gibi boşaltılır:
+                // paralel modda "aktif node" kümesi KOL satırlarıdır (bkz.
+                // `can_view` (c)/(f) aynı kümeyi paylaşır), node listable'ın yeri
+                // artık `wfe_branch.view_c_a`dır.
                 let join_json = serde_json::to_value(join).map_err(db_err)?;
                 // WOR-72/WOR-73: çözülmüş kural fork anında persist edilir.
                 // İkisi de NULL = AND-join.
@@ -623,7 +700,8 @@ impl WfeStore for WfeAdapter {
                 };
                 sqlx::query(
                     "UPDATE wf.wfe
-                     SET current_node = NULL, current_c_a = '[]'::jsonb, claimed_by = NULL,
+                     SET current_node = NULL, current_c_a = '[]'::jsonb,
+                         current_view_c_a = '[]'::jsonb, claimed_by = NULL,
                          claimed_at = NULL, join_target = $1, join_threshold = $4,
                          join_when = $5, updated_at = now()
                      WHERE wfe_id = $2 AND orgtnt_id = $3",
@@ -757,10 +835,14 @@ impl WfeStore for WfeAdapter {
                         // (join_target + join_threshold temizlenir).
                         let c_a_json =
                             serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
+                        // Join node'una inildi → paralel mod bitti, node listable
+                        // yeniden WFE-seviyesine döner (kol satırları düşüyor).
+                        let view_json =
+                            serde_json::to_value(&commit.current_view_c_a).map_err(db_err)?;
                         sqlx::query(
                             "UPDATE wf.wfe
-                             SET current_node = $1, current_c_a = $2, claimed_by = NULL,
-                                 claimed_at = NULL, join_target = NULL,
+                             SET current_node = $1, current_c_a = $2, current_view_c_a = $5,
+                                 claimed_by = NULL, claimed_at = NULL, join_target = NULL,
                                  join_threshold = NULL, join_when = NULL, updated_at = now()
                              WHERE wfe_id = $3 AND orgtnt_id = $4",
                         )
@@ -768,6 +850,7 @@ impl WfeStore for WfeAdapter {
                         .bind(&c_a_json)
                         .bind(commit.wfe_id)
                         .bind(commit.orgtnt_id)
+                        .bind(&view_json)
                         .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
@@ -784,7 +867,8 @@ impl WfeStore for WfeAdapter {
                         sqlx::query(
                             "UPDATE wf.wfe
                              SET status = 'terminal', current_node = NULL,
-                                 current_c_a = '[]'::jsonb, claimed_by = NULL, claimed_at = NULL,
+                                 current_c_a = '[]'::jsonb, current_view_c_a = '[]'::jsonb,
+                                 claimed_by = NULL, claimed_at = NULL,
                                  join_target = NULL, join_threshold = NULL, join_when = NULL,
                                  end_response = $1, updated_at = now()
                              WHERE wfe_id = $2 AND orgtnt_id = $3",
@@ -831,10 +915,13 @@ impl WfeStore for WfeAdapter {
                 lock_wfe_parallel(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
+                // Collapse'ta da paralel mod biter → node listable WFE-seviyesine döner.
+                let view_json = serde_json::to_value(&commit.current_view_c_a).map_err(db_err)?;
                 sqlx::query(
                     "UPDATE wf.wfe
-                     SET current_node = $1, current_c_a = $2, claimed_by = NULL,
-                         claimed_at = NULL, join_target = NULL, join_threshold = NULL, join_when = NULL,
+                     SET current_node = $1, current_c_a = $2, current_view_c_a = $5,
+                         claimed_by = NULL, claimed_at = NULL,
+                         join_target = NULL, join_threshold = NULL, join_when = NULL,
                          updated_at = now()
                      WHERE wfe_id = $3 AND orgtnt_id = $4",
                 )
@@ -842,6 +929,7 @@ impl WfeStore for WfeAdapter {
                 .bind(&c_a_json)
                 .bind(commit.wfe_id)
                 .bind(commit.orgtnt_id)
+                .bind(&view_json)
                 .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;
@@ -888,15 +976,30 @@ impl WfeStore for WfeAdapter {
         // Kol adayları: fork'ta tüm kollar, kol hareketinde hareket eden kol.
         // Kol satırları yukarıdaki outcome kollarında zaten yaratılmış/taşınmış
         // olur; burada yalnız cache kolonu doldurulur.
+        //
+        // 2026-08-13: kolun node listable'ı (`view_c_a`) AYNI UPDATE'te yazılır —
+        // `branch_view_c_a` doldurucu tarafından `branch_c_a` ile aynı kol kümesi
+        // için üretilir, ikisi ayrı döngüde yazılsa biri boş kalan bir kol
+        // sessizce görünmez olurdu.
+        let branch_views: std::collections::HashMap<&str, &Vec<ResolvedCandidate>> = commit
+            .branch_view_c_a
+            .iter()
+            .map(|(n, v)| (n.as_str(), v))
+            .collect();
         for (branch_node, c_a) in &commit.branch_c_a {
             let c_a_json = serde_json::to_value(c_a).map_err(db_err)?;
+            let view_json = match branch_views.get(branch_node.as_str()) {
+                Some(v) => serde_json::to_value(v).map_err(db_err)?,
+                None => serde_json::json!([]),
+            };
             sqlx::query(
-                "UPDATE wf.wfe_branch SET c_a = $1, updated_at = now()
+                "UPDATE wf.wfe_branch SET c_a = $1, view_c_a = $4, updated_at = now()
                  WHERE wfe_id = $2 AND branch_node = $3",
             )
             .bind(&c_a_json)
             .bind(commit.wfe_id)
             .bind(branch_node)
+            .bind(&view_json)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;

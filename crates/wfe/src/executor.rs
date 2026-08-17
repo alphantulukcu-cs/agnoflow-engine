@@ -1405,11 +1405,23 @@ impl WfeExecutor {
         // Guard'lar ve c_a çözümü commit SONRASI ctx'i görmeli — grant'lar yeni
         // duruma göre yazılır (`when` bir sonraki adımda değişebilir).
         let ctx = &commit.new_dynctx;
+        // WFAH da commit SONRASI defteri olmalı: `wfes.wfah` bu geçişin kayıtlarını
+        // HENÜZ içermiyor (satırlar `commit.wfah_entries`te staged duruyor, store'a
+        // `commit` ile birlikte yazılıyor). Eski defterle çözmek `{from: {wfah: "X"}}`
+        // çapalı bir `listable` kuralını BİR COMMIT GEÇ yazıyordu: "X'i yapanın
+        // biriminden …" kuralı, X uygulandığı anda projeksiyona GİRMİYOR, ancak
+        // sonraki commit'te (ya da `reproject` süpürmesinde) beliriyordu. Liste/havuz
+        // ucu saf projeksiyona baktığı için o pencerede kimseye görünmüyor, referans
+        // okuma `can_view` ise canlı defteri gördüğü için TERSİNİ söylüyordu — iki
+        // okumanın eşitliği (`visibility_report`) bu satıra bağlı. `start` yolu bunu
+        // zaten doğru yapıyor (`start_wfah`), pipeline'ın kendi `resolved_c_a`
+        // çözümü de öyle (`wfes.wfah.extended(&wfah_entries)`).
+        let wfah = wfes.wfah.extended(&commit.wfah_entries);
         commit.view_c_a = engine
             .view_grants(
                 wfd,
                 ctx,
-                &wfes.wfah,
+                &wfah,
                 wfes.current_node.as_deref(),
                 wfes.wfe_id,
                 origin,
@@ -1430,7 +1442,7 @@ impl WfeExecutor {
                     wfd,
                     &landed,
                     ctx,
-                    &wfes.wfah,
+                    &wfah,
                     Some(&landed),
                     wfes.wfe_id,
                     origin,
@@ -1454,7 +1466,7 @@ impl WfeExecutor {
                     wfd,
                     &node_key,
                     ctx,
-                    &wfes.wfah,
+                    &wfah,
                     &Actor {
                         orgu_id: origin,
                         user_id: Uuid::nil(),
@@ -1473,7 +1485,7 @@ impl WfeExecutor {
                     wfd,
                     &node_key,
                     ctx,
-                    &wfes.wfah,
+                    &wfah,
                     None,
                     wfes.wfe_id,
                     origin,

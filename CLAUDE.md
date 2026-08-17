@@ -283,6 +283,12 @@ Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap pro
 - **Projeksiyonu yazan tek yol**: `WfeExecutor::fill_view_grants` (+ start'ta `create`).
   Yeni bir commit yolu eklendiğinde ORAYA bağlanır; adapter kolonları outcome match'inin
   DIŞINDA, aynı transaction'da yazar.
+- **Projeksiyon commit SONRASI durumla çözülür**: ctx `commit.new_dynctx`, WFAH ise
+  `wfes.wfah.extended(&commit.wfah_entries)` — `wfes.wfah` bu geçişin kayıtlarını henüz
+  içermez. Eskiden ham `wfes.wfah` kullanılıyordu ve `{from:{wfah:"X"}}` çapalı bir
+  `listable` kuralı BİR COMMIT GEÇ yazılıyordu: X uygulandığı anda liste/havuz (saf
+  projeksiyon) grant'ı görmüyor, referans okuma `can_view` (canlı defter) görüyordu.
+  Regresyon testi: `crates/wfe/tests/view_grants_wfah_anchor.rs`.
 - Şema/kural değişince **`visibility_backfill --apply`** koşulur, sonra
   **`visibility_report`** ile kontrat doğrulanır (hedef: "KONTRAT SAĞLAM").
 - Sayfalama: `GET /wfe?viewable=true&limit&offset` + `X-Total-Count` (CORS'ta expose).

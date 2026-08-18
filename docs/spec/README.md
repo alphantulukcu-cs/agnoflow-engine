@@ -15,7 +15,7 @@ Aynı dizin `agnoflow-backend/docs/spec/` ve `agnoflow-frontend/docs/spec/` alt�
 | [`runtime-semantics.md`](runtime-semantics.md) | Davranış — matcher'lar, node kimliği + c_a tekilliği (§2b), pipeline, graf kuralları | "Çalışma anında ne olur?" |
 | [`decisions.md`](decisions.md) | WOR-* karar kaydı — neden böyle, alternatifler neden elendi | "Bu neden böyle yapılmış?" |
 | [`migration-notes.md`](migration-notes.md) | v2 / v2.1 → v2.2 delta (M1–M14) | "Eski model neydi, ne değişti?" |
-| [`reference-types.rs`](reference-types.rs) | Doğrulanmış referans serde modeli + `canonical()` + matcher (§2a slug'ı EDİTÖR önerisi olarak taşır, motorda yoktur) | "Rust tarafı nasıl modellenir?" |
+| [`reference-types.rs`](reference-types.rs) | Doğrulanmış referans serde modeli + `canonical()` + matcher (§2a slug'ı EDİTÖR önerisi olarak taşır, motorda yoktur). **2026-08-18'den beri DERLENİR ve motorla PARİTESİ test edilir** — `crates/wfe-core/tests/reference_types_parity.rs` | "Rust tarafı nasıl modellenir?" |
 | [`examples/`](examples/) | Örnek WFD'ler (aşağı bak) | "Gerçek bir WFD neye benzer?" |
 
 ### examples/

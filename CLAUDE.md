@@ -50,6 +50,15 @@ Alınan tasarım kararları: `docs/spec/decisions.md`.
 - **Tanınmayan `$` referansı yayını ENGELLER** (`unknown_dollar_ref`): motor çözemediği `$`-string'i HATA saymaz, alana düz METİN yazar (`effects::resolve_dollar_string` son satırı) → `$actor.role` / `$call.state` gibi yazım hataları yayında iz bırakmadan sessiz bozukluk üretiyordu. Gramerin tek kaynağı `v22/dollar.rs`; denetlenen yerler çözücülerin olduğu yerlerdir (`wfes_effects.set`, `calls[].input`, `terminals[].wfe_end_response`, `autoexec[].config` — obje/dizi içleri dahil). Yeni bir namespace eklenirse `dollar::EXACT`/`PREFIXES` de genişletilir.
 - `terminal_when` DEPRECATED (WOR-84): motor okumaz, validator uyarır, yeniden serileştirmede düşer. Terminal `wft: {terminal}` ile verilir.
 - `wfd_version: "2.2"` zorunlu; eski format hem upload hem fetch'te reddedilir.
+- **`docs/spec/reference-types.rs` DERLENİR ve motorla PARİTESİ test edilir** (2026-08-18,
+  `crates/wfe-core/tests/reference_types_parity.rs`): dosya `#[path]` ile modül olarak
+  alınır (tip rotunu derleyici yakalar), tip/alan kümeleri `types/wfd_v22.rs` ile
+  karşılaştırılır (motor ÜST KÜMEDİR — motorda olup referansta olmayan alan HATA; tersi
+  değil, referans `CandidateActor::slug`'ı bilerek fazladan taşır) ve `docs/spec/examples/`
+  altındaki her belge bu modelle parse edilir. Bilerek dışarıda kalan tip
+  `ENGINE_ONLY` listesinde GEREKÇESİYLE yazılır. Sebep: `docs/` altında olduğu için
+  hiçbir derleyici bakmıyordu ve sessizce çürümüştü (2026-08-17 ölçümü: 8 tip + 10'dan
+  fazla alan eksik, `c_u` hâlâ `Vec<String>`). Motora alan eklenince ORASI da güncellenir.
 - **`docs/spec/schema.json` RUNTIME kapısıdır** (`wfe_core::schema`, `include_str!` ile gömülü): `Wfd::from_value_checked`/`from_json_checked` upload/publish/submit/approve/**fetch**, `/wfd/validate`, `/wfe/simulate` ve senaryo koşumunda şemayı zorlar — serde `minItems`/`pattern` bilmez, elle yazılan JSON o boşluktan giriyordu (`"c_r": []`). Taslak KAYDI kapsam dışı; ham `from_value` testler için açık. Şema değişirse frontend kopyası (`src/schema/wfd.schema.json`) birlikte güncellenir.
 
 ## Çalışma kuralları

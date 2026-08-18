@@ -8,6 +8,14 @@
 // onerir), motor DEGIL. agnoflow-backend'deki ikizi (`wfe_core::types::wfd_v22`) bu
 // yuzden SILINDI: orada kimlik uretmiyordu, cagirani yoktu. Motorda duran tek sey
 // `canonical()` (tekillik) ve onun `COrgu::canonical_key` parcasidir.
+//
+// BU DOSYA ARTIK DERLENIYOR (2026-08-18). `crates/wfe-core/tests/reference_types_parity.rs`
+// onu `#[path]` ile modul olarak alir; ayni test motorun modeliyle TIP ve ALAN paritesini
+// dogrular ve `docs/spec/examples/*.json`in hepsini bu modelle parse eder. Sebep: dosya
+// `docs/` altinda oldugu icin hicbir derleyici bakmiyordu ve SESSIZCE curumustu — 2026-08-17
+// olcumunde 8 tip (CallDef/CallRef/CallMode/StartAs/CuItem/GlobalTarget/CaGrantRule) ve
+// 10'dan fazla alan eksikti, `c_u` hala `Vec<String>` idi. Motora alan eklendiginde BURASI
+// da guncellenir; unutulursa parite testi patlar.
 #![allow(dead_code)]
 use serde::Deserialize;
 use serde_json::Value;
@@ -35,10 +43,20 @@ pub struct Wfd {
     pub actions: BTreeMap<String, ActionDef>,
     #[serde(default)]
     pub autoexec: BTreeMap<String, AutoexecDef>,
+    // WFC katalogu (2026-07-30) — baska bir WFD'yi cagirma sozlesmeleri. NE cagrilacagini
+    // ve hangi girdiyle cagrilacagini tutar; NASIL cagrildigi referans yerindedir
+    // (`nodes.<k>.call` ya da `terminals[].call`). autoexec <-> trigger ayriminin aynisi.
+    #[serde(default)]
+    pub calls: BTreeMap<String, CallDef>,
     pub transitions: Vec<Transition>,
     pub terminals: Vec<Terminal>,
     #[serde(default)]
     pub listable: Vec<ListableRule>,
+    // T-A5 (2026-08-11) — akis-ici yetkili havuzu. `listable` ile AYNI kayit sekli ama
+    // AYRI dizi: biri gorme hakki verir, oteki akisi yonetme (claim devri + escalation
+    // mudahalesi + gorunurluk). AKSIYON yetkisi VERMEZ.
+    #[serde(default)]
+    pub wf_admin: Vec<CaGrantRule>,
     #[serde(default)]
     pub attachments: BTreeMap<String, AttachmentGroup>, // opsiyonel ek-belge katalogu
     // WOR-84: DEPRECATED — motor HIC okumaz (v1 kalintisi). Terminal wft: {terminal} ile
@@ -64,6 +82,11 @@ pub struct NodeDef {
     pub claim_timeout: Option<ClaimTimeout>, // SLA-1: claim eden aktor zamaninda aksiyon almazsa
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>, // root attachments katalogundaki grup referanslari
+    // WFC (2026-07-30) — alt akis cagrisi (mode: wait | detached). Bu blogu tasiyan node
+    // bir WFC node'udur: insan ACT'i ALINAMAZ (transitions[].from icinde yer alamaz),
+    // cikisi call.wft'dir, escalation/claim_timeout/attachments/reassign tasiyamaz.
+    #[serde(default)]
+    pub call: Option<CallRef>,
     // 2026-08-13: node-seviyesi gorunurluk grant'i - kok `listable` ile AYNI tip. WFE bu
     // node'dayken kurallardan birine uyan aktor gorebilir; kok listable KALICIDIR (terminal'de
     // de gorur), bu DURUMA BAGLIDIR (node'dan cikinca biter). ACT/claim VERMEZ.
@@ -75,6 +98,7 @@ pub struct NodeDef {
 /// - `"grup"`                                -> node'un TUM aksiyonlarina kapi
 /// - `{"group":"grup","actions":["onayla"]}` -> yalniz sayilan aksiyonlara kapi
 /// - `{"group":"grup","actions":[]}`         -> hicbir aksiyonu kapamaz (opsiyonel yukleme)
+///
 /// `actions` Option'dir: "verilmedi" (tumu) ile "bos verildi" (hicbiri) zit anlamlidir.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -97,9 +121,16 @@ pub struct ScopedAttachmentRef {
 #[serde(deny_unknown_fields)]
 pub struct ClaimTimeout {
     pub after: String,
-    /// Bare node/terminal key — {node}/{terminal} sarmalayicisi YOK.
+    #[serde(default)]
+    pub wfes_effects: Option<WfesEffects>,
+    /// Bare NODE key — {node}/{terminal} sarmalayicisi YOK. Terminal YASAK
+    /// (2026-07-28, validator `sla_terminal_target`): SLA akisi bitirmez.
     #[serde(default)]
     pub wft: Option<String>,
+    /// 2026-08-03 (WOR-56): paralel kolda tetiklendiginde kardes kollari dusurup
+    /// paraleli sonlandirir (bu bicimde `wft` ZORUNLU).
+    #[serde(default)]
+    pub collapses_parallel: bool,
 }
 
 /// Ek-belge katalog grubu. Dosyalar engine'de degil portal opendal storage'inda tutulur.
@@ -164,16 +195,44 @@ pub struct CandidateActor {
     pub c_orgu: Option<COrgu>,
     #[serde(default)]
     pub c_r: Option<Vec<String>>,
+    /// 2026-08: sabit kimlik ya da `$ctx` referansi (bkz. `CuItem`).
     #[serde(default)]
-    pub c_u: Option<Vec<String>>,
+    pub c_u: Option<Vec<CuItem>>,
+}
+
+/// `c_u` ogesi — IKI bicim.
+/// - `"user_ayse"`            -> sabit kimlik (uuid ya da kullanici adi)
+/// - `{"from": "$ctx.musteri.temsilci"}` -> ctx'ten OKUNAN kimlik
+///
+/// Neden sihirli onek (`"$ctx.x"` duz string) DEGIL: `c_u` buyuyecek bir alandir; bir
+/// onek konvansiyonu her yeni yetenegi semadan denetlenemez ve editorun tip sistemine
+/// gorunmez kilardi. Tekillik karsilastirmasi (`canonical`) iki variant'i AYIRIR:
+/// `Literal("x")` ile `Ref { from: "x" }` ayni c_a sayilmaz.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(untagged)]
+pub enum CuItem {
+    Literal(String),
+    Ref { from: String },
+}
+
+impl CuItem {
+    /// Slug/karsilastirma icin metin kaynagi. Referansta YOL kullanilir — cozulmus
+    /// kimlik calisma anindadir, belgede yoktur.
+    pub fn source(&self) -> &str {
+        match self { CuItem::Literal(s) => s, CuItem::Ref { from } => from }
+    }
 }
 
 impl CandidateActor {
     pub fn matches(&self, actor_orgu: &str, actor_role: &str, actor_user: &str,
                    resolved_orgu: &str) -> bool {
         let in_orgu  = actor_orgu == resolved_orgu;
-        let role_hit = self.c_r.as_ref().map_or(false, |r| r.iter().any(|x| x == actor_role));
-        let user_hit = self.c_u.as_ref().map_or(false, |u| u.iter().any(|x| x == actor_user));
+        let role_hit = self.c_r.as_ref().is_some_and(|r| r.iter().any(|x| x == actor_role));
+        // Referans matcher YALNIZ sabit kimligi bilir: `CuItem::Ref` ctx'ten cozulur ve
+        // ctx bu saf modelin disindadir (motorda `resolver::resolve_cu_ident`).
+        let user_hit = self.c_u.as_ref().is_some_and(|u| {
+            u.iter().any(|x| matches!(x, CuItem::Literal(s) if s == actor_user))
+        });
         in_orgu && (role_hit || user_hit)
     }
 
@@ -194,7 +253,7 @@ impl CandidateActor {
             parts.push(r.join("-"));
         }
         if let Some(u) = &self.c_u {
-            let mut u: Vec<String> = u.iter().map(|x| sanitize(x)).collect();
+            let mut u: Vec<String> = u.iter().map(|x| sanitize(x.source())).collect();
             u.sort();
             parts.push(format!("u_{}", u.join("-")));
         }
@@ -334,6 +393,13 @@ impl CatchDef { fn d_all() -> Vec<String> { vec!["WFD.ALL".into()] } }
 pub enum Wft {
     Node { node: String },
     Terminal { terminal: String },
+    // GLB (api-contract-v2, 2026-08-12): hedefi BELGE degil aksiyonu alan KISI secer.
+    // Eskiden hedef aksiyon ANAHTARINA kodlaniyordu (`Geri_Gonder__gt__self__mudur`) ve
+    // hedef basina ayri aksiyon + ayri transition uretiliyordu; artik TEK aksiyon, TEK
+    // transition var ve secim calisma aninda `apply(..., target)` ile gelir. Secim bir
+    // action input DEGILDIR: $ctx'e yazilmaz, wfes_effects gerektirmez, $wfah'a girmez.
+    // Yalniz `transitions[].wft` icinde gecerli (validator `global_action_placement`).
+    Targets { targets: Vec<GlobalTarget> },
     Conditional {
         conditions: Vec<WftCondition>,
         #[serde(default)]
@@ -348,6 +414,15 @@ pub enum Wft {
     // terminal hedef = WOR-31 kol->terminal collapse'unun ozel hali. Yalniz kol
     // baglaminda gecerli (start'ta yasak).
     Collapse { collapse: WftTarget },
+}
+
+/// `Wft::Targets` ogesi — secilebilir TEK bir hedef. Duz `Vec<String>` yerine obje
+/// olmasinin gerekcesi: hedef basina `when` guard'i / etiket gibi alanlar eklenirse
+/// sekil kirilmadan buyur. Bugun yalniz `node` tasir — TERMINAL hedef YOKTUR.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalTarget {
+    pub node: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -445,19 +520,132 @@ impl FromNodes {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Terminal {
+    /// MAKINE kimligi (`^[a-zA-Z0-9_]+$`, belge icinde benzersiz) — kullanici metni
+    /// DEGILDIR (api-contract-v2, 2026-08-12). Ekrana `label` basilir.
     pub id: String,
+    /// Gosterim adi. Verilmezse motor id'nin okunur halini uretir (`display::humanize_key`).
+    #[serde(default)]
+    pub label: Option<String>,
     #[serde(default)]
     pub wfes_effects: Option<WfesEffects>,
     pub wfe_end_response: BTreeMap<String, Value>,
+    /// 2026-08-17: terminal-seviyesi gorunurluk grant'i — WFE BU terminal'de bittiyse
+    /// kurallardan birine uyan aktor gorebilir. Kok `listable` ve `nodes.<k>.listable`
+    /// ile AYNI sekil; omru node listable'in TERSI: terminal'den cikis olmadigi icin
+    /// KALICI, ama kok listable'dan farkli olarak SONUCA BAGLI. Yalniz BASARILI Terminal
+    /// sonucunda islerlidir (Failed/Terminated'da varilmis bir terminal YOKTUR).
+    /// ACT/claim VERMEZ.
+    #[serde(default)]
+    pub listable: Vec<CaGrantRule>,
+    /// WFC — ardil akis cagrisi (mode: terminal). "Bir is akisinin bitisi baska bir is
+    /// akisinin baslangici." Donus YOKTUR.
+    #[serde(default)]
+    pub call: Option<CallRef>,
 }
 
+// ---- WFC: is akisi cagrisi (2026-07-30) ----
+// Katalog <-> referans ayrimi autoexec <-> trigger ile AYNIDIR: `wfd.calls` NE
+// cagrilacagini tutar (paylasilabilir), `nodes.<k>.call` / `terminals[].call` NASIL
+// cagrildigini (yerlesime ozel).
+
+/// Root `calls` katalog kaydi — moddan BAGIMSIZDIR, ucu modda da kullanilabilir.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ListableRule {
+pub struct CallDef {
+    /// Cagrilan WFD'nin DOKUMAN kimligi (`wfd.id`), DB uuid'si DEGIL.
+    pub wfd_id: String,
+    /// Yoksa cagri anindaki en son yayinlanmis surum; varsa o surume pinlenir.
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Cagrilanin start[] kurali >=2 ise ZORUNLU (StartRule.id).
+    #[serde(default)]
+    pub start: Option<String>,
+    /// WFC-IN — cagrilanin girdi adi -> cagiran baglamindaki kaynak. Izinli: `$ctx.<yol>`,
+    /// `$actor`, `$timestamp`, `$wfe_id`, sabit degerler. `$action.input.*` YASAKTIR:
+    /// (1) moddan bagimsizlik (terminal modunda ACT girdisi guvenilir bicimde yok),
+    /// (2) WOR-70 — ctx'e tek yazma yolu effects'tir.
+    #[serde(default)]
+    pub input: BTreeMap<String, Value>,
+}
+
+/// Bir katalog kaydina yapilan REFERANS. Node ve terminal yerlesimleri AYNI sekli
+/// kullanir; yanlis yere yazilmis alani validator reddeder.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallRef {
+    #[serde(rename = "use")]
+    pub use_: String,
+    #[serde(default)]
+    pub mode: CallMode,
+    /// Yalniz `wait` — asilirsa `$call.status == "timeout"`.
+    #[serde(default)]
+    pub timeout: Option<String>,
+    /// WFC-RETURN effects — `$call.result.*` / `$call.status` / `$call.wfe_id` gorunur.
+    #[serde(default)]
+    pub wfes_effects: Option<WfesEffects>,
+    /// WFC-RETURN hedefi — NODE yerlesiminde ZORUNLU. Node ya da terminal olabilir:
+    /// SLA'nin "terminal hedef yasak" kisiti BURADA GECERSIZDIR, cunku bu bir
+    /// zamanlayici degil cagrilanin sonucuna dayanan bir karardir.
+    #[serde(default)]
+    pub wft: Option<Wft>,
+    /// Yalniz `mode: terminal`. `actor` = terminale getiren ACT'in aktoru, `system` =
+    /// sistem aktoru. Kok timeout (SLA-3) da bu terminale getirebiliyorsa `system` SARTTIR.
+    #[serde(default)]
+    pub start_as: Option<StartAs>,
+    /// Yalniz `mode: terminal`. Ardil dongusune ACIK izin + ust sinir; verilmezse dongu
+    /// validator tarafindan reddedilir (`call_next_cycle`).
+    #[serde(default)]
+    pub max_next: Option<u32>,
+    /// K8: alt akisin PUBLISHED notlari cagiranin not listesine girsin mi. Motor bu alani
+    /// OKUMAZ, yalniz tasir (not defteri motorun disinda ucuncu bir katmandir).
+    #[serde(default)]
+    pub notes_visible_to_caller: bool,
+}
+
+/// WFC modu — cagrinin TEK belirleyici ekseni. Yerlesim de moda baglidir:
+/// `wait`/`detached` yalniz `nodes.<k>.call`, `terminal` yalniz `terminals[].call`
+/// (validator `call_mode_placement`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CallMode {
+    /// Cagiran node'da BEKLER; cagrilan bitince WFC-RETURN islenir.
+    #[default]
+    Wait,
+    /// Cagrilan baslatilir, cagiran HEMEN devam eder (`$call.result.*` daima bos).
+    Detached,
+    /// Cagiran BITER, ardil akis baslar. Donus YOKTUR.
+    Terminal,
+}
+
+/// Ardil akisi kimin baslattigi sayilir (yalniz `mode: terminal`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StartAs {
+    #[default]
+    Actor,
+    System,
+}
+
+/// C_A tabanli grant kaydi: kural + opsiyonel `when` guard'i.
+///
+/// DORT yer bu sekli paylasir — `wfd.listable[]` (kalici gorme), `nodes.<k>.listable[]`
+/// (2026-08-13, duruma bagli), `terminals[].listable[]` (2026-08-17, sonuca bagli) ve
+/// `wfd.wf_admin[]` (akis-ici yetkili). Farklari NE VERDIKLERIDIR, nasil yazildiklari degil.
+///
+/// `when` guard'inda `$actor` YASAKTIR (validator `grant_when_actor_ref`): grant'lar
+/// commit aninda, viewer BILINMEZKEN projeksiyona yazilir.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaGrantRule {
     pub c_a: CandidateActor,          // v2.2: TEK kural (coklu grant = coklu kayit)
     #[serde(default)]
     pub when: Option<String>,
 }
+
+/// `wfd.listable[]` ogesi — `CaGrantRule`'un alias'i (motorda da oyle).
+pub type ListableRule = CaGrantRule;
 
 // ---- kabul testleri ----
 fn main() {
@@ -490,7 +678,7 @@ fn main() {
     // matcher smoke test: c_u rol-agnostik
     let rule = CandidateActor {
         c_orgu: Some(COrgu::Selector("self".into())),
-        c_r: None, c_u: Some(vec!["user_ayse".into()]),
+        c_r: None, c_u: Some(vec![CuItem::Literal("user_ayse".into())]),
     };
     println!("4) c_u-only matcher: analist-ayse={} memur-ayse={} mehmet={}",
         rule.matches("sube_5", "creditAnalyst", "user_ayse", "sube_5"),

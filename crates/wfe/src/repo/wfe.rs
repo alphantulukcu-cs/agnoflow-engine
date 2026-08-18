@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 const WFE_COLUMNS: &str = "wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status,
                 current_node, current_c_a, view_c_a, origin_orgu_id, claimed_by, end_response,
+                end_view_c_a, end_terminal,
                 deadline, claimed_at, join_target, join_threshold, join_when,
                 created_at, updated_at";
 

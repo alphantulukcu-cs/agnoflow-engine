@@ -2059,3 +2059,92 @@ paralel-OLMAYAN belgelerde hata saymak (motor "bu iki node paralel kol mu" sorus
 yapısına bakmadan güvenilir cevaplayamaz, cevaplasa bile tasarımcıya iki farklı kural
 öğretirdi); kolların aynı havuza bakabilmesi için node anahtarını kol kimliğinden ayırmak
 (doğru çözüm, ama bu kararın kapsamının dışında — ertelendi).
+
+## Terminal-level `listable` — sonuca bağlı KALICI görünürlük, AYRI kolon (2026-08-17)
+
+**Sorun.** "Bu akış bittikten sonra kimler görebilir?" sorusunun tek cevabı kök
+`listable[]`/`wf_admin[]`ti ve o cevap **sonuçtan bağımsızdı**: onaylanan başvuruyu gören
+ile reddedileni gören zorunlu olarak aynı kümeydi. Oysa akış bitişini zaten terminal'ler
+ayırıyor (`terminal_approved` / `terminal_rejected` ayrı kayıtlar). Ayrımı kök kuralla
+ifade etmenin tek yolu `when` guard'ıydı: terminal `wfes_effects` ile `$ctx`'e bir sonuç
+işareti yazmak, sonra kök `listable[].when` ile onu test etmek. Çalışır ama görünürlüğü
+ctx defter tutmaya bağlar ve tutarlılığı İKİ ayrı yerde (terminal effects + kök kural)
+elle korumayı gerektirir.
+
+**Karar 1 — `terminals[].listable[]`.** `$defs/terminal`e opsiyonel `listable` eklendi;
+kök `listable[]` ve `nodes.<key>.listable[]` ile AYNI `$defs/listableRule` şeklini
+(`{c_a, when?}`) taşır. Ayrım YAPIDAN gelir: her terminal ayrı bir kayıt olduğu için
+"reddedileni denetçi görsün" tek satırdır, guard gerekmez. `wfd_version` **"2.2" KALIR**
+(node listable ile aynı gerekçe: opsiyonel + additive, eski belgeler değişmeden yüklenir;
+okuyucu silinmez, migration yolu YOK — proje hafızası `wire-format-readers-stay.md`).
+
+**Karar 2 — ömür: node listable'ın TERSİ.** `nodes.<key>.listable[]` "WFE bu node'da
+İKEN" der ve node'dan çıkışta biter. `terminals[].listable[]` "WFE BU terminal'de
+bittiyse" der ve terminal'den ÇIKIŞ OLMADIĞI için hiç bitmez — yani kök `listable` gibi
+KALICIDIR. Kök kuraldan farkı KAPSAMDIR (sonucu bilir), node kuralından farkı ÖMÜRDÜR.
+Üçü aynı şekli paylaşıp üç farklı ekseni kapatır.
+
+**Karar 3 — `can_view` (g) kriteri, erken dönüşün ÜSTÜNDE.** `can_view` kalıcı grant'ları
+sorduktan sonra `status != Active` ise `false` döner; (g) o satırın ÜSTÜNE konuldu, yoksa
+kriter hiç çalışmazdı. "Duruma bağlı" görünmesi yanıltıcı olurdu: kapıyı açan şey
+`wfes.end_terminal`in DOLU olmasıdır ve o alan yalnız başarıyla bitmiş satırda dolar.
+
+**Karar 4 — `Failed`/`Terminated` KAPSAM DIŞI.** Engine-defined fail (`error`) ve SLA
+ihlali (`terminated`) yollarında varılmış bir terminal YOKTUR. O akışlar yalnız kök
+`listable`/`wf_admin` ile görünür. "Hata ile biten akışı kim görür" ayrı bir eksendir
+(kökte `failed_listable[]` gibi bir alan isterdi) ve bu kararın kapsamına ALINMADI.
+
+**Karar 5 — YENİ kolon `wf.wfe.end_view_c_a`, mevcut üçünden hiçbiri DEĞİL.**
+
+| Mevcut kolon | Neden terminal listable ORAYA YAZILAMAZ |
+|---|---|
+| `wf.wfe.view_c_a` (listable∪wf_admin) | Kalıcı ama SONUCU BİLMEZ — aynı kuralı iki terminal için ayırmanın yolu yok |
+| `wf.wfe.current_view_c_a` (node listable) | Terminal'de BOŞALTILIR (tanımı gereği). Yazılsa hiç okunmazdı; boşaltma kaldırılsa node listable kalıcı olur ve 2026-08-13'ün önlediği hata geri gelirdi |
+| `wf.wfe.current_c_a` / `wfe_branch.c_a` | ACT adaylarıdır → bitmiş işe claim/ACT yetkisi verirdi (WOR-44'ün hatası) |
+
+`end_view_c_a` SQL parçasında `status='active'` kolunun **DIŞINDADIR** — node listable
+kolonlarının tam tersi yerde, çünkü ömürleri de tam ters. `PARAM_COUNT` DEĞİŞMEDİ (aynı
+viewer filtreleri yeniden kullanılır).
+
+**Karar 6 — `wf.wfe.end_terminal` kolonu da eklendi.** `CommitOutcome::Terminal` yalnız
+`end_response` taşır; hangi terminal'e varıldığı hiçbir yerde saklanmıyordu. İki tüketici
+zorunlu kılıyor: (1) `can_view` (g) hangi terminal'in `listable[]`ına bakacağını yalnız
+satırdan bilir, (2) `reproject` — org ağacı değişince bitmiş WFE'ler de yeniden
+projelendirilir ve terminal id olmadan `end_view_c_a` bir daha ÜRETİLEMEZ. Değer
+`CommitOutcome`a değil, "nereye varıldı"nın ZATEN var olan cevabına (`CallSite::Terminal`,
+WFC outbox'ının kullandığı) dayanır — `CommitOutcome`u genişletmek hedefle ilgisi olmayan
+bir alan yüzünden onlarca `PartialEq` testini değiştirmek demekti.
+
+**Karar 7 — kolondan ÖNCE bitmiş satırlar KANITLARDAN kurtarılır.** İlk değerlendirmede
+bu "geri kazanılamaz" sayılmıştı; gerekçe (`wft.conditions` o anki ctx ile çözülüyordu,
+bugün yeniden koşturmak aynı cevabı vermeyebilir) doğruydu ama sonuç yanlıştı: kararı
+yeniden ÜRETMEK gerekmiyor, kararın İZİNİ okumak yetiyor. Bitmiş satırda üç bağımsız kanıt
+duruyor — (a) `wf.wfe.end_response`, varılan terminal'in `wfe_end_response`'unun çözülmüş
+hâli; anahtar kümesi belgede SABİTTİR ve sabit değerli alanlar (`{"status":"rejected"}`)
+bitişleri ayırır; (b) WFAH'ın son gerçek aksiyonu + `from_node`, o (node, action)
+ikilisinden çıkan `wft`in gidebildiği terminal kümesi; (c) `(wfd_id, version)` değişmez
+olduğu için belgenin kendisi.
+
+Çıkarım `wfe_core::v22::end_terminal::infer_end_terminal` — saf, I/O'suz, birim testli.
+Her kanıt aday kümesini yalnız DARALTIR: tek aday kalırsa `Certain`, birden çok kalırsa
+`Ambiguous`, hiç kalmazsa (ya da iki kanıt ÇELİŞİRSE) `NoMatch`. **Yalnız `Certain`
+yazılır**; diğerlerinde kolon NULL bırakılır ve satır eski davranışında kalır. Yanlış bir
+`end_terminal`, görmemesi gereken kişiye bitmiş işi göstermek demektir — "bilmiyorum"
+demek her zaman daha ucuzdur. Modelin eksik kaldığı yer (tanınmayan `wft` biçimi,
+`from_node` taşımayan 2026-08-10 öncesi WFAH satırı) daraltma YAPMAZ: eksik, belirsizliğe
+dönüşür, yanlış cevaba değil.
+
+Sürücü `visibility_backfill`in ÖN GEÇİŞİDİR, ayrı bir komut değil — sıra zorunlu:
+`reproject` `end_view_c_a`'yı ancak kolon doluysa üretebilir. Rapor `kesin · belirsiz ·
+eşleşmedi · WFD yok` sayılarını basar; kurtarılamayan satırlar "terminal'i bilinmeyen"
+olarak ayrıca sayılır.
+
+**Reddedilenler:** `current_view_c_a`ı yeniden kullanmak (migration'dan kaçınmak için —
+kolonun adı ve `$node` çapası anlamını kaybederdi, "current" bitmiş işi anlatmaya
+başlardı); ayrımı kök `listable[].when` + terminal `wfes_effects` ile ifade etmek (bugün
+mümkün ve çalışıyor, ama görünürlüğü ctx defter tutmaya bağlar — yeni akışlar için
+yapısal olan tercih edildi, mevcut akışlar bozulmadı); `Failed`/`Terminated` için de bir
+grant alanı (Karar 4, ayrı iş).
+
+Detay: `migrations/wf/20260817000001_terminal_listable.sql` (kolon gerekçeleri),
+`crates/wfe/src/visibility.rs` (SQL parçası), `crates/wfe-core/tests/terminal_listable.rs`.

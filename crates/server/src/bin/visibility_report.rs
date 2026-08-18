@@ -3,8 +3,8 @@
 //! 2026-08-13'ten önce bu araç eski/yeni KURALI karşılaştırıyordu (o geçiş bitti,
 //! ölçüm raporu: 205 → 148 erişim). Bugünkü işi kuralın İKİ OKUMASINI
 //! karşılaştırmak:
-//!   * **projeksiyon** — `wf.wfe.view_c_a`/`current_c_a`/`current_view_c_a` ve
-//!     kol `c_a`/`view_c_a` üzerinde jsonb containment
+//!   * **projeksiyon** — `wf.wfe.view_c_a`/`current_c_a`/`current_view_c_a`/
+//!     `end_view_c_a` ve kol `c_a`/`view_c_a` üzerinde jsonb containment
 //!     (`wf_wfe::visibility::sql`). Liste ucu, detay kapısı VE portal havuzu
 //!     (2026-08-14'ten beri, `routes::portal::pool`) bunu koşar → havuz ayrıca
 //!     ölçülmez, aynı parçayı ödünç aldığı için bu raporun kapsamındadır.
@@ -24,6 +24,7 @@
 //! ```text
 //! görünür(WFE, viewer) :=
 //!      listable/wf_admin grant'i eşleşir           -- KALICI, `when` uygulanmış
+//!   OR varılan terminal'in listable'ı eşleşir     -- KALICI, SONUCA BAĞLI (g)
 //!   OR (status = 'active' AND (node c_a       eşleşir
 //!                           OR node listable  eşleşir  -- DURUMA BAĞLI (f)
 //!                           OR WFE/kol claim'i viewer'da))
@@ -33,8 +34,8 @@
 //! Bu araç iki soruyu cevaplar:
 //!   1. **Erişim farkı**: hangi (aktör, WFE) çifti eski kuralda görünürken yeni
 //!      kuralda görünmez oluyor (ve tersi). Anahtar rakam: kaybedilen erişim.
-//!   2. **Projeksiyon sağlamlığı**: `listable`/`wf_admin` VE node
-//!      `listable` kuralları VIEWER'DAN
+//!   2. **Projeksiyon sağlamlığı**: `listable`/`wf_admin`, node `listable` VE
+//!      terminal `listable` kuralları VIEWER'DAN
 //!      BAĞIMSIZ mı? Grant'lar commit anında (viewer bilinmezken) yazılacağı için
 //!      viewer'a bağlı iki form projeksiyona SIĞMAZ:
 //!        - `c_orgu` düz Selector: `resolve_c_orgu`ya default anchor olarak
@@ -159,6 +160,18 @@ async fn main() {
                         &format!("nodes.{key}.listable"),
                     ));
                 }
+                // 2026-08-17 terminal listable: yine AYNI şekil/çapa/kısıt →
+                // aynı tarama. `terminals[]` zaten belgedeki sırayı taşıyor,
+                // ayrıca sıralamaya gerek yok (rapor deterministik kalır).
+                for t in &wfd.terminals {
+                    if t.listable.is_empty() {
+                        continue;
+                    }
+                    reasons.extend(viewer_relative_reasons(
+                        &t.listable,
+                        &format!("terminals.{}.listable", t.id),
+                    ));
+                }
                 if !reasons.is_empty() {
                     unsound += 1;
                     println!("  WFD {} v{}:", row.wfd_id, row.wfd_version);
@@ -172,8 +185,8 @@ async fn main() {
     }
     if unsound == 0 {
         println!(
-            "  (yok — tüm listable/wf_admin/node listable kuralları viewer'dan bağımsız, \
-             projeksiyon sağlam)"
+            "  (yok — tüm listable/wf_admin/node/terminal listable kuralları viewer'dan \
+             bağımsız, projeksiyon sağlam)"
         );
     }
     if !missing_wfd.is_empty() {

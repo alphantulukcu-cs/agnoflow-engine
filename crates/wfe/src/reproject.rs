@@ -119,6 +119,31 @@ pub async fn reproject_wfe(
         _ => (None, None),
     };
 
+    // 2026-08-17 terminal listable: `end_view_c_a` KALICI bir kolondur, dolayısıyla
+    // `view_c_a` ile aynı sebeple bayatlar — org ağacı değişince bitmiş işin grant'ı
+    // da yeniden çözülmeli. Kolonu yeniden üretebilmenin tek yolu `end_terminal`in
+    // satırda durması; `None` ise (aktif satır, `Failed`/`Terminated` ile bitmiş satır,
+    // ya da bu kolondan önce bitmiş satır) kolona DOKUNULMAZ.
+    //
+    // `guard_node` yok — `fill_view_grants` ile AYNI seçim; okuma anında `can_view`in
+    // göreceği `$node` da `None` olacak (terminal'de `current_node` NULL'dır).
+    let end_view_c_a = match wfes.end_terminal.as_deref() {
+        Some(terminal_id) => Some(
+            engine
+                .terminal_view_grants(
+                    &wfd,
+                    terminal_id,
+                    ctx,
+                    &wfes.wfah,
+                    wfes.wfe_id,
+                    origin,
+                    wfes.orgtnt_id,
+                )
+                .await?,
+        ),
+        None => None,
+    };
+
     let mut branches = Vec::new();
     for b in wfes
         .branches
@@ -167,11 +192,16 @@ pub async fn reproject_wfe(
         Some(c) => Some(serde_json::to_value(c).map_err(io_err)?),
         None => None,
     };
+    let end_view_json = match &end_view_c_a {
+        Some(c) => Some(serde_json::to_value(c).map_err(io_err)?),
+        None => None,
+    };
     sqlx::query(
         "UPDATE wf.wfe
             SET view_c_a = $1, origin_orgu_id = $2, grants_built_at = now(),
                 current_c_a = COALESCE($4, current_c_a),
-                current_view_c_a = COALESCE($5, current_view_c_a)
+                current_view_c_a = COALESCE($5, current_view_c_a),
+                end_view_c_a = COALESCE($6, end_view_c_a)
           WHERE wfe_id = $3",
     )
     .bind(&view_json)
@@ -179,6 +209,7 @@ pub async fn reproject_wfe(
     .bind(wfe_id)
     .bind(&current_json)
     .bind(&current_view_json)
+    .bind(&end_view_json)
     .execute(pool)
     .await
     .map_err(io_err)?;

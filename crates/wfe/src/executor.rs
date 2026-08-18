@@ -997,6 +997,23 @@ impl WfeExecutor {
                 )
                 .await?;
         }
+        // Terminal listable (2026-08-17): start'ın `wft`'si doğrudan bir terminal'e
+        // inebilir — tek adımda biten akış hiç `commit` görmez, dolayısıyla projeksiyon
+        // burada yazılmazsa o WFE için HİÇ yazılmaz. `end_terminal` pipeline'da
+        // `CallSite`ten dolduruldu; burada yalnız çözülüyor.
+        if let Some(terminal_id) = new.end_terminal.clone() {
+            new.end_view_c_a = engine
+                .terminal_view_grants(
+                    &wfd,
+                    &terminal_id,
+                    &new.initial_dynctx,
+                    &start_wfah,
+                    wfe_id,
+                    new.origin_orgu_id,
+                    orgtnt_id,
+                )
+                .await?;
+        }
 
         self.wfe.create(&new).await?;
         self.nudge_timers(); // deadline / node dwell / claim_timeout vadesi değişti
@@ -1444,6 +1461,27 @@ impl WfeExecutor {
                     ctx,
                     &wfah,
                     Some(&landed),
+                    wfes.wfe_id,
+                    origin,
+                    wfes.orgtnt_id,
+                )
+                .await?;
+        }
+        // Terminal listable (2026-08-17): node listable'ın AYNADAKİ karşılığı. Orada
+        // "varılan node" vardı ve terminal'de yoktu; burada tam tersi. `end_terminal`
+        // yalnız başarılı `Terminal`de doludur (`Failed`/`Terminated` bir terminal'e
+        // varmaz), yani kolon kendiliğinden yalnız doğru satırlarda dolar.
+        //
+        // `guard_node` YOK: okuma anında (`can_view` (g)) `wfes.current_node` NULL
+        // olacağı için `matches_grant_rules`in `$node`'u da `None`dır. Buraya varılan
+        // terminal'in adını vermek kolon ile referans okumayı ayırırdı.
+        if let Some(terminal_id) = commit.end_terminal.clone() {
+            commit.end_view_c_a = engine
+                .terminal_view_grants(
+                    wfd,
+                    &terminal_id,
+                    ctx,
+                    &wfah,
                     wfes.wfe_id,
                     origin,
                     wfes.orgtnt_id,
@@ -2167,6 +2205,7 @@ mod branch_hint_tests {
             wfah: Wfah::empty(),
             status: WfeStatus::Active,
             current_node: current_node.map(String::from),
+            end_terminal: None,
             assigned_to: None,
             end_response: None,
             deadline: None,

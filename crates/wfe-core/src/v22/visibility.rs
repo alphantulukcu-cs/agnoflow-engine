@@ -158,6 +158,13 @@ pub async fn filter_dynctx(
 ///       `listable[]`in DURUMA BAĞLI karşılığı: WFE bu node'dan çıkınca (b) gibi
 ///       görünürlük de biter. ACT/claim VERMEZ (`matches_grant_rules` yalnız görme
 ///       sorar), aynı "aktif node" kümesi (c) ile PAYLAŞILIR.
+///   (g) WFE bir terminal'de BİTTİYSE o terminal'in `listable[]` kurallarından birine
+///       viewer authorize VE `when` guard'ı (varsa) true — 2026-08-17. (f)'nin ömür
+///       olarak TERSİDİR: terminal'den çıkış olmadığı için kalıcıdır, bu yüzden
+///       `status != Active` erken dönüşünün ÜSTÜNDE durur. Kök `listable`'dan farkı
+///       SONUCA BAĞLI olması — "reddedildi"yi gören ile "onaylandı"yı gören ayrılabilir.
+///       Yalnız başarılı `Terminal`de geçerli: `Failed`/`Terminated`'da `end_terminal`
+///       `None`'dır ve kriter hiç çalışmaz.
 /// `visible`/`filter_dynctx`'ten AYRIDIR: onlar field-level x-visibility'dir,
 /// bu fonksiyon WFE'nin bütünüyle görünür olup olmadığını belirler.
 pub async fn can_view(
@@ -177,6 +184,18 @@ pub async fn can_view(
     }
     if matches_grant_rules(&wfd.wf_admin, viewer, wfes, org).await? {
         return Ok(true);
+    }
+    // (g) 2026-08-17 — terminal `listable[]`. KALICI grant'ların yanında durur çünkü
+    // ömrü onlarınkiyle aynıdır: WFE vardığı terminal'den bir daha çıkmaz. Kritere
+    // "durumdan bağımsız" demek yanlış olurdu — `end_terminal` yalnız BİTMİŞ (ve
+    // başarıyla bitmiş) satırda doludur, yani kapı zaten duruma göre açılıyor; erken
+    // dönüşün üstünde olması onu ATLAMAMAK içindir.
+    if let Some(terminal_id) = wfes.end_terminal.as_deref() {
+        if let Some(terminal) = wfd.terminals.iter().find(|t| t.id == terminal_id) {
+            if matches_grant_rules(&terminal.listable, viewer, wfes, org).await? {
+                return Ok(true);
+            }
+        }
     }
     if wfes.status != crate::types::wfe::WfeStatus::Active {
         return Ok(false);

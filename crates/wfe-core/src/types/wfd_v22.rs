@@ -982,6 +982,21 @@ pub struct Terminal {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
     pub wfe_end_response: BTreeMap<String, Value>,
+    /// Terminal-seviyesi görünürlük grant'ı (2026-08-17): WFE **bu** terminal'de bittiyse
+    /// kurallardan birine uyan aktör onu görebilir.
+    ///
+    /// Kök `listable[]` ve `nodes.<key>.listable[]` ile AYNI şekli taşır; ömrü node
+    /// listable'ın TERSİDİR. Node kuralı "WFE bu node'da İKEN" der ve node'dan çıkınca
+    /// biter; terminal'den ÇIKIŞ YOKTUR, dolayısıyla bu grant kalıcıdır — ama kök
+    /// `listable`'dan farkı SONUCA BAĞLI olmasıdır: "onaylandı"yı gören ile
+    /// "reddedildi"yi gören ayrı kümeler olabilir ve ayrım yapıdan gelir (her terminal
+    /// ayrı kayıttır), `when` guard'ı yazmak gerekmez.
+    ///
+    /// YALNIZ başarılı `Terminal` sonucunda yazılır. `Failed` (error) ve `Terminated`
+    /// (SLA) yollarında varılmış bir terminal YOKTUR — o akışlar yalnız kök
+    /// `listable`/`wf_admin` ile görünür. ACT/claim VERMEZ, havuza girmez.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub listable: Vec<CaGrantRule>,
     /// WFC — ardıl akış çağrısı (`mode: terminal`). "Bir iş akışının bitişi başka bir
     /// iş akışının başlangıcı." WFE bu terminal'de NORMAL biçimde sonlanır (`completed`),
     /// ardından ardıl WFE başlar. Dönüş YOKTUR; `wfes_effects`/`wft`/`timeout` bu
@@ -992,10 +1007,11 @@ pub struct Terminal {
 
 /// C_A tabanlı bir grant kaydı: kural + opsiyonel `when` guard'ı.
 ///
-/// İki yer bu şekli paylaşır — `wfd.listable[]` (görme hakkı) ve `wfd.wf_admin[]`
-/// (akış-içi yetkili). İkisi için ayrı ama özdeş struct yazmak, kuralın şeklini iki
-/// yerden bakımı gereken bir şey yapardı; farkları ne verdikleridir, nasıl yazıldıkları
-/// değil.
+/// DÖRT yer bu şekli paylaşır — `wfd.listable[]` (kalıcı görme), `nodes.<key>.listable[]`
+/// (duruma bağlı görme), `terminals[].listable[]` (sonuca bağlı görme) ve
+/// `wfd.wf_admin[]` (akış-içi yetkili). Her biri için ayrı ama özdeş struct yazmak,
+/// kuralın şeklini dört yerden bakımı gereken bir şey yapardı; farkları ne
+/// verdikleridir, nasıl yazıldıkları değil.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaGrantRule {

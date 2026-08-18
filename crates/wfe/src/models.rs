@@ -30,6 +30,16 @@ pub struct WfeRow {
     /// NULL = backfill bekleyen eski satır (bkz. `Wfes::origin_orgu_id`).
     #[serde(skip_serializing)]
     pub origin_orgu_id: Option<Uuid>,
+    /// Terminal-seviyesi görünürlük projeksiyonu (2026-08-17): varılan terminal'in
+    /// `listable[]` grant'ları. `view_c_a` gibi KALICIDIR, ondan farkı SONUCA BAĞLI
+    /// olması. SERİLEŞMEZ — komşularıyla aynı gerekçe (SQL süzgecinin dayanağı).
+    #[serde(skip_serializing)]
+    pub end_view_c_a: serde_json::Value,
+    /// WFE'nin bittiği terminal id'si; NULL = bitmedi ya da `Failed`/`Terminated`.
+    /// `current_node` gibi SERİLEŞMEZ: dışarı çıkan hâli `{id, label}` çiftidir ve
+    /// etiket ancak WFD elde varken üretilebilir.
+    #[serde(skip_serializing)]
+    pub end_terminal: Option<String>,
     pub claimed_by: Option<serde_json::Value>,
     pub end_response: Option<serde_json::Value>,
     /// SLA-3: çözülmüş mutlak workflow deadline'ı; NULL = yok (2026-07-16).

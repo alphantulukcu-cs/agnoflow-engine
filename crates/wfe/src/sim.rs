@@ -25,6 +25,13 @@ pub struct SimState {
     pub current_node: Option<String>,
     pub status: WfeStatus,
     pub end_response: Option<serde_json::Value>,
+    /// WFE'nin bittiği terminal id'si (2026-08-17) — `current_node`'un aynadaki
+    /// karşılığı. `Wfes::end_terminal`in sim tarafındaki kaynağıdır; terminal
+    /// `listable[]`ı (`can_view` (g)) buna bakar, yani simülasyon ile gerçek akış
+    /// aynı görünürlük cevabını verebilsin diye izlenir. `#[serde(default)]` — bu
+    /// alandan önce üretilmiş sim_state blob'ları onsuz da parse edilir.
+    #[serde(default)]
+    pub end_terminal: Option<String>,
     /// WOR-31 T4: paralel mod kol durumları (JSON alan adı `node`, bkz.
     /// `BranchState`); paralel modda değilken boş. `#[serde(default)]` — eski
     /// (fork öncesi üretilmiş) sim_state blob'ları bu alan olmadan da parse edilir.
@@ -102,6 +109,7 @@ impl SimState {
             current_node,
             status,
             end_response,
+            end_terminal: new.end_terminal.clone(),
             branches: vec![],
             join_target: None,
             join_threshold: None,
@@ -151,6 +159,7 @@ impl SimState {
             wfah: Wfah(self.wfah.clone()),
             status: self.status.clone(),
             current_node: self.current_node.clone(),
+            end_terminal: self.end_terminal.clone(),
             assigned_to,
             end_response: self.end_response.clone(),
             deadline: None,
@@ -177,6 +186,11 @@ impl SimState {
         self.current_node = current_node;
         if end_response.is_some() {
             self.end_response = end_response;
+        }
+        // `end_terminal` yalnız DOLU geldiğinde yazılır — `end_response` ile aynı
+        // gerekçe: ara bir commit onu boşaltmamalı, terminal'e varış tek yönlüdür.
+        if commit.end_terminal.is_some() {
+            self.end_terminal = commit.end_terminal.clone();
         }
         // WFC: yeni çağrılar eklenir. Öncekiler KORUNUR — `wait` modunda akış zaten
         // çağrı çözülmeden ilerleyemez; `detached`/`terminal` satırları ise geçmişin

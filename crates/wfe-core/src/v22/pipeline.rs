@@ -124,6 +124,24 @@ fn is_terminal_class(status: &WfeStatus) -> bool {
     matches!(status, WfeStatus::Terminal | WfeStatus::Terminated)
 }
 
+/// Varılan site bir TERMİNAL ise id'si (2026-08-17) — `wf.wfe.end_terminal` kolonuna
+/// ve terminal `listable[]` projeksiyonuna giden değer.
+///
+/// Kaynak neden `CommitOutcome` değil `CallSite`: `CommitOutcome::Terminal` yalnız
+/// `end_response` taşır ve taşıdığını genişletmek bu enum'un `PartialEq`'ine dayanan
+/// onlarca testi, hedefle ilgisi olmayan bir alan yüzünden değiştirmek demekti.
+/// `CallSite` "nereye varıldı" sorusunun ZATEN var olan cevabıdır (WFC outbox'ı ardıl
+/// çağrıyı onunla buluyor) — ikinci bir kayıt tutmak yerine aynı cevap okunur.
+///
+/// `Some` dönmesi başarılı `Terminal` demektir: `Failed`/`Terminated` yollarında bir
+/// site hiç üretilmez, `MoveTo`/fork/kol yollarında ise site NODE'dur.
+fn end_terminal_of(landed: Option<&CallSite>) -> Option<String> {
+    match landed {
+        Some(CallSite::Terminal(id)) => Some(id.clone()),
+        _ => None,
+    }
+}
+
 /// GLB hedef seçimini transition'ın wft'sine UYGULAR.
 ///
 /// `Wft::Targets` çalıştırılabilir bir hedef DEĞİLDİR — bir MENÜDÜR. Seçim
@@ -346,6 +364,8 @@ impl<'a> Engine<'a> {
             current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
             branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: end_terminal_of(landed.as_ref()),
             // Görünürlük çapası: akışı BAŞLATAN aktörün birimi. Start'ın kendisi
             // zaten bu aktörle çözüm yapıyor; WFE ömrü boyunca sabit kalacak olan
             // değer burada donar.
@@ -575,6 +595,8 @@ impl<'a> Engine<'a> {
             current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
             branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: end_terminal_of(landed.as_ref()),
         })
     }
 
@@ -807,6 +829,8 @@ impl<'a> Engine<'a> {
             current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
             branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: end_terminal_of(landed.as_ref()),
         })
     }
 
@@ -1049,6 +1073,48 @@ impl<'a> Engine<'a> {
             ctx,
             wfah,
             guard_node,
+            wfe_id,
+            origin_orgu,
+            orgtnt_id,
+        )
+        .await?;
+        Ok(out)
+    }
+
+    /// Terminal-seviyesi görünürlük projeksiyonu (2026-08-17): `terminals[].listable[]`
+    /// kurallarının ÇÖZÜLMÜŞ hâli → `wf.wfe.end_view_c_a`.
+    ///
+    /// `node_view_grants`in kardeşidir ve AYNI çözücüyü paylaşır — ayrışırlarsa
+    /// `can_view` (g) ile SQL süzgeci sessizce farklı cevap verir. İki fark:
+    /// * Girdi node değil TERMİNALDİR (`terminals[]` bir dizi olduğundan id ile aranır).
+    /// * `guard_node` YOKTUR: terminal'de `current_node` NULL'dır, dolayısıyla okuma
+    ///   anında `matches_grant_rules`in `$node`'u da `None` olacaktır. Projeksiyonu
+    ///   varılan terminal'in adıyla yazmak, kolon ile referans okuma arasındaki
+    ///   eşitliği bozardı (`visibility_report` tam bunu ölçüyor).
+    ///
+    /// Bilinmeyen terminal = boş liste — `node_view_grants` ile aynı gerekçe: bu bir
+    /// yetki sorusu değil cache üretimidir, eksik kayıtta hata atmak commit'i düşürürdü.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn terminal_view_grants(
+        &self,
+        wfd: &Wfd,
+        terminal_id: &str,
+        ctx: &Value,
+        wfah: &Wfah,
+        wfe_id: Uuid,
+        origin_orgu: Uuid,
+        orgtnt_id: Uuid,
+    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
+        let Some(terminal) = wfd.terminals.iter().find(|t| t.id == terminal_id) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<ResolvedCandidate> = Vec::new();
+        self.extend_grant_candidates(
+            &mut out,
+            &terminal.listable,
+            ctx,
+            wfah,
+            None,
             wfe_id,
             origin_orgu,
             orgtnt_id,
@@ -1685,6 +1751,8 @@ impl<'a> Engine<'a> {
             current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
             branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: end_terminal_of(landed.as_ref()),
         })
     }
 
@@ -1745,6 +1813,10 @@ impl<'a> Engine<'a> {
             current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
             branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            // SLA-3 `Terminated` — varılmış bir terminal YOK, dolayısıyla
+            // terminal `listable[]`ı da yok (bkz. `Terminal.listable` yorumu).
+            end_terminal: None,
         }
     }
 
@@ -1981,6 +2053,8 @@ impl<'a> Engine<'a> {
                     current_view_c_a: Vec::new(),
                     branch_c_a: Vec::new(),
                     branch_view_c_a: Vec::new(),
+                    end_view_c_a: Vec::new(),
+                    end_terminal: end_terminal_of(landed.as_ref()),
                 }))
             }
         }
@@ -2380,6 +2454,8 @@ impl<'a> Engine<'a> {
             current_view_c_a: Vec::new(),
             branch_c_a: Vec::new(),
             branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: end_terminal_of(landed.as_ref()),
         })
     }
 

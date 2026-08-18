@@ -67,6 +67,16 @@ pub struct Wfes {
     pub status: WfeStatus,
     /// Aktif WFE'nin beklediği node slug'ı; terminal'de None.
     pub current_node: Option<String>,
+    /// WFE'nin BİTTİĞİ terminal id'si (2026-08-17) — `current_node`'un aynadaki karşılığı:
+    /// biri aktifken doludur, diğeri bittiğinde. Yalnız başarılı `Terminal` sonucunda
+    /// `Some`; `Failed`/`Terminated` yollarında varılmış bir terminal YOKTUR.
+    ///
+    /// `can_view` (g) bunu okur — terminal `listable[]`ı "WFE BU terminal'de bittiyse"
+    /// der ve hangi terminal olduğu yalnız WFE satırında durur (WFD'den türetilemez:
+    /// aynı belgede birden çok terminal vardır, zaten mesele de bu). Projeksiyondan
+    /// ÖNCE bitmiş satırlarda `None` — o satırlar eski davranışı (yalnız kök
+    /// `listable`/`wf_admin`) korur.
+    pub end_terminal: Option<String>,
     /// Claim eden kullanıcı (assignment). Node değişiminde temizlenir (M8).
     pub assigned_to: Option<Uuid>,
     pub end_response: Option<Value>,
@@ -285,6 +295,20 @@ pub struct TransitionCommit {
     /// Kol başına node listable projeksiyonu (`wf.wfe_branch.view_c_a`) —
     /// `current_view_c_a`nın kol karşılığı, `branch_c_a` ile AYNI kol kümesi.
     pub branch_view_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
+    /// Terminal-seviyesi görünürlük projeksiyonu (2026-08-17): VARILAN terminal'in
+    /// `listable[]` kurallarının çözülmüş hâli → `wf.wfe.end_view_c_a`.
+    /// `current_view_c_a`dan farkı ÖMÜR (terminal'den çıkış olmadığı için KALICIDIR,
+    /// silinmez), `view_c_a`dan farkı KAPSAM (yalnız bu terminal'de biten WFE).
+    /// Yalnız başarılı `Terminal` sonucunda dolar; `WfeExecutor::fill_view_grants` yazar.
+    pub end_view_c_a: Vec<ResolvedCandidate>,
+    /// VARILAN terminal id'si — yalnız başarılı `Terminal` sonucunda `Some`.
+    ///
+    /// `CommitOutcome::Terminal` bunu TAŞIMAZ (yalnız `end_response` taşır) ama
+    /// `wf.wfe.end_terminal` kolonuna yazılması gerekir: projeksiyon sonradan yeniden
+    /// üretilebilmeli (`reproject`, org ağacı değişince kuyruğa giren bitmiş WFE'ler),
+    /// bunun için "hangi terminal'de bitti" satırda durmak zorunda. Aynı bilgi
+    /// `stage_calls`ın kullandığı `CallSite::Terminal`den türer.
+    pub end_terminal: Option<String>,
 }
 
 /// Yeni WFE oluşturma isteği — wfe_id ENGINE tarafından üretilir ve effects
@@ -319,6 +343,12 @@ pub struct NewWfe {
     pub branch_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
     /// Kol başına node listable projeksiyonu — bkz. `TransitionCommit::branch_view_c_a`.
     pub branch_view_c_a: Vec<(String, Vec<ResolvedCandidate>)>,
+    /// Terminal listable projeksiyonu — bkz. `TransitionCommit::end_view_c_a`.
+    /// Start'ta da yazılır: start kuralının `wft`'si doğrudan bir terminal'e inebilir
+    /// (tek adımda biten akış), o hâlde WFE hiç `commit` görmeden sonlanır.
+    pub end_view_c_a: Vec<ResolvedCandidate>,
+    /// Varılan terminal id'si — bkz. `TransitionCommit::end_terminal`.
+    pub end_terminal: Option<String>,
     /// `listable`/`wf_admin` ORGTRVLANG çapası: akışı BAŞLATAN aktörün birimi.
     /// WFE ömrü boyunca sabittir ve `view_c_a` her yeniden hesaplandığında aynı
     /// çapa kullanılır — yoksa akışa dokunan her kişi görünürlüğü kaydırırdı.

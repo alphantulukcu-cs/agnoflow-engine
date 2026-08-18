@@ -381,6 +381,8 @@ fn build_wfes(
         wfah: Wfah(entries),
         status,
         current_node: row.current_node,
+        // `current_node`un aynadaki karşılığı — `can_view` (g) bunu okur.
+        end_terminal: row.end_terminal,
         assigned_to,
         end_response: row.end_response,
         deadline: row.deadline,
@@ -489,8 +491,8 @@ impl WfeStore for WfeAdapter {
         sqlx::query(
             "INSERT INTO wf.wfe
                (wfe_id, orgtnt_id, environment_id, wfd_id, wfd_version, status, current_node, current_c_a, end_response, deadline,
-                view_c_a, origin_orgu_id, grants_built_at, current_view_c_a)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)",
+                view_c_a, origin_orgu_id, grants_built_at, current_view_c_a, end_view_c_a, end_terminal)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13, $14, $15)",
         )
         .bind(new.wfe_id)
         .bind(new.orgtnt_id)
@@ -508,6 +510,11 @@ impl WfeStore for WfeAdapter {
         // Node listable: `current_c_a` ile AYNI satırda, aynı anda (terminal'e
         // inen start'ta ikisi de boştur).
         .bind(serde_json::to_value(&new.current_view_c_a).map_err(db_err)?)
+        // Terminal listable (2026-08-17): start doğrudan bir terminal'e inebilir —
+        // o WFE hiç `commit` görmez, projeksiyonu burada yazılmazsa hiç yazılmaz.
+        // Node'a inen start'ta ikisi de boş kalır (`end_terminal` NULL).
+        .bind(serde_json::to_value(&new.end_view_c_a).map_err(db_err)?)
+        .bind(new.end_terminal.as_deref())
         .execute(&mut *tx)
         .await
         .map_err(db_err)?;
@@ -621,10 +628,17 @@ impl WfeStore for WfeAdapter {
                 // arkasında bekler, sonra kendi CAS'larında Conflict alır.
                 lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
+                // 2026-08-17: `current_view_c_a` (node listable) BOŞALTILIRKEN aynı
+                // UPDATE'te `end_view_c_a` (terminal listable) DOLDURULUR — iki kolonun
+                // ömrü tam olarak burada ayrışıyor: node'dan çıkan iş o node'un görme
+                // hakkını bırakır, vardığı terminal'inkini kalıcı olarak kazanır.
+                // `end_terminal` de burada yazılır; onsuz projeksiyon bir daha
+                // üretilemez (`reproject` hangi terminal olduğunu bilemez).
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'terminal', current_node = NULL, current_c_a = '[]'::jsonb,
                          current_view_c_a = '[]'::jsonb,
+                         end_view_c_a = $4, end_terminal = $5,
                          claimed_by = NULL, claimed_at = NULL, join_target = NULL,
                          join_threshold = NULL, join_when = NULL,
                          end_response = $1, updated_at = now()
@@ -633,6 +647,8 @@ impl WfeStore for WfeAdapter {
                 .bind(end_response)
                 .bind(commit.wfe_id)
                 .bind(commit.orgtnt_id)
+                .bind(serde_json::to_value(&commit.end_view_c_a).map_err(db_err)?)
+                .bind(commit.end_terminal.as_deref())
                 .execute(&mut *tx)
                 .await
                 .map_err(db_err)?;

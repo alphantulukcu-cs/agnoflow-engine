@@ -2307,6 +2307,19 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
             }
         }
     }
+    // 2026-08-17: `terminals[].listable[]` — yine AYNI şekil, AYNI matcher, AYNI guard
+    // denetimi. `$node` bu guard'da `None`'dır (terminal'de `current_node` yoktur), ama
+    // bu bir yasak değil: `$node == "x"` yazan kural yalnız hiç eşleşmez ve `$actor`
+    // yasağı burada da geçerlidir — projeksiyon viewer bilinmezken yazılır.
+    for t in &wfd.terminals {
+        for (i, l) in t.listable.iter().enumerate() {
+            if let Some(when) = &l.when {
+                let path = format!("terminals[{}].listable[{i}].when", t.id);
+                check(when, path.clone(), report);
+                grant_when_actor_ref(when, path, report);
+            }
+        }
+    }
     // WOR-84: `calc` autoexec ifadeleri. `config` şemasız `Value` olduğu için upload
     // kapısı buraya HİÇ bakmıyordu — bozuk ifade yayınlanıp akış koşarken patlıyordu
     // (`ExecFailure`), yani tasarımcı hatayı üretimde öğreniyordu.

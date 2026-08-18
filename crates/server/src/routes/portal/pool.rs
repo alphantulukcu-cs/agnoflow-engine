@@ -589,10 +589,22 @@ mod tests {
     /// `visibility::sql`den gelir; testin işi "havuz o parçayı gerçekten
     /// koşuyor mu"yu kolon adıyla teyit etmek (parça değişip kolon düşerse
     /// yukarıdaki metin testi hâlâ geçerdi).
+    ///
+    /// 2026-08-17: `e.end_view_c_a` (terminal listable) de listede. Havuzda pratik
+    /// karşılığı YOKTUR — havuzun kendi süzgeci `status='active'` ister ve o kolon
+    /// yalnız BİTMİŞ satırda dolar. Yine de aranıyor çünkü test "havuz görünürlük
+    /// parçasının TAMAMINI koşuyor mu" sorusunu soruyor; parçanın bir kolu havuza
+    /// girmezse üç tüketicinin tek cevabı sessizce ikiye ayrılmış olur.
     #[test]
     fn pool_now_sees_node_listable_columns() {
         for (name, stmt) in [("wfe", pool_sql()), ("branch", branch_pool_sql())] {
-            for col in ["e.current_view_c_a", "b.view_c_a", "e.view_c_a", "e.current_c_a"] {
+            for col in [
+                "e.current_view_c_a",
+                "b.view_c_a",
+                "e.view_c_a",
+                "e.current_c_a",
+                "e.end_view_c_a",
+            ] {
                 assert!(stmt.contains(col), "{name}: {col} havuz sorgusunda yok");
             }
         }

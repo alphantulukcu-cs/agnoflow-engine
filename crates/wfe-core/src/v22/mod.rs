@@ -5,6 +5,7 @@ pub mod display;
 pub mod dollar;
 pub mod duration;
 pub mod effects;
+pub mod end_terminal;
 pub mod env;
 pub mod eval;
 pub mod grants;

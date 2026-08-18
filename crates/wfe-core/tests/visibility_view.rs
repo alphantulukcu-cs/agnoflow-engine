@@ -126,6 +126,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         wfah,
         status: WfeStatus::Active,
         current_node: Some(node.into()),
+        end_terminal: None,
         assigned_to: assigned,
         end_response: None,
         deadline: None,

@@ -20,6 +20,7 @@
 //! ```text
 //! görünür(WFE, viewer) :=
 //!      view_c_a @> viewer                    -- listable ∪ wf_admin, KALICI
+//!   OR end_view_c_a @> viewer                -- terminal listable'ı, KALICI
 //!   OR (status='active' AND (
 //!          current_c_a      @> viewer        -- node adayları (tek-kol)
 //!       OR current_view_c_a @> viewer        -- node listable'ı (tek-kol)
@@ -27,10 +28,20 @@
 //!       OR EXISTS(aktif kol: c_a @> viewer VEYA view_c_a @> viewer
 //!                            VEYA claimed_by @> viewer)))
 //! ```
-//! İş bitince `current_c_a` boşaltılır (adapter) → geriye yalnız `view_c_a`
-//! kalır. Yani bitmiş işi görme yetkisi tamamen `listable`/`wf_admin`
+//! İş bitince `current_c_a` boşaltılır (adapter) → geriye `view_c_a` ve
+//! `end_view_c_a` kalır. Yani bitmiş işi görme yetkisi tamamen grant
 //! tasarımına bağlıdır; "işe dokunmuş olmak" (eski `can_view` kriteri (b))
 //! ARTIK yetki üretmez.
+//!
+//! **Terminal listable (`can_view` kriteri (g), 2026-08-17)** `end_view_c_a`
+//! ile geldi ve `status='active'` kolunun DIŞINDADIR — node listable'ın TAM
+//! TERSİ yerde. Ayrım yine ömürdür: `nodes.<key>.listable[]` "WFE bu node'da
+//! İKEN" der ve çıkışta biter; `terminals[].listable[]` "WFE BU terminal'de
+//! bittiyse" der ve terminal'den çıkış olmadığı için hiç bitmez. Kök
+//! `view_c_a`dan ayrı bir kolon olmasının sebebi KAPSAM: kök kural sonucu
+//! bilmez, bu kural "onaylandı"yı görenle "reddedildi"yi göreni ayırabilir.
+//! Yalnız başarılı `Terminal` commit'inde yazılır; `Failed`/`Terminated`
+//! satırlarında boş kalır (varılmış bir terminal yoktur).
 //!
 //! **Node listable (`can_view` kriteri (f), 2026-08-13)** iki YENİ kolonla
 //! geldi ve `status='active'` KOLUNUN İÇİNDEDİR — kalıcı `view_c_a`nın yanına
@@ -80,6 +91,11 @@ pub fn sql(offset: usize) -> String {
           OR ({ident}::jsonb IS NOT NULL AND e.view_c_a @> {ident}::jsonb)
           OR e.view_c_a @> {any_user}::jsonb
           OR ({any_ident}::jsonb IS NOT NULL AND e.view_c_a @> {any_ident}::jsonb)
+          OR e.end_view_c_a @> {role}::jsonb
+          OR e.end_view_c_a @> {user}::jsonb
+          OR ({ident}::jsonb IS NOT NULL AND e.end_view_c_a @> {ident}::jsonb)
+          OR e.end_view_c_a @> {any_user}::jsonb
+          OR ({any_ident}::jsonb IS NOT NULL AND e.end_view_c_a @> {any_ident}::jsonb)
           OR (e.status = 'active' AND (
                  e.current_c_a @> {role}::jsonb
               OR e.current_c_a @> {user}::jsonb

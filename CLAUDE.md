@@ -243,10 +243,25 @@ uygulanır) ve `WFE_START_DEDUPE_WINDOW_SECS` (varsayılan 60) — 2026-08-11, a
 
 Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap projeksiyonda".
 
-- **Kural**: `görünür = view_c_a @> viewer OR (status='active' AND (current_c_a @> viewer
-  OR claimed_by @> viewer OR aktif kol c_a/claim))`. İş bitince `current_c_a` boşalır →
-  bitmiş işi YALNIZ `listable`/`wf_admin` gösterir. "WFAH'ta eylemi olmak" (eski `can_view`
-  kriteri (b)) yetki ÜRETMEZ.
+- **Kural**: `görünür = view_c_a @> viewer OR end_view_c_a @> viewer OR (status='active'
+  AND (current_c_a @> viewer OR claimed_by @> viewer OR aktif kol c_a/claim))`. İş bitince
+  `current_c_a` boşalır → bitmiş işi YALNIZ kalıcı grant'lar gösterir. "WFAH'ta eylemi
+  olmak" (eski `can_view` kriteri (b)) yetki ÜRETMEZ.
+- **Terminal listable (2026-08-17)**: `terminals[].listable[]` — "WFE BU terminal'de
+  bittiyse görsün". Kök `listable` ile node `listable`ın ÜÇÜNCÜ ekseni: kökten farkı
+  SONUCA BAĞLI olması (onaylandı/reddedildi ayrı terminal → ayrı görünürlük, `when`
+  guard'ı gerekmez), node'dan farkı KALICI olması (terminal'den çıkış yok). Projeksiyon
+  `wf.wfe.end_view_c_a`, `status='active'` kolunun DIŞINDA; varılan terminal
+  `wf.wfe.end_terminal`de saklanır (yoksa `reproject` kolonu yeniden üretemez). YALNIZ
+  başarılı `Terminal`de yazılır — `Failed`/`Terminated` kapsam dışı. Karar:
+  `docs/spec/decisions.md` "Terminal-level `listable`".
+- **Kolondan ÖNCE bitmiş satırlar KANITLARDAN kurtarılır** (`wfe_core::v22::end_terminal`,
+  saf + birim testli): `end_response`in anahtar kümesi/sabit değerleri + WFAH'ın son gerçek
+  aksiyonundan çıkan `wft`in terminal kümesi + değişmez belge. Her kanıt yalnız DARALTIR;
+  tek aday kalmazsa kolon NULL bırakılır — **kurtarma asla tahmin etmez** (yanlış
+  `end_terminal` = görmemesi gereken kişiye bitmiş işi göstermek). Sürücü
+  `visibility_backfill`in ÖN GEÇİŞİ, ayrı komut değil: `reproject` kolon dolmadan
+  `end_view_c_a` üretemiyor, sıra zorunlu.
 - **Tek yer**: `wf_wfe::visibility::sql`. Liste ucu, detay kapısı (`VisibilityPort` →
   `WfeExecutor::query`) ve portal havuzu AYNI parçayı koşar. Çekirdeğin `can_view`'i
   referans okumadır (sim/testler); eşitliği `visibility_report` ölçer.

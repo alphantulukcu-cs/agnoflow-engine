@@ -99,6 +99,7 @@ fn wfes_owned(node: &str, ctx: Value, owner: Option<Uuid>) -> Wfes {
         wfah,
         status: WfeStatus::Active,
         current_node: Some(node.into()),
+        end_terminal: None,
         assigned_to: owner,
         end_response: None,
         deadline: None,

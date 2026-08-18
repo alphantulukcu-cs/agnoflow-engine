@@ -205,6 +205,7 @@ impl WfeStore for MemStore {
             wfah: Wfah(new.wfah_entries.clone()),
             status,
             current_node,
+            end_terminal: new.end_terminal.clone(),
             assigned_to: None,
             end_response,
             deadline: new.deadline,
@@ -236,6 +237,9 @@ impl WfeStore for MemStore {
         wfes.current_node = current_node;
         if end_response.is_some() {
             wfes.end_response = end_response;
+        }
+        if commit.end_terminal.is_some() {
+            wfes.end_terminal = commit.end_terminal.clone();
         }
         wfes.assigned_to = None;
         wfes.claimed_at = None;

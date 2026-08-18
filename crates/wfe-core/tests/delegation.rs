@@ -117,6 +117,7 @@ fn wfes_at(node: &str) -> Wfes {
         wfah,
         status: WfeStatus::Active,
         current_node: Some(node.into()),
+        end_terminal: None,
         assigned_to: None,
         end_response: None,
         deadline: None,

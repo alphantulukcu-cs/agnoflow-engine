@@ -42,8 +42,7 @@ pub struct WfdMeta {
     pub doc_version: Option<String>,
     /// T‑B4 taslak kilidi: kilidi tutan kullanıcı. `NULL` = serbest.
     pub lock_user_id: Option<Uuid>,
-    /// Kilidin İLK alındığı an — tazelemede DEĞİŞMEZ ("ne zamandır tutuyor").
+    /// Kilidin alındığı an — "bu kişi bu taslağı ne zamandır tutuyor". Kilidin süresi
+    /// YOKTUR; sahiplik bırakılana kadar sürer.
     pub lock_acquired_at: Option<DateTime<Utc>>,
-    /// Kilidin bitişi. Geçmişte kalmışsa kilit YOK sayılır (süpürücü gerekmez).
-    pub lock_expires_at: Option<DateTime<Utc>>,
 }

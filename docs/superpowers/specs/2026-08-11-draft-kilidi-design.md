@@ -1,5 +1,22 @@
 # WFD taslak kilidi — pessimistic (T‑B4)
 
+> **REVİZYON 2026-08-18: SÜRE SINIRI KALDIRILDI.** Aşağıdaki §2.1/§2.2/§4'te anlatılan
+> 5 dakikalık TTL, `lock_expires_at` kolonu, `T-60s` popup'ı ve "süre doldu → otomatik
+> kaydet + bırak" yolu ARTIK YOK. Yeni kural: kilit, editör taslağı AÇIK TUTTUĞU sürece
+> sahibindedir ve yalnız bırakıldığında (ya da publish/submit ile satır taslak olmaktan
+> çıktığında) serbest kalır. Değişmeyenler: kilidin `wf.wfd_meta` satırında durması,
+> koşulun mutasyonun kendi `WHERE`'ine girmesi, dört mutasyonun kilit istemesi,
+> onay/ret'in istememesi ve iki ayrı hata kodu.
+>
+> Bırakma AÇIK bir eylemdir: "Kilidi bırak" düğmesi (önce KAYDEDER sonra bırakır), sayfa
+> kapanışı (`pagehide` + `keepalive` DELETE, tutulan TÜM kilitler), publish/submit ve
+> yönetici zorla-açma. Başka taslağa geçmek kilidi DÜŞÜRMEZ — komşu akışa bakıp dönmek
+> kilidi kaybettirmemeli; bu yüzden bir kullanıcı aynı anda birden çok kilit tutabilir.
+>
+> §6'da "gerekmez" denen ZORLA AÇMA ARTIK VAR: `DELETE .../lock?force=true`, yetki tenant
+> admin veya proje admini (`require_manage_on_wfd`). Gerekçesi TTL'e dayanıyordu, o gidince
+> gerekçe de gitti. Güncel karar: `docs/spec/decisions.md`.
+
 **Tarih:** 2026-08-11
 **Kapsam:** `agnoflow-engine` (wfd crate + server) + `agnoflow-frontend` (editör).
 **Görevlendirme:** T‑B4 ("Draft kilidi — aynı draft iki kişide açık olmasın").

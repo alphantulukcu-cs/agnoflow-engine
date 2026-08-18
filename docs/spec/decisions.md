@@ -1750,24 +1750,59 @@ Sözleşme özeti: CLAUDE.md "WF Admin (akış-içi yetkili)".
 **Sorun:** `save_draft`'ta eşzamanlılık denetimi yoktu — son yazan kazanıyordu. İki
 tasarımcı aynı taslağı açıp çalışırsa ikinci kaydeden birincinin emeğini sessizce siler.
 
-**Karar:** Pessimistic kilit. `wf.wfd_meta`'ya üç kolon (`lock_user_id`,
-`lock_acquired_at`, `lock_expires_at`) — AYRI TABLO DEĞİL, çünkü kilit taslakla 1:1 ve
-taslak zaten o satırdır; böylece kilit koşulu mutasyonun kendi `WHERE`'ine girebiliyor
+**Karar:** Pessimistic kilit. `wf.wfd_meta`'ya iki kolon (`lock_user_id`,
+`lock_acquired_at`) — AYRI TABLO DEĞİL, çünkü kilit taslakla 1:1 ve taslak zaten o
+satırdır; böylece kilit koşulu mutasyonun kendi `WHERE`'ine girebiliyor
 (kontrol-sonra-yaz açığı olmadan).
 
-**Alma ve tazeleme AYNI ifadedir** — tek `UPDATE`, `WHERE` cümlesi CAS:
-`(lock_user_id IS NULL OR lock_user_id = $user OR lock_expires_at <= now())`. Sıfır satır
-→ başkasında canlı kilit. `lock_acquired_at` tazelemede DEĞİŞMEZ (`COALESCE`): "bu kişi
-bu taslağı ne zamandır tutuyor" ancak böyle cevaplanır.
+**Alma tek ifadedir** — tek `UPDATE`, `WHERE` cümlesi CAS:
+`(lock_user_id IS NULL OR lock_user_id = $user)`. Sıfır satır → başkasında kilit var.
+Kilit zaten bizdeyse çağrı ETKİSİZDİR. `lock_acquired_at` mevcut değeri KORUR
+(`COALESCE`): "bu kişi bu taslağı ne zamandır tutuyor" ancak böyle cevaplanır.
 
-**Süresi geçmiş kilit yok sayılır, SİLİNMEZ** — `lock_expires_at <= now()` koşulu onu
-zaten geçirir, süpürücüye gerek yok; kolonlar son sahibin izini taşımaya devam eder.
+**SÜRE SINIRI YOK — 2026-08-18 revizyonu.** İlk tasarım kilidi 5 dakikalık tutuyor,
+editör `T-60s`'de "devam mı" diye soruyor, cevap gelmezse kaydedip bırakıyordu. Yeni
+kural: kilit, editör taslağı AÇIK TUTTUĞU sürece sahibindedir; yalnız bırakıldığında (ya
+da publish/submit ile satır taslak olmaktan çıktığında) serbest kalır. `lock_expires_at`
+kolonu DÜŞÜRÜLDÜ (`20260818000001_wfd_draft_lock_no_ttl.sql`); göç mevcut kilitleri ÖNCE
+serbest bırakır, aksi halde göç anında canlı olan her kilit kalıcı hale gelir ve o
+taslaklar bir daha düzenlenemezdi.
 
-**TTL 5 dakika ve tazeleme YALNIZ İNSAN eylemiyle olur** (kör zamanlayıcı YOK). Editör
-`T-60s`'de "Devam et / Kaydet / Kaydetmeden çık" sorar; `T-30s`'de cevap yoksa ÖNCE
-KAYDEDER sonra kilidi bırakır. Popup `T-0`'da değil `T-30s`'de karar verir: otomatik
-kaydetme tam bitiş anında koşarsa kilit düşmüş olabilir ve emeği kurtaracak mekanizma tam
-o anda `409` alır. Bu tasarım "açık ama idle sekme taslağı rehin alır" deliğini kapatır.
+**Bırakma AÇIK bir eylemdir.** İlk revizyonda kilit, başka taslağa geçilince
+kendiliğinden bırakılıyordu; bu da kaldırıldı — tasarımcı fikir almak için komşu akışa
+gidip gelirken kilidini kaybediyor, döndüğünde başkasına kaptırmış olabiliyordu. Kilit
+artık yalnız şu yollarla düşer: "Kilidi bırak" düğmesi (ÖNCE KAYDEDER sonra bırakır),
+sayfa kapanışı (`pagehide` + `keepalive` DELETE, tutulan TÜM kilitler), publish/submit
+(sunucu bırakır) ve yönetici zorla-açma. Sonuç: bir kullanıcı aynı anda birden çok kilit
+tutabilir; istemci bunları modül düzeyinde bir kayıtta toplar, çünkü kanca yalnız o anki
+taslağı bilir ve kapanışta hepsi bırakılmalı.
+
+**Yan etki — taslak geçişinde kaydetme ZORUNLU oldu.** Editör store'u tek taslak tutar
+(`loadDraft` üzerine yazar) ve geçiş yolunda hiçbir onay penceresi yoktu: "komşu akışa
+bakıp geleyim" demek kaydedilmemiş işi sessizce siliyordu (kilitten ÖNCE de vardı, kilit
+geçişte düştüğü için görünmüyordu). Kilit artık korunduğu için kaydetme burada mümkün ve
+yapılıyor — sessizce, sormadan: taslak tanımı gereği yarım iştir.
+
+**Kilit bizdeyken taslak OTOMATİK KAYDEDİLİR** (istemci; 20 sn'de bir, yalnız değişiklik
+varsa + sekme gizlenince). Sebebi doğrudan zorla-açmadır: kırma anında kaydedilmemiş iş
+YALNIZ sahibinin tarayıcı belleğindedir — sunucu onu kaydedemez (elinde yoktur) ve
+sahibinin istemcisi de kilidi kaybettiği için artık kaydedemez (`409
+draft.lock_required`). "Kırmadan önce sahibinin işini kaydet" bu yüzden sunucu tarafında
+UYGULANAMAZ; tek gerçek çözüm işi ÖNCEDEN taşımak, böylece kırma en fazla son turu
+kaybettirir. Aynı ağ tarayıcı çökmesini de kapatır. Otomatik kaydetme `409` alırsa kilit
+elden gitmiş demektir: istemci `acquire` ETMEZ (yöneticinin az önce devraldığı kilidi
+geri kapardı), yalnız durumu tazeler.
+
+**Zorla açma ARTIK VAR** (`DELETE .../lock?force=true`). §6'da "TTL varken gereksiz"
+diye kapsam dışı bırakılmıştı; TTL gidince gerekçe de gitti — tarayıcısı çöken
+kullanıcının kilidi kendiliğinden düşmez ve taslak bir daha düzenlenemez. Yetki
+`require_manage_on_wfd`: tenant admin VEYA proje admini. Tasarım yetkisi YETMEZ, yoksa
+proje üyesi olan herkes birbirinin kilidini kırabilir ve kilit bir anlaşma olmaktan
+çıkardı. Repo tarafında AYRI fonksiyon (`force_release_lock`); `release_lock`e bayrak
+eklenmedi çünkü "yalnız sahibi bırakır" o fonksiyonun tek işidir ve birleştirmek, yetki
+kontrolünü atlayan bir çağrının sessizce zorla-açmaya dönüşmesini bir `bool`luk mesafeye
+indirirdi. `GET .../lock` yanıtındaki `can_force` KAPI DEĞİL, yalnız düğmeyi göstermek
+içindir.
 
 **Kilit TÜM taslak mutasyonlarında zorunlu** (kaydet / yayınla / onaya gönder / sil):
 A kilidi tutup düzenlerken B yayınlarsa A'nın YARIM işi yayına çıkar — kaydetmeyi

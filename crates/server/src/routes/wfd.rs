@@ -105,8 +105,13 @@ async fn require_design_on_wfd(
     require_can_design(&s.pool, auth, meta.project_id).await
 }
 
-/// Onay/yayın kapısı: tenant admin veya hedef projenin admini.
-async fn require_approver_on_wfd(
+/// Yönetim kapısı: tenant admin veya hedef projenin admini.
+///
+/// İki iş paylaşır çünkü ikisi de AYNI yetki seviyesidir: onay/yayın ve başkasının
+/// taslak kilidini zorla düşürme. Tasarım yetkisi (`require_design_on_wfd`) YETMEZ —
+/// proje üyesi olan herkes birbirinin kilidini kırabilseydi kilit anlaşma olmaktan
+/// çıkardı.
+async fn require_manage_on_wfd(
     s: &AppState,
     auth: &AppAuth,
     wfd_id: Uuid,
@@ -575,12 +580,12 @@ async fn require_draft_lock(
 
 /// T‑B4: taslak kilidi — AL ya da TAZELE (tek uç, tek SQL ifadesi).
 ///
-/// Kilit sahibi zaten sen isen bu çağrı tazelemedir; bu yüzden istemcinin "aldım mı,
-/// tazeliyor muyum" ayrımını yapması gerekmez.
+/// Kilit zaten sende ise çağrı ETKİSİZDİR (kilidin süresi yok, tazelenecek bir şey de
+/// yok); bu yüzden istemcinin "aldım mı, zaten benim mi" ayrımını yapması gerekmez.
 #[utoipa::path(post, path = "/draft/{id}/{version}/lock", tag = "wfd",
     params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
     responses(
-        (status = 200, description = "Kilit sende — lock_expires_at ile", body = serde_json::Value),
+        (status = 200, description = "Kilit sende — sahibi ve alınma anı ile", body = serde_json::Value),
         (status = 409, description = "Başkasında (draft.locked) veya satır draft değil"),
     ),
     security(("bearer_jwt" = [])))]
@@ -598,7 +603,6 @@ async fn lock_draft(
     Ok(Json(serde_json::json!({
         "lock_user_id": meta.lock_user_id,
         "lock_acquired_at": meta.lock_acquired_at,
-        "lock_expires_at": meta.lock_expires_at,
     })))
 }
 
@@ -621,40 +625,64 @@ async fn get_draft_lock(
     let meta = wf_wfd::repo::get_meta_any(&s.pool, id, ver)
         .await
         .map_err(map_wfd_err)?;
-    // Süresi geçmiş kilit SERBEST gösterilir: DB'de satır duruyor ama kapılar onu
-    // geçiriyor — istemciye "kilitli" demek yanlış bilgi olurdu.
-    let live = meta
-        .lock_expires_at
-        .is_some_and(|e| e > chrono::Utc::now());
+    // `can_force`: istemci "Kilidi kır" düğmesini kime göstereceğini buradan bilir.
+    // KAPI DEĞİLDİR — asıl yetki `DELETE .../lock?force=true` içinde yeniden sorulur;
+    // bu yalnız gösterim içindir (düğmeyi gizlemek yetki denetimi sayılmaz).
+    let can_force = require_manage_on_wfd(&s, &auth, id, ver).await.is_ok();
+    // Kilidin süresi YOK: `lock_user_id` doluysa kilit vardır. "Süresi geçmiş kilit"
+    // diye bir durum kalmadığı için ayrıca canlılık ölçülmez.
     Ok(Json(serde_json::json!({
-        "locked": live,
-        "lock_user_id": live.then_some(meta.lock_user_id).flatten(),
-        "lock_acquired_at": live.then_some(meta.lock_acquired_at).flatten(),
-        "lock_expires_at": live.then_some(meta.lock_expires_at).flatten(),
-        "mine": live && meta.lock_user_id == Some(auth.user_id),
+        "locked": meta.lock_user_id.is_some(),
+        "lock_user_id": meta.lock_user_id,
+        "lock_acquired_at": meta.lock_acquired_at,
+        "mine": meta.lock_user_id == Some(auth.user_id),
+        "can_force": can_force,
     })))
 }
 
 /// T‑B4: kilidi bırakır — YALNIZ sahibi. Başkası çağırırsa kilit düşmez (409):
-/// aksi halde bu uç zorla-açma ucuna dönüşürdü.
+/// aksi halde bu uç kazara zorla-açma ucuna dönüşürdü.
+///
+/// `?force=true` AYRI bir kapıdır: proje admini ya da tenant admini başkasının kilidini
+/// düşürebilir. Süresiz kilitte bu yol zorunlu — tarayıcısı çöken kullanıcının kilidi
+/// kendiliğinden düşmez ve taslak bir daha düzenlenemez. Yetki `require_can_manage_project`
+/// (tasarım yetkisi YETMEZ: proje üyesi olan herkes birbirinin kilidini kırabilseydi kilit
+/// bir anlaşma olmaktan çıkardı).
 #[utoipa::path(delete, path = "/draft/{id}/{version}/lock", tag = "wfd",
     params(("id" = Uuid, Path, description = "WFD id"), ("version" = i32, Path, description = "Versiyon")),
     responses(
         (status = 204, description = "Bırakıldı"),
+        (status = 403, description = "force=true ama proje/tenant admini değil"),
         (status = 409, description = "Kilit sende değil (draft.locked)"),
     ),
+    params(("force" = Option<bool>, Query, description = "Yönetici: başkasının kilidini düşür")),
     security(("bearer_jwt" = [])))]
 async fn unlock_draft(
     State(s): State<AppState>,
     auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
+    Query(q): Query<UnlockQuery>,
 ) -> Result<StatusCode, AppError> {
+    if q.force.unwrap_or(false) {
+        require_manage_on_wfd(&s, &auth, id, ver).await?;
+        return s
+            .wfd
+            .force_unlock_draft(id, ver, auth.orgtnt_id)
+            .await
+            .map(|_| StatusCode::NO_CONTENT)
+            .map_err(map_wfd_err);
+    }
     require_design_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .unlock_draft(id, ver, auth.orgtnt_id, auth.user_id)
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(map_wfd_err)
+}
+
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+struct UnlockQuery {
+    force: Option<bool>,
 }
 
 #[utoipa::path(put, path = "/draft/{id}/{version}", tag = "wfd",
@@ -689,7 +717,7 @@ async fn require_can_publish_wfd(
     wfd_id: Uuid,
     version: i32,
 ) -> Result<(), AppError> {
-    if require_approver_on_wfd(s, auth, wfd_id, version)
+    if require_manage_on_wfd(s, auth, wfd_id, version)
         .await
         .is_ok()
     {
@@ -1016,7 +1044,7 @@ async fn approve_draft(
     auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
 ) -> Result<Json<Value>, AppError> {
-    require_approver_on_wfd(&s, &auth, id, ver).await?;
+    require_manage_on_wfd(&s, &auth, id, ver).await?;
     assert_attachment_storage_env(&s, id, ver).await?;
     s.wfd
         .approve_draft(id, ver)
@@ -1041,7 +1069,7 @@ async fn reject_draft(
     Path((id, ver)): Path<(Uuid, i32)>,
     Json(b): Json<RejectBody>,
 ) -> Result<Json<Value>, AppError> {
-    require_approver_on_wfd(&s, &auth, id, ver).await?;
+    require_manage_on_wfd(&s, &auth, id, ver).await?;
     s.wfd
         .reject_draft(id, ver, b.reason.as_deref())
         .await

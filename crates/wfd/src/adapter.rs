@@ -290,7 +290,8 @@ impl WfdAdapter {
     // ── T‑B4: taslak kilidi ────────────────────────────────────────────────
     // İnce sarmalayıcılar: kilit mantığı SQL'de (repo), burada yalnız yönlendirme.
 
-    /// Kilidi alır ya da tazeler; güncel meta (kilit alanları dahil) döner.
+    /// Kilidi alır; güncel meta (kilit alanları dahil) döner. Kilit zaten bizdeyse
+    /// çağrı etkisizdir — kilidin süresi yok, tazelenecek bir şey de yok.
     pub async fn lock_draft(
         &self,
         wfd_id: Uuid,
@@ -298,7 +299,18 @@ impl WfdAdapter {
         orgtnt_id: Uuid,
         user_id: Uuid,
     ) -> Result<crate::models::WfdMeta, crate::error::WfdError> {
-        repo::acquire_or_renew_lock(&self.pool, wfd_id, version, orgtnt_id, user_id).await
+        repo::acquire_lock(&self.pool, wfd_id, version, orgtnt_id, user_id).await
+    }
+
+    /// Kilidi sahibinden bağımsız düşürür — yetki kararı ROTADA verilir (proje/tenant
+    /// admini). Bkz. `repo::force_release_lock`.
+    pub async fn force_unlock_draft(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        orgtnt_id: Uuid,
+    ) -> Result<(), crate::error::WfdError> {
+        repo::force_release_lock(&self.pool, wfd_id, version, orgtnt_id).await
     }
 
     /// Kilidi bırakır — yalnız sahibi.

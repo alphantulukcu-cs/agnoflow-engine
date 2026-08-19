@@ -114,6 +114,16 @@ impl MockRunner {
             rest_calls: AtomicU32::new(0),
         }
     }
+
+    /// REST sonucunu HAM verir — dış sistemin şemaya uymayan bir şey döndürdüğü
+    /// vakaları (kapı B) kurmak için. `calc` normal davranır.
+    fn with_rest_result(rest: Value, within_limit: bool) -> Self {
+        Self {
+            rest: RestBehavior::Ok(rest),
+            calc: json!({"within_limit": within_limit}),
+            rest_calls: AtomicU32::new(0),
+        }
+    }
 }
 
 #[async_trait]
@@ -4567,4 +4577,196 @@ async fn wf_admin_does_not_grant_action_rights() {
         engine.can_claim(&wfd, &wfes, &analyst, None).await.unwrap(),
         ClaimCheck::Ok
     );
+}
+
+// ---- Girdi TİP kapısı (2026-08-19) ----
+//
+// Motor bilir kişidir: bildirilen bir tip varsa ve değer o tipte gelmiyorsa reddi
+// ENGINE verir. İstemci (editör, portal, üçüncü parti UI) kendi tip kuralını icat
+// etmez — kapı burada. Denetim çekirdeği `wfe_core::v22::ctx_types`.
+
+/// Golden'da `credit_info.amount_requested` `number`; METİN gönderilirse REDDEDİLİR.
+/// (2026-08-19 öncesi bu değer sessizce ctx'e yazılıyordu ve etkisi ancak sayısal bir
+/// `when` çalışırken çıkıyordu.)
+#[tokio::test]
+async fn wrong_typed_start_input_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let actor = clerk(Uuid::new_v4());
+    let mut input = start_input();
+    input["credit_info"]["amount_requested"] = json!("yüz bin");
+
+    let err = engine
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .await
+        .unwrap_err();
+    match &err {
+        EngineError::InputTypeMismatch(violations) => {
+            assert_eq!(violations.len(), 1, "{violations:?}");
+            assert_eq!(violations[0].path, "credit_info.amount_requested");
+            assert!(violations[0].expected.contains("number"), "{:?}", violations[0]);
+            assert!(violations[0].got.contains("string"), "{:?}", violations[0]);
+        }
+        other => panic!("tip ihlali beklendi: {other}"),
+    }
+}
+
+/// Doğru tip geçer — kapı meşru girdiyi engellemez.
+#[tokio::test]
+async fn correctly_typed_start_input_passes() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let actor = clerk(Uuid::new_v4());
+    engine
+        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .await
+        .expect("doğru tipli girdi geçmeli");
+}
+
+/// Aksiyon (apply) yolu da AYNI kapıdan geçer: `manager_decision` enum'dur, listede
+/// olmayan değer reddedilir.
+#[tokio::test]
+async fn enum_violation_on_apply_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let manager = actor_with_role("branchManager");
+    let wfes = wfes_at("self__branchManager", Some(manager.user_id), json!({}));
+
+    let err = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &manager,
+            "manager_decide",
+            &json!({ "manager_decision": "belki" }),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    match &err {
+        EngineError::InputTypeMismatch(v) => {
+            assert_eq!(v[0].path, "manager_decision");
+            assert!(v[0].expected.contains("approve"), "{:?}", v[0]);
+        }
+        other => panic!("enum ihlali beklendi: {other}"),
+    }
+}
+
+/// TİP denetimi bildirim denetiminden SONRA koşar: tanımsız yola gönderilen bozuk
+/// değerde kullanıcı asıl sorunu ("yol bildirilmemiş") görmeli.
+#[tokio::test]
+async fn undeclared_path_error_wins_over_type_error() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let actor = clerk(Uuid::new_v4());
+    let mut input = start_input();
+    input["credit_score"] = json!("metin"); // hem tanımsız hem yanlış tip
+
+    let err = engine
+        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::InvalidInput(m) if m.contains("tanımlı değil")),
+        "{err}"
+    );
+}
+
+// ---- Kapı B: ctx'e YAZILAN değerin tip denetimi (2026-08-19) ----
+//
+// Kapı A isteğin girdisini görür; kapı B `wfes_effects` ile bağlama yazılan HER şeyi
+// (autoexec sonucu · WFC dönüşü · `$env` · sistem/sabit) tek noktada denetler. Yalnız
+// DEĞİŞEN kök alanlar sorulur: enforcement öncesi bozulmuş eski veri akışı durdurmaz.
+
+/// Autoexec `credit_score`a METİN yazarsa (şemada `number`) geçiş UYGULANMAZ.
+/// Bu, kapı A'nın göremediği sınıftır: değer istekten değil DIŞ SİSTEMDEN geliyor.
+#[tokio::test]
+async fn autoexec_result_with_wrong_type_is_rejected() {
+    let org = MockOrg { role_assigned: true };
+    // `MockRunner::ok` skoru `credit_score`a yazıyor; burada METİN döndüren bir runner.
+    let runner = MockRunner::with_rest_result(json!({ "score": "yüksek", "grade": "A" }), true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let analyst = actor_with_role("creditAnalyst");
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst.user_id), json!({}));
+
+    let err = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &analyst,
+            "analyst_approve",
+            &json!({ "credit_info": { "amount_requested": 1000 } }),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    match &err {
+        EngineError::CtxTypeMismatch(v) => {
+            assert!(
+                v.iter().any(|x| x.path == "credit_score"),
+                "ihlal `credit_score`u göstermeli: {v:?}"
+            );
+        }
+        other => panic!("ctx tip ihlali beklendi: {other}"),
+    }
+}
+
+/// Doğru tipli autoexec sonucu geçer — kapı meşru akışı engellemez.
+#[tokio::test]
+async fn correctly_typed_autoexec_result_passes() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let analyst = actor_with_role("creditAnalyst");
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst.user_id), json!({}));
+
+    let commit = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &analyst,
+            "analyst_approve",
+            &json!({ "credit_info": { "amount_requested": 1000 } }),
+            None,
+            None,
+        )
+        .await
+        .expect("doğru tipli sonuç geçmeli");
+    assert_eq!(commit.new_dynctx["credit_score"], json!(750));
+}
+
+/// ÖNCEDEN bozulmuş bir alan (bu geçişte YAZILMAYAN) akışı durdurmaz: kapı B yalnız
+/// bu commit'in yazdığına bakar. Bozuk veriyle iş yapmayı engellemek ayrı bir kapının
+/// (`ctx_types::validate_dynctx` → "kapı C") işidir.
+#[tokio::test]
+async fn preexisting_corrupt_field_does_not_block_the_transition() {
+    let org = MockOrg { role_assigned: true };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let analyst = actor_with_role("creditAnalyst");
+    // `internal_notes` şemada `string`; DB'de sayı olarak duruyor (enforcement öncesi).
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst.user_id),
+        json!({ "internal_notes": 42 }),
+    );
+
+    engine
+        .apply(
+            &golden(),
+            &wfes,
+            &analyst,
+            "analyst_approve",
+            &json!({ "credit_info": { "amount_requested": 1000 } }),
+            None,
+            None,
+        )
+        .await
+        .expect("bu geçişte yazılmayan bozuk alan akışı durdurmamalı");
 }

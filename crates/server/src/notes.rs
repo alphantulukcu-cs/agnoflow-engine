@@ -27,7 +27,7 @@
 use crate::error::AppError;
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
@@ -35,23 +35,10 @@ use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::ports::BranchStatus;
 
-/// Not hedefleme (K9). `{"kind":"all"}` (varsayılan) → herkes (WFE'yi
-/// görebilen); `{"kind":"users","ids":[...]}` → yalnız listelenen
-/// `user_id`'ler (+ notun yazarı, her koşulda). Başka bir `kind` deserialize
-/// hatası üretir — axum'un `Json` extractor'ı bunu `400`'e çevirir, ayrıca bir
-/// doğrulama kodu yazmaya gerek yoktur.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
-#[serde(tag = "kind", rename_all = "lowercase")]
-pub enum Audience {
-    All,
-    Users { ids: Vec<Uuid> },
-}
-
-impl Default for Audience {
-    fn default() -> Self {
-        Audience::All
-    }
-}
+// Not hedefleme (K9) — tip `wf_wfe::note_rules::Audience`'tadır (simülasyon/senaryo
+// koşucusu da aynı şekli okur). Buradaki `pub use` mevcut çağrı yerlerini
+// (`notes::Audience`) olduğu gibi bırakır.
+pub use wf_wfe::note_rules::Audience;
 
 /// `audience` süzgeci ORTAK SQL parçası — hem `list_visible` hem
 /// `count_by_wfe`/`unread_count_by_wfe` hem çocuk WFE not sorgusu aynı kuralı
@@ -70,47 +57,22 @@ fn audience_sql(prefix: &str, user_param: &str, orgu_param: &str) -> String {
     )
 }
 
-/// Not gövdesi uzunluk sınırı (karakter). Aşımı `400`.
-pub const MAX_BODY_LEN: usize = 10_000;
-
-/// Yetim draft TTL'i (saat) — süpürücü bundan eski taslakları siler (K5).
-pub const DRAFT_TTL_HOURS: i64 = 24;
-
-// ---- Ad-hoc dosya limitleri (Faz 2, spec "Ad-hoc dosya limitleri") ----
+// ---- limitler + MIME blocklist: `wf_wfe::note_rules`'ta ----
 //
-// Katalog `AttachmentItem.formats` kuralları burada uygulanamaz (ad-hoc dosyanın
-// katalogda karşılığı yok) — sınırsız yükleme yüzeyi doğmasın diye sunucu tarafı
-// sabitleri konur.
+// 2026-08-19'da taşındı: AYNI limitleri iki tüketici uygular — bu katman (gerçek
+// akış, DB + depo) ve `wf_wfe::sim` (simülasyon/senaryo, in-memory not adımı).
+// İki kopya olsaydı senaryoda geçen bir not portalda 413/422 alabilirdi.
+// `wfe-core`'a KONMADI: motor not katmanından habersiz kalır (K1).
+// Baytlara/HTTP başlığına bakan kısım (`decode_filename`, `sanitize_filename`)
+// TAŞINMADI — o bu katmanın işi.
+pub use wf_wfe::note_rules::{
+    is_blocked_mime, MAX_BODY_LEN, MAX_FILENAME_LEN, MAX_FILES_PER_NOTE, MAX_FILE_BYTES,
+    MAX_WFE_QUOTA_BYTES,
+};
 
-/// Dosya başı boyut sınırı (bayt) — aşımı `413 note.too_large`.
-pub const MAX_FILE_BYTES: i64 = 25 * 1024 * 1024;
-
-/// Not başına dosya sayısı sınırı — aşımı `422`.
-pub const MAX_FILES_PER_NOTE: i64 = 10;
-
-/// WFE başına TÜM notların dosyalarının toplam boyutu — aşımı `422`. Not bazlı
-/// sayı sınırı tek başına yeterli değildir: az sayıda çok büyük dosya da aynı
-/// sınırsız yükleme yüzeyini açar.
-pub const MAX_WFE_QUOTA_BYTES: i64 = 200 * 1024 * 1024;
-
-/// Dosya adı uzunluk sınırı (karakter) — `sanitize_filename` bu sınıra kısar.
-pub const MAX_FILENAME_LEN: usize = 255;
-
-/// Çalıştırılabilir/tehlikeli MIME blocklist — ad-hoc not dosyasında YASAK
-/// (`415 note.unsupported_type`). Katalogun `formats` allowlist'inin aksine
-/// burada allowlist yok (herhangi bir belge/görsel/ofis dosyası serbest);
-/// yalnız bilinen çalıştırılabilir tipler reddedilir.
-pub const MIME_BLOCKLIST: &[&str] = &[
-    "application/x-msdownload",
-    "application/x-executable",
-    "application/x-sh",
-    "application/x-bat",
-    "application/x-msdos-program",
-    "application/vnd.microsoft.portable-executable",
-    "application/java-archive",
-    "application/x-elf",
-    "application/vnd.apple.installer+xml",
-];
+/// Yetim draft TTL'i (saat) — süpürücü bundan eski taslakları siler (K5). Taslak
+/// yaşam döngüsü DB'ye özgüdür (simülasyonda draft yok), bu yüzden taşınmadı.
+pub const DRAFT_TTL_HOURS: i64 = 24;
 
 /// Dosya adını sanitize eder: yol ayracı (`/`, `\`), `..` ve kontrol karakterleri
 /// temizlenir, uzunluk `MAX_FILENAME_LEN`'e kısılır. Boş/temizlik-sonrası-boş
@@ -154,13 +116,6 @@ pub fn sanitize_filename(name: &str) -> String {
     let trimmed = no_traversal.trim();
     let base = if trimmed.is_empty() { "dosya" } else { trimmed };
     base.chars().take(MAX_FILENAME_LEN).collect()
-}
-
-/// MIME blocklist kontrolü — `Content-Type`'ın parametre kısmı (`; charset=...`)
-/// yok sayılır, karşılaştırma büyük/küçük harf duyarsızdır.
-pub fn is_blocked_mime(mime: &str) -> bool {
-    let m = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-    MIME_BLOCKLIST.iter().any(|b| *b == m)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

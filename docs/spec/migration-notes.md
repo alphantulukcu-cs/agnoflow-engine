@@ -191,6 +191,83 @@ anahtarı olduğundan (WOR-73) aynı havuza bakan iki eşzamanlı kol iki node i
 çizilemez. Bilinçli ve GEÇİCİ kısıt; gerekçesi ve ileride kaldırılma yolu `decisions.md`
 2026-08-14 maddesindedir.
 
+## M19. Adlandırılmış tip `format` + RUNTIME tip denetimi (2026-08-19, **KIRICI**)
+
+Karar kayıtları: `decisions.md` → "Adlandırılmış tip: `format` → `$defs`" ve
+"Runtime tip denetimi — engine bilir kişi".
+
+### Ne değişti
+
+1. **`$ref` KALDIRILDI (okuyucusu da yok).** Context şemasında bir alanı yeniden
+   kullanılabilir bir tanıma bağlamanın tek yolu artık `format`tır:
+
+   ```diff
+    "context": {
+      "$defs": { "Tarih": { "type": "string", "pattern": "^[0-9]{14}$" } },
+      "properties": {
+   -    "basvuru_tarihi": { "$ref": "#/$defs/Tarih" }
+   +    "basvuru_tarihi": { "format": "Tarih" }
+      }
+    }
+   ```
+
+   `$ref` şemadan çıkarıldı (`contextSchemaNode`), motor/editör/portal çözücüleri onu
+   TANIMAZ, validator `context_ref_removed` ile reddeder.
+
+2. **`format` artık standart JSON Schema formatı DEĞİL**, `$defs` tanım adıdır.
+   `format: "date-time"` = "benim `$defs.date-time` tanımım"; tanımlı değilse
+   `context_format_unknown` ile yayın durur. Standart adların kütüphaneye gömülü anlamı
+   KULLANILMAZ — kural belgede durur, motor onu çalışma anında da uygular.
+
+3. **`format` yanında tip kuralı yazılamaz** (`context_format_with_type`): `type`, `enum`,
+   `pattern`, sayı/uzunluk sınırları, `items`, `properties`, `x-wf-kind`. Tip tanımın
+   İÇİNDEDİR; kullanım yerinde yalnız `title`/`description`/`x-visibility` ezilebilir.
+
+4. **Yayınlanan belge DRY**: editör artık `properties`'i inline ETMEZ; `format` + `$defs`
+   birlikte yayınlanır ve üç tüketici (motor `v22::ctx_types`, editör `utils/contextDefs`,
+   portal `lib/contextTypes`) aynı çözümü yapar.
+
+5. **Çalışma anında TİP denetimi** (üç kapı):
+   | Kapı | Nerede | Hata |
+   |---|---|---|
+   | A — girdi | `validate_action_input` (start + apply) | `422` `input.type_mismatch` + `items[]` |
+   | B — ctx yazma | `pipeline::guard_written_ctx` (bu geçişin YAZDIĞI yollar) | `422` `ctx.type_mismatch` + `items[]` |
+   | C — bozuk ctx | `executor::guard_stored_ctx` (apply · claim · escalation fire) | `422` `ctx.type_mismatch`; okuma SERBEST + `WfeView.ctx_violations` |
+
+   Zorlanan kurallar: `type` · `enum` · `const` · sayı sınırları · `minLength`/`maxLength`/
+   `pattern` · dizi kuralları · iç içe `properties`. **`null` HER tipte geçerlidir**
+   (WOR-70b gönderilmeyen `optional` ctx'e `null` yazar).
+
+### Kimi etkiler
+
+- **Elle JSON yazan / API'ye doğrudan istek atan istemciler:** gevşek tipli değer
+  (`"1000"` yerine `1000` bekleniyorsa) artık `422` alır. Alan bazında ne beklendiği
+  `items[]`te yazar.
+- **`$ref` kullanan belgeler:** ölçüldü — yayınlanmış hiçbir belgede `$ref`/`format`
+  kullanımı YOK (`ctx_type_report`, 2026-08-19: 25 WFE / 0 `$ref`). Elde kalan bir
+  taslak varsa `$ref` → `format` elle çevrilir.
+- **`format: "date-time"` gibi standart ad taşıyan belgeler:** editör import'unda o değer
+  DÜŞER (motorda zaten etkisizdi); `data-url` → `x-wf-document: true` çevrilir. Kesin
+  kısıt isteniyorsa `$defs` tanımı + `pattern` yazılır.
+
+### Düzeltme reçetesi
+
+1. `context.$defs` altına tipleri tanımla (`type` + `pattern`/sınır/`enum` ile).
+2. Alanlarda `$ref`i `format` ile değiştir, alanın üzerindeki tip kurallarını SİL
+   (tanıma taşı).
+3. `ctx_type_report` ile sahayı ölç: ihlal varsa akışın yeni sürümünü yayınla ya da
+   bağlamı düzelt (motor bozuk bağlamda EYLEM kabul etmez, görüntülemeye izin verir).
+4. Yanlış tip gönderen entegrasyonları düzelt; ret gövdesindeki `items[]` hangi yolun ne
+   beklediğini söyler.
+
+### Geriye uyum politikası (bu maddenin gerekçesi)
+
+"Wire formatı değişince eski şeklin okuyucusu kalır" kuralı **production'dan SONRA**
+geçerlidir. Ürün henüz production'da değil; mevcut tüm WFD/WFE'ler test verisi ve
+production öncesi sıfırlanacak — bu yüzden `$ref` okuyucusu ve GLB `__gt__` anahtar
+ailesi okuyucusu (`legacyGlobalAction.ts`) SİLİNDİ. Kalan geriye uyum okuyucularının
+envanteri: `docs/2026-08-19-legacy-okuyucu-temizligi.md`.
+
 ## Editor (React Flow) Eşlemesi
 
 ```text

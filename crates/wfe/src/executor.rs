@@ -385,6 +385,14 @@ pub struct WfeView {
     /// (bkz. `PathStep`). `$wfah` izdüşümüne DEĞİL, yalnız bu görünüme eklenir.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub path: Vec<PathStep>,
+    /// **Kapı C** (2026-08-19): `dynctx`in context şemasını İHLAL EDEN alanları.
+    ///
+    /// GÖRÜNTÜLEME reddedilmez — bozuk kayıt görünmez olursa düzeltilemez; bunun yerine
+    /// ihlaller burada BİLDİRİLİR (portal kırmızı şerit gösterir). Buna karşılık EYLEM
+    /// yolları (apply/claim/escalation) aynı ihlalde REDDEDER: motor bozuk veriyle iş
+    /// yapmaz. Boşsa alan hiç gönderilmez.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ctx_violations: Vec<wfe_core::v22::ctx_types::Violation>,
 }
 
 /// GET /wfe/:id kol görünümü: `BranchState`in alanları + sorgu-anında çözülmüş `c_a`
@@ -789,6 +797,27 @@ fn to_wfah_view(
     }
 }
 
+
+/// **Kapı C** — bozuk `dynctx` taşıyan bir WFE'de EYLEM reddedilir.
+///
+/// Enforcement (2026-08-19) öncesinde ctx'e şemaya uymayan değer yazılmış olabilir.
+/// Karar (kullanıcı): **motor bozuk veriyle iş YAPMAZ** ama kayıt GÖRÜNÜR kalır —
+/// görünmez olursa kullanıcı neyin bozuk olduğunu göremez ve düzeltemez. Bu yüzden:
+///   · eylem yolları (apply / claim / escalation fire+skip) bu kapıdan geçer → `422`,
+///   · okuma (`GET /wfe/:id`) 200 döner ve ihlalleri `WfeView.ctx_violations` ile bildirir.
+///
+/// Kapı B'den (`pipeline::guard_written_ctx`) farkı: orası BU GEÇİŞİN YAZDIĞINA bakar
+/// (yeni bozulma girmesin), burası ZATEN VAR OLAN duruma bakar (bozukla iş yapılmasın).
+fn guard_stored_ctx(wfd: &Wfd, wfes: &Wfes) -> Result<(), EngineError> {
+    let violations =
+        wfe_core::v22::ctx_types::validate_dynctx(&wfd.context, wfes.dynctx.as_value()).violations;
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(EngineError::CtxTypeMismatch(violations))
+    }
+}
+
 impl WfeExecutor {
     /// `$env` kullanmayan kurulum (testler, sim). Ortam gerekiyorsa `with_env`.
     pub fn new(
@@ -1072,6 +1101,7 @@ impl WfeExecutor {
             // precondition'ı artık tutmadığı için aksiyon SESSİZCE uygulanmaz.
             check_rev(&wfes, expected_rev)?;
             let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+            guard_stored_ctx(&wfd, &wfes)?;
 
             let mut commit = self
                 .engine_for(&wfes)
@@ -1254,6 +1284,9 @@ impl WfeExecutor {
         // Madde 6: claim DOĞRUDAN mı VEKALETEN mi uygun? Vekaletense CAS kazanılınca
         // aynı transaction'da `claim:delegated` audit marker'ı yazılır.
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        // Kapı C: claim bir EYLEMDİR (işi üstlenmek) — bozuk ctx'te reddedilir. Kişi
+        // üstlenip ilk aksiyonda 422 almasın; "bu kayıt bozuk" cevabı burada verilir.
+        guard_stored_ctx(&wfd, &wfes)?;
         let marker = match self
             .engine()
             .claim_decision(&wfd, &wfes, actor, node)
@@ -1344,6 +1377,8 @@ impl WfeExecutor {
         let wfes = self.wfe.load(wfe_id).await?;
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
         require_branch_hint(&wfes, node)?;
+        // Kapı C: escalation bir GEÇİŞ uygular (node devri) → bozuk ctx'te reddedilir.
+        guard_stored_ctx(&wfd, &wfes)?;
         let engine = self.engine_for(&wfes).await?;
         let Some((step_idx, mut commit)) = engine
             .admin_fire_escalation(&wfd, &wfes, admin, node, Utc::now())
@@ -1570,6 +1605,10 @@ impl WfeExecutor {
         };
 
         let ctx = wfes.dynctx.as_value();
+        // Kapı C bildirimi HAM ctx üzerinden hesaplanır (aşağıda `ctx_violations`):
+        // `filtered` alanları düşürebilir ve bozuk alanın raporlanmaması, kullanıcının
+        // düzeltmesi gereken şeyi gizlerdi. `wfes` aşağıda taşındığı için kopyalanır.
+        let raw_ctx = ctx.clone();
         let env = MatchEnv {
             ctx,
             wfah: &wfes.wfah,
@@ -1714,6 +1753,12 @@ impl WfeExecutor {
             calls,
             caller,
             path,
+            // Kapı C bildirimi: GÖRÜNTÜLEME serbest, ihlaller yalnız RAPORLANIR.
+            // Ham `wfes.dynctx` üzerinden hesaplanır — `filtered` (x-visibility süzgeci)
+            // alanları düşürebilir ve bozuk bir alanın raporlanmaması, kullanıcının
+            // düzeltmesi gereken şeyi gizlerdi.
+            ctx_violations: wfe_core::v22::ctx_types::validate_dynctx(&wfd.context, &raw_ctx)
+                .violations,
         })
     }
 

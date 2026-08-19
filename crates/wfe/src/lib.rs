@@ -3,6 +3,7 @@ pub mod env_adapter;
 pub mod error;
 pub mod executor;
 pub mod models;
+pub mod note_rules;
 pub mod org_adapter;
 pub mod priority;
 pub mod repo;

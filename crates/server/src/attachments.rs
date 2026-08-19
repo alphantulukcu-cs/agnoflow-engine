@@ -19,7 +19,8 @@
 use opendal::Operator;
 use serde::Serialize;
 use uuid::Uuid;
-use wfe_core::types::wfd_v22::{AttachmentFormatRule, AttachmentItem, Wfd};
+use wfe_core::types::wfd_v22::{AttachmentFormatRule, Wfd};
+use wfe_core::v22::attachments::GateSlot;
 
 #[derive(Clone)]
 pub struct AttachmentStore {
@@ -329,20 +330,31 @@ pub fn missing_required_with_pending(
     groups: &[AttachmentGroupStatus],
     pending: &[(String, String)],
 ) -> Vec<String> {
-    groups
+    // Kural (hangi slot kapıdır, hangisi eksiktir) `wfe_core::v22::attachments`'ta —
+    // simülasyon/senaryo koşucusu (`wf_wfe::sim`) AYNI fonksiyonu çağırır. Burada
+    // yalnız bu katmanın "yüklenmiş" tanımı verilir: depo ∪ bu isteğin staging'i.
+    let slots: Vec<GateSlot> = groups
         .iter()
-        .filter(|g| g.gates)
         .flat_map(|g| {
-            g.items
-                .iter()
-                .filter(|i| {
-                    i.required
-                        && !i.uploaded
-                        && !pending.iter().any(|(pg, pi)| pg == &g.group && pi == &i.id)
-                })
-                .map(move |i| format!("{}/{}", g.group, i.id))
+            g.items.iter().map(move |i| GateSlot {
+                group: g.group.clone(),
+                item: i.id.clone(),
+                label: i.label.clone(),
+                required: i.required,
+                gates: g.gates,
+                formats: i.formats.clone(),
+            })
         })
-        .collect()
+        .collect();
+    let uploaded = |group: &str, item: &str| {
+        groups.iter().any(|g| {
+            g.group == group
+                && g.items
+                    .iter()
+                    .any(|i| i.id == item && i.uploaded)
+        }) || pending.iter().any(|(pg, pi)| pg == group && pi == item)
+    };
+    wfe_core::v22::attachments::missing_required(&slots, uploaded)
 }
 
 /// `satisfied`in genelleştirilmiş hâli — bkz. `missing_required_with_pending` NEDEN
@@ -354,75 +366,19 @@ pub fn satisfied_with_pending(groups: &[AttachmentGroupStatus], pending: &[(Stri
 
 // ---- upload doğrulaması (her iki route ağacı da kullanır) ----
 
-/// Basit MIME eşleşmesi: tam eşit, `*/*`, ya da `type/*` joker.
-pub fn mime_matches(pattern: &str, ct: &str) -> bool {
-    if pattern == ct || pattern == "*/*" {
-        return true;
-    }
-    if let Some(prefix) = pattern.strip_suffix("/*") {
-        return ct.split('/').next() == Some(prefix);
-    }
-    false
-}
-
-/// Upload reddi — route katmanı HTTP statüsüne çevirir.
-#[derive(Debug, PartialEq)]
-pub enum UploadReject {
-    /// İçerik tipi hiçbir format kuralına uymadı (415).
-    UnsupportedType(String),
-    /// Eşleşen kuralın boyut sınırı aşıldı (413) — taşınan değer sınır (MB).
-    TooLarge(f64),
-    /// Beyan edilen `Content-Type` ile dosya baytlarından sezilen gerçek tip çelişiyor
-    /// (route katmanı bunu 415 sayar) — bkz. `detect_mismatch`.
-    TypeMismatch { declared: String, detected: String },
-}
-
-/// Yüklenen dosyayı item'ın format kurallarına göre doğrular.
-/// - `formats` boşsa: her tip/boyut kabul (yalnız boşluk kontrolü route'ta).
-/// - Aksi halde: `content_type` bir kurala UYMALI; uyan kuralın `max_size_mb`'si uygulanır.
-///   İçerik tipi verilmemişse (`None`) ve kural varsa → UnsupportedType.
-pub fn check_upload(
-    item: &AttachmentItem,
-    content_type: Option<&str>,
-    len: usize,
-) -> Result<(), UploadReject> {
-    if item.formats.is_empty() {
-        return Ok(());
-    }
-    let ct = content_type.unwrap_or("").trim();
-    let rule = item
-        .formats
-        .iter()
-        .find(|r| r.accept.iter().any(|a| mime_matches(a, ct)));
-    let Some(rule) = rule else {
-        return Err(UploadReject::UnsupportedType(if ct.is_empty() {
-            "(içerik tipi yok)".into()
-        } else {
-            ct.into()
-        }));
-    };
-    if let Some(max_mb) = rule.max_size_mb {
-        let max_bytes = (max_mb * 1024.0 * 1024.0) as usize;
-        if len > max_bytes {
-            return Err(UploadReject::TooLarge(max_mb));
-        }
-    }
-    Ok(())
-}
-
-/// `AttachmentItem` içinden bir dosya için geçerli tüm MIME kalıpları (accept birleşimi) —
-/// UI `accept` attribute'u / hata mesajı için.
-pub fn all_accept_patterns(item: &AttachmentItem) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for r in &item.formats {
-        for a in &r.accept {
-            if !out.contains(a) {
-                out.push(a.clone());
-            }
-        }
-    }
-    out
-}
+// ---- format/boyut kuralı: wfe-core'da ----
+//
+// `mime_matches` / `UploadReject` / `check_upload` / `all_accept_patterns`
+// 2026-08-19'da `wfe_core::v22::attachments`'a taşındı: AYNI kuralı iki tüketici
+// uygular — bu katman (gerçek akış, `uploaded` bilgisi depodan) ve
+// `wf_wfe::sim` (simülasyon/senaryo, `uploaded` bilgisi `SimState`ten). İki
+// kopya olsaydı simülasyonda geçen bir senaryo portalda 415/413 alabilirdi.
+// Buradaki `pub use` çağrı yerlerini (`crate::attachments::check_upload`, …)
+// olduğu gibi bırakır. Baytlara bakan kısım (`sniff_content_type`/
+// `detect_mismatch`) TAŞINMADI — o route katmanının işi.
+pub use wfe_core::v22::attachments::{
+    all_accept_patterns, check_upload, mime_matches, UploadReject,
+};
 
 // ---- magic-byte sniff (beyan edilen Content-Type'a körü körüne güvenmemek için) ----
 

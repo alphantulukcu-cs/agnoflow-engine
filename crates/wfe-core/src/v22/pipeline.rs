@@ -172,6 +172,31 @@ fn select_wft<'w>(wft: &'w Wft, target: Option<&str>) -> Result<std::borrow::Cow
     }
 }
 
+
+/// **Kapı B** — bir commit'in `$ctx`'e YAZDIĞI değerlerin tip denetimi (2026-08-19).
+///
+/// Motor bilir kişidir: bağlama yazılan değer context şemasına uymuyorsa geçiş
+/// UYGULANMAZ. Kapı A (`validate_action_input`) yalnız İSTEK girdisini görür; buradaki
+/// kaynaklar farklıdır ve hepsi `wfes_effects` üzerinden geçer:
+///   · autoexec sonucu (`$exec.result.*`) — dış sistem ne döndürdüyse,
+///   · WFC dönüşü (`$call.result.*`) — çağrılan akışın `wfe_end_response`'u,
+///   · `$env` değeri (ortam konfigürasyonu),
+///   · sistem/sabit yazımlar (bunlar tasarım zamanında da denetli: `effect_type_mismatch`).
+///
+/// YALNIZ DEĞİŞEN kök alanlar denetlenir (`ctx_types::validate_written`): enforcement'tan
+/// önce bozulmuş eski veri bu geçişi durdurmaz — o ayrı bir kapının işidir.
+///
+/// Ölçüm (2026-08-19, `ctx_type_report`, test DB): 25 WFE / 0 ihlal → kapı doğrudan
+/// REDDEDEREK açıldı (önce `warn` fazı gerekmedi).
+fn guard_written_ctx(wfd: &Wfd, before: &Value, after: &Value) -> Result<(), EngineError> {
+    let violations = crate::v22::ctx_types::validate_written(&wfd.context, before, after);
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(EngineError::CtxTypeMismatch(violations))
+    }
+}
+
 impl<'a> Engine<'a> {
     // ---------------------------------------------------------------- start
 
@@ -240,7 +265,7 @@ impl<'a> Engine<'a> {
                 rule.action
             ))
         })?;
-        validate_action_input(action_def, input)?;
+        validate_action_input(action_def, input, &wfd.context)?;
         let mut staged = json!({});
 
         let now = Utc::now();
@@ -343,6 +368,8 @@ impl<'a> Engine<'a> {
         // tarafından yazılmak zorunda. Çalışma anında ayrı bir ctx doluluk denetimi yok.
         let staged_calls =
             self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfe_id, now)?;
+        // Kapı B: start'ta ctx SIFIRDAN kurulur, dolayısıyla tüm alanlar "yazılmış"tır.
+        guard_written_ctx(wfd, &json!({}), &final_ctx)?;
 
         Ok(NewWfe {
             wfe_id,
@@ -483,7 +510,7 @@ impl<'a> Engine<'a> {
             .actions
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
-        validate_action_input(action_def, input)?;
+        validate_action_input(action_def, input, &wfd.context)?;
         // GLB hedef seçimi — effects STAGE EDİLMEDEN önce doğrulanır: reddedilecek
         // bir aksiyon için hiçbir hesap yapılmasın.
         let wft = select_wft(&transition.wft, target)?;
@@ -580,6 +607,7 @@ impl<'a> Engine<'a> {
         // WFC: varılan site bir çağrı taşıyorsa outbox satırı AYNI tx'te stage edilir.
         let staged_calls =
             self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
+        guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -707,7 +735,7 @@ impl<'a> Engine<'a> {
             .actions
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
-        validate_action_input(action_def, input)?;
+        validate_action_input(action_def, input, &wfd.context)?;
         // GLB hedef seçimi (tek-kol yolla AYNI kural — kolda da geçerlidir).
         let wft = select_wft(&transition.wft, target)?;
         let mut staged = ctx.clone();
@@ -814,6 +842,7 @@ impl<'a> Engine<'a> {
         // WFC: varılan site bir çağrı taşıyorsa outbox satırı AYNI tx'te stage edilir.
         let staged_calls =
             self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
+        guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -1736,6 +1765,7 @@ impl<'a> Engine<'a> {
 
         let staged_calls =
             self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
+        guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -2039,6 +2069,7 @@ impl<'a> Engine<'a> {
                 );
                 let staged_calls =
                     self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
+                guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
                 Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
                     wfe_id: wfes.wfe_id,
                     orgtnt_id: wfes.orgtnt_id,
@@ -2439,6 +2470,9 @@ impl<'a> Engine<'a> {
             wfes.wfe_id,
             now,
         )?;
+        // Kapı B — WFC dönüşü: çağrılan akışın `wfe_end_response`'u `$call.result.*` ile
+        // ctx'e yazılır. Dış bir akışın döndürdüğü şekil bizim şemamıza uymak zorundadır.
+        guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         Ok(TransitionCommit {
             wfe_id: wfes.wfe_id,
@@ -3489,7 +3523,16 @@ fn parse_wfd_uuid(wfd: &Wfd) -> Result<Uuid, EngineError> {
 /// kendisine bakar: `required: ["applicant"]` ile `{"applicant": {"name": null}}`
 /// geçerlidir; `name`'in de dolu olması isteniyorsa `applicant.name` ayrıca
 /// `input.required`'a yazılır.
-fn validate_action_input(action: &ActionDef, input: &Value) -> Result<(), EngineError> {
+/// §7.5 + TİP: `context` verilirse bildirilen yolların DEĞERLERİ de context şemasına
+/// göre denetlenir (2026-08-19 — `v22::ctx_types`). Motor bilir kişidir: bildirilen bir
+/// tip varsa ve değer o tipte gelmiyorsa reddi BURADA verir, istemcinin kendi kuralını
+/// koymasını beklemez. `null` her tipte geçerlidir (WOR-70b gönderilmeyen `optional`
+/// ctx'e `null` yazar); `required`ın null olamaması aşağıdaki ayrı kuraldır.
+fn validate_action_input(
+    action: &ActionDef,
+    input: &Value,
+    context: &Value,
+) -> Result<(), EngineError> {
     let declared: Vec<&String> = action
         .input
         .required
@@ -3525,6 +3568,15 @@ fn validate_action_input(action: &ActionDef, input: &Value) -> Result<(), Engine
                 "input yolu '{leaf}' bu action'da tanımlı değil"
             )));
         }
+    }
+
+    // TİP denetimi EN SON: önce "yol bildirildi mi" sorusu yanıtlanır, sonra değer.
+    // Ters sırada, tanımsız bir yola gönderilen değer için tip hatası verilir ve
+    // kullanıcı asıl sorunu (yol bildirilmemiş) göremezdi.
+    let declared_owned: Vec<String> = declared.iter().map(|s| (*s).clone()).collect();
+    let violations = crate::v22::ctx_types::validate_input(context, &declared_owned, input);
+    if !violations.is_empty() {
+        return Err(EngineError::InputTypeMismatch(violations));
     }
 
     Ok(())

@@ -51,7 +51,9 @@ fn to_actor(actor: &PortalActor) -> Actor {
 struct CreateNoteBody {
     body: String,
     /// K9 hedefleme: göndermeyen istemci `{"kind":"all"}` (herkes) alır.
+    /// Tip `wf_wfe::note_rules::Audience` (utoipa türetmesi yok — gövde şeması `Object`).
     #[serde(default)]
+    #[schema(value_type = Object)]
     audience: notes::Audience,
 }
 

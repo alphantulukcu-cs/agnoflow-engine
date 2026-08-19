@@ -20,7 +20,7 @@ use wf_wfe::{
 };
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
-use wfe_core::v22::pipeline::{ClaimCheck, Engine};
+use wfe_core::v22::pipeline::Engine;
 use wfe_core::validator;
 
 pub fn router(state: AppState) -> OpenApiRouter {
@@ -29,6 +29,9 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(sim_apply))
         .routes(routes!(sim_call_return))
         .routes(routes!(sim_possible_actions))
+        .routes(routes!(sim_attach))
+        .routes(routes!(sim_detach))
+        .routes(routes!(sim_note))
         .with_state(state)
 }
 
@@ -75,34 +78,10 @@ struct SimStartBody {
     environment: Option<String>,
 }
 
-/// Sim claim-eşdeğeri uygunluk — gerçek `WfeExecutor::can_claim` ile aynı kural:
-/// zaten sahipse uygun; değilse `Engine::can_claim` (matcher §7.1, delegation dahil).
-/// Sahiplik ATANMAMIŞ wfes üzerinde denetlenir (sim'in geçici pre-claim'i yetkiyi
-/// gölgelemesin diye).
-async fn sim_eligible(
-    engine: &Engine<'_>,
-    wfd: &Wfd,
-    sim_state: &SimState,
-    actor: &Actor,
-    node: Option<&str>,
-) -> Result<bool, AppError> {
-    let wfes = sim_state.to_wfes(None);
-    let owned = match node {
-        Some(n) => wfes
-            .branches
-            .iter()
-            .any(|b| b.branch_node == n && b.claimed_by == Some(actor.user_id)),
-        None => wfes.assigned_to == Some(actor.user_id),
-    };
-    if owned {
-        return Ok(true);
-    }
-    let check = engine
-        .can_claim(wfd, &wfes, actor, node)
-        .await
-        .map_err(AppError::from)?;
-    Ok(matches!(check, ClaimCheck::Ok))
-}
+// Sim claim-eşdeğeri uygunluk `wf_wfe::sim::step::eligible`de — 2026-08-19'da
+// BURADAN oraya taşındı. Sebep: yalnız bu route'ta yaşadığı için SENARYO KOŞUCUSU
+// kapıyı hiç sormuyordu; yetkisiz aktörle yazılmış senaryo yeşil geçiyor, aynı adım
+// portalda 403 alıyordu. Adım mantığının ortak olmasının (`sim::step`) sebebi budur.
 
 /// Sim aksiyon listesi — `possible_actions_for`'un uygunluk-farkındalı ikizi:
 /// yalnız aktörün claim-uygun olduğu node/kolların aksiyonları döner.
@@ -116,7 +95,10 @@ async fn sim_actions_for(
     if wfes_owned.join_target.is_some() {
         let mut out = Vec::new();
         for node in active_branch_nodes(&wfes_owned) {
-            if !sim_eligible(engine, wfd, sim_state, actor, Some(&node)).await? {
+            if !wf_wfe::sim::step::eligible(engine, wfd, sim_state, actor, Some(&node))
+                .await
+                .map_err(AppError::from)?
+            {
                 continue;
             }
             let choices = engine
@@ -131,7 +113,10 @@ async fn sim_actions_for(
         }
         Ok(out)
     } else {
-        if !sim_eligible(engine, wfd, sim_state, actor, None).await? {
+        if !wf_wfe::sim::step::eligible(engine, wfd, sim_state, actor, None)
+            .await
+            .map_err(AppError::from)?
+        {
             return Ok(vec![]);
         }
         let choices = engine
@@ -254,17 +239,13 @@ async fn sim_apply(
 
     let mut sim_state = body.sim_state;
 
-    // Claim YAZIMI atlanır ama uygunluk atlanmaz: gerçek akışta bu aktör claim
-    // alamayacaksa sim'de de aksiyon uygulayamamalı (yetki delik olmasın).
-    if !sim_eligible(&engine, &wfd, &sim_state, &body.actor, body.branch.as_deref()).await? {
-        return Err(AppError(
-            "aktör bu adım için yetkili değil (c_a eşleşmiyor) — gerçek akışta claim reddedilirdi"
-                .into(),
-            StatusCode::FORBIDDEN,
-        ));
-    }
+    // Claim YAZIMI atlanır ama uygunluk atlanmaz — denetim `step::apply`ın İÇİNDE
+    // (senaryo koşucusu da aynı kapıdan geçsin diye); burada yalnız statüye çevrilir.
 
     // simülasyon claim'i atlar — yardımcı state'i uygulamadan önce aktöre atar
+    // Belge kapısı `EngineError` değildir — gerçek akışta `422 attachment.missing`
+    // döner (`routes/wfe.rs::apply_action`); simülasyon AYNI kodu/statüyü verir,
+    // yoksa editörde geçen bir yol portalda 422'ye düşerdi.
     wf_wfe::sim::step::apply(
         &engine,
         &wfd,
@@ -276,7 +257,18 @@ async fn sim_apply(
         body.target.as_deref(),
     )
     .await
-    .map_err(AppError::from)?;
+    .map_err(|e| match e {
+        wf_wfe::sim::step::ApplyError::MissingAttachments(missing) => AppError {
+            message: format!("Eksik zorunlu belgeler: {}", missing.join(", ")),
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: Some("attachment.missing"),
+            items: None,
+        },
+        wf_wfe::sim::step::ApplyError::NotEligible => {
+            AppError(e.to_string(), StatusCode::FORBIDDEN)
+        }
+        wf_wfe::sim::step::ApplyError::Engine(inner) => AppError::from(inner),
+    })?;
 
     let terminal = wf_wfe::sim::step::is_terminal(&sim_state);
     let possible_actions = if terminal {
@@ -426,4 +418,136 @@ async fn sim_possible_actions(
     sim_actions_for(&engine, &wfd, &body.sim_state, &body.actor)
         .await
         .map(Json)
+}
+
+// ── /attach · /detach · /note ────────────────────────────────────────────────
+//
+// Portal kullanıcısının aksiyon DIŞINDA yaptığı iki şey: belge yükler, not yazar.
+// Simülasyonda ikisi de BAYT TAŞIMAZ — yalnız metadata (ad/tip/boyut) tutulur; amaç
+// dosyayı denemek değil, DOSYAYA BAĞLI KURALLARI (belge kapısı, format/boyut
+// allowlist'i, not limitleri) editörde denenebilir kılmaktır. Bu yüzden bu uçlar
+// depoya (`AttachmentStore`) hiç dokunmaz ve `multipart` de kabul etmez.
+//
+// Ne `parse_and_validate` dışında motora, ne DB'ye giderler: durum tamamen
+// `sim_state` içinde gidip gelir (simülasyonun geri kalanıyla aynı sözleşme).
+
+#[derive(Deserialize, ToSchema)]
+struct SimAttachBody {
+    wfd: Value,
+    #[schema(value_type = Object)]
+    sim_state: SimState,
+    /// Katalog grup key'i (`wfd.attachments` anahtarı).
+    group: String,
+    /// Grup içindeki slot id'si.
+    item: String,
+    #[serde(default)]
+    filename: Option<String>,
+    #[serde(default)]
+    content_type: Option<String>,
+    #[serde(default)]
+    size_bytes: i64,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+struct SimStateOnlyResponse {
+    #[schema(value_type = Object)]
+    sim_state: SimState,
+}
+
+#[utoipa::path(post, path = "/attach", tag = "simulate",
+    request_body = SimAttachBody,
+    responses(
+        (status = 200, description = "Belge yüklenmiş sayıldıktan sonraki sim durumu", body = SimStateOnlyResponse),
+        (status = 422, description = "Bilinmeyen slot / aktif adımda toplanmıyor / format-boyut reddi")))]
+async fn sim_attach(
+    State(_s): State<AppState>,
+    Json(body): Json<SimAttachBody>,
+) -> Result<Json<SimStateOnlyResponse>, AppError> {
+    let wfd = parse_and_validate(body.wfd)?;
+    let mut sim_state = body.sim_state;
+    wf_wfe::sim::step::attach(
+        &wfd,
+        &mut sim_state,
+        &body.group,
+        &body.item,
+        body.filename.as_deref(),
+        body.content_type.as_deref(),
+        body.size_bytes,
+    )
+    .map_err(|e| AppError {
+        message: e.to_string(),
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: Some("attachment.rejected"),
+        items: None,
+    })?;
+    Ok(Json(SimStateOnlyResponse { sim_state }))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct SimDetachBody {
+    #[schema(value_type = Object)]
+    sim_state: SimState,
+    group: String,
+    item: String,
+}
+
+#[utoipa::path(post, path = "/detach", tag = "simulate",
+    request_body = SimDetachBody,
+    responses((status = 200, description = "Belge geri alındıktan sonraki sim durumu", body = SimStateOnlyResponse)))]
+async fn sim_detach(
+    State(_s): State<AppState>,
+    Json(body): Json<SimDetachBody>,
+) -> Result<Json<SimStateOnlyResponse>, AppError> {
+    // WFD parse EDİLMEZ: silme katalogdan bağımsızdır (yüklü olmayan slot da
+    // sessizce geçer) ve yarım taslakta da çalışması gerekir.
+    let mut sim_state = body.sim_state;
+    wf_wfe::sim::step::detach(&mut sim_state, &body.group, &body.item);
+    Ok(Json(SimStateOnlyResponse { sim_state }))
+}
+
+#[derive(Deserialize, ToSchema)]
+struct SimNoteBody {
+    #[schema(value_type = Object)]
+    sim_state: SimState,
+    body: String,
+    /// K9 hedefleme; verilmezse `{"kind":"all"}`.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    audience: wf_wfe::note_rules::Audience,
+    /// Ad-hoc dosyalar — yalnız metadata (ad/tip/boyut).
+    #[serde(default)]
+    #[schema(value_type = Vec<Object>)]
+    files: Vec<wf_wfe::note_rules::NoteFileSpec>,
+    /// Notu yazan; verilmezse yazarsız kayda geçer.
+    #[serde(default)]
+    #[schema(value_type = Object)]
+    actor: Option<Actor>,
+}
+
+#[utoipa::path(post, path = "/note", tag = "simulate",
+    request_body = SimNoteBody,
+    responses(
+        (status = 200, description = "Not eklendikten sonraki sim durumu", body = SimStateOnlyResponse),
+        (status = 422, description = "Not limitleri (gövde/dosya sayısı/boyut/kota/yasak MIME) reddetti")))]
+async fn sim_note(
+    State(_s): State<AppState>,
+    Json(body): Json<SimNoteBody>,
+) -> Result<Json<SimStateOnlyResponse>, AppError> {
+    // WFD parse EDİLMEZ: not motorun katmanı değildir (K1), limitleri belgeden
+    // bağımsızdır — yarım taslakta da not yazılabilmeli.
+    let mut sim_state = body.sim_state;
+    wf_wfe::sim::step::add_note(
+        &mut sim_state,
+        body.actor.as_ref(),
+        &body.body,
+        body.audience,
+        body.files,
+    )
+    .map_err(|e| AppError {
+        message: e.to_string(),
+        status: StatusCode::UNPROCESSABLE_ENTITY,
+        code: Some("note.rejected"),
+        items: None,
+    })?;
+    Ok(Json(SimStateOnlyResponse { sim_state }))
 }

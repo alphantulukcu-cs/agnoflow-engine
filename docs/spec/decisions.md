@@ -2183,3 +2183,109 @@ grant alanı (Karar 4, ayrı iş).
 
 Detay: `migrations/wf/20260817000001_terminal_listable.sql` (kolon gerekçeleri),
 `crates/wfe/src/visibility.rs` (SQL parçası), `crates/wfe-core/tests/terminal_listable.rs`.
+
+## Adlandırılmış tip: `format` → `$defs` (2026-08-19, KIRICI)
+
+**Sorun:** Bir alanın tipini yeniden kullanılabilir bir tanıma bağlamanın yolu
+`{"$ref": "#/$defs/Ad"}` idi ve bu şekil YALNIZ EDİTÖRDE yaşıyordu: export
+`properties`'i inline ediyor, motor `$ref`'i hiçbir yerde çözmüyordu
+(`resolve_schema_path` onu `Opaque` sayıyor, `expr_types`'ta hiç yok). Sonuçları:
+(a) `$defs` arkasındaki alan `effect_type_mismatch` denetiminin DIŞINDA kalıyordu,
+(b) yayınlanan belgede gruplama kayboluyor, aynı kural iki şekilde dolaşıyordu
+(inline kopya + tanım), (c) elle JSON yazan için iki sözdizimi vardı.
+
+Ayrıca `format` anahtarı şemada İZİNLİ ama hiçbir aracın yazmadığı, motorun da
+sessizce yok saydığı bir kalıntıydı — tam olarak `context.required`'ın WOR-70'te
+hard-reject edilmesine yol açan durum ("sessiz yoksayma 'kural hâlâ işliyor'
+yanılgısını sürdürür").
+
+**Karar (kullanıcı, 2026-08-19):** Adlandırılmış tipin TEK sözdizimi `format`tır.
+
+- `{"format": "Tarih"}` = `#/$defs/Tarih`. `format` bu belgede **standart JSON Schema
+  formatı DEĞİLDİR**: `date-time`/`email` gibi adların kütüphaneye gömülü anlamı
+  KULLANILMAZ. Gerekçe: standart `format` yalnız bir İSİMDİR, kuralı doğrulayıcının
+  format tablosunda durur — o tabloyu kabul etmek motorun sözleşmesini crate sürümüne
+  bağlamak olurdu (`cargo update` kabul kümesini değiştirebilirdi). `$defs` tanımı
+  kuralı BELGEDE taşır (`type`, `pattern`, sınırlar) ve motor onu okuyup ZORLAR.
+- **`format` ile tip kuralı YAN YANA OLAMAZ** (`context_format_with_type`): tip tanımın
+  içindedir. Kullanım yerinde yalnız anlatım/görünürlük ezilebilir (`title`,
+  `description`, `x-visibility`).
+- **`format` değeri `$defs`te TANIMLI olmak zorundadır** (`context_format_unknown`).
+  Yani `format: "date-time"` "benim `$defs.date-time` tanımım" demektir; tanımsızsa
+  yayın durur. Kural kütüphanede değil belgede.
+- Tanım adı biçimi `^[A-Za-z][A-Za-z0-9_]*$` (`context_defs_name`); tanım zinciri döngü
+  yapamaz (`context_format_cycle`, 16 hop tavanı).
+- **`$ref` TAMAMEN KALDIRILDI, OKUYUCUSU DA YOK** (kullanıcı kararı, aynı gün): şemadan
+  çıkarıldı, `deref_defs`/`ctx_types` yalnız `format` çözer, validator
+  `context_ref_removed` ile reddeder. **Gerekçe — "okuyucu kalır" kuralının SINIRI:**
+  o kural yayınlanmış işlerin sonradan okunabilmesi için vardır ve ancak
+  PRODUCTION'DAN SONRA geçerlidir. Ürün henüz production'da değil, mevcut tüm WFD/WFE'ler
+  test verisi ve production öncesi sıfırlanacak → geriye uyum kodu saf borç. Aynı kararla
+  GLB'nin `__gt__` anahtar ailesi okuyucusu (`legacyGlobalAction.ts`) da SİLİNDİ.
+- **Wire formatı DRY**: export artık INLINE ETMEZ, yayınlanan belgede `format` + `$defs`
+  birlikte durur. Motor (`v22::ctx_types`), editör (`contextDefs`) ve portal
+  (`lib/contextTypes`) aynı çözümü yapar. Editörün İÇ türetmeleri
+  (`deriveContextProperties`) hâlâ inline çalışır — koşul kurucusu somut tip ister.
+- **Göç**: tanımı olmayan eski STANDART `format` değerleri import'ta DÜŞER (motorda
+  zaten etkisizdi; tutmak `context_format_unknown` hatası üretirdi). Tek istisna
+  `data-url` → `x-wf-document: true` (doküman alanının güncel işareti). Ölçüm
+  (2026-08-19, test DB + Garage): 25 WFE, `$ref`/`format` kullanan yayınlanmış belge
+  YOK → sahada göç yükü sıfır.
+
+## Runtime tip denetimi — engine bilir kişi (2026-08-19)
+
+**İlke (kullanıcı):** "Engine bizim en asıl uygulamamız; bilir kişimiz. Bildirilen bir
+tip varsa ve değer o tipte gelmiyorsa engine hata dönmeli. İleride bu engine'i başka
+UI'lar da kullanacak, onlara hangi kuralları koyacaklarını söyleyemeyiz." Editör/portal
+kısıtları KULLANICI KOLAYLIĞIDIR, kapı değil.
+
+**Sorun:** Tip yalnız TASARIM zamanında denetleniyordu (`check_effect_value_types`,
+`expr_types`, `call_input_type_mismatch`). Çalışma anında `validate_action_input` yalnız
+"bildirilen yol var mı, `required` dolu mu" soruyordu; TİP sorulmuyordu → sayı beklenen
+yola gönderilen metin ctx'e AYNEN yazılıyor, etkisi ancak karar anında (sayısal bir
+`when` çalışırken) çıkıyordu. Kanıt: `wf_wfe::tests::scenario::
+wrong_type_input_passes_the_input_gate`.
+
+**Karar:** Kural motora taşınır; üç kapı + bir ölçüm aracı.
+
+| Kapı | Nerede | Davranış |
+|---|---|---|
+| A — girdi | `start` / `apply`, bildirilen input yolları | SERT reddet (`422 input.type_mismatch`) |
+| B — ctx yazma | `apply_effects` sonrası, YALNIZ bu geçişin yazdığı yollar (autoexec sonucu · WFC dönüşü · `$env` · sistem) | önce `warn` + rapor, saha temizlenince `reject` (`WFD.CtxTypeMismatch`, `catch` ile yakalanabilir) |
+| C — bozuk ctx | eylem yolları (`apply`/`claim`/`possible-actions`/escalation) | reddet; **GÖRÜNTÜLEME serbest** (`GET` 200 + `ctx_violations[]`) — kayıt görünmez olursa düzeltilemez |
+
+- Denetim çekirdeği `wfe_core::v22::ctx_types` (SAF): yol → alt şema çözümü
+  (adlandırılmış tip dahil) + değer doğrulama. Zorlanan kurallar `type` · `enum` ·
+  `const` · sayı sınırları · `minLength`/`maxLength`/`pattern` · dizi kuralları · iç içe
+  `properties` — hepsi belgede kesin yazılı. İhlal ÖĞE/ALAN başına raporlanır
+  (`etiketler.0`, `musteri.bakiye`).
+- **`null` HER tipte geçerlidir**: WOR-70b gönderilmeyen `optional` girdiyi ctx'e
+  koşulsuz `null` yazar (golden fixture `internal_notes`) — `type: string` null'ı
+  reddederse o fixture ilk koşuda patlardı. `required` girdinin null olamaması AYRI
+  kuraldır ve yerinde durur.
+- Şemanın tanımlamadığı yol (`Missing`/`Opaque`) için TİP ihlali üretilmez: "bildirilmemiş
+  yol" ayrı bir kuralın (`validate_action_input`) işidir; motor bilmediği şeyi reddetmez.
+- **Ölçüm aracı `ctx_type_report`** (salt okuma, `visibility_report` deseni): sahadaki
+  WFE'lerin son dynctx snapshot'ını kendi WFD sürümünün şemasına karşı tarar; ayrıca
+  şemada olmayan ctx alanlarını (ihlal DEĞİL, olgu — effects bugün bildirilmemiş hedefe
+  yazabiliyor) ve `$ref` kullanan sürümleri sayar. **İlk koşum (2026-08-19, test DB):
+  25 WFE / 0 ihlal / 0 bildirilmemiş alan / 0 `$ref`** → kapı B doğrudan `reject`
+  açılabilir.
+- Fazlar: F0 çekirdek + rapor · F1 `format` modeli + `$ref` deref boşluğu · F2 kapı A ·
+  F3 kapı B/C · F4 istemci aynaları · F5 belgeler. **F0–F5 TAMAMLANDI** (2026-08-19).
+  Kırıcılık kaydı: `migration-notes.md` M19; runtime sözleşmesi: `runtime-semantics.md`
+  §7.5b (+ pipeline adım listesinde kapı 0 ve 8b).
+- **Kapı B'nin yeri**: `pipeline::guard_written_ctx`, commit kurulmadan önce, ALTI
+  noktada (start · apply tek-kol · apply paralel · escalation · claim_timeout · WFC
+  dönüşü). `fire_deadline_timeout` ctx'e yazmaz → kapı yok. `before`/`after`
+  karşılaştırması sayesinde dokuz `apply_effects` çağrısını tek tek sarmak gerekmedi.
+- **Kapı B `warn` fazı ATLANDI**: `ctx_type_report` sahada 0 ihlal ölçtü (25 WFE),
+  gerekçe kalmadı → doğrudan `reject`.
+- **Kapı C'nin yeri**: `executor::guard_stored_ctx` (apply · claim · escalation fire).
+  `skip_escalation` yalnız audit satırı yazdığı için KAPSAM DIŞI — "eylem" = durumu
+  değiştiren.
+- **`catch` ile yakalanabilirlik YAPILMADI**: tasarımda `WFD.CtxTypeMismatch`in
+  `trigger[].catch.error_equals` ile yakalanabilmesi düşünülmüştü; uygulanmadı çünkü tip
+  ihlali akışın TASARIM hatasıdır — `catch`le gizlemek bozuk verinin sessizce ilerlemesi
+  demek olurdu. Gerekirse ayrı bir kararla açılır.
+

@@ -85,16 +85,30 @@ pub struct Scenario {
     pub start_action: Option<String>,
     #[serde(rename = "startInput", default)]
     pub start_input: Value,
+    /// NEGATİF test — BAŞLATMANIN reddedilmesi beklenir: yetkisiz başlatan, yanlış
+    /// tipte/eksik başlangıç girdisi, olmayan start aksiyonu… Reddedilirse senaryo
+    /// GEÇER (adımlar koşulmaz, çünkü akış hiç başlamadı) ve sebep
+    /// `rejected_as_expected`e yazılır; başlatma BAŞARILI olursa senaryo kalır.
+    ///
+    /// Adım bazındaki `expectReject`in start karşılığı. Onsuz "bu kişi bu akışı
+    /// başlatamaz" ya da "başlangıç girdisi yanlış tipte reddedilir" senaryosu
+    /// YAZILAMIYORDU (start hatası her koşulda senaryoyu kaldırıyordu).
+    #[serde(rename = "expectStartReject", default, skip_serializing_if = "is_false")]
+    pub expect_start_reject: bool,
     #[serde(default)]
     pub steps: Vec<ScenarioStep>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect: Option<Expect>,
 }
 
-/// Adımın iki çeşidi. `untagged`: `action` anahtarı taşıyan nesne aksiyon adımı,
-/// `call_return` taşıyan nesne WFC çağrı dönüşüdür. Sıra ÖNEMLİ — `Action`
-/// `action`'ı zorunlu kıldığı için `call_return` nesnesi ona uymaz ve ikinci
-/// varyanta düşer.
+/// Adımın DÖRT çeşidi. `untagged`: her varyantın ZORUNLU ve BENZERSİZ bir anahtarı
+/// var (`action` / `call_return` / `attach` / `note`), serde ilk uyanı seçer. Sıra
+/// ÖNEMLİ — `Action` `action`'ı zorunlu kıldığı için diğer nesneler ona uymaz.
+///
+/// `attach`/`note` 2026-08-19'da eklendi: portal kullanıcısının gerçekte yaptığı iki
+/// şey (belge yükle, not yaz) senaryoda da yapılabilsin diye. `attach` bir sonraki
+/// aksiyonun **belge kapısını** açar (bkz. `sim::step::missing_gate_attachments`);
+/// `note` akışın gidişatını DEĞİŞTİRMEZ (K1) ama limitleri denenir.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ScenarioStep {
@@ -111,10 +125,65 @@ pub enum ScenarioStep {
         /// geçsin diye: hedefsiz bir GLB adımı burada da 400 karşılığı hata verir.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
+        /// NEGATİF test: `true` ise bu adım **başarısız olmalıdır**. Reddedilirse
+        /// senaryo GEÇMEYE devam eder (durum değişmez, kalan adımlar koşar);
+        /// beklenmedik şekilde UYGULANIRSA senaryo kalır. "Belge yüklemeden
+        /// onaylanamaz", "muhasebe bu adımı alamaz" gibi kuralların testi budur —
+        /// bunlar olmadan senaryo seti yalnız mutlu yolu kanıtlıyordu.
+        #[serde(rename = "expectReject", default, skip_serializing_if = "is_false")]
+        expect_reject: bool,
     },
     CallReturn {
         call_return: CallReturn,
     },
+    /// Katalog belgesi "yükler" (baytlar YOK — ad/tip/boyut metadata'sı).
+    Attach {
+        attach: AttachStep,
+    },
+    /// Not ekler (ad-hoc dosyalarıyla).
+    Note {
+        note: NoteStep,
+    },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// `attach` adımının gövdesi. `size_bytes`/`content_type` verilirse katalogdaki
+/// `formats` kuralı (tip allowlist + MB sınırı) UYGULANIR — senaryo "4 MB üstü PDF
+/// reddedilir" kuralını da deneyebilsin diye.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachStep {
+    pub group: String,
+    pub item: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: i64,
+    /// NEGATİF test: `true` ise bu yükleme reddedilmelidir (yanlış tip/çok büyük/
+    /// bilinmeyen slot). Bkz. `ScenarioStep::Action::expect_reject`.
+    #[serde(rename = "expectReject", default, skip_serializing_if = "is_false")]
+    pub expect_reject: bool,
+}
+
+/// `note` adımının gövdesi. Dosyalar için de baytlar taşınmaz: limit denetimi
+/// (sayı/boyut/kota/yasak MIME) metadata üzerinden koşar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteStep {
+    pub body: String,
+    #[serde(default)]
+    pub audience: crate::note_rules::Audience,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<crate::note_rules::NoteFileSpec>,
+    /// Notu yazan; verilmezse senaryonun yedek aktörü.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<ScenarioActor>,
+    /// NEGATİF test: `true` ise not reddedilmelidir (boş gövde, kota, yasak MIME…).
+    #[serde(rename = "expectReject", default, skip_serializing_if = "is_false")]
+    pub expect_reject: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +208,11 @@ pub struct Expect {
         skip_serializing_if = "Option::is_none"
     )]
     pub context_contains: Option<Value>,
+    /// `Some(true)`: akış adımların sonunda HÂLÂ AKTİF olmalı; `Some(false)`: bitmiş
+    /// olmalı (hangi terminal olduğu önemsizse). Negatif senaryonun ("belgesiz onay
+    /// reddedilir") asıl kanıtı budur — `terminal` beklentisi bunu söyleyemez.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
 }
 
 /// Tek senaryonun koşu sonucu — HTTP yanıtına doğrudan serileşir.
@@ -152,6 +226,18 @@ pub struct ScenarioResult {
     pub terminal: bool,
     pub terminal_id: Option<String>,
     pub dynctx: Value,
+    /// Koşu sonunda yüklenmiş sayılan katalog belgeleri (`"grup/slot"`) — editör
+    /// "bu senaryo hangi belgeleri teslim etti" diyebilsin diye.
+    #[serde(default)]
+    pub attachments: Vec<String>,
+    /// Koşuda eklenen not sayısı.
+    #[serde(default)]
+    pub notes: usize,
+    /// `expectReject: true` ile REDDEDİLMESİ beklenip gerçekten reddedilen adımlar
+    /// (1 tabanlı sıra + sebep). Geçen bir senaryonun neyi KANITLADIĞI buradan okunur:
+    /// "3. adım beklendiği gibi reddedildi: Eksik zorunlu belgeler: kimlik/kimlik.pdf".
+    #[serde(default)]
+    pub rejected_as_expected: Vec<String>,
 }
 
 /// `expected`'in `actual` içinde ALT KÜME olarak var olup olmadığını derinlemesine
@@ -202,10 +288,18 @@ pub fn check_expectations(
     let Some(e) = expect else {
         return Vec::new();
     };
-    if e.terminal.is_none() && e.context_contains.is_none() {
+    if e.terminal.is_none() && e.context_contains.is_none() && e.active.is_none() {
         return Vec::new();
     }
     let mut failures = Vec::new();
+
+    if let Some(want_active) = e.active {
+        if want_active && terminal {
+            failures.push("akışın hâlâ aktif olması beklendi ama sonlandı".to_string());
+        } else if !want_active && !terminal {
+            failures.push("akışın sonlanması beklendi ama hâlâ aktif".to_string());
+        }
+    }
 
     if let Some(want) = &e.terminal {
         if !terminal {
@@ -302,6 +396,9 @@ pub async fn run(
         terminal: false,
         terminal_id: None,
         dynctx: Value::Null,
+        attachments: vec![],
+        notes: 0,
+        rejected_as_expected: vec![],
     };
 
     let Some(start_actor) = resolve(&scenario.start_actor) else {
@@ -317,7 +414,7 @@ pub async fn run(
             Err(e) => return fail(vec![format!("aktörün tenant'ı çözülemedi: {e}")], 0),
         };
 
-    let mut state = match step::start(
+    let start_result = step::start(
         engine,
         wfd,
         &start_actor,
@@ -325,30 +422,69 @@ pub async fn run(
         scenario.start_action.as_deref(),
         &scenario.start_input,
     )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => return fail(vec![format!("start: {e}")], 0),
+    .await;
+
+    let mut state = match (start_result, scenario.expect_start_reject) {
+        // Beklenen ret: akış hiç başlamadı, koşturulacak adım yok — senaryo GEÇER.
+        (Err(e), true) => {
+            return ScenarioResult {
+                id: scenario.id.clone(),
+                name: scenario.name.clone(),
+                ok: true,
+                failures: vec![],
+                steps_executed: 0,
+                terminal: false,
+                terminal_id: None,
+                dynctx: Value::Null,
+                attachments: vec![],
+                notes: 0,
+                rejected_as_expected: vec![format!("Başlatma beklendiği gibi reddedildi: {e}")],
+            };
+        }
+        (Err(e), false) => return fail(vec![format!("start: {e}")], 0),
+        // Reddedilmesi beklenen başlatma GEÇTİ — kural delik demektir.
+        (Ok(_), true) => {
+            return fail(
+                vec!["Başlatma reddedilmeliydi ama akış başladı — beklenen kural (yetki / girdi sözleşmesi / tip) devrede değil".into()],
+                0,
+            )
+        }
+        (Ok(s), false) => s,
     };
 
     let mut steps_executed = 0usize;
+    // `expectReject: true` ile reddedilmesi beklenip GERÇEKTEN reddedilen adımlar.
+    let mut rejected_as_expected: Vec<String> = Vec::new();
     for (i, s) in scenario.steps.iter().enumerate() {
         if step::is_terminal(&state) {
             break; // terminale ulaşıldı — kalan adımlar sessizce atlanır
         }
-        let outcome = match s {
+        let no = i + 1;
+        // `(sonuç, beklenen-ret-mi, adım-etiketi)` — üç adım çeşidi de aynı ele alıştan
+        // geçsin diye: `expectReject` mantığı TEK yerde durur, varyant başına kopyalanmaz.
+        let (outcome, expect_reject, label): (Result<(), String>, bool, String) = match s {
             ScenarioStep::Action {
                 action,
                 actor,
                 input,
                 node,
                 target,
-            } => match resolve(actor) {
-                None => Err(format!(
-                    "Adım {} (\"{action}\") için aktör çözülemedi",
-                    i + 1
-                )),
-                Some(a) => step::apply(
+                expect_reject,
+            } => {
+                let label = format!("\"{action}\"");
+                // Aktörün çözülememesi bir KURAL reddi değil, senaryonun kendi
+                // eksiğidir — `expectReject` bunu yutmamalı, yoksa aktörü unutulmuş
+                // bir senaryo "kural devrede" diye geçerdi.
+                let Some(a) = resolve(actor) else {
+                    return ScenarioResult {
+                        rejected_as_expected,
+                        ..fail(
+                            vec![format!("Adım {no} ({label}): aktör çözülemedi")],
+                            steps_executed,
+                        )
+                    };
+                };
+                let res = step::apply(
                     engine,
                     wfd,
                     &mut state,
@@ -359,24 +495,85 @@ pub async fn run(
                     target.as_deref(),
                 )
                 .await
-                .map_err(|e| format!("Adım {} (\"{action}\"): {e}", i + 1)),
-            },
+                .map_err(|e| e.to_string());
+                (res, *expect_reject, label)
+            }
             // Her iki başarısızlık da (bekleyen çağrı yok / motor hatası) senaryoyu
             // kaldırır — koşucu için ikisi arasında fark yok, HTTP durumu yok.
-            ScenarioStep::CallReturn { call_return } => step::call_return(
-                engine,
-                wfd,
-                &mut state,
-                &call_return.status,
-                call_return.result.as_ref(),
-            )
-            .await
-            .map_err(|e| format!("Adım {} (çağrı dönüşü): {e}", i + 1)),
+            ScenarioStep::CallReturn { call_return } => (
+                step::call_return(
+                    engine,
+                    wfd,
+                    &mut state,
+                    &call_return.status,
+                    call_return.result.as_ref(),
+                )
+                .await
+                .map_err(|e| e.to_string()),
+                false,
+                "çağrı dönüşü".to_string(),
+            ),
+            ScenarioStep::Attach { attach } => (
+                step::attach(
+                    wfd,
+                    &mut state,
+                    &attach.group,
+                    &attach.item,
+                    attach.filename.as_deref(),
+                    attach.content_type.as_deref(),
+                    attach.size_bytes,
+                )
+                .map_err(|e| e.to_string()),
+                attach.expect_reject,
+                format!("belge yükleme {}/{}", attach.group, attach.item),
+            ),
+            ScenarioStep::Note { note } => {
+                // Not YAZARI akışın gidişatını etkilemez ama kayda geçer; yoksa yedek aktör.
+                let author = resolve(&note.actor);
+                (
+                    step::add_note(
+                        &mut state,
+                        author.as_ref(),
+                        &note.body,
+                        note.audience.clone(),
+                        note.files.clone(),
+                    )
+                    .map_err(|e| e.to_string()),
+                    note.expect_reject,
+                    "not".to_string(),
+                )
+            }
         };
-        if let Err(msg) = outcome {
-            return fail(vec![msg], steps_executed);
+
+        match (outcome, expect_reject) {
+            // Beklenen ret gerçekleşti: durum DEĞİŞMEDİ (adım uygulanmadı), senaryo devam
+            // eder. Bu adım "koşturuldu" sayılır — kanıtladığı şey reddedilmesidir.
+            (Err(why), true) => {
+                rejected_as_expected.push(format!("Adım {no} ({label}) beklendiği gibi reddedildi: {why}"));
+                steps_executed += 1;
+            }
+            // Kalan senaryoda da O ANA KADAR kanıtlanan kurallar korunur: "3. adım
+            // patladı" bilgisi, 1. adımın kapıyı doğrulamış olmasını silmez.
+            (Err(why), false) => {
+                return ScenarioResult {
+                    rejected_as_expected,
+                    ..fail(vec![format!("Adım {no} ({label}): {why}")], steps_executed)
+                }
+            }
+            // Reddedilmesi beklenen adım GEÇTİ — kural delik demektir, senaryo kalır.
+            (Ok(()), true) => {
+                return ScenarioResult {
+                    rejected_as_expected,
+                    ..fail(
+                        vec![format!(
+                            "Adım {no} ({label}) reddedilmeliydi ama uygulandı — beklenen kural (belge kapısı / yetki / limit) devrede değil"
+                        )],
+                        steps_executed,
+                    )
+                }
+            }
+            (Ok(()), false) => steps_executed += 1,
         }
-        steps_executed += 1;
     }
 
     let terminal = step::is_terminal(&state);
@@ -402,6 +599,13 @@ pub async fn run(
         terminal,
         terminal_id,
         dynctx,
+        attachments: state
+            .attachments
+            .iter()
+            .map(|a| format!("{}/{}", a.group, a.item))
+            .collect(),
+        notes: state.notes.len(),
+        rejected_as_expected,
     }
 }
 
@@ -484,6 +688,7 @@ mod tests {
         let e = Expect {
             terminal: None,
             context_contains: Some(serde_json::json!({ "musteri": { "ad": "Ay" } })),
+            active: None,
         };
         // Fazladan alan sorun değil — alt küme yeterli.
         let ok = check_expectations(
@@ -509,6 +714,7 @@ mod tests {
         let e = Expect {
             terminal: None,
             context_contains: Some(serde_json::json!({ "l": [1, 2] })),
+            active: None,
         };
         assert!(
             check_expectations(Some(&e), false, None, &dynctx(serde_json::json!({ "l": [1, 2] })))
@@ -531,6 +737,7 @@ mod tests {
         let e = Expect {
             terminal: None,
             context_contains: Some(serde_json::json!({ "a": { "b": 1 } })),
+            active: None,
         };
         let f = check_expectations(Some(&e), false, None, &dynctx(serde_json::json!({ "a": {} })));
         assert_eq!(f.len(), 1);
@@ -542,6 +749,7 @@ mod tests {
         let e = Expect {
             terminal: Some("onaylandi".into()),
             context_contains: None,
+            active: None,
         };
         let still_active = check_expectations(Some(&e), false, None, &dynctx(serde_json::json!({})));
         assert_eq!(still_active.len(), 1);

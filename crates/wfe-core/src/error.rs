@@ -113,6 +113,26 @@ pub enum EngineError {
     NoConditionMatched,
     #[error("invalid action input: {0}")]
     InvalidInput(String),
+    /// Girdi TİP sözleşmesi ihlali — bildirilen bir yola context şemasının kabul
+    /// etmediği bir değer gönderildi (2026-08-19).
+    ///
+    /// `InvalidInput`ten AYRI bir varyant: istemci "hangi alan, ne bekleniyordu, ne
+    /// geldi" bilgisini hata METNİNİ ayrıştırmadan almalı (aynı gerekçe:
+    /// `TargetInvalid`/`ConflictKind`). Route bunu `422 input.type_mismatch` + ihlal
+    /// listesi (`items[]`) olarak yayar; motor bilir kişidir, istemci kendi tip
+    /// kuralını icat etmez.
+    #[error("input.type_mismatch: {}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join(" · "))]
+    InputTypeMismatch(Vec<crate::v22::ctx_types::Violation>),
+    /// İş bağlamına (`$ctx`) YAZILAN değer context şemasına uymuyor (2026-08-19,
+    /// "kapı B"). Kaynağı istek girdisi DEĞİL: autoexec sonucu, WFC dönüşü, `$env`
+    /// değeri ya da sistem yazımı olabilir — hepsi `wfes_effects` üzerinden geçtiği
+    /// için tek noktada yakalanır.
+    ///
+    /// `InputTypeMismatch`ten ayrı: orada suçlu İSTEĞİ atan istemcidir (400/422 sınıfı,
+    /// düzeltmesi istemcide), burada suçlu AKIŞIN kendisi ya da dış sistemdir —
+    /// tasarımcının belgeyi/uç noktayı düzeltmesi gerekir.
+    #[error("ctx.type_mismatch: {}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join(" · "))]
+    CtxTypeMismatch(Vec<crate::v22::ctx_types::Violation>),
     #[error("start rule not matched — actor not eligible to initiate this workflow")]
     StartNotEligible,
     #[error("zen evaluation error: {0}")]

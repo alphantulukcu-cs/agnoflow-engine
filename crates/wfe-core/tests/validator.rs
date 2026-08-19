@@ -2367,7 +2367,7 @@ fn anchor_under_schemaless_object_is_warning_not_error() {
 }
 
 #[test]
-fn kind_behind_defs_ref_is_resolved() {
+fn kind_behind_a_named_type_is_resolved() {
     // Motor `$ref`'i başka yerde çözmüyor ama editör `{"$ref":"#/$defs/..."}` üretebiliyor.
     // Çözülmezse MEŞRU bir belge reddedilirdi.
     let mut v = with_listable_anchor("$ctx.musteri.sube");
@@ -2383,16 +2383,16 @@ fn kind_behind_defs_ref_is_resolved() {
             },
         },
     });
-    v["context"]["properties"]["musteri"] = json!({ "$ref": "#/$defs/Musteri" });
+    v["context"]["properties"]["musteri"] = json!({ "format": "Musteri" });
     v["transitions"][0]["wfes_effects"]["set"]["musteri.sube"] = json!("$actor");
     let report = validate_value(v);
     assert!(
         !has_error(&report, "c_orgu_anchor_not_orgu_kind")
             && !has_error(&report, "c_orgu_anchor_unknown_field"),
-        "$defs arkasındaki kind çözülmeli: {:#?}",
+        "adlandırılmış tip arkasındaki kind çözülmeli: {:#?}",
         report.errors
     );
-    // Uyarının da OLMAMASI kritik: `$defs` çözülmeseydi yol `Opaque`'a düşer ve bu test
+    // Uyarının da OLMAMASI kritik: tanım çözülmeseydi yol `Opaque`'a düşer ve bu test
     // yalnız hata yokluğuna baktığı için sessizce geçerdi. Uyarısızlık, düğümün gerçekten
     // `Found(kind: orgu)` olarak çözüldüğünün kanıtı.
     assert!(
@@ -2400,19 +2400,19 @@ fn kind_behind_defs_ref_is_resolved() {
             .warnings
             .iter()
             .any(|w| w.code == "c_orgu_anchor_kind_unverifiable"),
-        "$defs çözümlenmiş olmalı — 'doğrulanamadı' uyarısı beklenmiyor: {:#?}",
+        "tanım çözümlenmiş olmalı — 'doğrulanamadı' uyarısı beklenmiyor: {:#?}",
         report.warnings
     );
 }
 
 #[test]
-fn cyclic_defs_ref_does_not_hang() {
+fn cyclic_named_types_do_not_hang() {
     let mut v = with_listable_anchor("$ctx.dongu");
     v["context"]["$defs"] = json!({
-        "A": { "$ref": "#/$defs/B" },
-        "B": { "$ref": "#/$defs/A" },
+        "A": { "format": "B" },
+        "B": { "format": "A" },
     });
-    v["context"]["properties"]["dongu"] = json!({ "$ref": "#/$defs/A" });
+    v["context"]["properties"]["dongu"] = json!({ "format": "A" });
     v["transitions"][0]["wfes_effects"]["set"]["dongu"] = json!("$actor");
     // Dönmemesi yeter; döngü çözülemediği için kind doğrulanamaz → uyarı.
     let report = validate_value(v);
@@ -2994,6 +2994,116 @@ fn node_listable_bad_c_orgu_anchor_is_caught() {
     assert!(
         has_error(&report, "c_orgu_anchor_unknown_field"),
         "node listable c_orgu anchor'ı context şemasıyla doğrulanmalı: {:#?}",
+        report.errors
+    );
+}
+
+// ---- Adlandırılmış tip: `format` → `$defs` (2026-08-19) ----
+//
+// `format` bu belgede standart JSON Schema formatı DEĞİL, `$defs`'teki bir tipin adıdır.
+// Kural motorda çünkü çalışma anı denetimi (`v22::ctx_types`) de aynı çözümü kullanıyor:
+// editör/portal yalnız aynı cevabı önden verir.
+
+#[test]
+fn named_type_via_format_is_valid_and_typed() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "Para": { "type": "number", "minimum": 0 } });
+    // `credit_info.amount_requested` golden'da `number`; aynı tipi ADLA veriyoruz.
+    v["context"]["properties"]["credit_info"]["properties"]["amount_requested"] =
+        json!({ "format": "Para" });
+    let report = validate_value(v);
+    assert!(
+        report.errors.is_empty(),
+        "adlandırılmış tip geçerli olmalı: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn unknown_format_name_is_error() {
+    let mut v = fixture_value();
+    v["context"]["properties"]["credit_grade"] = json!({ "format": "BoyleBirTipYok" });
+    let report = validate_value(v);
+    assert!(has_error(&report, "context_format_unknown"), "{:#?}", report.errors);
+}
+
+/// `format` bir tanıma işaret ettiği için tip kuralı YANINA yazılamaz — tip tanımın
+/// içindedir. Aksi halde "hangisi kazanıyor" belirsiz kalırdı.
+#[test]
+fn format_next_to_a_type_keyword_is_error() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "Metin": { "type": "string" } });
+    v["context"]["properties"]["credit_grade"] = json!({ "format": "Metin", "type": "string" });
+    let report = validate_value(v);
+    assert!(has_error(&report, "context_format_with_type"), "{:#?}", report.errors);
+}
+
+/// Anlatım/görünürlük anahtarları kullanım yerinde EZİLEBİLİR (eski `$ref` davranışı).
+#[test]
+fn description_next_to_format_is_allowed() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "Metin": { "type": "string" } });
+    v["context"]["properties"]["credit_grade"] =
+        json!({ "format": "Metin", "description": "bu alana özel açıklama" });
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "{:#?}", report.errors);
+}
+
+#[test]
+fn cyclic_type_definitions_are_error() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "A": { "format": "B" }, "B": { "format": "A" } });
+    v["context"]["properties"]["credit_grade"] = json!({ "format": "A" });
+    let report = validate_value(v);
+    assert!(has_error(&report, "context_format_cycle"), "{:#?}", report.errors);
+}
+
+#[test]
+fn invalid_definition_name_is_error() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "1Para": { "type": "number" } });
+    let report = validate_value(v);
+    assert!(has_error(&report, "context_defs_name"), "{:#?}", report.errors);
+}
+
+/// `$ref` YAZILAMAZ (kapı yalnız yazma yollarında) — okuma tarafı onu hâlâ çözer,
+/// bkz. `v22::ctx_types::tests::legacy_ref_is_still_resolved`.
+#[test]
+fn writing_ref_is_error() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "Metin": { "type": "string" } });
+    v["context"]["properties"]["credit_grade"] = json!({ "$ref": "#/$defs/Metin" });
+    let report = validate_value(v);
+    assert!(has_error(&report, "context_ref_removed"), "{:#?}", report.errors);
+}
+
+/// Adlandırılmış tip artık effect TİP denetimine de girer: `$defs` arkasındaki alan
+/// eskiden `Opaque`ti ve `effect_type_mismatch` onu hiç görmüyordu.
+#[test]
+fn effect_type_mismatch_sees_through_a_named_type() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "Metin": { "type": "string" } });
+    v["context"]["properties"]["credit_grade"] = json!({ "format": "Metin" });
+    // `$actor` bir NESNEDİR; metin bir alana yazılamaz.
+    v["transitions"][0]["wfes_effects"]["set"]["credit_grade"] = json!("$actor");
+    let report = validate_value(v);
+    assert!(has_error(&report, "effect_type_mismatch"), "{:#?}", report.errors);
+}
+
+/// Girdi yolu denetimi de tanımın arkasını görür: adlandırılmış tipli bir alan
+/// `input.required`da meşru bir yoldur (eskiden `Opaque` olduğu için sessizce geçiyordu,
+/// şimdi gerçekten ÇÖZÜLÜYOR).
+#[test]
+fn declared_input_path_through_a_named_type_resolves() {
+    let mut v = fixture_value();
+    v["context"]["$defs"] = json!({ "Musteri": { "type": "object", "properties": {
+        "name": { "type": "string" }, "tckid": { "type": "string" }, "income": { "type": "number" }
+    }}});
+    v["context"]["properties"]["applicant"] = json!({ "format": "Musteri" });
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "input_path"),
+        "`applicant` tanım arkasında da çözülmeli: {:#?}",
         report.errors
     );
 }

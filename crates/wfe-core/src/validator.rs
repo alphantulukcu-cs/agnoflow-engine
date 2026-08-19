@@ -87,6 +87,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_action_inputs(wfd, &mut report);
     check_input_required_optional_overlap(wfd, &mut report);
     check_context_required_removed(wfd, &mut report);
+    check_context_named_types(wfd, &mut report);
     check_context_field_writers(wfd, &mut report);
     check_action_input_consumed(wfd, &mut report);
     check_effect_value_types(wfd, &mut report);
@@ -245,23 +246,17 @@ const ORGU_CAPABLE_KINDS: [&str; 2] = ["orgu", "actor"];
 /// (`resolver::extract_orgu_uuid` bu iki anahtarı arar).
 const ORGU_CHILD_KEYS: [&str; 2] = ["orgu", "orgu_id"];
 
-/// `#/$defs/<Ad>` referanslarını çözer.
+/// Adlandırılmış tipi (`format: "<Ad>"` → `$defs.<Ad>`) çözer.
 ///
-/// Motor `$ref`'i başka hiçbir yerde çözmüyor (`expr_types`'ta hiç yok, `resolve_schema_path`
-/// onu `Opaque` sayıyor) ama EDİTÖR çözüyor: Context Studio alanı `{"$ref":"#/$defs/Musteri"}`
-/// olarak yazabiliyor. Bu asimetri kalırsa `$defs` arkasındaki kind'lı alanı göremeyip MEŞRU
-/// bir belgeyi reddederdik. Kapsam bilinçli olarak dar: yalnız editörün ürettiği tek biçim
-/// (`#/$defs/<Ad>`, iç içe yol yok), zincir uzunluğu sınırlı → döngü asla dönmez.
+/// `x-wf-kind` denetimleri bunu kullanır: kind'lı alan bir tanımın arkasında olabilir ve
+/// çözülmezse MEŞRU bir belge reddedilirdi. Zincir uzunluğu sınırlı → döngü asla dönmez.
+/// (2026-08-19: eski `$ref` sözdizimi okuyucusu KALDIRILDI — bkz. `v22::ctx_types`.)
 fn deref_defs<'a>(root: &'a Value, node: &'a Value) -> Option<&'a Value> {
     let mut current = node;
     for _ in 0..16 {
-        let Some(reference) = current.get("$ref").and_then(Value::as_str) else {
+        let Some(name) = current.get("format").and_then(Value::as_str) else {
             return Some(current);
         };
-        let name = reference.strip_prefix("#/$defs/")?;
-        if name.contains('/') {
-            return None; // iç içe pointer — çözmüyoruz, opak kalır
-        }
         current = root.get("$defs")?.get(name)?;
     }
     None // 16 hop'tan uzun zincir = döngü kabul edilir
@@ -270,11 +265,11 @@ fn deref_defs<'a>(root: &'a Value, node: &'a Value) -> Option<&'a Value> {
 enum NodeAt<'a> {
     Found(&'a Value),
     Missing,
-    /// Şema bu derinliği kısıtlamıyor (`properties` yok, çözülemeyen `$ref`, ...).
+    /// Şema bu derinliği kısıtlamıyor (`properties` yok, çözülemeyen tanım adı, ...).
     Opaque,
 }
 
-/// Bir context yolundaki şema düğümü, `$defs` çözülerek.
+/// Bir context yolundaki şema düğümü, adlandırılmış tip çözülerek.
 fn context_node_at<'a>(context: &'a Value, dotted: &str) -> NodeAt<'a> {
     let Some(mut current) = deref_defs(context, context) else {
         return NodeAt::Opaque;
@@ -888,15 +883,20 @@ fn callee_inputs(callee: &Wfd, start_id: Option<&str>) -> Option<CalleeInputs> {
 }
 
 /// Bir context şeması yolundaki `type` değeri (biliniyorsa).
+/// Bir context yolunun TİPİ — adlandırılmış tip (`format` → `$defs`, eski `$ref`)
+/// ÇÖZÜLEREK. Çözüm `v22::ctx_types`tedir; burada ikinci bir gezici YAZILMAZ (iki
+/// kopya ayrışırsa tasarım zamanı ile çalışma anı farklı cevap verirdi).
+///
+/// 2026-08-19 öncesinde bu fonksiyon `$ref`i hiç çözmüyordu: `$defs` arkasındaki
+/// alanlar `effect_type_mismatch` denetiminin DIŞINDA kalıyordu (tip bilinmiyor →
+/// kıyas yok). Adlandırılmış tip `format`a taşınırken o boşluk da kapandı.
 pub(crate) fn schema_type_at(context: &Value, dotted: &str) -> Option<String> {
-    let mut current = context;
-    for segment in dotted.split('.') {
-        current = current.get("properties")?.get(segment)?;
-    }
-    current
-        .get("type")
-        .and_then(Value::as_str)
-        .map(String::from)
+    let crate::v22::ctx_types::Resolved::Found(schema) =
+        crate::v22::ctx_types::field_schema(context, dotted)
+    else {
+        return None;
+    };
+    schema.get("type").and_then(Value::as_str).map(String::from)
 }
 
 fn check_calls_cross_wfd(
@@ -2425,6 +2425,190 @@ fn check_action_inputs(wfd: &Wfd, report: &mut ValidationReport) {
 //      okuyan koşullar sessizce hep-false olur.
 // Çalışma anında ctx doluluk denetimi YOKTUR; her şey tasarım zamanında yakalanır.
 
+// ---- Adlandırılmış tip (`format` → `$defs`) — 2026-08-19 ----
+//
+// Bir alan tipini `$defs`'teki bir tanıma ADLA bağlayabilir:
+//     "$defs":      { "Tarih": { "type": "string", "pattern": "^[0-9]{14}$" } }
+//     "properties": { "basvuru_tarihi": { "format": "Tarih" } }
+//
+// `format` bu belgede STANDART JSON Schema anlamında DEĞİL, `#/$defs/<Ad>` kısayolu
+// olarak okunur. Sebep: standart `format` yalnız bir İSİMDİR, kuralı doğrulayıcı
+// kütüphanenin format tablosunda durur — motorun sözleşmesini crate sürümüne bağlamak
+// olurdu. `$defs` tanımı kuralı BELGEDE taşır ve motor onu çalışma anında da uygular
+// (`v22::ctx_types`).
+//
+// Kurallar:
+//   `context_format_unknown`   — `format` değeri `$defs`'te TANIMLI olmalı. Yani
+//                                `format: "date-time"` "standart format" demek değil,
+//                                "benim `$defs.date-time` tanımım" demektir.
+//   `context_format_with_type` — `format` yanında TİP kuralı olamaz (`type`, `enum`,
+//                                `pattern`, sınırlar, `items`, `properties`,
+//                                `x-wf-kind`): tip tanımın içindedir. İzinli kardeşler
+//                                yalnız anlatım/görünürlük (`title`, `description`,
+//                                `x-visibility`).
+//   `context_format_cycle`     — tanım zinciri döngü yapamaz (A → B → A).
+//   `context_defs_name`        — tanım adı biçimi (`^[A-Za-z][A-Za-z0-9_]*$`).
+//   `context_ref_removed`      — `$ref` YAZILAMAZ. Okuma tarafı onu ÇÖZMEYE devam eder
+//                                (`ctx_types::field_schema`) çünkü yayınlanmış belge
+//                                yeniden yazılamaz; kapı yalnız YAZMA yollarındadır
+//                                (upload/publish/submit/approve — `fetch` bu kapıdan
+//                                geçmez, yalnız şemaya bakar).
+
+/// `$defs` tanım adı biçimi — editördeki `DEF_NAME_RE` ile aynı; tek kaynak MOTOR.
+fn is_valid_def_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `format` yanında bulunması YASAK olan (tip taşıyan) anahtarlar.
+const TYPE_KEYWORDS: [&str; 18] = [
+    "type",
+    "enum",
+    "const",
+    "properties",
+    "items",
+    "pattern",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "x-wf-kind",
+];
+
+fn check_context_named_types(wfd: &Wfd, report: &mut ValidationReport) {
+    let defs = wfd.context.get("$defs").and_then(Value::as_object);
+
+    // Tanım adları.
+    if let Some(defs) = defs {
+        for name in defs.keys() {
+            if !is_valid_def_name(name) {
+                report.error(
+                    "context_defs_name",
+                    format!("context.$defs.{name}"),
+                    format!(
+                        "'{name}' geçersiz tip adı — harfle başlamalı, yalnız harf/rakam/alt                          çizgi içerebilir (motor ve editör aynı kuralı uygular)"
+                    ),
+                );
+            }
+        }
+    }
+
+    // Kullanım yerleri: context ağacının her düğümü (tanımların İÇİ dahil).
+    let mut nodes: Vec<(String, &Value)> = Vec::new();
+    collect_schema_nodes(&wfd.context, "context", &mut nodes);
+    if let Some(defs) = defs {
+        for (name, def) in defs {
+            collect_schema_nodes(def, &format!("context.$defs.{name}"), &mut nodes);
+        }
+    }
+
+    for (path, node) in nodes {
+        let Some(map) = node.as_object() else { continue };
+
+        if map.contains_key("$ref") {
+            report.error(
+                "context_ref_removed",
+                path.clone(),
+                "`$ref` artık YAZILAMAZ — adlandırılmış tip `\"format\": \"<Ad>\"` ile                  verilir (aynı `$defs` tanımına işaret eder). Yayınlanmış belgelerdeki                  `$ref` okunmaya devam eder; bu kapı yalnız yeni yazımlar içindir."
+                    .into(),
+            );
+        }
+
+        let Some(format_name) = map.get("format").and_then(Value::as_str) else {
+            continue;
+        };
+
+        if defs.is_none_or(|d| !d.contains_key(format_name)) {
+            report.error(
+                "context_format_unknown",
+                path.clone(),
+                format!(
+                    "'{format_name}' tipi `context.$defs` içinde tanımlı değil. `format` bu                      belgede standart JSON Schema formatı DEĞİL, `$defs`'teki bir tipin                      adıdır — tipi `$defs.{format_name}` olarak tanımlayın (ör.                      {{\"type\": \"string\", \"pattern\": \"…\"}})."
+                ),
+            );
+        }
+
+        let clashing: Vec<&str> = TYPE_KEYWORDS
+            .iter()
+            .copied()
+            .filter(|k| map.contains_key(*k))
+            .collect();
+        if !clashing.is_empty() {
+            report.error(
+                "context_format_with_type",
+                path.clone(),
+                format!(
+                    "`format: \"{format_name}\"` yanında tip kuralı olamaz ({}) — tip                      tanımın İÇİNDEDİR. Bu alana özel bir kural gerekiyorsa ayrı bir                      `$defs` tipi tanımlayın; yalnız `title`/`description`/`x-visibility`                      kullanım yerinde ezilebilir.",
+                    clashing.join(", ")
+                ),
+            );
+        }
+    }
+
+    // Döngü: tanım → tanım zinciri.
+    if let Some(defs) = defs {
+        for name in defs.keys() {
+            let mut seen: Vec<&str> = Vec::new();
+            let mut current: &str = name;
+            loop {
+                if seen.contains(&current) {
+                    report.error(
+                        "context_format_cycle",
+                        format!("context.$defs.{name}"),
+                        format!(
+                            "tip tanımı döngüsü: {} → {current}",
+                            seen.join(" → ")
+                        ),
+                    );
+                    break;
+                }
+                seen.push(current);
+                let Some(next) = defs
+                    .get(current)
+                    .and_then(|d| d.get("format"))
+                    .and_then(Value::as_str)
+                else {
+                    break;
+                };
+                current = next;
+            }
+        }
+    }
+}
+
+/// Context şema ağacındaki TÜM düğümleri toplar (`properties` ve `items` içleri dahil).
+/// `$defs`in kendisi ATLANIR — çağıran onları ayrıca gezer (yol adları farklı olsun).
+fn collect_schema_nodes<'a>(node: &'a Value, path: &str, out: &mut Vec<(String, &'a Value)>) {
+    out.push((path.to_string(), node));
+    if let Some(props) = node.get("properties").and_then(Value::as_object) {
+        for (name, sub) in props {
+            collect_schema_nodes(sub, &format!("{path}.properties.{name}"), out);
+        }
+    }
+    match node.get("items") {
+        Some(Value::Object(_)) => {
+            collect_schema_nodes(node.get("items").unwrap(), &format!("{path}.items"), out)
+        }
+        Some(Value::Array(arr)) => {
+            for (i, sub) in arr.iter().enumerate() {
+                collect_schema_nodes(sub, &format!("{path}.items[{i}]"), out);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Kural 1 — kaldırılan `required` bildirimleri hard reject.
 fn check_context_required_removed(wfd: &Wfd, report: &mut ValidationReport) {
     if wfd.context.get("required").is_some() {
@@ -3477,19 +3661,13 @@ enum PathResolution {
     Opaque,
 }
 
+/// Yol çözümü — adlandırılmış tip (`format`/`$ref`) `v22::ctx_types` ile çözülür,
+/// yani `$defs` arkasındaki alan artık `Opaque` değil `Found`dur ve girdi yolu
+/// denetimi (`input_path`) onu görebilir.
 fn resolve_schema_path(context: &Value, dotted: &str) -> PathResolution {
-    let mut current = context;
-    for segment in dotted.split('.') {
-        if current.get("$ref").is_some() {
-            return PathResolution::Opaque;
-        }
-        let Some(props) = current.get("properties").and_then(Value::as_object) else {
-            return PathResolution::Opaque;
-        };
-        let Some(next) = props.get(segment) else {
-            return PathResolution::Missing;
-        };
-        current = next;
+    match crate::v22::ctx_types::field_schema(context, dotted) {
+        crate::v22::ctx_types::Resolved::Found(_) => PathResolution::Found,
+        crate::v22::ctx_types::Resolved::Missing => PathResolution::Missing,
+        crate::v22::ctx_types::Resolved::Opaque => PathResolution::Opaque,
     }
-    PathResolution::Found
 }

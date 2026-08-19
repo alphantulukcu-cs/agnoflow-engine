@@ -78,6 +78,13 @@ impl From<EngineError> for AppError {
             | EngineError::TargetInvalid(_)
             | EngineError::TargetUnexpected => StatusCode::BAD_REQUEST,
             EngineError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+            // Tip ihlali GÖVDE hatasıdır ama "sözleşmeye uymuyor" sınıfındadır:
+            // belge kapılarıyla (422) aynı statüde, `attachment.missing` deseniyle
+            // tutarlı. İstemci hangi alanın neden reddedildiğini `items[]`ten okur.
+            EngineError::InputTypeMismatch(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            // Kapı B/C: bağlama yazılan ya da zaten bağlamda duran değer şemaya uymuyor.
+            // Aynı sınıf (sözleşme ihlali) → aynı statü; ayrım `code` iledir.
+            EngineError::CtxTypeMismatch(_) => StatusCode::UNPROCESSABLE_ENTITY,
             EngineError::UnsupportedWfdVersion(_) => StatusCode::UNPROCESSABLE_ENTITY,
             EngineError::InvalidWfd(_) => StatusCode::UNPROCESSABLE_ENTITY,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -97,13 +104,31 @@ impl From<EngineError> for AppError {
             EngineError::TargetRequired => Some("action.target_required"),
             EngineError::TargetInvalid(_) => Some("action.target_invalid"),
             EngineError::TargetUnexpected => Some("action.target_unexpected"),
+            EngineError::InputTypeMismatch(_) => Some("input.type_mismatch"),
+            EngineError::CtxTypeMismatch(_) => Some("ctx.type_mismatch"),
+            _ => None,
+        };
+        // Tip ihlalleri ALAN BAZINDA taşınır: tek `error` metni N alanı anlatamaz
+        // (çok-dosyalı belge reddiyle aynı gerekçe, bkz. `items` alanı). İstemci
+        // formda ilgili alanın yanına basar; metni AYRIŞTIRMAZ.
+        let items = match &e {
+            EngineError::InputTypeMismatch(violations)
+            | EngineError::CtxTypeMismatch(violations) => Some(serde_json::json!(violations
+                .iter()
+                .map(|v| serde_json::json!({
+                    "path": v.path,
+                    "expected": v.expected,
+                    "got": v.got,
+                    "message": v.to_string(),
+                }))
+                .collect::<Vec<_>>())),
             _ => None,
         };
         AppError {
             message: e.to_string(),
             status,
             code,
-            items: None,
+            items,
         }
     }
 }

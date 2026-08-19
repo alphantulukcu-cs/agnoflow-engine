@@ -61,6 +61,60 @@ pub struct SimState {
     /// da parse edilir.
     #[serde(default)]
     pub pending_calls: Vec<SimCall>,
+    /// 2026-08-19: simülasyonda "yüklenmiş" sayılan KATALOG belgeleri
+    /// (`wfd.attachments` grup/slot). Gerçek akışta bu bilginin kaynağı depodur
+    /// (`AttachmentStore::exists`); simülasyonda depo YOKTUR — baytlar hiç
+    /// taşınmaz, yalnız metadata (ad/tip/boyut) tutulur ve **kapı** (bir aksiyonu
+    /// kapayan zorunlu belgeler) bu listeye bakar. Böylece "belge yüklenmeden
+    /// onaylanamaz" kuralı editörde de denenebilir.
+    /// `#[serde(default)]` — bu alandan önce üretilmiş blob'lar onsuz parse edilir.
+    #[serde(default)]
+    pub attachments: Vec<SimAttachment>,
+    /// 2026-08-19: simülasyonda eklenen NOTLAR (ad-hoc dosyalarıyla). Not motorun
+    /// ne `$ctx`'ine ne `$wfah`'ına girer (K1) — akışın gidişatını DEĞİŞTİRMEZ;
+    /// burada durmasının sebebi limitlerin (gövde uzunluğu, dosya sayısı/boyutu,
+    /// WFE kotası, yasak MIME) senaryoda da denenebilmesi.
+    #[serde(default)]
+    pub notes: Vec<SimNote>,
+}
+
+/// Simülasyonda yüklenmiş sayılan katalog belgesi — baytlar YOK, yalnız kapının ve
+/// format/boyut kuralının ihtiyaç duyduğu metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimAttachment {
+    /// Katalog grup key'i (`wfd.attachments` anahtarı).
+    pub group: String,
+    /// Grup içindeki slot id'si (`AttachmentItem.id`).
+    pub item: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub size_bytes: i64,
+    /// Yüklemenin yapıldığı node — "hangi adımda teslim edildi" sorusu için (gerçek
+    /// akışta `wf.wfe_attachment` metadata'sının karşılığı). Kapı bunu SORMAZ:
+    /// dosya bir kez yüklendiyse sonraki adımlarda da yüklüdür (depo semantiği).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+}
+
+/// Simülasyonda eklenen not — gerçek akıştaki `wf.wfe_note` satırının (+ dosyaları)
+/// karşılığı. Draft/publish yaşam döngüsü YOKTUR: simülasyonda not eklemek tek
+/// adımdır (draft → aksiyonla yayın zinciri DB'ye özgüdür).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SimNote {
+    pub body: String,
+    #[serde(default)]
+    pub audience: crate::note_rules::Audience,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<crate::note_rules::NoteFileSpec>,
+    /// Notun yazıldığı adım (o anki `current_node` / verilen kol).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// Yazar — senaryoda adım aktörü, interaktif simülasyonda seçili aktör.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<Actor>,
 }
 
 /// Simülasyonda bekleyen bir WFC çağrısı — `wf.wfe_call`'ın kullanıcıya görünen özeti.
@@ -115,6 +169,8 @@ impl SimState {
             join_threshold: None,
             join_when: None,
             pending_calls: new.staged_calls.iter().map(SimCall::from_staged).collect(),
+            attachments: vec![],
+            notes: vec![],
         }
     }
 
@@ -318,6 +374,38 @@ impl SimState {
         }
     }
 
+    /// Şu an adım BEKLENEN node'lar: tekil modda `current_node`, paralel modda aktif
+    /// kolların node'ları. Belge yükleme izni (`step::attach`) ve not çapası bunu sorar.
+    pub fn active_nodes(&self) -> Vec<String> {
+        if let Some(n) = &self.current_node {
+            return vec![n.clone()];
+        }
+        self.branches
+            .iter()
+            .filter(|b| b.status == BranchStatus::Active)
+            .map(|b| b.branch_node.clone())
+            .collect()
+    }
+
+    /// Bu slot simülasyonda yüklü mü? Kapının (`wfe_core::v22::attachments::
+    /// missing_required`) "yüklenmiş" tanımı — gerçek akıştaki `AttachmentStore::exists`
+    /// karşılığı.
+    pub fn has_attachment(&self, group: &str, item: &str) -> bool {
+        self.attachments
+            .iter()
+            .any(|a| a.group == group && a.item == item)
+    }
+
+    /// Not dosyalarının şimdiye kadarki toplamı — WFE kotası (`MAX_WFE_QUOTA_BYTES`)
+    /// bunun üzerine sorulur.
+    pub fn note_files_total_bytes(&self) -> i64 {
+        self.notes
+            .iter()
+            .flat_map(|n| n.files.iter())
+            .map(|f| f.size_bytes)
+            .sum()
+    }
+
     fn active_branch_mut(&mut self, node: &str) -> Option<&mut BranchState> {
         self.branches
             .iter_mut()
@@ -354,6 +442,7 @@ fn outcome_parts(
 /// Ayrı yazılsalardı simülasyonda geçen bir senaryo koşucuda kalabilirdi.
 pub mod step {
     use super::SimState;
+    use wfe_core::v22::attachments as attach_rules;
     use serde_json::Value;
     use uuid::Uuid;
     use wfe_core::types::actor::Actor;
@@ -382,6 +471,89 @@ pub mod step {
         Ok(SimState::from_new_wfe(&new))
     }
 
+    /// `apply`'ın iki ayrık başarısızlığı. Belge kapısı `EngineError` DEĞİLDİR:
+    /// motor dosyaya hiç değmez, kapı portal/edge katmanının kuralıdır (gerçek akışta
+    /// `routes/wfe.rs` `422 attachment.missing` verir) — bu ayrım route'un aynı statüyü
+    /// döndürebilmesi ve senaryo koşucusunun eksik belgeyi ADIYLA yazabilmesi için.
+    #[derive(Debug)]
+    pub enum ApplyError {
+        /// Bu aksiyonu KAPAYAN zorunlu belgeler eksik (`"grup/slot"` listesi).
+        MissingAttachments(Vec<String>),
+        /// Aktör bu adım için claim-uygun değil (node'un `c_a`'sı eşleşmiyor).
+        /// Gerçek akışta claim reddedilirdi (403) — simülasyon claim'i YAZMAZ ama
+        /// UYGUNLUĞU atlamaz, yoksa sim'de herkes her şeyi yapabilir görünürdü.
+        NotEligible,
+        Engine(EngineError),
+    }
+
+    impl std::fmt::Display for ApplyError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::MissingAttachments(missing) => {
+                    write!(f, "Eksik zorunlu belgeler: {}", missing.join(", "))
+                }
+                Self::NotEligible => write!(
+                    f,
+                    "aktör bu adım için yetkili değil (c_a eşleşmiyor) — gerçek akışta claim reddedilirdi"
+                ),
+                Self::Engine(e) => write!(f, "{e}"),
+            }
+        }
+    }
+
+    /// Sim claim-eşdeğeri uygunluk — gerçek `WfeExecutor::can_claim` ile AYNI kural:
+    /// zaten sahipse uygun; değilse `Engine::can_claim` (matcher §7.1, delegation dahil).
+    /// Sahiplik ATANMAMIŞ wfes üzerinde denetlenir (sim'in geçici pre-claim'i yetkiyi
+    /// gölgelemesin diye).
+    ///
+    /// 2026-08-19'da route'tan (`routes/simulate.rs::sim_eligible`) BURAYA taşındı:
+    /// yalnız orada yaşadığı için **senaryo koşucusu bu kapıyı hiç sormuyordu** —
+    /// yetkisiz aktörle yazılmış bir senaryo yeşil geçiyor, aynı adım portalda 403
+    /// alıyordu. Adım mantığının ortak olması (`sim::step`) tam bu yüzden var.
+    pub async fn eligible(
+        engine: &Engine<'_>,
+        wfd: &Wfd,
+        state: &SimState,
+        actor: &Actor,
+        node: Option<&str>,
+    ) -> Result<bool, EngineError> {
+        let wfes = state.to_wfes(None);
+        let owned = match node {
+            Some(n) => wfes
+                .branches
+                .iter()
+                .any(|b| b.branch_node == n && b.claimed_by == Some(actor.user_id)),
+            None => wfes.assigned_to == Some(actor.user_id),
+        };
+        if owned {
+            return Ok(true);
+        }
+        Ok(matches!(
+            engine.can_claim(wfd, &wfes, actor, node).await?,
+            wfe_core::v22::pipeline::ClaimCheck::Ok
+        ))
+    }
+
+    /// Belge kapısı — gerçek akıştaki `apply_action`/`submit_action` kapısının sim
+    /// karşılığı: kapı **aksiyon bazlıdır** ve node = verilen kol ?? `current_node`.
+    /// Kural `wfe_core::v22::attachments`'tan gelir (gerçek akışla TEK kaynak);
+    /// buradaki tek fark "yüklenmiş" tanımıdır: depo değil `SimState.attachments`.
+    pub fn missing_gate_attachments(
+        wfd: &Wfd,
+        state: &SimState,
+        action: &str,
+        node: Option<&str>,
+    ) -> Vec<String> {
+        let Some(node_key) = node
+            .map(str::to_string)
+            .or_else(|| state.current_node.clone())
+        else {
+            return vec![]; // paralel modda kol verilmemişse motor zaten reddeder
+        };
+        let slots = attach_rules::gate_slots(wfd, &node_key, Some(action));
+        attach_rules::missing_required(&slots, |g, i| state.has_attachment(g, i))
+    }
+
     /// `POST /wfe/simulate/apply` gövdesi — claim YAZILMAZ ama uygunluk
     /// çağıranın sorumluluğundadır (route `sim_eligible` ile denetler).
     ///
@@ -396,12 +568,140 @@ pub mod step {
         input: &Value,
         node: Option<&str>,
         target: Option<&str>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), ApplyError> {
+        // Sıra gerçek akışla aynı: önce YETKİ (403 karşılığı), sonra BELGE kapısı
+        // (422 karşılığı), sonra motor. Yetki kapısı burada olmasaydı senaryo koşucusu
+        // onu hiç sormazdı (route'ta duruyordu) ve yetkisiz senaryo yeşil geçerdi.
+        if !eligible(engine, wfd, state, actor, node)
+            .await
+            .map_err(ApplyError::Engine)?
+        {
+            return Err(ApplyError::NotEligible);
+        }
+        let missing = missing_gate_attachments(wfd, state, action, node);
+        if !missing.is_empty() {
+            return Err(ApplyError::MissingAttachments(missing));
+        }
         let wfes = state.to_wfes(Some(actor.user_id));
         let commit = engine
             .apply(wfd, &wfes, actor, action, input, node, target)
-            .await?;
+            .await
+            .map_err(ApplyError::Engine)?;
         state.apply_commit(&commit);
+        Ok(())
+    }
+
+    // ── Belge yükleme (katalog slotları) ────────────────────────────────────
+
+    /// `attach`ın reddi. Gerçek akıştaki karşılıkları: bilinmeyen slot →
+    /// `422 attachment.rejected` / `unknown_slot`; format/boyut → `415`/`413`.
+    #[derive(Debug)]
+    pub enum AttachError {
+        /// Grup katalogda (`wfd.attachments`) yok.
+        UnknownGroup(String),
+        /// Grup var, slot yok.
+        UnknownItem { group: String, item: String },
+        /// Slot var ama ŞU AN aktif olan hiçbir node'da toplanmıyor — gerçek akışta
+        /// `upload_catalog` de yalnız aktörün erişebildiği node'ların slotlarını açar.
+        NotCollectedHere { group: String, item: String },
+        /// Format/boyut kuralı (`AttachmentItem.formats`) reddetti.
+        Rejected(attach_rules::UploadReject),
+    }
+
+    impl std::fmt::Display for AttachError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::UnknownGroup(g) => write!(f, "\"{g}\" belge grubu katalogda yok"),
+                Self::UnknownItem { group, item } => {
+                    write!(f, "\"{group}\" grubunda \"{item}\" dosya slotu yok")
+                }
+                Self::NotCollectedHere { group, item } => write!(
+                    f,
+                    "\"{group}/{item}\" şu an aktif olan adımda toplanmıyor"
+                ),
+                Self::Rejected(r) => write!(f, "{r}"),
+            }
+        }
+    }
+
+    /// Bir katalog slotuna dosya "yükler" — baytlar YOK, yalnız metadata. Aynı slota
+    /// tekrar yükleme ÜZERİNE YAZAR (gerçek akışta yeni sürüm açılır; kapı açısından
+    /// ikisi aynıdır: slot yüklüdür).
+    pub fn attach(
+        wfd: &Wfd,
+        state: &mut SimState,
+        group: &str,
+        item: &str,
+        filename: Option<&str>,
+        content_type: Option<&str>,
+        size_bytes: i64,
+    ) -> Result<(), AttachError> {
+        if !wfd.attachments.contains_key(group) {
+            return Err(AttachError::UnknownGroup(group.into()));
+        }
+        let def = attach_rules::find_item(wfd, group, item).ok_or_else(|| {
+            AttachError::UnknownItem {
+                group: group.into(),
+                item: item.into(),
+            }
+        })?;
+        let active = state.active_nodes();
+        let collected_here = active.iter().any(|n| {
+            attach_rules::gate_slots(wfd, n, None)
+                .iter()
+                .any(|s| s.group == group && s.item == item)
+        });
+        if !collected_here {
+            return Err(AttachError::NotCollectedHere {
+                group: group.into(),
+                item: item.into(),
+            });
+        }
+        attach_rules::check_upload(def, content_type, size_bytes.max(0) as usize)
+            .map_err(AttachError::Rejected)?;
+        state.attachments.retain(|a| !(a.group == group && a.item == item));
+        state.attachments.push(super::SimAttachment {
+            group: group.into(),
+            item: item.into(),
+            filename: filename.map(str::to_string),
+            content_type: content_type.map(str::to_string),
+            size_bytes,
+            node: active.first().cloned(),
+        });
+        Ok(())
+    }
+
+    /// Yüklenmiş sayılan bir slotu geri alır (gerçek akıştaki tekil `DELETE`).
+    /// Dönüş: satır VAR MIYDI (yoksa çağıran "zaten yok" diyebilir).
+    pub fn detach(state: &mut SimState, group: &str, item: &str) -> bool {
+        let before = state.attachments.len();
+        state
+            .attachments
+            .retain(|a| !(a.group == group && a.item == item));
+        state.attachments.len() != before
+    }
+
+    // ── Not ekleme (ad-hoc dosyalarla) ──────────────────────────────────────
+
+    /// Not ekler. Limitler `crate::note_rules::check_note` — gerçek akışla TEK kaynak.
+    /// Not akışın gidişatını DEĞİŞTİRMEZ (K1): `$ctx`/`$wfah`'a yazılmaz, yalnız
+    /// `SimState.notes`'a düşer ve senaryo bunun limitlere uygunluğunu dener.
+    pub fn add_note(
+        state: &mut SimState,
+        actor: Option<&Actor>,
+        body: &str,
+        audience: crate::note_rules::Audience,
+        files: Vec<crate::note_rules::NoteFileSpec>,
+    ) -> Result<(), crate::note_rules::NoteReject> {
+        crate::note_rules::check_note(body, &files, state.note_files_total_bytes())?;
+        let node = state.active_nodes().first().cloned();
+        state.notes.push(super::SimNote {
+            body: body.to_string(),
+            audience,
+            files,
+            node,
+            author: actor.cloned(),
+        });
         Ok(())
     }
 

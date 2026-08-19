@@ -326,6 +326,143 @@ Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap pro
   Rol ATAMASI kuyruğa girmez — satırlar (birim, rol) tuttuğu için yeni atama anında etkilidir.
   Yeniden üretimin TEK kod yolu `wf_wfe::reproject` (backfill komutu da onu çağırır).
 
+## Tip denetimi: engine bilir kişi (2026-08-19)
+
+Karar kayıtları: `docs/spec/decisions.md` → "Adlandırılmış tip: `format` → `$defs`" +
+"Runtime tip denetimi — engine bilir kişi". İlke: **bildirilen bir tip varsa ve değer o
+tipte gelmiyorsa reddi ENGINE verir** — istemci (editör, portal, üçüncü parti UI) kendi
+kuralını icat etmez, yalnız aynı cevabı önden verir.
+
+- **Adlandırılmış tip = `format`** (KIRICI): `{"format": "Tarih"}` = `#/$defs/Tarih`.
+  `format` bu belgede **standart JSON Schema formatı DEĞİL** — kuralı kütüphanenin
+  tablosunda değil BELGEDE (`$defs` tanımında) durur, motor onu okur ve zorlar. Yeni
+  validator kuralları: `context_format_unknown` (tanımsız ad) · `context_format_with_type`
+  (`format` yanında tip kuralı olamaz — tip tanımın içinde) · `context_format_cycle` ·
+  `context_defs_name` · `context_ref_removed`.
+- **`$ref` TAMAMEN KALDIRILDI — okuyucusu da yok** (kullanıcı kararı, 2026-08-19):
+  şemadan çıkarıldı (`contextSchemaNode`), `deref_defs`/`ctx_types` yalnız `format`
+  çözer, validator `context_ref_removed` ile reddeder. Gerekçe: ürün production'da
+  DEĞİL; mevcut tüm WFD/WFE'ler test verisi ve production öncesi sıfırlanacak. **"Wire
+  formatı değişince okuyucu kalır" kuralı production'dan SONRA geçerlidir** — şu an
+  geriye uyum kodu saf borçtur.
+- **Wire formatı DRY**: yayınlanan belgede `format` + `$defs` birlikte durur (editör artık
+  inline ETMEZ). Çözücüler: motor `v22::ctx_types`, editör `utils/contextDefs`, portal
+  `lib/contextTypes` — üçü AYNI kuralı uygular.
+- **Çalışma anı denetimi `wfe_core::v22::ctx_types`** (SAF): yol → alt şema (adlandırılmış
+  tip çözülmüş) + değer doğrulama. Zorlananlar: `type`/`enum`/`const`/sayı sınırları/
+  `minLength`/`maxLength`/`pattern`/dizi kuralları/iç içe `properties`. **`null` HER tipte
+  geçerlidir** (WOR-70b gönderilmeyen `optional` ctx'e `null` yazar — aksi halde golden
+  fixture ilk koşuda patlardı). Şemanın tanımlamadığı yol için tip ihlali üretilmez.
+- `resolve_schema_path` ve `schema_type_at` artık adlandırılmış tipi ÇÖZER → `$defs`
+  arkasındaki alan `effect_type_mismatch`/`input_path` denetimlerinin İÇİNE girdi
+  (2026-08-19 öncesi `Opaque` sayılıp sessizce atlanıyordu).
+- **Ölçüm aracı `ctx_type_report`** (salt okuma): sahadaki WFE'lerin dynctx'ini kendi WFD
+  şemasına karşı tarar + şemada olmayan ctx alanlarını + `$ref` kullanan sürümleri sayar.
+  Koşum: `DATABASE_URL=... cargo run -p wf-server --bin ctx_type_report` (WFD JSON deposu
+  için `STORAGE_*` da gerekir). **İlk ölçüm: 25 WFE / 0 ihlal / 0 `$ref`.**
+- **Kapı A TAMAMLANDI (F2):** `validate_action_input` artık context şemasını da alıyor
+  ve bildirilen yolların DEĞERLERİNİ denetliyor → `EngineError::InputTypeMismatch(Vec<
+  Violation>)` → `422` + `code: "input.type_mismatch"` + **`items[]`** (alan bazında
+  `path`/`expected`/`got`/`message`). `start` ve `apply` (tek-kol + paralel) aynı kapıdan
+  geçer; `sim`/senaryo koşucusu aynı fonksiyonu çağırdığı için otomatik kapsanır.
+  Sıra: bildirim denetimi ÖNCE, tip SONRA (tanımsız yola gönderilen bozuk değerde
+  kullanıcı asıl sorunu görsün). Portal `items[]`i alan bazında forma basar
+  (`inputTypeErrorFields` / `applyInputTypeErrorFields`).
+- **Senaryoda `expectStartReject`** (yeni): BAŞLATMANIN reddi de test edilebilir
+  (yetkisiz başlatan, yanlış tipte/eksik başlangıç girdisi, olmayan start aksiyonu).
+  Onsuz start hatası her koşulda senaryoyu kaldırıyordu, yani o kurallar
+  test EDİLEMİYORDU.
+- **Kapı B TAMAMLANDI (F3):** `pipeline::guard_written_ctx` — commit kurulmadan ÖNCE
+  bu geçişin YAZDIĞI kök alanlar denetlenir (`ctx_types::validate_written`, `before`/
+  `after` karşılaştırması). Altı çağrı noktası: start · apply (tek-kol) · apply (paralel
+  kol) · escalation · claim_timeout · WFC dönüşü. `fire_deadline_timeout` ctx'e YAZMAZ
+  (kopyalar), kapı gerekmez. Böylece autoexec sonucu · `$call.result.*` · `$env` ·
+  sistem yazımları tek noktadan geçer → `EngineError::CtxTypeMismatch` → `422` +
+  `code: "ctx.type_mismatch"` + `items[]`. **Yalnız DEĞİŞEN alanlar** denetlenir:
+  enforcement öncesi bozulmuş veri geçişi durdurmaz (o kapı C'nin işi). Ölçüm sıfır
+  çıktığı için `warn` fazı atlandı, doğrudan REDDEDİYOR.
+- **Kapı C TAMAMLANDI (F3):** `executor::guard_stored_ctx` — bozuk `dynctx` taşıyan
+  WFE'de **eylem** reddedilir (apply · claim · escalation fire; `skip_escalation` geçiş
+  uygulamadığı için kapsam dışı), **görüntüleme SERBEST** kalır ve ihlaller
+  `WfeView.ctx_violations` ile bildirilir (portal kırmızı şerit gösterir). Kayıt görünmez
+  olsaydı kullanıcı neyin bozuk olduğunu göremez, düzeltemezdi.
+- **F4 TAMAMLANDI:** `ApiError` artık `items[]` taşıyor (`engineApi.typeViolationsOf`),
+  editörün `PathFields`i `serverErrors` prop'uyla motorun reddini ALANIN yanında gösteriyor
+  (SimulationTab start + apply). Portal iki yolda da aynı şeyi yapıyor
+  (`inputTypeErrorFields` / `applyInputTypeErrorFields`) ve bozuk bağlam için kırmızı şerit
+  çiziyor. Editörde WFE detay yüzeyi YOK (o portalın işi) — `ctx_violations` gösterimi
+  oraya ait.
+- **F5 TAMAMLANDI:** `docs/spec/migration-notes.md` **M19** (kırıcı: `$ref` kaldırıldı,
+  `format` semantiği, üç kapı, düzeltme reçetesi), `docs/spec/runtime-semantics.md` **§7.5b**
+  + pipeline adım listesine kapı B/C, `decisions.md` iki madde.
+- Yakalanabilir hata sınıfı (`trigger[].catch.error_equals` ile `WFD.CtxTypeMismatch`)
+  BİLİNÇLİ olarak YAPILMADI: tip ihlali akışın tasarım hatasıdır, `catch` ile gizlenmesi
+  bozuk verinin sessizce ilerlemesine yol açardı — gerekirse ayrı bir karar maddesiyle
+  açılır.
+
+## Simülasyonda belge + not (senaryo testleri)
+
+2026-08-19. Amaç: bir WFD'nin **kaydedilip her seferinde koşturulabilen** test seti
+yalnız mutlu yolu değil, portal kullanıcısının gerçekten çarptığı kuralları da
+kanıtlayabilsin — "belge yüklenmeden onaylanamaz", "yanlış tip reddedilir",
+"bu aktör bu adımı alamaz".
+
+- **Kural tek kaynakta**: `wfe_core::v22::attachments` (gate: `gate_slots` +
+  `missing_required`; format/boyut: `check_upload`/`mime_matches`/
+  `all_accept_patterns`) ve `wf_wfe::note_rules` (not limitleri + `Audience`).
+  `wf_server::attachments`/`notes` bunları `pub use` ile yeniden ihraç eder —
+  çağrı yerleri değişmedi, DAVRANIŞ değişmedi. İki kopya olsaydı simülasyonda
+  geçen bir senaryo portalda 422 alabilirdi (`check_expectations`ın motora
+  taşınmasıyla aynı gerekçe). Not kuralları `wfe-core`'a KONMADI: motor not
+  katmanından habersiz kalır (K1) — `wf_wfe` adapter crate'i, `sim`in yaşadığı yer.
+- **`SimState` iki alan kazandı** (ikisi de `#[serde(default)]`, eski blob'lar
+  parse olur): `attachments: Vec<SimAttachment>` (grup/slot + ad/tip/boyut) ve
+  `notes: Vec<SimNote>`. **BAYT TAŞINMAZ** — simülasyonda depo yok; tutulan şey
+  metadata, denenen şey DOSYAYA BAĞLI KURALLAR.
+- **Kapı `sim::step::apply` içinde, motordan ÖNCE**: node = verilen kol ??
+  `current_node`, aksiyon bazlı (gerçek akıştaki `apply_action` ile aynı soru).
+  Eksikse `ApplyError::MissingAttachments`; route bunu `422 attachment.missing`
+  yapar (gerçek akışla AYNI kod/statü). `EngineError`'a katlanmadı: motor dosyaya
+  değmez, kapı portal/edge kuralıdır.
+- **Uçlar**: `POST /wfe/simulate/attach` (`422 attachment.rejected`: bilinmeyen
+  slot / aktif adımda toplanmıyor / format-boyut), `.../detach`, `.../note`
+  (`422 note.rejected`). `detach`/`note` WFD parse ETMEZ (yarım taslakta da
+  çalışmalı); `attach` katalog için parse eder.
+- **Senaryo adımları** (`wf_wfe::scenario::ScenarioStep`, `untagged`, her varyantın
+  benzersiz zorunlu anahtarı var): `action` · `call_return` · **`attach`** ·
+  **`note`**. Aksiyon/attach/note adımlarının hepsinde **`expectReject`** (camelCase)
+  bayrağı var: `true` ise adım REDDEDİLMELİ — reddedilirse senaryo geçer ve sebep
+  `ScenarioResult.rejected_as_expected`'e yazılır, beklenmedik şekilde uygulanırsa
+  senaryo KALIR ("kural devrede değil"). Negatif test olmadan senaryo seti yalnız
+  mutlu yolu kanıtlıyordu.
+- **`expect.active`** (`Option<bool>`): adımlardan sonra akış hâlâ aktif mi olmalı,
+  bitmiş mi. Negatif senaryonun asıl kanıtı budur (`expect.terminal` bunu söyleyemez;
+  ayrıca `infer_terminal_id` yalnız `terminals[].wfes_effects.set` ayırt ediciyse id
+  çözer — `wfe_end_response` id çözmez, o senaryolar `active` ile yazılır).
+- `ScenarioResult` üç alan kazandı: `attachments[]` (koşu sonunda yüklü slotlar),
+  `notes` (sayı), `rejected_as_expected[]`.
+- **Not akışın gidişatını hâlâ DEĞİŞTİRMEZ** (K1): `$ctx`/`$wfah`'a yazılmaz,
+  `$notes` yok. Simülasyondaki not yalnız limit testidir. Draft→aksiyonla-yayın
+  zinciri DB'ye özgüdür, simülasyonda not eklemek TEK adımdır.
+- **Yetki kapısı ARTIK `sim::step::apply` İÇİNDE** (2026-08-19): `sim::step::eligible`
+  (gerçek `can_claim` kuralının aynısı) `routes/simulate.rs`ten BURAYA taşındı. Sebep:
+  yalnız route'ta yaşadığı için **senaryo koşucusu hiç sormuyordu** — yetkisiz aktörle
+  yazılmış senaryo yeşil geçiyor, aynı adım portalda 403 alıyordu. Sıra gerçek akışla
+  aynı: yetki (`ApplyError::NotEligible` → 403) → belge kapısı (422) → motor.
+- **Kasıtlı HATA senaryoları birinci sınıf vatandaştır.** Motorun reddettikleri
+  senaryoyla test edilebilir: eksik/null zorunlu girdi · bildirilmemiş girdi yolu ·
+  olmayan aksiyon · yetkisiz aktör · geçersiz kol · geçersiz/eksik GLB hedefi · belge
+  kapısı · katalog dışı slot / kabul edilmeyen tip / boyut aşımı · not limitleri.
+  **REDDEDİLMEYEN tek şey TİP**: `validate_action_input` varlık ve bildirim denetler,
+  tip denetlemez — yanlış tip ctx'e AYNEN yazılır ve etkisi karar anında görülür
+  (sayısal `when` çalışırken patlar). Bu sınır editörde de açıkça yazılıdır; iki test
+  onu belgeler (`wrong_type_input_passes_the_input_gate`,
+  `wrong_type_breaks_a_numeric_condition_at_decision_time`).
+- Testler: `crates/wfe-core/src/v22/attachments.rs` (kapı birim testleri),
+  `crates/wfe/src/note_rules.rs` (limitler), `crates/wfe/tests/scenario.rs`
+  (uçtan uca: kapı bloklar → `attach` açar → kapsamlı grup yalnız kendi aksiyonunu
+  kapar → yanlış tip/boyut reddi → not kayda geçer ama ctx'e sızmaz).
+
 ## WFE not defteri (ad-hoc not + belge)
 
 Tasarım: `docs/superpowers/specs/2026-08-10-wfe-not-ve-adhoc-belge-design.md` (K1–K9).

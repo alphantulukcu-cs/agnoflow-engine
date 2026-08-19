@@ -52,7 +52,9 @@ async fn orgtnt_of(s: &AppState, actor: &Actor) -> Result<Uuid, AppError> {
 struct CreateNoteBody {
     body: String,
     /// K9 hedefleme: göndermeyen istemci `{"kind":"all"}` (herkes) alır.
+    /// Tip `wf_wfe::note_rules::Audience` (utoipa türetmesi yok — gövde şeması `Object`).
     #[serde(default)]
+    #[schema(value_type = Object)]
     audience: notes::Audience,
 }
 

@@ -226,21 +226,53 @@ Alan opsiyoneldir; katalog boş/yoksa hiçbir kural tetiklenmez. Dosyaların KEN
 ## 7. Transition Runtime Pipeline
 
 ```text
+0. Bozuk bagalam kapisi (kapi C, 2026-08-19): WFE'nin mevcut dynctx'i context semasini
+   ihlal ediyorsa EYLEM reddedilir (422 ctx.type_mismatch). Okuma serbesttir ve ihlaller
+   WfeView.ctx_violations ile bildirilir — kayit gorunmez olursa duzeltilemez.
 1. WFE assigned mi? Actor owner mi? Degilse ACT reddedilir.
    (Unassigned'da once claim; claim = current node c_a match'i, §3 semantigi.)
 2. transition.c_a varsa: owner bu EK kurala da match etmeli (§3).
 3. current_node ∈ transition.from? Degilse aday degildir.
 4. Adaylar array sirasiyla; when'i true olan ILK transition secilir.
-5. Action input validate edilir (SADECE dogrulama — ctx'e YAZILMAZ, §7.5a).
+5. Action input validate edilir (SADECE dogrulama — ctx'e YAZILMAZ, §7.5a):
+   bildirim (yol + required/non-null) SONRA TIP (kapi A, §7.5b).
 6. transition.wfes_effects STAGED.
 7. trigger[] sirayla: when -> execute (timeout_seconds) -> fail'de retry
    (bekleme = interval * backoff^attempt, max_delay ile kirpilir)
    -> catch match: effects STAGED, handled, devam -> yoksa required davranisi.
    Basarili autoexec: wfes_effects STAGED.
 8. transition.wft staged DynCtx uzerinden evaluate edilir.
+8b. Yazilan ctx yollarinin TIP denetimi (kapi B, §7.5b): bu gecisin DEGISTIRDIGI kok
+   alanlar context semasina karsi dogrulanir — autoexec sonucu, $call.result.*, $env ve
+   sistem yazimlari dahil. Ihlalde COMMIT YOK (422 ctx.type_mismatch).
 9. COMMIT (atomik): diff'ler + WFAH + node degisimi + assignment reset (yeni node'a UNASSIGNED).
 Unhandled fail'de hicbir sey commit edilmez.
 ```
+
+### 7.5b. Tip denetimi — engine bilir kisi (2026-08-19)
+
+Bildirilen bir tip varsa ve gelen deger o tipte degilse reddi ENGINE verir; istemci
+(editor, portal, ucuncu parti UI) kendi tip kuralini icat etmez. Denetim cekirdegi
+`wfe_core::v22::ctx_types` (saf): yol → alt sema cozumu (adlandirilmis tip `format` →
+`$defs` dahil) + deger dogrulama.
+
+| Kapi | Nerede | Neyi gorur | Hata |
+|---|---|---|---|
+| A | `validate_action_input` (start + apply) | ISTEK girdisi, bildirilen yollar | `input.type_mismatch` |
+| B | commit oncesi (`guard_written_ctx`) | bu gecisin YAZDIGI ctx yollari | `ctx.type_mismatch` |
+| C | eylem oncesi (`guard_stored_ctx`) | ZATEN VAR OLAN dynctx | `ctx.type_mismatch` |
+
+Zorlanan kurallar: `type` · `enum` · `const` · sayi sinirlari (`minimum`…`multipleOf`) ·
+`minLength`/`maxLength`/`pattern` · dizi kurallari (`items`, `minItems`…) · ic ice
+`properties`. Hepsi BELGEDE kesin yazili — dogrulayici kutuphanesinin `format` tablosu
+KULLANILMAZ (bkz. M19).
+
+**`null` HER tipte gecerlidir:** WOR-70b gonderilmeyen `optional` girdiyi ctx'e kosulsuz
+`null` yazar; `required` girdinin null olamamasi AYRI kuraldir (§7.5a).
+
+Semanin tanimlamadigi yol icin TIP ihlali uretilmez — "bildirilmemis yol" ayri bir kuralin
+isidir (§7.5a). Ihlal ALAN/OGE bazinda raporlanir (`musteri.bakiye`, `etiketler.0`) ve HTTP
+govdesinde `items[]` olarak tasinir: istemci hata METNINI ayristirmaz.
 
 ### 7.5a. Context'e TEK yazma yolu: wfes_effects (WOR-70)
 

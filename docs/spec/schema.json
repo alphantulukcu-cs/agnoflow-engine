@@ -357,10 +357,8 @@
           "type": "string"
         },
         "$defs": {
-          "type": "object"
-        },
-        "$ref": {
-          "type": "string"
+          "type": "object",
+          "description": "Yeniden kullanilabilir TIP KUTUPHANESI: ad → sema dugumu. Bir alan bu tipe `\"format\": \"<Ad>\"` ile baglanir; tanimi degistirmek ona baglanan TUM alanlari birlikte degistirir. Tanim adi `^[A-Za-z][A-Za-z0-9_]*$` (`context_defs_name`)."
         },
         "title": {
           "type": "string"
@@ -424,7 +422,8 @@
           "type": "string"
         },
         "format": {
-          "type": "string"
+          "type": "string",
+          "description": "ADLANDIRILMIS TIP adi — `context.$defs` icindeki bir tipe isaret eder (ornek: \"format\": \"Tarih\" → $defs.Tarih). DIKKAT: bu belgede `format` STANDART JSON Schema formati DEGILDIR (date-time/email gibi adlarin kutuphaneye gomulu anlami KULLANILMAZ) — kural tanimin icinde, yani BELGEDE durur ve motor onu calisma aninda da uygular (wfe_core::v22::ctx_types). Tanimda `type`/`pattern` gibi gercek kurallar bulunur; `format` yaninda tip kurali YAZILAMAZ. Validator: tanimsiz ad `context_format_unknown`, tip kuraliyla yan yana `context_format_with_type`, dongu `context_format_cycle`. ESKI `$ref` sozdizimi 2026-08-19'da KALDIRILDI (okuyucusu da yok) — semada artik yer almaz, validator `context_ref_removed` ile reddeder."
         },
         "minItems": {
           "type": "integer",

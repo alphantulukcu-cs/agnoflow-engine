@@ -100,6 +100,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_sla(wfd, &mut report);
     check_env_references(wfd, &mut report);
     check_c_orgu_anchor_kinds(wfd, &mut report);
+    check_c_orgu_wfah_anchors(wfd, &mut report);
     check_c_u_items(wfd, &mut report);
     check_c_a_shape(wfd, &mut report);
     report
@@ -339,7 +340,8 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
 
     for (path, c_orgu) in sites {
         // Yalnız ctx-anchor formu: `from` STRING. Selector formu düz string, wfah formunda
-        // `from` bir objedir — ikisi de bu kuralın dışında.
+        // `from` bir objedir — ikisi de bu kuralın dışında (wfah formunun kendi kuralı
+        // `check_c_orgu_wfah_anchors`tır).
         let Some(from) = c_orgu.get("from").and_then(Value::as_str) else {
             continue;
         };
@@ -397,6 +399,59 @@ fn check_c_orgu_anchor_kinds(wfd: &Wfd, report: &mut ValidationReport) {
                 );
             }
         }
+    }
+}
+
+/// wfah çapasının işaret ettiği aksiyon KATALOGDA var mı.
+///
+/// `check_c_orgu_anchor_kinds`ten ayrı durmasının sebebi sorunun ayrı olması: orada
+/// context alanının TİPİ sorulur, burada aksiyon adının VARLIĞI. İkisi ayrı formlardır
+/// (`from` STRING ↔ `from` OBJE) ve tek gövdede birleşince hangi dalın hangi kuralı
+/// koştuğu okunamaz hale gelirdi.
+///
+/// Neden HATA: `resolver::anchor_from_wfah` adı geçmişte bulamazsa `Ok(None)` döner,
+/// `resolve_c_orgu` boş birim listesi verir ve o node'da HİÇ KİMSE yetkilenmez — ne
+/// hata, ne uyarı, ne log; akış sessizce kilitlenir. Sahada görülen hâl (2026-08-20):
+/// aksiyon editörde yeniden adlandırıldı (`Baslat`), çapa eski adda kaldı (`Ba_lat`).
+/// Aksiyon adı KİMLİKTİR ve etiketten türediği için yeniden adlandırma bu referansı
+/// rutin olarak kırar. Koşuldaki ölü ad (hep-false) uyarıyla geçebilir, çapadaki
+/// geçemez: çapa yetkinin kaynağıdır, bedeli duran bir akıştır.
+///
+/// Editör aynası: `utils/validation.ts` → `UNKNOWN_WFAH_ANCHOR`. İki taraf da
+/// katalog anahtarlarına bakar; ayrışırlarsa editörde yeşil görünen belge yayında 422 alır.
+fn check_c_orgu_wfah_anchors(wfd: &Wfd, report: &mut ValidationReport) {
+    let Ok(doc) = serde_json::to_value(wfd) else {
+        return; // serileştirme hatası başka kuralların işi
+    };
+    let mut sites = Vec::new();
+    collect_key_sites(&doc, "c_orgu", "", &mut sites);
+
+    for (path, c_orgu) in sites {
+        // Yalnız wfah formu: `from` bir OBJE ve içinde `wfah` var. Selector düz string,
+        // ctx-anchor'da `from` STRING — ikisi de bu kuralın dışında.
+        let Some(action) = c_orgu
+            .get("from")
+            .and_then(|from| from.get("wfah"))
+            .and_then(Value::as_str)
+        else {
+            continue;
+        };
+        // Boş ad şemanın işi (`$defs/wfahAnchor.wfah.minLength: 1`); burada ikinci bir
+        // kod üretmek aynı kusuru iki kez raporlamak olurdu.
+        if action.is_empty() || wfd.actions.contains_key(action) {
+            continue;
+        }
+        report.error(
+            "c_orgu_anchor_unknown_action",
+            format!("{path}.from"),
+            format!(
+                "c_orgu çapası '{action}' aksiyonunu işaret ediyor ama bu ad aksiyon \
+                 katalogunda YOK. Aksiyon yeniden adlandırıldıysa çapayı yeni anahtara \
+                 çevirin; adı doğruysa aksiyonu tanımlayın. Aksi halde çapa çalışma anında \
+                 hiçbir WFAH kaydına oturmaz, kapsam boş çözülür ve o node'da KİMSE \
+                 yetkilenmez — akış hatasız durur."
+            ),
+        );
     }
 }
 

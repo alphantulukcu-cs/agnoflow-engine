@@ -2462,7 +2462,8 @@ fn node_reassign_anchor_is_checked() {
 
 #[test]
 fn selector_and_wfah_forms_are_untouched() {
-    // Selector düz string; wfah formunda `from` OBJEDİR — ikisi de bu kuralın dışında.
+    // Selector düz string; wfah formunda `from` OBJEDİR — ikisi de KIND kuralının dışında
+    // (wfah formunun kendi kuralı `c_orgu_anchor_unknown_action`, aşağıda).
     let mut v = fixture_value();
     v["listable"][0]["c_a"]["c_orgu"] = json!({
         "from": { "wfah": "analyst_approve", "field": "actor.orgu" },
@@ -2475,6 +2476,119 @@ fn selector_and_wfah_forms_are_untouched() {
         .warnings
         .iter()
         .any(|w| w.code == "c_orgu_anchor_kind_unverifiable"));
+}
+
+// ---- wfah çapası: aksiyon katalogda var mı ----
+//
+// Sahada görülen bozukluk (2026-08-20): aksiyon editörde yeniden adlandırıldı
+// (`Ba_lat` → `Baslat`), çapa eski adda kaldı. `anchor_from_wfah` adı geçmişte
+// bulamayınca `Ok(None)` döner, kapsam boş çözülür ve o node'da KİMSE yetkilenmez —
+// hiçbir yerde hata yok, akış sessizce durur. Yayın kapısı bu yüzden hatadır.
+
+/// `c_orgu`'yu verilen aksiyona bakan bir wfah çapasıyla kuran kök `listable` kuralı.
+fn with_listable_wfah_anchor(action: &str) -> Value {
+    let mut v = fixture_value();
+    v["listable"][0]["c_a"]["c_orgu"] = json!({
+        "from": { "wfah": action, "field": "actor.orgu" },
+        "traverse": "self",
+    });
+    v
+}
+
+#[test]
+fn wfah_anchor_to_unknown_action_is_error() {
+    assert!(has_error(
+        &validate_value(with_listable_wfah_anchor("Ba_lat")),
+        "c_orgu_anchor_unknown_action"
+    ));
+}
+
+#[test]
+fn wfah_anchor_to_known_action_is_valid() {
+    let report = validate_value(with_listable_wfah_anchor("analyst_approve"));
+    assert!(
+        !has_error(&report, "c_orgu_anchor_unknown_action"),
+        "katalogdaki aksiyona bakan çapa geçerli olmalı: {:#?}",
+        report.errors
+    );
+}
+
+#[test]
+fn wfah_anchor_error_carries_the_from_path() {
+    // Yol sözleşmesi ctx-anchor kurallarıyla aynı (`<site>.from`) — editör hatayı
+    // o yol üzerinden alanın yanına basıyor.
+    let report = validate_value(with_listable_wfah_anchor("olmayan_aksiyon"));
+    let issue = report
+        .errors
+        .iter()
+        .find(|e| e.code == "c_orgu_anchor_unknown_action")
+        .expect("hata bekleniyor");
+    assert_eq!(issue.path, "listable[0].c_a.c_orgu.from");
+    assert!(
+        issue.message.contains("olmayan_aksiyon"),
+        "mesaj ölü adı taşımalı: {}",
+        issue.message
+    );
+}
+
+#[test]
+fn wfah_anchor_in_node_c_a_is_checked() {
+    let mut v = fixture_value();
+    v["nodes"]["type_branch__branchClerk"]["c_a"]["c_orgu"] = json!({
+        "from": { "wfah": "olmayan_aksiyon", "field": "actor.orgu" },
+        "traverse": "self",
+    });
+    assert!(has_error(
+        &validate_value(v),
+        "c_orgu_anchor_unknown_action"
+    ));
+}
+
+#[test]
+fn wfah_anchor_in_wf_admin_is_checked() {
+    // Yürüyüş YAPISALDIR (`collect_key_sites`): `c_a` dışındaki grant yüzeyleri de
+    // kendiliğinden kapsanmalı, yoksa kural yüzey yüzey elle sayılırdı.
+    let mut v = fixture_value();
+    v["wf_admin"] = json!([{
+        "c_a": {
+            "c_orgu": {
+                "from": { "wfah": "olmayan_aksiyon", "field": "actor.orgu" },
+                "traverse": "self",
+            },
+            "c_r": ["branchManager"],
+        },
+    }]);
+    assert!(has_error(
+        &validate_value(v),
+        "c_orgu_anchor_unknown_action"
+    ));
+}
+
+#[test]
+fn wfah_anchor_in_x_visibility_is_checked() {
+    // Context şemasının içindeki `x-visibility` de aynı çapa biçimini taşıyabilir.
+    let mut v = fixture_value();
+    v["context"]["properties"]["credit_score"]["x-visibility"] = json!({
+        "c_orgu": {
+            "from": { "wfah": "olmayan_aksiyon", "field": "actor.orgu" },
+            "traverse": "self",
+        },
+        "c_r": ["creditAnalyst"],
+    });
+    assert!(has_error(
+        &validate_value(v),
+        "c_orgu_anchor_unknown_action"
+    ));
+}
+
+#[test]
+fn ctx_anchor_does_not_trigger_the_action_rule() {
+    // `from` STRING olduğunda kural hiç konuşmamalı — aksi halde her ctx çapası
+    // "aksiyon değil" diye reddedilirdi.
+    assert!(!has_error(
+        &validate_value(with_listable_anchor("$ctx.applicant")),
+        "c_orgu_anchor_unknown_action"
+    ));
 }
 
 // ---- c_u: sabit kimlik ↔ context referansı ----

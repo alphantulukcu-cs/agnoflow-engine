@@ -61,6 +61,18 @@ Alınan tasarım kararları: `docs/spec/decisions.md`.
   fazla alan eksik, `c_u` hâlâ `Vec<String>`). Motora alan eklenince ORASI da güncellenir.
 - **`docs/spec/schema.json` RUNTIME kapısıdır** (`wfe_core::schema`, `include_str!` ile gömülü): `Wfd::from_value_checked`/`from_json_checked` upload/publish/submit/approve/**fetch**, `/wfd/validate`, `/wfe/simulate` ve senaryo koşumunda şemayı zorlar — serde `minItems`/`pattern` bilmez, elle yazılan JSON o boşluktan giriyordu (`"c_r": []`). Taslak KAYDI kapsam dışı; ham `from_value` testler için açık. Şema değişirse frontend kopyası (`src/schema/wfd.schema.json`) birlikte güncellenir.
 
+- **Senaryo sidecar'ında `folders` alanı FRONTEND'e aittir** (2026-08-20). `ScenarioSet`
+  onu bilmez ve bilmesi de gerekmiyor: `put_scenarios` gövdeyi doğrulamak için
+  `ScenarioSet`'e deserialize ediyor ama **ham `body`'yi saklıyor**
+  (`save_scenarios(id, ver, &body)`), `get_scenarios` da saklananı olduğu gibi
+  döndürüyor. `ScenarioSet` üzerinde `deny_unknown_fields` OLMADIĞI için alan
+  doğrulamayı geçer ve round-trip'te yaşar. Editör bunu BOŞ KLASÖRLERİ saklamak için
+  kullanıyor (klasör normalde senaryonun `path`inden türer, dolayısıyla boş klasörün
+  tutunacağı yer yoktu).
+  **`ScenarioSet`e `deny_unknown_fields` EKLENMEZ** — eklenirse kullanıcının açtığı boş
+  klasörler sessizce kaybolur. Alanı motorun de tanımasına gerek yoksa dokunmayın;
+  tanıması gerekirse frontend tarafı `src/utils/scenarioSidecar.ts` ile birlikte güncellenir.
+
 ## Çalışma kuralları
 
 - Her değişiklikten sonra `cargo test --workspace`; golden fixture (`docs/spec/examples/kredi-basvuru.golden.json`) DEĞİŞTİRİLMEZ — kod fixture'a uyar. (Tek istisna: WOR-70/2026-07-29, spec değişikliği gereği kullanıcı onayıyla. Kural yürürlükte.) Fixture'ların `crates/wfe-core/tests/fixtures/` kopyaları senkron tutulur.

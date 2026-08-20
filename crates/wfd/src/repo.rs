@@ -224,7 +224,7 @@ pub async fn set_pending(
     let n = sqlx::query(
         &format!(
         "UPDATE wf.wfd_meta SET status='pending_approval', submitted_by=$3, review_note=NULL, \
-             updated_at=now(), lock_user_id=NULL, lock_acquired_at=NULL \
+             updated_at=now(), lock_user_id=NULL, lock_acquired_at=NULL, lock_heartbeat_at=NULL \
          WHERE wfd_id=$1 AND version=$2 AND status='draft' AND {}",
         lock_held(4))
     )
@@ -292,7 +292,7 @@ pub async fn set_published(
     let n = sqlx::query(
         &format!(
         "UPDATE wf.wfd_meta SET status='published', updated_at=now(), \
-             lock_user_id=NULL, lock_acquired_at=NULL \
+             lock_user_id=NULL, lock_acquired_at=NULL, lock_heartbeat_at=NULL \
          WHERE wfd_id=$1 AND version=$2 AND status='draft' AND {}",
         lock_held(3)),
     )
@@ -395,19 +395,30 @@ pub async fn resolve_doc(
 pub const LOCK_HELD_BY_OTHER: &str = "draft.locked";
 pub const LOCK_REQUIRED: &str = "draft.lock_required";
 
-/// Kilidi ALIR — tek ifade, `WHERE` cümlesi CAS görevi yapar.
+/// Heartbeat sessizliği eşiği — istemci ping aralığından (bkz. frontend
+/// `useDraftLock.ts` `HEARTBEAT_INTERVAL_MS`, 60s) kasıtlı olarak kat kat büyük:
+/// arka plana alınmış sekmede tarayıcı zamanlayıcıyı kısar (1 dk'ya kadar), eşik
+/// dar tutulursa hâlâ açık bir sekmenin kilidi yanlışlıkla stale sayılıp
+/// devralınabilir. Bu eşik yalnız GERÇEK sessizlikte (çökme/force-kill/ağ
+/// kopması — `pagehide` de ateşlenmeyen durumlar) devreye girer.
+const LOCK_STALE_AFTER: &str = "5 minutes";
+
+/// Kilidi ALIR — tek ifade, `WHERE` cümlesi CAS görevi yapar. Aynı çağrı
+/// HEARTBEAT'tir de: istemci kilit bizdeyken bunu periyodik çağırır, `lock_user_id
+/// = $4` dalı etkisizdir ama `lock_heartbeat_at` yine `now()`a çekilir.
 ///
-/// Kilit SÜRESİZ: sahibi taslağı bırakana kadar (ya da publish/submit ile satır
-/// taslak olmaktan çıkana kadar) onda kalır. Bu yüzden "tazeleme" diye bir iş yok;
-/// kilit zaten bizdeyse çağrı ETKİSİZDİR (`lock_user_id = $4` dalı), istemcinin
-/// "aldım mı, zaten benim mi" ayrımını yapması gerekmez.
+/// Kilit SÜRESİZ: sahibi taslağı bırakana (ya da publish/submit ile satır taslak
+/// olmaktan çıkana, ya da heartbeat `LOCK_STALE_AFTER` kadar sessiz kalıp
+/// başkasına devredilene) kadar onda kalır.
 ///
-/// `lock_acquired_at` mevcut değeri KORUR (`COALESCE`): "bu kişi bu taslağı ne
-/// zamandır tutuyor" sorusu ancak böyle cevaplanır.
+/// `lock_acquired_at` YALNIZ AYNI SAHİP tazelerken KORUNUR (`CASE`): "bu kişi bu
+/// taslağı ne zamandır tutuyor" sorusu ancak böyle cevaplanır. Stale kilit
+/// BAŞKASINA devredilirken (`lock_user_id` eski sahibi taşıyordu) bu artık YENİ
+/// bir sahiplik olduğu için `now()`a sıfırlanır.
 ///
-/// Sıfır satır → ya başkasında kilit var ya satır draft değil. İkisini ayırmak için
-/// satır ayrıca okunur; ayrım önemlidir çünkü istemci "Ahmet'te" ile "bu artık
-/// taslak değil" durumlarında farklı davranır.
+/// Sıfır satır → ya başkasında (canlı) kilit var ya satır draft değil. İkisini
+/// ayırmak için satır ayrıca okunur; ayrım önemlidir çünkü istemci "Ahmet'te" ile
+/// "bu artık taslak değil" durumlarında farklı davranır.
 pub async fn acquire_lock(
     pool: &PgPool,
     wfd_id: Uuid,
@@ -418,9 +429,11 @@ pub async fn acquire_lock(
     let updated = sqlx::query_as::<_, WfdMeta>(&format!(
         "UPDATE wf.wfd_meta \
          SET lock_user_id = $4, \
-             lock_acquired_at = COALESCE(lock_acquired_at, now()) \
+             lock_acquired_at = CASE WHEN lock_user_id = $4 THEN lock_acquired_at ELSE now() END, \
+             lock_heartbeat_at = now() \
          WHERE wfd_id = $1 AND version = $2 AND orgtnt_id = $3 AND status = 'draft' \
-           AND (lock_user_id IS NULL OR lock_user_id = $4) \
+           AND (lock_user_id IS NULL OR lock_user_id = $4 \
+                OR lock_heartbeat_at < now() - interval '{LOCK_STALE_AFTER}') \
          RETURNING {COLS}"
     ))
     .bind(wfd_id)
@@ -454,7 +467,7 @@ pub async fn release_lock(
 ) -> Result<(), WfdError> {
     let n = sqlx::query(
         "UPDATE wf.wfd_meta \
-         SET lock_user_id = NULL, lock_acquired_at = NULL \
+         SET lock_user_id = NULL, lock_acquired_at = NULL, lock_heartbeat_at = NULL \
          WHERE wfd_id = $1 AND version = $2 AND orgtnt_id = $3 AND lock_user_id = $4",
     )
     .bind(wfd_id)
@@ -487,7 +500,7 @@ pub async fn force_release_lock(
 ) -> Result<(), WfdError> {
     let n = sqlx::query(
         "UPDATE wf.wfd_meta \
-         SET lock_user_id = NULL, lock_acquired_at = NULL \
+         SET lock_user_id = NULL, lock_acquired_at = NULL, lock_heartbeat_at = NULL \
          WHERE wfd_id = $1 AND version = $2 AND orgtnt_id = $3",
     )
     .bind(wfd_id)

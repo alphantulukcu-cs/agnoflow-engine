@@ -15,8 +15,9 @@ use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
-    AutoexecDef, AutoexecType, COrgu, CaGrantRule, CandidateActor, ClaimTimeout,
-    EscalationStep, Wfd, WfesEffects, Wft, WftTarget, JoinRule,};
+    AutoexecDef, AutoexecType, COrgu, CaGrantRule, CandidateActor, ClaimTimeout, EscalationStep,
+    JoinRule, Wfd, WfesEffects, Wft, WftTarget,
+};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
@@ -78,7 +79,11 @@ impl OrgPort for StrictAnchorOrg {
             return Err(EngineError::OrgPort(format!("not found: orgu {anchor}")));
         }
         Ok(vec![OrgUnit {
-            orgu_id: if anchor.is_nil() { Uuid::new_v4() } else { anchor },
+            orgu_id: if anchor.is_nil() {
+                Uuid::new_v4()
+            } else {
+                anchor
+            },
             orgu_type: json!({"type": "branch"}),
             path: "1".into(),
         }])
@@ -186,6 +191,19 @@ fn start_input() -> Value {
 
 /// self__creditAnalyst node'unda bekleyen, analiste atanmış bir WFES kurar.
 fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
+    wfes_at_visited(node, assigned, ctx, vec![])
+}
+
+/// K-2: geri gönderme testleri için "bu WFE şu node'lardan geçti" kurulumu.
+/// `wfes_at` bunun boş-geçmişli hâlidir — çekirdek `visited_nodes` fonksiyonu
+/// `current_node`u zaten kümeye koyduğu için geri gönderme DIŞINDAKİ testler
+/// etkilenmez.
+fn wfes_at_visited(
+    node: &str,
+    assigned: Option<Uuid>,
+    ctx: Value,
+    visited: Vec<String>,
+) -> Wfes {
     let system = Actor {
         orgu_id: Uuid::nil(),
         user_id: Uuid::nil(),
@@ -202,6 +220,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         dynctx: DynCtx(ctx),
         wfah,
         status: WfeStatus::Active,
+        visited_nodes: visited,
         current_node: Some(node.into()),
         end_terminal: None,
         assigned_to: assigned,
@@ -1065,7 +1084,15 @@ async fn missing_required_input_is_rejected() {
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
     let err = engine
-        .apply(&golden(), &wfes, &m, "manager_decide", &json!({}), None, None)
+        .apply(
+            &golden(),
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({}),
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
@@ -1218,7 +1245,10 @@ async fn owner_sees_available_actions() {
         .await
         .unwrap();
     assert_eq!(
-        actions.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(),
+        actions
+            .iter()
+            .map(|a| a.action.as_str())
+            .collect::<Vec<_>>(),
         vec!["manager_decide"]
     );
     // Düz aksiyon: hedef seçimi YOK (alan API'de de hiç çıkmaz).
@@ -1233,26 +1263,39 @@ async fn owner_sees_available_actions() {
     assert!(actions.is_empty());
 }
 
-// ============================================== GLB — `wft: {targets}` runtime (api-contract-v2)
+// ================================ GERİ GÖNDER — `wft: {targets}` runtime (api-contract-v2)
 //
 // Tasarım-zamanı kuralları `tests/validator.rs`te. Buradakiler ÇALIŞMA ANI sözleşmesi:
 // hedefi artık aksiyon anahtarı değil, isteğin `target` alanı taşır. Menü aksiyonun
 // PARÇASIDIR — bu yüzden "hedef verilmedi" ile "hedef uydurulmuş" AYRI hatalardır,
 // ikisi de commit'e hiç ulaşmaz.
 
-/// `t_manager_decide`ı GLB'ye çevirir (validator testindeki `with_global_targets`in
-/// ikizi): tek transition, hedef menüsü `self__creditAnalyst`. Yetim kalan
-/// `terminal_rejected` düşürülür — GLB hedefleri node'dur, terminal hedefleyemez.
-fn golden_with_global_targets() -> Wfd {
+/// `t_manager_decide`ı geri göndermeye çevirir (validator testindeki `with_send_back`in
+/// ikizi): aksiyon REZERVE `send_back`, hedef menüsü `self__creditAnalyst` ve hedefin
+/// KENDİ etiketi. Yetim kalan `terminal_rejected` düşürülür — hedefler node'dur,
+/// terminal hedeflenemez. Aksiyon katalog girdisi taban aksiyondan kopyalanır: girdi
+/// bildirimi (`manager_decision`) aynı kalsın ki `wfes_effects` sözleşmesi (WOR-70)
+/// bozulmasın.
+fn golden_with_send_back() -> Wfd {
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    v["transitions"][1]["wft"] = json!({ "targets": [{"node": "self__creditAnalyst"}] });
+    let base = v["actions"]["manager_decide"].clone();
+    v["actions"]["send_back"] = base;
+    // Rezerve aksiyonun adı sabittir, gösterim metni de — `label` YAZILMAZ.
+    v["actions"]["send_back"]["label"] = Value::Null;
+    if let Some(o) = v["actions"]["send_back"].as_object_mut() {
+        o.remove("label");
+    }
+    v["transitions"][1]["action"] = json!("send_back");
+    v["transitions"][1]["wft"] = json!({
+        "targets": [{"node": "self__creditAnalyst", "label": "Başa Gönder"}]
+    });
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
-    Wfd::from_value_checked(v).expect("GLB belgesi şema kapısından geçmeli")
+    Wfd::from_value_checked(v).expect("geri gönderme belgesi şema kapısından geçmeli")
 }
 
-fn glb_engine_parts() -> (MockOrg, MockRunner) {
+fn send_back_engine_parts() -> (MockOrg, MockRunner) {
     (
         MockOrg {
             role_assigned: true,
@@ -1262,22 +1305,29 @@ fn glb_engine_parts() -> (MockOrg, MockRunner) {
 }
 
 #[tokio::test]
-async fn global_action_moves_to_the_chosen_target() {
-    let (org, runner) = glb_engine_parts();
+async fn send_back_moves_to_the_chosen_target() {
+    let (org, runner) = send_back_engine_parts();
     let engine = Engine {
         org: &org,
         exec: &runner,
         env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
-    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    // K-2: bu WFE analist havuzundan geçip müdüre geldi — geri gönderme hedefi
+    // ancak UĞRANMIŞ bir node olabilir.
+    let wfes = wfes_at_visited(
+        "self__branchManager",
+        Some(m.user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
 
     let commit = engine
         .apply(
-            &golden_with_global_targets(),
+            &golden_with_send_back(),
             &wfes,
             &m,
-            "manager_decide",
+            "send_back",
             &json!({"manager_decision": "reject"}),
             None,
             Some("self__creditAnalyst"),
@@ -1293,36 +1343,40 @@ async fn global_action_moves_to_the_chosen_target() {
     assert_eq!(commit.new_dynctx.get("target"), None);
     assert_eq!(commit.new_dynctx.get("hedef"), None);
     // WFAH'a yazılan ad TABAN aksiyondur; hedef anahtara kodlanmaz (`__gt__` kalktı) —
-    // yayınlanmış akışların `count($wfah, #.action == "manager_decide")` sayımı bozulmaz.
-    assert!(commit
-        .wfah_entries
-        .iter()
-        .any(|e| e.action == "manager_decide"));
+    // yayınlanmış akışların `count($wfah, #.action == "send_back")` sayımı bozulmaz.
+    assert!(commit.wfah_entries.iter().any(|e| e.action == "send_back"));
 }
 
 #[tokio::test]
-async fn global_action_without_a_target_is_rejected() {
-    let (org, runner) = glb_engine_parts();
+async fn send_back_without_a_target_is_rejected() {
+    let (org, runner) = send_back_engine_parts();
     let engine = Engine {
         org: &org,
         exec: &runner,
         env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
-    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    // K-2: bu WFE analist havuzundan geçip müdüre geldi — geri gönderme hedefi
+    // ancak UĞRANMIŞ bir node olabilir.
+    let wfes = wfes_at_visited(
+        "self__branchManager",
+        Some(m.user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
 
     let err = engine
         .apply(
-            &golden_with_global_targets(),
+            &golden_with_send_back(),
             &wfes,
             &m,
-            "manager_decide",
+            "send_back",
             &json!({"manager_decision": "reject"}),
             None,
             None,
         )
         .await
-        .expect_err("hedefsiz GLB uygulanmamalı");
+        .expect_err("hedefsiz geri gönderme uygulanmamalı");
     assert!(
         matches!(err, EngineError::TargetRequired),
         "beklenen TargetRequired, gelen: {err:?}"
@@ -1330,25 +1384,32 @@ async fn global_action_without_a_target_is_rejected() {
 }
 
 #[tokio::test]
-async fn global_action_with_an_unlisted_target_is_rejected() {
-    let (org, runner) = glb_engine_parts();
+async fn send_back_with_an_unlisted_target_is_rejected() {
+    let (org, runner) = send_back_engine_parts();
     let engine = Engine {
         org: &org,
         exec: &runner,
         env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
-    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    // K-2: bu WFE analist havuzundan geçip müdüre geldi — geri gönderme hedefi
+    // ancak UĞRANMIŞ bir node olabilir.
+    let wfes = wfes_at_visited(
+        "self__branchManager",
+        Some(m.user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
 
     // `self__branchManager` belgede GERÇEK bir node — ama bu aksiyonun menüsünde YOK.
     // Kapı "node var mı"ya değil "menüde mi"ye bakmalı, aksi halde istemci istediği
     // node'a atlayarak grafı dolanırdı.
     let err = engine
         .apply(
-            &golden_with_global_targets(),
+            &golden_with_send_back(),
             &wfes,
             &m,
-            "manager_decide",
+            "send_back",
             &json!({"manager_decision": "reject"}),
             None,
             Some("self__branchManager"),
@@ -1363,14 +1424,21 @@ async fn global_action_with_an_unlisted_target_is_rejected() {
 
 #[tokio::test]
 async fn a_plain_action_rejects_a_target() {
-    let (org, runner) = glb_engine_parts();
+    let (org, runner) = send_back_engine_parts();
     let engine = Engine {
         org: &org,
         exec: &runner,
         env: Default::default(),
     };
     let m = manager(Uuid::new_v4());
-    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    // K-2: bu WFE analist havuzundan geçip müdüre geldi — geri gönderme hedefi
+    // ancak UĞRANMIŞ bir node olabilir.
+    let wfes = wfes_at_visited(
+        "self__branchManager",
+        Some(m.user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
 
     // Sessizce YOK SAYMAK yanlış olurdu: istemci hedef seçtiğini sanır, motor
     // başka yere götürür. Açık hata, sessiz sapmadan iyidir.
@@ -1394,7 +1462,73 @@ async fn a_plain_action_rejects_a_target() {
 
 #[tokio::test]
 async fn possible_actions_offers_the_target_menu() {
-    let (org, runner) = glb_engine_parts();
+    let (org, runner) = send_back_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    // K-2: bu WFE analist havuzundan geçip müdüre geldi — geri gönderme hedefi
+    // ancak UĞRANMIŞ bir node olabilir.
+    let wfes = wfes_at_visited(
+        "self__branchManager",
+        Some(m.user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
+
+    let actions = engine
+        .possible_actions(&golden_with_send_back(), &wfes, &m, None)
+        .await
+        .unwrap();
+    let glb = actions
+        .iter()
+        .find(|a| a.action == "send_back")
+        .expect("geri gönderme aksiyonu listede olmalı");
+    let targets = glb
+        .targets
+        .as_deref()
+        .expect("hedef menüsü aksiyonun parçasıdır");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].node, "self__creditAnalyst");
+    // Hedefin KENDİ etiketi çekirdekten HAM geçer — çözüm (`node_label`'a düşme)
+    // adapter'ın işi, çekirdek gösterim üretmez.
+    assert_eq!(targets[0].label.as_deref(), Some("Başa Gönder"));
+}
+
+// ---- K-2: hedef menüsü UĞRANMIŞ node'larla kesişir (2026-08-21) ----
+
+/// Belgede hedef var ama WFE o node'a HİÇ uğramadı → menüde ÇIKMAZ. Uğranmamış bir
+/// node'a "geri" göndermek geri gönderme değil ileri atlamadır.
+#[tokio::test]
+async fn unvisited_targets_are_dropped_from_the_menu() {
+    let (org, runner) = send_back_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    // Geçmiş BOŞ: yalnız bulunulan node bilinir. Menüdeki tek hedef
+    // (`self__creditAnalyst`) uğranmadığı için aksiyon HİÇ sunulmaz.
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    let actions = engine
+        .possible_actions(&golden_with_send_back(), &wfes, &m, None)
+        .await
+        .unwrap();
+    assert!(
+        !actions.iter().any(|a| a.action == "send_back"),
+        "uğranmamış tek hedefli menü boş kalır → aksiyon sunulmaz: {actions:?}"
+    );
+}
+
+/// Menü boş kalınca aksiyon SUNULMAZ ama apply da kabul ETMEZ — iki kapı aynı kümeye
+/// bakar. İstemci menüyü atlayıp doğrudan istek atarsa hedef reddedilir.
+#[tokio::test]
+async fn apply_rejects_an_unvisited_target() {
+    let (org, runner) = send_back_engine_parts();
     let engine = Engine {
         org: &org,
         exec: &runner,
@@ -1403,19 +1537,119 @@ async fn possible_actions_offers_the_target_menu() {
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
+    let err = engine
+        .apply(
+            &golden_with_send_back(),
+            &wfes,
+            &m,
+            "send_back",
+            &json!({"manager_decision": "reject"}),
+            None,
+            Some("self__creditAnalyst"),
+        )
+        .await
+        .expect_err("uğranmamış hedef reddedilmeli");
+    assert!(
+        matches!(err, EngineError::TargetInvalid(_)),
+        "beklenen TargetInvalid, gelen: {err:?}"
+    );
+}
+
+/// START node'u `visited_nodes` listesinde YOKTUR (start satırının `from_node`'u NULL,
+/// `to_node`'u ilk havuzdur) — çekirdek onu `wfd.start[]`ten ekler. "Başa gönder"in
+/// çalışması buna bağlıdır.
+#[tokio::test]
+async fn the_start_node_counts_as_visited() {
+    let (org, runner) = send_back_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+    // Menü YALNIZ start node'unu gösteriyor; geçmiş listesi BOŞ.
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    let start_node = v["start"][0]["from"].as_str().unwrap().to_string();
+    let start_action = v["start"][0]["action"].as_str().unwrap().to_string();
+    let base = v["actions"]["manager_decide"].clone();
+    v["actions"]["send_back"] = base;
+    v["transitions"][1]["action"] = json!("send_back");
+    v["transitions"][1]["wft"] = json!({ "targets": [{"node": start_node, "label": "Başa Gönder"}] });
+    if let Some(terminals) = v["terminals"].as_array_mut() {
+        terminals.retain(|t| t["id"] != json!("terminal_rejected"));
+    }
+    let wfd = Wfd::from_value_checked(v).expect("belge şema kapısından geçmeli");
+
+    // WFAH'ın ilk kaydı start aksiyonudur — çekirdek start node'unu oradan bulur.
+    let mut wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+    wfes.wfah = Wfah::empty().push(
+        start_action,
+        Actor {
+            orgu_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            role: "system".into(),
+        },
+        None,
+    );
+
     let actions = engine
-        .possible_actions(&golden_with_global_targets(), &wfes, &m, None)
+        .possible_actions(&wfd, &wfes, &m, None)
         .await
         .unwrap();
-    let glb = actions
+    let sb = actions
         .iter()
-        .find(|a| a.action == "manager_decide")
-        .expect("GLB aksiyonu listede olmalı");
-    assert_eq!(
-        glb.targets.as_deref(),
-        Some(["self__creditAnalyst".to_string()].as_slice()),
-        "hedef menüsü aksiyonun parçası olarak sunulmalı"
+        .find(|a| a.action == "send_back")
+        .expect("başa gönder sunulmalı");
+    let targets = sb.targets.as_deref().expect("menü");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].node, start_node);
+    assert_eq!(targets[0].label.as_deref(), Some("Başa Gönder"));
+}
+
+/// Kısmi kesişim: uğranmış hedef KALIR, uğranmamış DÜŞER; belgedeki SIRA korunur.
+#[tokio::test]
+async fn the_menu_keeps_document_order_and_drops_only_the_unvisited() {
+    let (org, runner) = send_back_engine_parts();
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let m = manager(Uuid::new_v4());
+
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    let base = v["actions"]["manager_decide"].clone();
+    v["actions"]["send_back"] = base;
+    v["transitions"][1]["action"] = json!("send_back");
+    // Belge sırası: HİÇ uğranmamış → uğranmış. Süzgeç sırayı değiştirmemeli.
+    v["transitions"][1]["wft"] = json!({
+        "targets": [
+            {"node": "parent__creditDeptManager", "label": "Departmana Gönder"},
+            {"node": "self__creditAnalyst", "label": "Analiste Gönder"}
+        ]
+    });
+    if let Some(terminals) = v["terminals"].as_array_mut() {
+        terminals.retain(|t| t["id"] != json!("terminal_rejected"));
+    }
+    let wfd = Wfd::from_value_checked(v).expect("belge şema kapısından geçmeli");
+
+    let wfes = wfes_at_visited(
+        "self__branchManager",
+        Some(m.user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
     );
+    let actions = engine.possible_actions(&wfd, &wfes, &m, None).await.unwrap();
+    let targets = actions
+        .iter()
+        .find(|a| a.action == "send_back")
+        .expect("aksiyon sunulmalı")
+        .targets
+        .as_deref()
+        .expect("menü");
+    assert_eq!(targets.len(), 1, "uğranmamış hedef düşmeli: {targets:?}");
+    assert_eq!(targets[0].node, "self__creditAnalyst");
+    assert_eq!(targets[0].label.as_deref(), Some("Analiste Gönder"));
 }
 
 // ================================================================ escalation (M6)
@@ -2407,6 +2641,7 @@ fn parallel_wfes(branches: Vec<BranchState>, join: WftTarget, ctx: Value) -> Wfe
         dynctx: DynCtx(ctx),
         wfah,
         status: WfeStatus::Active,
+        visited_nodes: vec![],
         current_node: None,
         end_terminal: None,
         assigned_to: None,
@@ -2451,7 +2686,15 @@ async fn start_review_forks_into_three_branches() {
     let wfes = wfes_at("self__coordinator", Some(coord.user_id), parallel_ctx());
 
     let commit = engine
-        .apply(&paralel(), &wfes, &coord, "start_review", &json!({}), None, None)
+        .apply(
+            &paralel(),
+            &wfes,
+            &coord,
+            "start_review",
+            &json!({}),
+            None,
+            None,
+        )
         .await
         .unwrap();
 
@@ -2722,7 +2965,10 @@ async fn last_branch_arrival_completes_join_to_node() {
         .await
         .unwrap();
 
-    let CommitOutcome::JoinComplete { from_node, next, .. } = &commit.outcome else {
+    let CommitOutcome::JoinComplete {
+        from_node, next, ..
+    } = &commit.outcome
+    else {
         panic!("JoinComplete bekleniyordu: {:?}", commit.outcome);
     };
     assert_eq!(from_node, "self__hrApprover");
@@ -2778,7 +3024,10 @@ async fn last_branch_arrival_completes_join_to_terminal() {
         .await
         .unwrap();
 
-    let CommitOutcome::JoinComplete { from_node, next, .. } = &commit.outcome else {
+    let CommitOutcome::JoinComplete {
+        from_node, next, ..
+    } = &commit.outcome
+    else {
         panic!("JoinComplete bekleniyordu: {:?}", commit.outcome);
     };
     assert_eq!(from_node, "self__hrApprover");
@@ -3889,7 +4138,10 @@ async fn required_input_allows_null_in_undeclared_subfield() {
         .await
         .expect("bildirilmemiş alt alanın null'u geçerli");
     assert_eq!(new.initial_dynctx["applicant"]["income"], Value::Null);
-    assert_eq!(new.initial_dynctx["applicant"]["name"], json!("Ayşe Yılmaz"));
+    assert_eq!(
+        new.initial_dynctx["applicant"]["name"],
+        json!("Ayşe Yılmaz")
+    );
 }
 
 #[tokio::test]
@@ -3954,7 +4206,15 @@ async fn apply_approve(wfes: &Wfes, actor: &Actor, node: &str) -> CommitOutcome 
         env: Default::default(),
     };
     engine
-        .apply(&paralel(), wfes, actor, "approve", &json!({}), Some(node), None)
+        .apply(
+            &paralel(),
+            wfes,
+            actor,
+            "approve",
+            &json!({}),
+            Some(node),
+            None,
+        )
         .await
         .expect("aksiyon uygulanmalı")
         .outcome
@@ -4017,7 +4277,9 @@ async fn expr_join_completes_when_and_side_satisfied() {
                     "self__legalApprover".to_string()
                 ]
             );
-            assert!(matches!(*next, CommitOutcome::MoveTo { ref node } if node == "self__resultCoordinator"));
+            assert!(
+                matches!(*next, CommitOutcome::MoveTo { ref node } if node == "self__resultCoordinator")
+            );
         }
         other => panic!("JoinComplete beklendi: {other:?}"),
     }
@@ -4127,7 +4389,9 @@ fn test_engine<'a>(org: &'a MockOrg, runner: &'a MockRunner) -> Engine<'a> {
 /// WF Admin, node'un `reassign` kuralı OLMASA da devredebilir — "tek yerde ayarla".
 #[tokio::test]
 async fn wf_admin_can_reassign_on_node_without_reassign_rule() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4154,7 +4418,9 @@ async fn wf_admin_can_reassign_on_node_without_reassign_rule() {
 /// ayrımı gerekir.
 #[tokio::test]
 async fn wf_admin_reassign_marker_records_via() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4174,7 +4440,9 @@ async fn wf_admin_reassign_marker_records_via() {
 /// Node'un kendi kuralıyla gelen devir `via` TAŞIMAZ — eski kayıtların şekli korunur.
 #[tokio::test]
 async fn node_reassign_path_does_not_record_via() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_reassign(); // wf_admin YOK
@@ -4199,7 +4467,9 @@ async fn node_reassign_path_does_not_record_via() {
 /// hiçbir aksiyon alamaz — WF Admin akışı kilitlemiş olurdu.
 #[tokio::test]
 async fn wf_admin_reassign_still_requires_eligible_target() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4220,7 +4490,9 @@ async fn wf_admin_reassign_still_requires_eligible_target() {
 /// Kural eşleşmiyorsa yetki yok (kapı `wf_admin` VARLIĞIYLA açılmaz).
 #[tokio::test]
 async fn non_matching_wf_admin_rule_does_not_authorize_reassign() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let mut wfd = golden_with_wf_admin(None);
@@ -4241,7 +4513,9 @@ async fn non_matching_wf_admin_rule_does_not_authorize_reassign() {
 /// `when` guard'ı false ise yetki yok.
 #[tokio::test]
 async fn wf_admin_when_guard_false_does_not_authorize() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(Some("false"));
@@ -4263,7 +4537,9 @@ async fn wf_admin_when_guard_false_does_not_authorize() {
 /// Atlama marker'ı `:skipped` sonekiyle yazılır ve geçiş UYGULANMAZ.
 #[tokio::test]
 async fn skip_escalation_writes_skipped_marker() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4281,13 +4557,18 @@ async fn skip_escalation_writes_skipped_marker() {
     assert_eq!(skip.node, "self__creditAnalyst");
     assert_eq!(skip.marker, "escalate:self__creditAnalyst:0:skipped");
     assert_eq!(skip.entry.action, skip.marker);
-    assert_eq!(skip.entry.actor.user_id, admin.user_id, "iz admini gösterir");
+    assert_eq!(
+        skip.entry.actor.user_id, admin.user_id,
+        "iz admini gösterir"
+    );
 }
 
 /// Atlanan adım bir daha ateşlenmez.
 #[tokio::test]
 async fn skipped_escalation_step_does_not_refire() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4324,7 +4605,9 @@ async fn skipped_escalation_step_does_not_refire() {
 /// taşımasa tüm sayaçlar sessizce sıfırlanırdı.
 #[tokio::test]
 async fn skipping_does_not_shift_the_escalation_base() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let mut wfd = golden_with_wf_admin(None);
@@ -4388,7 +4671,9 @@ async fn skipping_does_not_shift_the_escalation_base() {
 /// Escalation müdahalesi `node.reassign` ile AÇILMAZ — farklı bir güç.
 #[tokio::test]
 async fn skip_escalation_requires_wf_admin() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_reassign(); // node amiri var, wf_admin YOK
@@ -4407,7 +4692,9 @@ async fn skip_escalation_requires_wf_admin() {
 /// Bekleyen adım yoksa cevap `None` — hata değil (route bunu 409'a çevirir).
 #[tokio::test]
 async fn skip_escalation_returns_none_when_no_step_pending() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let mut wfd = golden_with_wf_admin(None);
@@ -4432,7 +4719,9 @@ async fn skip_escalation_returns_none_when_no_step_pending() {
 /// `count($wfah, ...)` sayımları bozulmasın); ayrım AKTÖRDEDİR.
 #[tokio::test]
 async fn manual_fire_uses_same_marker_but_records_admin_actor() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4459,7 +4748,9 @@ async fn manual_fire_uses_same_marker_but_records_admin_actor() {
 /// denetim, yetkisiz bir aktörün akışı ilerletmesi demek olurdu.
 #[tokio::test]
 async fn admin_fire_escalation_requires_wf_admin() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_reassign(); // node amiri var, wf_admin YOK
@@ -4477,7 +4768,9 @@ async fn admin_fire_escalation_requires_wf_admin() {
 /// Yetkili aktör vade gelmeden tetikleyebilir; sonuç adım index'i + commit'tir.
 #[tokio::test]
 async fn admin_fire_escalation_applies_step_before_deadline() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4500,7 +4793,9 @@ async fn admin_fire_escalation_applies_step_before_deadline() {
 /// Bekleyen adım yoksa `None` (rota 409'a çevirir).
 #[tokio::test]
 async fn admin_fire_escalation_returns_none_when_nothing_pending() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let mut wfd = golden_with_wf_admin(None);
@@ -4523,7 +4818,9 @@ async fn admin_fire_escalation_returns_none_when_nothing_pending() {
 /// Spec §6.1/10 — BİTMİŞ akışın sayacı yönetilmez (iki uç da reddeder).
 #[tokio::test]
 async fn escalation_admin_endpoints_reject_terminal_wfe() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4552,7 +4849,9 @@ async fn escalation_admin_endpoints_reject_terminal_wfe() {
 /// kanalı kazanırdı.
 #[tokio::test]
 async fn wf_admin_does_not_grant_action_rights() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
     let engine = test_engine(&org, &runner);
     let wfd = golden_with_wf_admin(None);
@@ -4590,22 +4889,40 @@ async fn wf_admin_does_not_grant_action_rights() {
 /// `when` çalışırken çıkıyordu.)
 #[tokio::test]
 async fn wrong_typed_start_input_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
     input["credit_info"]["amount_requested"] = json!("yüz bin");
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     match &err {
         EngineError::InputTypeMismatch(violations) => {
             assert_eq!(violations.len(), 1, "{violations:?}");
             assert_eq!(violations[0].path, "credit_info.amount_requested");
-            assert!(violations[0].expected.contains("number"), "{:?}", violations[0]);
+            assert!(
+                violations[0].expected.contains("number"),
+                "{:?}",
+                violations[0]
+            );
             assert!(violations[0].got.contains("string"), "{:?}", violations[0]);
         }
         other => panic!("tip ihlali beklendi: {other}"),
@@ -4615,12 +4932,26 @@ async fn wrong_typed_start_input_is_rejected() {
 /// Doğru tip geçer — kapı meşru girdiyi engellemez.
 #[tokio::test]
 async fn correctly_typed_start_input_passes() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let actor = clerk(Uuid::new_v4());
     engine
-        .start(&golden(), &actor, Uuid::nil(), None, &start_input(), Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .expect("doğru tipli girdi geçmeli");
 }
@@ -4629,9 +4960,15 @@ async fn correctly_typed_start_input_passes() {
 /// olmayan değer reddedilir.
 #[tokio::test]
 async fn enum_violation_on_apply_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let manager = actor_with_role("branchManager");
     let wfes = wfes_at("self__branchManager", Some(manager.user_id), json!({}));
 
@@ -4660,15 +4997,29 @@ async fn enum_violation_on_apply_is_rejected() {
 /// değerde kullanıcı asıl sorunu ("yol bildirilmemiş") görmeli.
 #[tokio::test]
 async fn undeclared_path_error_wins_over_type_error() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let actor = clerk(Uuid::new_v4());
     let mut input = start_input();
     input["credit_score"] = json!("metin"); // hem tanımsız hem yanlış tip
 
     let err = engine
-        .start(&golden(), &actor, Uuid::nil(), None, &input, Uuid::new_v4(), None)
+        .start(
+            &golden(),
+            &actor,
+            Uuid::nil(),
+            None,
+            &input,
+            Uuid::new_v4(),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
@@ -4687,10 +5038,16 @@ async fn undeclared_path_error_wins_over_type_error() {
 /// Bu, kapı A'nın göremediği sınıftır: değer istekten değil DIŞ SİSTEMDEN geliyor.
 #[tokio::test]
 async fn autoexec_result_with_wrong_type_is_rejected() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     // `MockRunner::ok` skoru `credit_score`a yazıyor; burada METİN döndüren bir runner.
     let runner = MockRunner::with_rest_result(json!({ "score": "yüksek", "grade": "A" }), true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let analyst = actor_with_role("creditAnalyst");
     let wfes = wfes_at("self__creditAnalyst", Some(analyst.user_id), json!({}));
 
@@ -4720,9 +5077,15 @@ async fn autoexec_result_with_wrong_type_is_rejected() {
 /// Doğru tipli autoexec sonucu geçer — kapı meşru akışı engellemez.
 #[tokio::test]
 async fn correctly_typed_autoexec_result_passes() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let analyst = actor_with_role("creditAnalyst");
     let wfes = wfes_at("self__creditAnalyst", Some(analyst.user_id), json!({}));
 
@@ -4746,9 +5109,15 @@ async fn correctly_typed_autoexec_result_passes() {
 /// (`ctx_types::validate_dynctx` → "kapı C") işidir.
 #[tokio::test]
 async fn preexisting_corrupt_field_does_not_block_the_transition() {
-    let org = MockOrg { role_assigned: true };
+    let org = MockOrg {
+        role_assigned: true,
+    };
     let runner = MockRunner::ok(750, "A", true);
-    let engine = Engine { org: &org, exec: &runner, env: Default::default() };
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
     let analyst = actor_with_role("creditAnalyst");
     // `internal_notes` şemada `string`; DB'de sayı olarak duruyor (enforcement öncesi).
     let wfes = wfes_at(

@@ -197,7 +197,7 @@ struct SimApplyBody {
     /// WOR-31 T4: paralel modda kol seçimi (bkz. `routes/wfe.rs::ApplyBody.branch`).
     #[serde(default)]
     branch: Option<String>,
-    /// GLB hedef seçimi (bkz. `routes/wfe.rs::ApplyBody.target`).
+    /// Geri gönderme hedef seçimi (bkz. `routes/wfe.rs::ApplyBody.target`).
     #[serde(default)]
     target: Option<String>,
     /// `$env.*` çözümü — editör header'ındaki ortam seçicisi. Verilmezse boş ortam.

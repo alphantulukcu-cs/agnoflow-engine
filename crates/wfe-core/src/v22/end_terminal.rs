@@ -244,14 +244,17 @@ fn collect_join_terminals(wfd: &Wfd, out: &mut BTreeSet<String>) {
 
 /// Bir `wft`in gidebileceği terminal id'leri. Node hedefleri ilgilendirmez.
 ///
-/// `Wft::Targets` (GLB) yalnız node taşır — şema `GlobalTarget { node }` ile bunu
+/// `Wft::SendBack` yalnız node taşır — şema `SendBackTarget { node, label? }` ile bunu
 /// zorluyor, dolayısıyla terminal üretemez.
 fn collect_wft_terminals(wft: &Wft, out: &mut BTreeSet<String>) {
     match wft {
         Wft::Terminal { terminal } => {
             out.insert(terminal.clone());
         }
-        Wft::Conditional { conditions, default } => {
+        Wft::Conditional {
+            conditions,
+            default,
+        } => {
             for c in conditions {
                 if let Some(t) = &c.terminal {
                     out.insert(t.clone());
@@ -271,7 +274,7 @@ fn collect_wft_terminals(wft: &Wft, out: &mut BTreeSet<String>) {
                 out.insert(terminal.clone());
             }
         }
-        Wft::Node { .. } | Wft::Targets { .. } => {}
+        Wft::Node { .. } | Wft::SendBack { .. } => {}
     }
 }
 
@@ -291,7 +294,10 @@ mod tests {
     #[test]
     fn golden_terminals_are_separable_by_their_response_shape() {
         let wfd = golden();
-        assert!(wfd.terminals.len() >= 2, "fixture en az iki terminal taşımalı");
+        assert!(
+            wfd.terminals.len() >= 2,
+            "fixture en az iki terminal taşımalı"
+        );
         for t in &wfd.terminals {
             // Her terminal'in KENDİ şablonundan üretilmiş bir yanıt yalnız KENDİSİNE uymalı.
             let resp = synth_response(&wfd, &t.id);
@@ -313,7 +319,11 @@ mod tests {
         for (k, v) in &t.wfe_end_response {
             map.insert(
                 k.clone(),
-                if contains_dollar_ref(v) { json!("<runtime>") } else { v.clone() },
+                if contains_dollar_ref(v) {
+                    json!("<runtime>")
+                } else {
+                    v.clone()
+                },
             );
         }
         Value::Object(map)
@@ -324,7 +334,10 @@ mod tests {
         let mut wfd = golden();
         wfd.terminals.truncate(1);
         let id = wfd.terminals[0].id.clone();
-        assert_eq!(infer_end_terminal(&wfd, None, None), EndTerminalGuess::Certain(id));
+        assert_eq!(
+            infer_end_terminal(&wfd, None, None),
+            EndTerminalGuess::Certain(id)
+        );
     }
 
     #[test]
@@ -344,8 +357,13 @@ mod tests {
     fn extra_key_in_stored_response_matches_nothing() {
         let wfd = golden();
         let mut resp = synth_response(&wfd, &wfd.terminals[0].id);
-        resp.as_object_mut().unwrap().insert("sarkan".into(), json!(1));
-        assert_eq!(infer_end_terminal(&wfd, Some(&resp), None), EndTerminalGuess::NoMatch);
+        resp.as_object_mut()
+            .unwrap()
+            .insert("sarkan".into(), json!(1));
+        assert_eq!(
+            infer_end_terminal(&wfd, Some(&resp), None),
+            EndTerminalGuess::NoMatch
+        );
     }
 
     /// Kanıt yoksa karar da yok — belgede iki terminal varken sessizce birini SEÇMEZ.
@@ -377,16 +395,27 @@ mod tests {
             .iter_mut()
             .find(|t| t.action == action && t.from.contains(&node))
             .expect("geçiş");
-        tr.wft = Wft::Terminal { terminal: b.clone() };
+        tr.wft = Wft::Terminal {
+            terminal: b.clone(),
+        };
 
         // Kontrol: erişilebilirlik artık YALNIZ B.
-        let reach = reachable_terminals(&wfd, LastAction { from_node: Some(&node), action: &action });
+        let reach = reachable_terminals(
+            &wfd,
+            LastAction {
+                from_node: Some(&node),
+                action: &action,
+            },
+        );
         assert_eq!(reach.iter().cloned().collect::<Vec<_>>(), vec![b]);
 
         let guess = infer_end_terminal(
             &wfd,
             Some(&resp),
-            Some(LastAction { from_node: Some(&node), action: &action }),
+            Some(LastAction {
+                from_node: Some(&node),
+                action: &action,
+            }),
         );
         assert_eq!(guess, EndTerminalGuess::NoMatch);
     }
@@ -397,12 +426,25 @@ mod tests {
         let wfd = golden();
         let target = &wfd.terminals[0].id;
         let (node, action) = transition_to(&wfd, target).expect("geçiş");
-        let reach = reachable_terminals(&wfd, LastAction { from_node: Some(&node), action: &action });
+        let reach = reachable_terminals(
+            &wfd,
+            LastAction {
+                from_node: Some(&node),
+                action: &action,
+            },
+        );
         // Fixture'da bu geçiş tek terminal'e gidiyorsa `Certain` bekleriz; birden çok
         // hedefi varsa test yalnız "daraltıyor" iddiasını kontrol eder.
         if reach.len() == 1 {
             assert_eq!(
-                infer_end_terminal(&wfd, None, Some(LastAction { from_node: Some(&node), action: &action })),
+                infer_end_terminal(
+                    &wfd,
+                    None,
+                    Some(LastAction {
+                        from_node: Some(&node),
+                        action: &action
+                    })
+                ),
                 EndTerminalGuess::Certain(target.clone()),
             );
         } else {
@@ -416,20 +458,42 @@ mod tests {
         let wfd = golden();
         let target = &wfd.terminals[0].id;
         let (_, action) = transition_to(&wfd, target).expect("geçiş");
-        let reach = reachable_terminals(&wfd, LastAction { from_node: None, action: &action });
-        assert!(reach.contains(target), "aksiyon adıyla da hedefe ulaşılmalı");
+        let reach = reachable_terminals(
+            &wfd,
+            LastAction {
+                from_node: None,
+                action: &action,
+            },
+        );
+        assert!(
+            reach.contains(target),
+            "aksiyon adıyla da hedefe ulaşılmalı"
+        );
     }
 
     /// Tanınmayan aksiyon → boş küme → daraltma YOK (yanlış cevap değil).
     #[test]
     fn unknown_action_does_not_narrow() {
         let wfd = golden();
-        let reach = reachable_terminals(&wfd, LastAction { from_node: None, action: "boyle_aksiyon_yok" });
+        let reach = reachable_terminals(
+            &wfd,
+            LastAction {
+                from_node: None,
+                action: "boyle_aksiyon_yok",
+            },
+        );
         assert!(reach.is_empty());
         // Yanıt kanıtı hâlâ çalışır — erişilebilirlik boşsa devre dışı kalır.
         let resp = synth_response(&wfd, &wfd.terminals[0].id);
         assert_eq!(
-            infer_end_terminal(&wfd, Some(&resp), Some(LastAction { from_node: None, action: "boyle_aksiyon_yok" })),
+            infer_end_terminal(
+                &wfd,
+                Some(&resp),
+                Some(LastAction {
+                    from_node: None,
+                    action: "boyle_aksiyon_yok"
+                })
+            ),
             EndTerminalGuess::Certain(wfd.terminals[0].id.clone()),
         );
     }
@@ -453,7 +517,9 @@ mod tests {
             .find(|t| matches!(t.wft, Wft::Parallel { .. }))
             .expect("paralel fixture bir fork taşımalı");
         if let Wft::Parallel { parallel } = &mut fork.wft {
-            parallel.join = WftTarget::Terminal { terminal: join_terminal.clone() };
+            parallel.join = WftTarget::Terminal {
+                terminal: join_terminal.clone(),
+            };
         }
 
         // Kol içindeki HERHANGİ bir aksiyon: node hedefli, join'i hiç görmüyor.
@@ -464,7 +530,13 @@ mod tests {
             .map(|t| (t.from.iter()[0].to_string(), t.action.clone()))
             .expect("node hedefli bir geçiş olmalı");
 
-        let reach = reachable_terminals(&wfd, LastAction { from_node: Some(&node), action: &action });
+        let reach = reachable_terminals(
+            &wfd,
+            LastAction {
+                from_node: Some(&node),
+                action: &action,
+            },
+        );
         assert!(
             reach.contains(&join_terminal),
             "join terminal'i aday kümesinde OLMALI, yoksa yanlış Certain yazılabilir: {reach:?}",

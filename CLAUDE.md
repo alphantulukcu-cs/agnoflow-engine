@@ -3,7 +3,11 @@
 Bu repo **WFD v2.2** (Named Nodes, Single-Rule C_A) modelini çalıştıran çok-tenant'lı
 workflow engine'dir. Spec ile kod çelişirse SPEC kazanır: kanonik dosyalar
 `docs/spec/` altındadır (kaynak: WFD-EDITOR reposu `docs/spec/`; senkron tutulur).
-Alınan tasarım kararları: `docs/spec/decisions.md`.
+Alınan tasarım kararları: `docs/spec/decisions.md`. **Henüz karara bağlanmamış konular ve
+2026-08-20 toplantı kavramlarının spec denetimi: `docs/2026-08-20-toplanti-spec-denetimi.md`
+— "şu kavram var mı?" sorusunu oradan sor** (yetkili sistem aksiyonları,
+node/state bazlı `x-visibility`, `release` ucu, label i18n orada "YOK / karar bekliyor"
+olarak listelidir; `seq` ve hedef başına label KAPANDI).
 
 ## Crate haritası
 
@@ -463,7 +467,7 @@ kanıtlayabilsin — "belge yüklenmeden onaylanamaz", "yanlış tip reddedilir"
   aynı: yetki (`ApplyError::NotEligible` → 403) → belge kapısı (422) → motor.
 - **Kasıtlı HATA senaryoları birinci sınıf vatandaştır.** Motorun reddettikleri
   senaryoyla test edilebilir: eksik/null zorunlu girdi · bildirilmemiş girdi yolu ·
-  olmayan aksiyon · yetkisiz aktör · geçersiz kol · geçersiz/eksik GLB hedefi · belge
+  olmayan aksiyon · yetkisiz aktör · geçersiz kol · geçersiz/eksik geri gönderme hedefi · belge
   kapısı · katalog dışı slot / kabul edilmeyen tip / boyut aşımı · not limitleri.
   **REDDEDİLMEYEN tek şey TİP**: `validate_action_input` varlık ve bildirim denetler,
   tip denetlemez — yanlış tip ctx'e AYNEN yazılır ve etkisi karar anında görülür
@@ -583,20 +587,43 @@ yazılmadı. Sözleşme: `docs/spec/schema.json` + `wfe_core::v22::display`.
   dönmez** (belgede yoksa `display::humanize_key` üretir, istemci fallback yazmaz).
   Ref dönen yüzeyler: `PossibleAction` · `WfeView.current_node`/`branches[]`/`path[]`/
   `join_target` · `WfeApplyResult.current_node` · `WfahView`.
-- **GLB: `__gt__` anahtar kodlaması KALKTI.** Hedef artık aksiyon ANAHTARINA
-  gömülmüyor; tek aksiyon + tek transition, menü `wft: { targets: [{node}, ...] }`
-  içinde (`Wft::Targets`, schema `wftGlobalTargets`, `minItems: 1`). Seçim
-  `POST /wfe/{id}/actions` gövdesindeki **`target`** ile gelir.
+- **GERİ GÖNDER (2026-08-21, KIRICI; eski adı "global aksiyon/GLB").** Hedef aksiyon
+  ANAHTARINA gömülmüyor (`__gt__` kodlaması KALKTI); tek aksiyon + tek transition, menü
+  `wft: { targets: [{node, label?}, ...] }` içinde (`Wft::SendBack`, schema
+  `wftSendBack`/`sendBackTarget`, `minItems: 1`). Seçim `POST /wfe/{id}/actions`
+  gövdesindeki **`target`** ile gelir.
+  - **REZERVE ANAHTAR YOK.** Bir aksiyonu geri gönderme yapan şey ADI değil `wft`inin bu
+    formu olmasıdır; istemci de soruyu `possible-actions` yanıtındaki `target` alanının
+    VARLIĞINDAN okur. Editör adı sormaz ama rezerve de etmez: `Geri Gönder`,
+    `Geri Gönder 2`… → **her biri AYRI kimlik, dolayısıyla AYRI girdi sözleşmesi**;
+    gösterim metni (`label`) hepsinde AYNI yazılır. Tek anahtar (`send_back` + sabit
+    etiket + iki yönlü ad↔menü bağı) aynı gün denendi ve GERİ ALINDI — hepsini tek
+    kimliğe indirip `actions.<key>.input`u akış genelinde tekleştiriyordu.
+  - **Ayırt edici metin HEDEFTE:** `wft.targets[].label` (opsiyonel; yoksa node label'ına
+    düşer — `display::send_back_target_label`). Aynı node farklı menülerde farklı metin
+    taşıyabilir; bu yüzden metin node'a değil MENÜ ÖĞESİNE yazılır. Çekirdek gösterim
+    üretmez: `ActionChoice.targets` = `SendBackChoice { node, label? }` (ham metin),
+    `Ref`e çeviren adapter (`Ref::send_back_target`).
+  - **K-2 — menü ÇALIŞMA ANINDA süzülür:** `targets ∩ visited_nodes`. Saf fonksiyon
+    `pipeline::visited_nodes(wfd, wfes)` = `Wfes::visited_nodes` (WFAH izi:
+    `wf.wfah.from_node` ∪ `to_node`) ∪ **start node'u** (ilk WFAH kaydının aksiyonunu
+    taşıyan `start[].from` — start satırının `from_node`'u NULL olduğu için "başa
+    gönder" ancak böyle çalışır) ∪ `current_node` + iptal olmayan kol node'ları.
+    `possible_actions` süzer ve hiç hedef kalmazsa **aksiyonu HİÇ SUNMAZ**; `apply` AYNI
+    kümeyi kapı olarak sorar (`TargetInvalid`). İki kapı ayrışırsa istemci menüyü atlayıp
+    ileri atlar. **Yeni hata kodu YOK.** Belgedeki hedef SIRASI korunur.
+  - **`Wfes::visited_nodes` neden state'te:** kesişim hem menüyü hem kapıyı besliyor ve
+    alan `Wfes`te olduğu için her yol (store · sim · testler) doldurmak ZORUNDA — parametre
+    olsaydı atlayan çağıran kapıyı sessizce kapatırdı. Adapter `build_wfes`te K7
+    kolonlarından doldurur, **ekstra sorgu yok**; `SimState` karşılığı `#[serde(default)]`.
   - `Engine::apply` `target: Option<&str>` alır. Zorunlu olduğu yerde yoksa
-    `TargetRequired` (400 `action.target_required`), menüde olmayan hedef
-    `TargetInvalid` (400 `action.target_invalid`), GLB olmayan aksiyonda gönderilmişse
-    `TargetUnexpected` (400 `action.target_unexpected`). **Sessizce yok saymak yasak** —
-    istemci hedef seçtiğini sanıp motor başka yere götürürdü.
+    `TargetRequired` (400 `action.target_required`), süzülmüş menüde olmayan hedef
+    `TargetInvalid` (400 `action.target_invalid`), menüsüz aksiyonda gönderilmişse
+    `TargetUnexpected` (400 `action.target_unexpected`). **Sessizce yok saymak yasak.**
   - **`target` bir action input DEĞİLDİR**: `$ctx`'e yazılmaz, `wfes_effects`
-    gerektirmez, `$wfah` izdüşümüne girmez. Eski iki şeklin (anahtar ailesi ve
-    `$action.input.hedef` fan-out'u) sebebi buydu; ikisi de kalktı.
-  - Validator: `global_action_no_targets` · `_target_unknown` · `_target_dup` ·
-    `_target_self` · `global_action_placement` (yalnız `transitions[].wft` içinde).
+    gerektirmez, `$wfah` izdüşümüne girmez.
+  - Validator (tasarım zamanı): `send_back_no_targets` · `_target_unknown` ·
+    `_target_dup` · `_target_self` · `send_back_wft_placement`.
 - **Paralel kol seçimi `ApplyBody.node` → `branch`.** Değer kolun node anahtarıdır ama
   istemci için OPAKTIR; sentetik id tablosu AÇILMADI (istemci onu zaten ayrıştırmıyor,
   yeni bir DB kolonu sıfır fayda için karmaşa olurdu).

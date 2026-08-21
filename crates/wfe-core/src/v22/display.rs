@@ -61,13 +61,31 @@ pub fn terminal_label(wfd: &Wfd, terminal_id: &str) -> String {
 
 /// Bir aksiyonun gösterim adı: `actions.<key>.label`, yoksa anahtarın okunur hâli.
 ///
-/// GLB (global aksiyon) artık burada ÖZEL HAL DEĞİLDİR: hedef aksiyon anahtarına
-/// kodlanmadığı için (`Wft::Targets`) bölünecek bir anahtar yok. Hedefin etiketi
-/// ayrı bir `Ref` olarak `node_label`'dan gelir.
+/// Geri gönderme burada ÖZEL HAL DEĞİLDİR (2026-08-21): ne rezerve bir anahtar ne de
+/// sabit bir metin vardır — editör adı `Geri Gönder`, `Geri Gönder 2`… diye üretir ve
+/// hepsine AYNI `label`ı ("Geri Gönder") yazar, yani gösterimin tekliği belgeden gelir,
+/// motordan değil. Hedef aksiyon anahtarına kodlanmadığı için (`Wft::SendBack`)
+/// bölünecek bir anahtar da yok; hedefin etiketi ayrı bir `Ref` olarak
+/// `send_back_target_label`'dan gelir.
 pub fn action_label(wfd: &Wfd, action: &str) -> String {
     non_empty(wfd.actions.get(action).and_then(|a| a.label.as_ref()))
         .map(str::to_string)
         .unwrap_or_else(|| humanize_key(action))
+}
+
+/// Bir geri gönderme HEDEFİNİN gösterim adı: hedefin kendi `label`'ı, yoksa hedef
+/// node'un `label`'ı, o da yoksa anahtarın okunur hâli.
+///
+/// Portal bu metni doğrudan butona basar ("Başa Gönder", "Şube Müdürüne Gönder").
+/// Hedef etiketi node etiketinden AYRI tutulur çünkü ikisi farklı soruyu yanıtlar:
+/// node label'ı "bu adım kimin havuzu" (her yerde aynı), hedef label'ı "buraya geri
+/// göndermek NE DEMEK" (gönderen node'a göre değişir — aynı node'a başka bir adımdan
+/// geri gönderirken metin de başka olabilir).
+pub fn send_back_target_label(wfd: &Wfd, node_key: &str, target_label: Option<&str>) -> String {
+    match target_label.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(text) => text.to_string(),
+        None => node_label(wfd, node_key),
+    }
 }
 
 #[cfg(test)]
@@ -121,7 +139,8 @@ mod tests {
     #[test]
     fn plain_action_uses_label_then_humanized_key() {
         let mut w = wfd();
-        w.actions.insert("Onayla".into(), act(Some("Onayla ve gönder")));
+        w.actions
+            .insert("Onayla".into(), act(Some("Onayla ve gönder")));
         w.actions.insert("Geri_Cevir".into(), act(None));
         assert_eq!(action_label(&w, "Onayla"), "Onayla ve gönder");
         assert_eq!(action_label(&w, "Geri_Cevir"), "Geri Cevir");
@@ -129,15 +148,37 @@ mod tests {
         assert_eq!(action_label(&w, "Bir_Sey"), "Bir Sey");
     }
 
-    /// GLB artık etikette özel hal değil: hedef anahtara kodlanmadığı için
-    /// aksiyon etiketi taban aksiyonun kendi etiketidir, hedef AYRI bir Ref'tir.
+    /// Geri gönderme aksiyonunun etiketi de belgeden gelir: motorda ÖZEL HAL YOK.
+    /// Editör ikinci geri göndermeye `Geri_Gonder_2` anahtarı verir ama `label`ı
+    /// AYNI yazar — kullanıcı iki ayrı kimliği aynı isimle görür.
     #[test]
-    fn global_action_label_is_just_the_action_label() {
+    fn send_back_actions_share_a_label_but_not_an_identity() {
         let mut w = wfd();
-        w.actions
-            .insert("Geri_Gonder".into(), act(Some("Geri Gönder")));
+        w.actions.insert("Geri_Gonder".into(), act(Some("Geri Gönder")));
+        w.actions.insert("Geri_Gonder_2".into(), act(Some("Geri Gönder")));
         assert_eq!(action_label(&w, "Geri_Gonder"), "Geri Gönder");
-        assert_eq!(node_label(&w, "self__mudur"), "Müdür");
+        assert_eq!(action_label(&w, "Geri_Gonder_2"), "Geri Gönder");
+        // Label yazılmamışsa anahtarın okunur hâline düşer (özel hal yok).
+        w.actions.insert("Geri_Gonder_3".into(), act(None));
+        assert_eq!(action_label(&w, "Geri_Gonder_3"), "Geri Gonder 3");
+    }
+
+    /// Hedef etiketi: kendi label'ı > node label'ı > anahtarın okunur hâli.
+    #[test]
+    fn send_back_target_label_prefers_its_own_text() {
+        let w = wfd();
+        assert_eq!(
+            send_back_target_label(&w, "self__mudur", Some("Başa Gönder")),
+            "Başa Gönder"
+        );
+        // Boş/whitespace label yok sayılır — node label'ına düşer.
+        assert_eq!(
+            send_back_target_label(&w, "self__mudur", Some("  ")),
+            "Müdür"
+        );
+        assert_eq!(send_back_target_label(&w, "self__mudur", None), "Müdür");
+        // Node'un da label'ı yoksa anahtar okunur hâle gelir.
+        assert_eq!(send_back_target_label(&w, "self__gm", None), "self gm");
     }
 
     #[test]

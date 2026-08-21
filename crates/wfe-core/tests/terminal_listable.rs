@@ -244,7 +244,10 @@ async fn projection_resolves_terminal_rules_and_applies_the_guard() {
         )
         .await
         .unwrap();
-    assert!(miss.is_empty(), "guard false → kolona hiçbir aday yazılmamalı");
+    assert!(
+        miss.is_empty(),
+        "guard false → kolona hiçbir aday yazılmamalı"
+    );
 }
 
 /// Bilinmeyen terminal = boş liste, HATA DEĞİL. `node_view_grants` ile aynı
@@ -358,6 +361,7 @@ fn finished_at_with_ctx(end_terminal: Option<&str>, ctx: Value) -> Wfes {
         dynctx: DynCtx(ctx),
         wfah,
         status: WfeStatus::Terminal,
+        visited_nodes: vec![],
         current_node: None,
         end_terminal: end_terminal.map(str::to_string),
         assigned_to: None,

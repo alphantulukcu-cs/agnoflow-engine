@@ -32,6 +32,14 @@ pub struct SimState {
     /// alandan önce üretilmiş sim_state blob'ları onsuz da parse edilir.
     #[serde(default)]
     pub end_terminal: Option<String>,
+    /// K-2 (2026-08-21): bu simülasyonun UĞRADIĞI node'lar (giriş sırasıyla,
+    /// tekilleştirilmiş). Gerçek akışta `wf.wfah.from_node`/`to_node` kolonlarından
+    /// gelen bilginin sim karşılığı — simülasyonun geri gönderme menüsü gerçek akışla
+    /// AYNI süzgeçten geçsin diye izlenir (`wfe_core::v22::pipeline::visited_nodes`).
+    /// `#[serde(default)]` — bu alandan önce üretilmiş sim_state blob'ları onsuz da
+    /// parse edilir; o hâlde çekirdek en azından `current_node`u kümeye koyar.
+    #[serde(default)]
+    pub visited_nodes: Vec<String>,
     /// WOR-31 T4: paralel mod kol durumları (JSON alan adı `node`, bkz.
     /// `BranchState`); paralel modda değilken boş. `#[serde(default)]` — eski
     /// (fork öncesi üretilmiş) sim_state blob'ları bu alan olmadan da parse edilir.
@@ -160,6 +168,7 @@ impl SimState {
             orgtnt_id: new.orgtnt_id,
             dynctx: new.initial_dynctx.clone(),
             wfah: new.wfah_entries.clone(),
+            visited_nodes: current_node.iter().cloned().collect(),
             current_node,
             status,
             end_response,
@@ -213,6 +222,7 @@ impl SimState {
             wfd_version: 0,
             dynctx: DynCtx(self.dynctx.clone()),
             wfah: Wfah(self.wfah.clone()),
+            visited_nodes: self.visited_nodes.clone(),
             status: self.status.clone(),
             current_node: self.current_node.clone(),
             end_terminal: self.end_terminal.clone(),
@@ -240,6 +250,15 @@ impl SimState {
         let (status, current_node, end_response) = outcome_parts(&commit.outcome);
         self.status = status;
         self.current_node = current_node;
+        // K-2: uğranan node'lar. Kol node'ları `apply_branch_outcome` sonrası okunur —
+        // fork/BranchMoveTo o çağrıda işlendi.
+        let mut reached: Vec<String> = self.current_node.iter().cloned().collect();
+        reached.extend(self.branches.iter().map(|b| b.branch_node.clone()));
+        for node in reached {
+            if !self.visited_nodes.contains(&node) {
+                self.visited_nodes.push(node);
+            }
+        }
         if end_response.is_some() {
             self.end_response = end_response;
         }
@@ -557,7 +576,7 @@ pub mod step {
     /// `POST /wfe/simulate/apply` gövdesi — claim YAZILMAZ ama uygunluk
     /// çağıranın sorumluluğundadır (route `sim_eligible` ile denetler).
     ///
-    /// `target`: GLB hedef seçimi — gerçek akıştaki `ApplyBody.target`ın karşılığı.
+    /// `target`: geri gönderme hedef seçimi — gerçek akıştaki `ApplyBody.target` karşılığı.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply(
         engine: &Engine<'_>,

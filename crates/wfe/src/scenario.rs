@@ -121,8 +121,9 @@ pub enum ScenarioStep {
         /// WOR-31: paralel modda kol seçimi.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<String>,
-        /// GLB (`wft: {targets}`) hedef seçimi — senaryo da gerçek akışın kapısından
-        /// geçsin diye: hedefsiz bir GLB adımı burada da 400 karşılığı hata verir.
+        /// Geri gönderme (`wft: {targets}`) hedef seçimi — senaryo da gerçek akışın
+        /// kapısından geçsin diye: hedefsiz bir geri gönderme adımı burada da 400
+        /// karşılığı hata verir.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
         /// NEGATİF test: `true` ise bu adım **başarısız olmalıdır**. Reddedilirse

@@ -13,7 +13,7 @@
 // onu `#[path]` ile modul olarak alir; ayni test motorun modeliyle TIP ve ALAN paritesini
 // dogrular ve `docs/spec/examples/*.json`in hepsini bu modelle parse eder. Sebep: dosya
 // `docs/` altinda oldugu icin hicbir derleyici bakmiyordu ve SESSIZCE curumustu — 2026-08-17
-// olcumunde 8 tip (CallDef/CallRef/CallMode/StartAs/CuItem/GlobalTarget/CaGrantRule) ve
+// olcumunde 8 tip (CallDef/CallRef/CallMode/StartAs/CuItem/SendBackTarget/CaGrantRule) ve
 // 10'dan fazla alan eksikti, `c_u` hala `Vec<String>` idi. Motora alan eklendiginde BURASI
 // da guncellenir; unutulursa parite testi patlar.
 #![allow(dead_code)]
@@ -393,13 +393,15 @@ impl CatchDef { fn d_all() -> Vec<String> { vec!["WFD.ALL".into()] } }
 pub enum Wft {
     Node { node: String },
     Terminal { terminal: String },
-    // GLB (api-contract-v2, 2026-08-12): hedefi BELGE degil aksiyonu alan KISI secer.
+    // GERI GONDER (2026-08-21; onceki adi "global aksiyon/GLB"): hedefi BELGE degil
+    // aksiyonu alan KISI secer. YALNIZ rezerve `send_back` aksiyonunda kullanilir ve o
+    // aksiyon baska wft formu tasiyamaz (validator send_back_wft_reserved / _required).
     // Eskiden hedef aksiyon ANAHTARINA kodlaniyordu (`Geri_Gonder__gt__self__mudur`) ve
     // hedef basina ayri aksiyon + ayri transition uretiliyordu; artik TEK aksiyon, TEK
     // transition var ve secim calisma aninda `apply(..., target)` ile gelir. Secim bir
     // action input DEGILDIR: $ctx'e yazilmaz, wfes_effects gerektirmez, $wfah'a girmez.
-    // Yalniz `transitions[].wft` icinde gecerli (validator `global_action_placement`).
-    Targets { targets: Vec<GlobalTarget> },
+    // Yalniz `transitions[].wft` icinde gecerli (validator `send_back_wft_placement`).
+    SendBack { targets: Vec<SendBackTarget> },
     Conditional {
         conditions: Vec<WftCondition>,
         #[serde(default)]
@@ -416,13 +418,16 @@ pub enum Wft {
     Collapse { collapse: WftTarget },
 }
 
-/// `Wft::Targets` ogesi — secilebilir TEK bir hedef. Duz `Vec<String>` yerine obje
-/// olmasinin gerekcesi: hedef basina `when` guard'i / etiket gibi alanlar eklenirse
-/// sekil kirilmadan buyur. Bugun yalniz `node` tasir — TERMINAL hedef YOKTUR.
+/// `Wft::SendBack` ogesi — secilebilir TEK bir geri gonderme hedefi. TERMINAL hedef
+/// YOKTUR. Obje olmasinin karsiligi 2026-08-21'de geldi: hedef basina kendi `label`i
+/// yazilabiliyor (aksiyonun adi sabit, ayirt edici metin hedefte).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GlobalTarget {
+pub struct SendBackTarget {
     pub node: String,
+    /// Bu hedefin buton metni. Opsiyonel — verilmezse gosterim node label'ina duser.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -41,7 +41,10 @@ Detay gerektiğinde bu dosyaları oku; içeriklerini başka yere kopyalama.
 - claim/assignment node'u değiştirmeyen runtime metadata
 - transition: `from` (node anahtarı/array) + `action`; `when` sadece ek veri guard'ı; aynı (node,action) = ilk-match
 - **start artık transition ile simetrik** (amended v2.2 in place): `{ id, from, action:"start", wfes_effects?, trigger?, wft }`; `c_a` startRule'da DEĞİL, `start[].from` ile referans edilen node'da; start-node kimliği referanstan türetilir (node'da `kind` alanı yok)
-- wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`
+- wft ALTI form: `{node}` / `{terminal}` / `{conditions[], default?}` / **`{targets[]}`** (GERİ GÖNDER —
+  yalnız rezerve `send_back` aksiyonunda; hedefi aksiyonu ALAN KİŞİ seçer, `POST /wfe/{id}/actions`
+  gövdesindeki `target` ile; hedef başına `label`) / `{parallel}` / `{collapse}`;
+  `conditions`'ta default yoksa `WFD.NoConditionMatched`
 - trigger: `use` + `when?`/`required?`(true)/`retry[]?`/`catch?`; catch routing yapmaz
 - tek exec namespace `$exec.result.*`; pipeline atomik; hata isimleri `WFD.*`
 - **visibility matcher AYRI fonksiyondur ve kriterler arası OR'dur** — authorization matcher'ı ile birleştirme

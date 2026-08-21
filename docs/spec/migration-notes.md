@@ -286,3 +286,28 @@ Sanal node üretme katmanı silinir; export ajv (draft 2020-12) ile `schema.json
 2. Custom validator: cross-ref + c_a tekilliği (`duplicate_c_a`) + context path + ZEN parse.
 3. Graf analizi: BFS reachability (escalation kenarları DAHİL) + çıkışsız node.
 4. Rust kabul testi: `reference-types.rs` fixture'ı parse eder, slug'ları doğrular.
+
+## M20. GERİ GÖNDER: hedef başına `label` + menü çalışma anında süzülür (2026-08-21, **KIRICI**)
+
+Hedef menüsünün (`wft: {targets}`) eski adı "global aksiyon (GLB)" idi; ad BIRAKILDI.
+Gün içinde rezerve bir anahtar (`send_back`) da denendi ve **geri alındı** — aşağıdaki
+tablo YÜRÜRLÜKTEKİ hâli anlatır.
+
+| Eski | Yeni |
+|---|---|
+| `targets: [{ "node": "..." }]` | `targets: [{ "node": "...", "label"?: "Başa Gönder" }]` — hedef başına buton metni, opsiyonel (boşsa node label'ına düşer) |
+| `$defs/wftGlobalTargets` | `$defs/wftSendBack` + `$defs/sendBackTarget` |
+| `global_action_*` validator kodları | `send_back_*` (bkz. `decisions.md`) |
+| Menü STATİK: belgedeki her hedef her zaman seçilebilir | Menü `targets ∩ uğranmış node'lar`; hiç kalmazsa aksiyon HİÇ SUNULMAZ, süzgeçten geçmeyen hedef `400 action.target_invalid` |
+| Aksiyon adı serbest | Adı hâlâ SERBEST (rezerve anahtar YOK); editör `Geri Gönder`, `Geri Gönder 2`… üretir ve hepsine aynı `label`ı yazar |
+
+**Motor iç sözleşmesi (wire DEĞİL):** `Wfes` yeni `visited_nodes: Vec<String>` alanı taşır
+— `wf.wfah.from_node`/`to_node` kolonlarından doldurulur, ekstra sorgu yok. `SimState`
+karşılığı `#[serde(default)]`dır.
+
+**Göç:** hedef menüsü kullanan belge yayında YOKTU (fixture taraması: 0) → saha yükü
+sıfır. Eski şekli okuyan kod YAZILMADI (pre-production kuralı, bkz.
+`docs/2026-08-19-legacy-okuyucu-temizligi.md`).
+
+**Değişmeyen:** wire hata kodları (`action.target_*`), `ApplyBody.target`, `Ref {id,label}`
+şekli, `$wfah` izdüşümü, `PathStep.from` (`null` = başlangıç).

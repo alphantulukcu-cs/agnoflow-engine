@@ -56,22 +56,32 @@ fn golden_fixture_is_valid() {
     );
 }
 
-// ---- GLB (global aksiyon) — `wft: {targets}` ----
+// ---- GERİ GÖNDER (`send_back`) — `wft: {targets}` ----
 //
 // Hedef artık aksiyon ANAHTARINA kodlanmıyor (`__gt__` kalktı); tek transition,
-// tek aksiyon, hedefi çalışma anında kişi seçiyor. Aşağıdaki kurallar o menünün
-// tasarım-zamanı denetimidir.
+// tek aksiyon, hedefi çalışma anında kişi seçiyor. Aksiyonun ADI da tasarımcının
+// değil: rezerve `send_back`. Aşağıdaki kurallar o menünün tasarım-zamanı
+// denetimidir.
 
-/// `t_manager_decide`ın wft'sini verilen hedef listesiyle GLB'ye çevirir.
-/// `from` iki node taşır (`self__branchManager`, `parent__creditDeptManager`) —
-/// `global_action_target_self` kuralı için de elverişli.
-fn with_global_targets(targets: Value) -> Value {
+/// `t_manager_decide`ı bir geri gönderme aksiyonuna (`Geri_Gonder`) + verilen hedef
+/// listesine çevirir. `from` iki node taşır (`self__branchManager`,
+/// `parent__creditDeptManager`) — `send_back_target_self` kuralı için de elverişli.
+fn with_send_back(targets: Value) -> Value {
     let mut v = fixture_value();
+    // Aksiyon katalog girdisi taban aksiyondan kopyalanır (girdi bildirimi aynı
+    // kalsın, WOR-70 `unused_action_input` testleri kirlenmesin).
+    let mut base = v["actions"]["manager_decide"].clone();
+    if let Some(o) = base.as_object_mut() {
+        // Gösterim metni: iki ayrı kimlik AYNI label'ı taşır (editör deseni).
+        o.insert("label".into(), json!("Geri Gönder"));
+    }
+    v["actions"]["Geri_Gonder"] = base;
+    v["transitions"][1]["action"] = json!("Geri_Gonder");
     v["transitions"][1]["wft"] = json!({ "targets": targets });
-    // Bu transition `terminal_rejected`a giden TEK yoldu; wft'si GLB menüsüne
-    // dönünce o terminal yetim kalır ve `unreachable` GLB ile ilgisiz bir hata
+    // Bu transition `terminal_rejected`a giden TEK yoldu; wft'si hedef menüsüne
+    // dönünce o terminal yetim kalır ve `unreachable` konuyla ilgisiz bir hata
     // olarak testleri kirletir. Belgeyi tutarlı bırakmak için terminali de
-    // düşürüyoruz — GLB hedefleri node'dur, terminal hedefleyemez.
+    // düşürüyoruz — hedefler node'dur, terminal hedeflenemez.
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -79,31 +89,39 @@ fn with_global_targets(targets: Value) -> Value {
 }
 
 #[test]
-fn global_action_targets_are_valid_edges() {
-    let report = with_global_targets(json!([{"node": "self__creditAnalyst"}]));
-    let report = validate_value(report);
+fn send_back_targets_are_valid_edges() {
+    let report = validate_value(with_send_back(json!([{"node": "self__creditAnalyst"}])));
     assert!(
         report.errors.is_empty(),
-        "geçerli GLB temiz geçmeli: {:#?}",
+        "geçerli geri gönderme temiz geçmeli: {:#?}",
         report.errors
     );
 }
 
+/// Hedef başına `label` (2026-08-21) temiz geçer ve zorunlu DEĞİLDİR.
 #[test]
-fn global_action_with_no_targets_is_error() {
-    let report = validate_value(with_global_targets(json!([])));
+fn send_back_target_label_is_optional_and_valid() {
+    let report = validate_value(with_send_back(json!([
+        {"node": "self__creditAnalyst", "label": "Başa Gönder"}
+    ])));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+#[test]
+fn send_back_with_no_targets_is_error() {
+    let report = validate_value(with_send_back(json!([])));
     assert!(
-        has_error(&report, "global_action_no_targets"),
+        has_error(&report, "send_back_no_targets"),
         "hatalar: {:#?}",
         report.errors
     );
 }
 
 #[test]
-fn global_action_unknown_target_is_error() {
-    let report = validate_value(with_global_targets(json!([{"node": "self__yok"}])));
+fn send_back_unknown_target_is_error() {
+    let report = validate_value(with_send_back(json!([{"node": "self__yok"}])));
     assert!(
-        has_error(&report, "global_action_target_unknown"),
+        has_error(&report, "send_back_target_unknown"),
         "hatalar: {:#?}",
         report.errors
     );
@@ -112,12 +130,12 @@ fn global_action_unknown_target_is_error() {
 }
 
 #[test]
-fn duplicate_global_action_target_is_error() {
-    let report = validate_value(with_global_targets(
+fn duplicate_send_back_target_is_error() {
+    let report = validate_value(with_send_back(
         json!([{"node": "self__creditAnalyst"}, {"node": "self__creditAnalyst"}]),
     ));
     assert!(
-        has_error(&report, "global_action_target_dup"),
+        has_error(&report, "send_back_target_dup"),
         "hatalar: {:#?}",
         report.errors
     );
@@ -126,10 +144,10 @@ fn duplicate_global_action_target_is_error() {
 /// Kendine dönen hedef sessiz bir tuzaktır: aksiyon uygulanır, WFE aynı node'da
 /// kalır, yalnız claim düşer.
 #[test]
-fn global_action_target_pointing_at_its_own_from_node_is_error() {
-    let report = validate_value(with_global_targets(json!([{"node": "self__branchManager"}])));
+fn send_back_target_pointing_at_its_own_from_node_is_error() {
+    let report = validate_value(with_send_back(json!([{"node": "self__branchManager"}])));
     assert!(
-        has_error(&report, "global_action_target_self"),
+        has_error(&report, "send_back_target_self"),
         "hatalar: {:#?}",
         report.errors
     );
@@ -137,15 +155,52 @@ fn global_action_target_pointing_at_its_own_from_node_is_error() {
 
 /// Start kuralında hedefi seçecek bir aktör yoktur — kapı yayında, runtime'da değil.
 #[test]
-fn global_action_outside_a_transition_is_error() {
+fn send_back_menu_outside_a_transition_is_error() {
     let mut v = fixture_value();
     v["start"][0]["wft"] = json!({ "targets": [{"node": "self__branchManager"}] });
     let report = validate_value(v);
     assert!(
-        has_error(&report, "global_action_placement"),
+        has_error(&report, "send_back_wft_placement"),
         "hatalar: {:#?}",
         report.errors
     );
+}
+
+/// **REZERVE AD YOKTUR** (2026-08-21 akşamı geri alındı). Hedef menüsü HERHANGİ bir
+/// aksiyona yazılabilir; aksiyonu geri gönderme yapan şey adı değil `wft`inin bu
+/// formu olmasıdır. Tek anahtar (`send_back`) denendi ve geri alındı: tüm geri gönderme
+/// adımlarını TEK aksiyon kimliğine indiriyor, dolayısıyla girdi sözleşmesini akış
+/// genelinde tekleştiriyordu. Editör adları `Geri Gönder`, `Geri Gönder 2`… üretir.
+#[test]
+fn a_target_menu_needs_no_reserved_action_name() {
+    let mut v = fixture_value();
+    v["transitions"][1]["wft"] = json!({ "targets": [{"node": "self__creditAnalyst"}] });
+    if let Some(terminals) = v["terminals"].as_array_mut() {
+        terminals.retain(|t| t["id"] != json!("terminal_rejected"));
+    }
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+}
+
+/// İkinci geri gönderme AYRI bir aksiyon kimliğidir (editörün `Geri Gönder 2` deseni) —
+/// iki menü aynı belgede yaşayabilir ve girdi sözleşmeleri AYRIDIR.
+#[test]
+fn two_send_back_actions_can_coexist_with_separate_identities() {
+    let mut v = with_send_back(json!([{"node": "self__creditAnalyst"}]));
+    // İkinci geri gönderme: başka node'dan, başka kimlik, kendi menüsü.
+    v["actions"]["Geri_Gonder_2"] = json!({
+        "label": "Geri Gönder",
+        "input": { "required": [], "optional": [] }
+    });
+    let tx = json!({
+        "id": "t_send_back_2",
+        "from": ["self__creditAnalyst"],
+        "action": "Geri_Gonder_2",
+        "wft": { "targets": [{"node": "type_branch__branchClerk", "label": "Başa Gönder"}] }
+    });
+    v["transitions"].as_array_mut().unwrap().push(tx);
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
 
 // ---- §1 cross-reference ----
@@ -1120,10 +1175,7 @@ fn attachment_scoped_ref_duplicate_group_is_error() {
     ]);
     let report = validate_value(v);
     assert!(
-        report
-            .errors
-            .iter()
-            .any(|e| e.code == "attachment_ref_dup"),
+        report.errors.iter().any(|e| e.code == "attachment_ref_dup"),
         "aynı grup iki referansta hata vermeli, hatalar: {:#?}",
         report.errors
     );
@@ -1215,10 +1267,7 @@ fn quorum_or_join_without_threshold_is_valid() {
 fn join_threshold_without_or_mode_is_error() {
     let mut v = parallel_fixture_value();
     v["transitions"][0]["wft"]["parallel"]["join_threshold"] = json!(2);
-    assert!(has_error(
-        &validate_value(v),
-        "parallel_join_threshold"
-    ));
+    assert!(has_error(&validate_value(v), "parallel_join_threshold"));
 }
 
 /// K = kol sayısı matematiksel olarak AND'dir; aynı davranışın ikinci yazımı
@@ -1501,7 +1550,10 @@ fn untyped_source_never_flags_effect_type_mismatch() {
     v["context"]["properties"]["credit_grade"] = json!({"type": "number"});
     let report = validate_value(v);
     assert!(
-        !report.errors.iter().any(|e| e.code == "effect_type_mismatch"),
+        !report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch"),
         "hatalar: {:#?}",
         report.errors
     );
@@ -1517,8 +1569,11 @@ fn action_input_object_written_into_scalar_field_is_error() {
         json!("$action.input.applicant");
     let report = validate_value(v);
     assert!(
-        report.errors.iter().any(|e| e.code == "effect_type_mismatch"
-            && e.message.contains("credit_info.amount_requested")),
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch"
+                && e.message.contains("credit_info.amount_requested")),
         "hatalar: {:#?}",
         report.errors
     );
@@ -1535,7 +1590,10 @@ fn action_input_written_into_its_own_field_is_clean() {
         json!("$action.input.credit_info.amount_requested");
     let report = validate_value(v);
     assert!(
-        !report.errors.iter().any(|e| e.code == "effect_type_mismatch"),
+        !report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch"),
         "hatalar: {:#?}",
         report.errors
     );
@@ -1548,9 +1606,12 @@ fn literal_effect_value_type_is_checked() {
     v["context"]["properties"]["internal_notes"] = json!({"type": "boolean"});
     let report = validate_value(v);
     assert!(
-        report.errors.iter().any(|e| e.code == "effect_type_mismatch"
-            && e.path.contains("escalation")
-            && e.message.contains("internal_notes")),
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "effect_type_mismatch"
+                && e.path.contains("escalation")
+                && e.message.contains("internal_notes")),
         "hatalar: {:#?}",
         report.errors
     );
@@ -1916,7 +1977,9 @@ fn object_compared_with_object_is_error() {
 
 #[test]
 fn actor_subfield_comparison_is_clean() {
-    let report = validate_value(fixture_with_when(r#"some($wfah, #.actor.role == "creditAnalyst")"#));
+    let report = validate_value(fixture_with_when(
+        r#"some($wfah, #.actor.role == "creditAnalyst")"#,
+    ));
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
 
@@ -2103,7 +2166,9 @@ fn null_comparison_is_clean() {
 fn date_wrapped_ordering_is_exempt() {
     // `d()` sonucu Dynamic'tir ve motorun `Compare`ı (Date,Date) çiftini bilir — fonksiyon
     // sonuçları BİLİNMEZ sayıldığı için kural buraya karışmaz.
-    let report = validate_value(fixture_with_when(r#"some($wfah, d(#.at) > d("2026-01-01"))"#));
+    let report = validate_value(fixture_with_when(
+        r#"some($wfah, d(#.at) > d("2026-01-01"))"#,
+    ));
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
 
@@ -2146,8 +2211,7 @@ fn env_references_collects_across_document() {
     );
 
     v["autoexec"]["kredi_skoru_getir"]["config"]["url"] = json!("$env.SCORE_API/v1/score");
-    v["autoexec"]["kredi_skoru_getir"]["config"]["params"] =
-        json!({ "region": "$env.REGION" });
+    v["autoexec"]["kredi_skoru_getir"]["config"]["params"] = json!({ "region": "$env.REGION" });
     let refs = wfe_core::validator::env_references(&Wfd::from_value(v).unwrap()).unwrap();
     assert_eq!(
         refs.into_iter().collect::<Vec<_>>(),
@@ -2268,7 +2332,10 @@ fn env_interpolation_is_not_an_unknown_ref() {
 
 #[test]
 fn golden_fixture_has_no_unknown_dollar_refs() {
-    assert!(!has_error(&validate_value(fixture_value()), "unknown_dollar_ref"));
+    assert!(!has_error(
+        &validate_value(fixture_value()),
+        "unknown_dollar_ref"
+    ));
 }
 
 /// SLA bağlamında bir ÇAĞRI DÖNÜŞÜ de yoktur: escalation'ı timer tetikler, `$call.*`
@@ -2276,7 +2343,13 @@ fn golden_fixture_has_no_unknown_dollar_refs() {
 #[test]
 fn sla_effects_reject_call_namespace() {
     let mut v = fixture_value();
-    let node = v["nodes"].as_object().unwrap().keys().next().unwrap().clone();
+    let node = v["nodes"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     v["nodes"][&node]["escalation"] = json!([{
         "after": "PT1H",
         "wft": { "terminal": "terminal_rejected" },
@@ -2426,10 +2499,7 @@ fn transition_c_a_anchor_is_checked() {
         "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
         "c_r": ["creditAnalyst"],
     });
-    assert!(has_error(
-        &validate_value(v),
-        "c_orgu_anchor_not_orgu_kind"
-    ));
+    assert!(has_error(&validate_value(v), "c_orgu_anchor_not_orgu_kind"));
 }
 
 #[test]
@@ -2441,10 +2511,7 @@ fn x_visibility_c_orgu_anchor_is_checked() {
         "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
         "c_r": ["creditAnalyst"],
     });
-    assert!(has_error(
-        &validate_value(v),
-        "c_orgu_anchor_not_orgu_kind"
-    ));
+    assert!(has_error(&validate_value(v), "c_orgu_anchor_not_orgu_kind"));
 }
 
 #[test]
@@ -2454,10 +2521,7 @@ fn node_reassign_anchor_is_checked() {
         "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
         "c_r": ["branchManager"],
     });
-    assert!(has_error(
-        &validate_value(v),
-        "c_orgu_anchor_not_orgu_kind"
-    ));
+    assert!(has_error(&validate_value(v), "c_orgu_anchor_not_orgu_kind"));
 }
 
 #[test]
@@ -2637,7 +2701,8 @@ fn c_u_ref_to_actor_field_is_valid() {
     );
     let report = validate_value(v);
     assert!(
-        !has_error(&report, "c_u_ref_not_actor_kind") && !has_error(&report, "c_u_ref_unknown_field"),
+        !has_error(&report, "c_u_ref_not_actor_kind")
+            && !has_error(&report, "c_u_ref_unknown_field"),
         "actor kind'lı alanın user_id'sine bakan referans geçerli olmalı: {:#?}",
         report.errors
     );
@@ -2710,10 +2775,11 @@ fn c_u_ref_and_literal_can_mix() {
         "talep_sahibi",
     );
     let report = validate_value(v);
-    assert!(report
-        .errors
-        .iter()
-        .all(|e| !e.code.starts_with("c_u_")), "karışık liste geçerli olmalı: {:#?}", report.errors);
+    assert!(
+        report.errors.iter().all(|e| !e.code.starts_with("c_u_")),
+        "karışık liste geçerli olmalı: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -2742,7 +2808,8 @@ fn x_visibility_c_u_is_checked_too() {
 #[test]
 fn numeric_agg_over_text_field_is_error() {
     assert!(
-        errors_for_when("avg(map($wfah, #.action)) > 0").contains(&"zen_agg_not_numeric".to_string()),
+        errors_for_when("avg(map($wfah, #.action)) > 0")
+            .contains(&"zen_agg_not_numeric".to_string()),
         "metin alanında ortalama reddedilmeli"
     );
     for fnname in ["sum", "avg", "min", "max", "median", "mode"] {
@@ -2793,7 +2860,10 @@ fn sum_over_whole_history_does_not_warn() {
     // `sum([])` sıfırdır — boş geçmiş riski YOK.
     let report = validate_value(fixture_with_when("sum(map($wfah, #.seq)) > 0"));
     let codes: Vec<String> = report.warnings.into_iter().map(|w| w.code).collect();
-    assert!(!codes.contains(&"zen_agg_empty_history".to_string()), "uyarılar: {codes:#?}");
+    assert!(
+        !codes.contains(&"zen_agg_empty_history".to_string()),
+        "uyarılar: {codes:#?}"
+    );
 }
 
 // ---- Çapasız C_A (c_orgu yok) — biçim kuralları -------------------------------------
@@ -2841,7 +2911,11 @@ fn anchorless_with_c_r_is_error() {
     let report = validate_value(fixture_with_anchorless_node(
         json!({ "c_u": ["ayse"], "c_r": ["mudur"] }),
     ));
-    assert!(has_error(&report, "c_a_anchorless_role"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "c_a_anchorless_role"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -2863,7 +2937,11 @@ fn anchorless_reassign_with_c_r_is_error() {
     let key = nodes.keys().next().unwrap().clone();
     nodes[&key]["reassign"] = json!({ "c_r": ["mudur"] });
     let report = validate_value(v);
-    assert!(has_error(&report, "c_a_anchorless_role"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "c_a_anchorless_role"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 // ================================================================ T‑A5: wf_admin
@@ -3027,10 +3105,9 @@ fn node_listable_when_expression_is_validated() {
     }]);
     let report = validate_value(v);
     assert!(
-        report
-            .errors
-            .iter()
-            .any(|e| e.path.starts_with("nodes[self__creditAnalyst].listable[0].when")),
+        report.errors.iter().any(|e| e
+            .path
+            .starts_with("nodes[self__creditAnalyst].listable[0].when")),
         "nodes.<key>.listable[].when denetlenmeli, hatalar: {:#?}",
         report.errors
     );
@@ -3063,7 +3140,11 @@ fn node_listable_when_allows_ctx_reference() {
           "when": "$ctx.credit_info.amount_requested >= 100000" }
     ]);
     let report = validate_value(v);
-    assert!(!has_error(&report, "grant_when_actor_ref"), "{:#?}", report.errors);
+    assert!(
+        !has_error(&report, "grant_when_actor_ref"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 /// Çapasız (`c_orgu` yok) node `listable[]` kuralında `c_r` YASAK — `check_c_a_shape`
@@ -3138,7 +3219,11 @@ fn unknown_format_name_is_error() {
     let mut v = fixture_value();
     v["context"]["properties"]["credit_grade"] = json!({ "format": "BoyleBirTipYok" });
     let report = validate_value(v);
-    assert!(has_error(&report, "context_format_unknown"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "context_format_unknown"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 /// `format` bir tanıma işaret ettiği için tip kuralı YANINA yazılamaz — tip tanımın
@@ -3149,7 +3234,11 @@ fn format_next_to_a_type_keyword_is_error() {
     v["context"]["$defs"] = json!({ "Metin": { "type": "string" } });
     v["context"]["properties"]["credit_grade"] = json!({ "format": "Metin", "type": "string" });
     let report = validate_value(v);
-    assert!(has_error(&report, "context_format_with_type"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "context_format_with_type"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 /// Anlatım/görünürlük anahtarları kullanım yerinde EZİLEBİLİR (eski `$ref` davranışı).
@@ -3169,7 +3258,11 @@ fn cyclic_type_definitions_are_error() {
     v["context"]["$defs"] = json!({ "A": { "format": "B" }, "B": { "format": "A" } });
     v["context"]["properties"]["credit_grade"] = json!({ "format": "A" });
     let report = validate_value(v);
-    assert!(has_error(&report, "context_format_cycle"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "context_format_cycle"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 #[test]
@@ -3177,7 +3270,11 @@ fn invalid_definition_name_is_error() {
     let mut v = fixture_value();
     v["context"]["$defs"] = json!({ "1Para": { "type": "number" } });
     let report = validate_value(v);
-    assert!(has_error(&report, "context_defs_name"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "context_defs_name"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 /// `$ref` YAZILAMAZ (kapı yalnız yazma yollarında) — okuma tarafı onu hâlâ çözer,
@@ -3188,7 +3285,11 @@ fn writing_ref_is_error() {
     v["context"]["$defs"] = json!({ "Metin": { "type": "string" } });
     v["context"]["properties"]["credit_grade"] = json!({ "$ref": "#/$defs/Metin" });
     let report = validate_value(v);
-    assert!(has_error(&report, "context_ref_removed"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "context_ref_removed"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 /// Adlandırılmış tip artık effect TİP denetimine de girer: `$defs` arkasındaki alan
@@ -3201,7 +3302,11 @@ fn effect_type_mismatch_sees_through_a_named_type() {
     // `$actor` bir NESNEDİR; metin bir alana yazılamaz.
     v["transitions"][0]["wfes_effects"]["set"]["credit_grade"] = json!("$actor");
     let report = validate_value(v);
-    assert!(has_error(&report, "effect_type_mismatch"), "{:#?}", report.errors);
+    assert!(
+        has_error(&report, "effect_type_mismatch"),
+        "{:#?}",
+        report.errors
+    );
 }
 
 /// Girdi yolu denetimi de tanımın arkasını görür: adlandırılmış tipli bir alan

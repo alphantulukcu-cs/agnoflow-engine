@@ -95,7 +95,7 @@ pub enum EngineError {
     Unauthorized,
     #[error("reassign target is not eligible for the current node's candidate actor")]
     TargetNotEligible,
-    /// GLB (`wft: {targets}`) — hedef seçimi ZORUNLU ama gönderilmedi.
+    /// Geri gönderme (`wft: {targets}`) — hedef seçimi ZORUNLU ama gönderilmedi.
     /// Üçü de HTTP 400'dür ve `action.target_*` kodlarıyla dışa çıkar: istemci
     /// "hedef seç" ekranını hangi durumda göstereceğini koddan bilir, hata
     /// METNİNİ ayrıştırmaz.

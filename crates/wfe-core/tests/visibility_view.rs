@@ -26,9 +26,9 @@ use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
-use wfe_core::types::wfd_v22::{AutoexecDef, CaGrantRule, COrgu, CandidateActor, JoinRule};
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::types::wfd_v22::WftTarget;
+use wfe_core::types::wfd_v22::{AutoexecDef, COrgu, CaGrantRule, CandidateActor, JoinRule};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, BranchState, BranchStatus, ExecEnv, ExecFailure, Wfes};
@@ -125,6 +125,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
         dynctx: DynCtx(ctx),
         wfah,
         status: WfeStatus::Active,
+        visited_nodes: vec![],
         current_node: Some(node.into()),
         end_terminal: None,
         assigned_to: assigned,
@@ -429,7 +430,11 @@ async fn wf_admin_can_view() {
     let orgu = Uuid::new_v4();
     let admin = credit_dept_manager(orgu);
     // Sahip DEĞİL, WFAH katılımcısı DEĞİL, aktif node'un c_a'sı creditAnalyst.
-    let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(30000));
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(Uuid::new_v4()),
+        start_input(30000),
+    );
 
     assert!(
         can_view(&golden_with_wf_admin(None), &wfes, &admin, &org)
@@ -446,7 +451,11 @@ async fn non_matching_actor_still_cannot_view() {
     };
     let orgu = Uuid::new_v4();
     let outsider = clerk(orgu); // wf_admin kuralı creditDeptManager ister
-    let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(30000));
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(Uuid::new_v4()),
+        start_input(30000),
+    );
 
     assert!(
         !can_view(&golden_with_wf_admin(None), &wfes, &outsider, &org)
@@ -463,7 +472,11 @@ async fn wf_admin_when_guard_gates_visibility() {
     };
     let orgu = Uuid::new_v4();
     let admin = credit_dept_manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(30000));
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(Uuid::new_v4()),
+        start_input(30000),
+    );
 
     let gated = golden_with_wf_admin(Some("$ctx.credit_info.amount_requested > 100000"));
     assert!(
@@ -471,7 +484,11 @@ async fn wf_admin_when_guard_gates_visibility() {
         "when false iken görünmemeli (30.000 < 100.000)"
     );
 
-    let big = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input(250000));
+    let big = wfes_at(
+        "self__creditAnalyst",
+        Some(Uuid::new_v4()),
+        start_input(250000),
+    );
     assert!(
         can_view(&gated, &big, &admin, &org).await.unwrap(),
         "when true iken görünmeli"
@@ -683,9 +700,7 @@ async fn node_listable_when_false_cannot_view() {
     };
     let orgu = Uuid::new_v4();
     let m = manager(orgu);
-    let gated = golden_with_node_listable(Some(
-        "$ctx.credit_info.amount_requested >= 100000",
-    ));
+    let gated = golden_with_node_listable(Some("$ctx.credit_info.amount_requested >= 100000"));
 
     let mut low = wfes_at("self__creditAnalyst", None, start_input(30_000));
     low.origin_orgu_id = Some(orgu);

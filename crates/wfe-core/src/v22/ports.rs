@@ -97,6 +97,29 @@ pub struct Wfes {
     /// içindeyiz" bilgisi yalnızca WFE satırında durur (aynı join hedefine giden iki
     /// fork mümkündür), dolayısıyla kural da kol durumlarıyla aynı yerde yaşar.
     pub join_rule: JoinRule,
+    /// **Bu WFE'nin GEÇTİĞİ node'lar** (giriş sırasıyla, tekilleştirilmiş) — geri
+    /// gönderme hedef menüsünün çalışma anı süzgeci (K-2, 2026-08-21).
+    ///
+    /// Belgedeki `wft.targets` listesi STATİKTİR: tasarımcı "buraya geri gönderilebilir"
+    /// der ama o node'a bu ÖRNEKTE gerçekten uğranmış olması gerekmez (koşullu dallar,
+    /// atlanan adımlar). Uğranmamış bir node'a "geri" göndermek geri gönderme DEĞİL,
+    /// ileri atlamadır: akış hiç görmediği bir adıma düşer, o adımın beklediği ctx
+    /// alanları hiç yazılmamıştır. Bu yüzden menü `targets ∩ visited_nodes` olarak
+    /// sunulur ve `apply` aynı kesişimi kapı olarak sorar.
+    ///
+    /// **Neden `Wfes` üzerinde:** kesişim hem menüyü (`possible_actions`) hem kapıyı
+    /// (`apply`) besliyor; ikisinin AYNI kümeye bakması zorunlu. Alan `Wfes`te
+    /// olduğu için her yol (gerçek store, sim, testler) onu doldurmak ZORUNDA —
+    /// parametre olsaydı doldurmayı atlayan çağıran kapıyı sessizce kapatırdı.
+    ///
+    /// Kaynak: `wf.wfah.from_node` ∪ `to_node` (K7'de eklenen kolonlar; ekstra sorgu
+    /// GEREKMEZ, adapter zaten o satırları okuyor). Escalation/claim_timeout ile
+    /// taşınan node'lar da DAHİLDİR — WFE orada gerçekten bekledi.
+    ///
+    /// SINIR: iptal olmuş paralel kardeş kolun node'ları da bu listede kalır. Tasarım
+    /// zamanı kuralı (editör SB-P/SB-R) o hedefleri zaten yasaklar; runtime kesişimi
+    /// EK bir daraltmadır, o kuralın yerine geçmez.
+    pub visited_nodes: Vec<String>,
     /// `listable`/`wf_admin` ORGTRVLANG çapası — start'ta yazılan `origin_orgu_id`.
     ///
     /// `None` = bu satır görünürlük projeksiyonundan ÖNCE yaratılmış (backfill

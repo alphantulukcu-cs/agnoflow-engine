@@ -319,6 +319,22 @@ fn build_wfes(
     branch_rows: Vec<crate::models::BranchRow>,
 ) -> Wfes {
     let wfe_id = row.wfe_id;
+    // K-2 (2026-08-21): geri gönderme menüsünün süzgeci — WFE'nin GERÇEKTEN uğradığı
+    // node'lar. K7'de eklenen `from_node`/`to_node` kolonlarından okunur, EKSTRA SORGU
+    // YOK: satırlar zaten burada. Start satırının `from_node`'u NULL'dır (start node'u
+    // çekirdek `visited_nodes` fonksiyonunda `wfd.start[]`ten eklenir).
+    let visited: Vec<String> = {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for r in &wfah_rows {
+            for n in [r.from_node.as_deref(), r.to_node.as_deref()].into_iter().flatten() {
+                if seen.insert(n.to_string()) {
+                    out.push(n.to_string());
+                }
+            }
+        }
+        out
+    };
     let entries: Vec<WfahEntry> = wfah_rows
         .into_iter()
         .map(|r| {
@@ -379,6 +395,7 @@ fn build_wfes(
         wfd_version: row.wfd_version,
         dynctx: DynCtx(ctx),
         wfah: Wfah(entries),
+        visited_nodes: visited,
         status,
         current_node: row.current_node,
         // `current_node`un aynadaki karşılığı — `can_view` (g) bunu okur.

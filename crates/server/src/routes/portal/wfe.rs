@@ -50,7 +50,7 @@ struct AvailableAction {
     #[schema(value_type = Object)]
     action: wf_wfe::executor::Ref,
     input: ActionInputSchema,
-    /// GLB (global aksiyon) hedef seçimi — yalnız `wft: {targets}` aksiyonlarında
+    /// Geri gönderme hedef seçimi — yalnız rezerve `send_back` aksiyonunda
     /// bulunur. İstemci seçilen `options[].id`yi gövdede `target` olarak yollar.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Object)]
@@ -233,7 +233,7 @@ struct ActionRequest {
     /// WOR-31 T4: paralel modda kol seçimi (bkz. `AvailableAction.branch`).
     #[serde(default)]
     branch: Option<String>,
-    /// GLB hedef seçimi (bkz. `AvailableAction.target`) — `wft: {targets}`
+    /// Geri gönderme hedef seçimi (bkz. `AvailableAction.target`) — `wft: {targets}`
     /// aksiyonlarında ZORUNLU, diğerlerinde YASAK.
     #[serde(default)]
     target: Option<String>,

@@ -180,7 +180,8 @@ transitions = (from node + ACT) -> effects + trigger + WFT kenari
 trigger     = autoexec invocation listesi (retry/catch destekli)
 nodes.<k>.call    = alt akis cagrisi   (mode: wait | detached; donuslu)
 terminals[].call  = ardil akis cagrisi (mode: terminal; bitis = ardilin baslangici)
-wft         = tek routing authority; hedef node id veya terminal id
+wft         = tek routing authority; ALTI form: {node} {terminal} {conditions,default}
+              {targets} (geri gonder - hedefi kullanici secer) {parallel} {collapse}
 ```
 
 ---
@@ -357,13 +358,203 @@ WFD dokümanı versiyonludur; kural değişikliği yeni WFD versiyonu doğurur, 
 
 ## WFT / TRIGGER / AUTOEXEC / PIPELINE
 
-v2.1 ile aynıdır:
+Trigger/autoexec/pipeline v2.1 ile aynıdır; **WFT form kümesi v2.2'de büyüdü.**
 
-- WFT formları: `{node}`, `{terminal}`, `{conditions[], default?}`; ilk-match; default yoksa `WFD.NoConditionMatched`.
+- WFT formları (`$defs/wft` oneOf, ALTI form):
+
+| Form | Şekil | Anlam |
+|---|---|---|
+| `wftNode` | `{ "node": "<node key>" }` | Tek deterministik hedef |
+| `wftSimpleTerminal` | `{ "terminal": "<terminal id>" }` | Akış biter |
+| `wftConditional` | `{ "conditions": [...], "default"?: ... }` | İlk-match; `default` yoksa `WFD.NoConditionMatched` |
+| **`wftSendBack`** | `{ "targets": [{ "node": ..., "label"?: ... }, ...] }` | **Hedefi BELGE değil, aksiyonu ALAN KİŞİ seçer**; menü çalışma anında uğranmış node'larla kesişir — bkz. §GERİ GÖNDER |
+| `wftParallel` | `{ "parallel": {...} }` | Fork/join (WOR-31/72/73) — bkz. `runtime-semantics.md` §5b |
+| `wftCollapse` | `{ "collapse": {...} }` | Paralel kolu sonlandıran hedef (WOR-56) — bkz. `runtime-semantics.md` §5b |
+
 - Trigger: `use` + `when?` + `required?`(default true) + `retry[]?` + `catch?`. Fail akışı: retry → catch (effects, handled, devam) → required davranışı.
 - Autoexec: root katalog, `timeout_seconds` (default 60), tek çıktı namespace `$exec.result.*`; routing alanları yasak.
 - Pipeline atomiktir: diff'ler ancak WFT çözülünce commit edilir; başarılı transition sonrası WFE yeni node'a UNASSIGNED girer.
 - Hata taksonomisi: `WFD.ALL`, `WFD.Timeout`, `WFD.AutoexecFailed`, `WFD.NoConditionMatched`.
+
+---
+
+## GERİ GÖNDER — hedef seçimli aksiyon (2026-08-21)
+
+**"Geri gönderme" ayrı bir aksiyon TİPİ DEĞİLDİR.** Normal bir transition'dır; tek farkı
+`wft`inin tek hedef değil bir **menü** taşımasıdır — hedefi aksiyonu ALAN KİŞİ seçer.
+
+> **Ad değişikliği (2026-08-21):** bu mekanizmaya "**global aksiyon (GLB)**" deniyordu.
+> Ad BIRAKILDI: "global aksiyon" bundan sonra **akış tanımından bağımsız, yalnız
+> yetkiliye ait sistem aksiyonları** (iptal / başa döndür / havuza at / yeniden ata)
+> için kullanılacak. Buradaki mekanizma akış tasarımcısının WFD'ye koyduğu NORMAL bir
+> aksiyondur.
+
+```json
+{
+  "actions": {
+    "Geri_Gonder":   { "label": "Geri Gönder", "input": { "required": ["red_gerekcesi"], "optional": [] } },
+    "Geri_Gonder_2": { "label": "Geri Gönder", "input": { "required": [], "optional": [] } }
+  },
+  "transitions": [
+    {
+      "id": "t_send_back",
+      "from": ["parent__creditDeptManager"],
+      "action": "Geri_Gonder",
+      "wfes_effects": { "set": { "red_gerekcesi": "$action.input.red_gerekcesi" } },
+      "wft": {
+        "targets": [
+          { "node": "type_branch__branchClerk", "label": "Başa Gönder" },
+          { "node": "self__branchManager",      "label": "Şube Müdürüne Gönder" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+### Aksiyonun adı: REZERVE DEĞİL, kimlikler AYRI
+
+- **Motorda rezerve anahtar YOKTUR.** Bir aksiyonu geri gönderme yapan şey ADI değil,
+  `wft`inin `{targets}` formu olmasıdır; istemci de "bu aksiyon hedef seçtirir mi"
+  sorusunu `possible-actions` yanıtındaki **`target` alanının varlığından** okur — ad
+  ayrıştırmaz.
+- **Editör adı sorMAZ, üretir:** `Geri Gönder`, ikincisi `Geri Gönder 2`, üçüncüsü
+  `Geri Gönder 3`… Her biri **AYRI aksiyon kimliğidir**, dolayısıyla **girdi sözleşmesi
+  de ayrıdır** (`actions.<key>.input`).
+- **Gösterim metni hepsinde AYNI** (`label: "Geri Gönder"`): kullanıcı üç ayrı kimliği
+  tek isimle görür. Motorun bu konuda özel hâli yoktur — `display::action_label`
+  belgedeki `label`ı okur.
+- Kısa süre (2026-08-21 içinde) tek rezerve anahtar (`send_back` + sabit etiket + iki
+  yönlü ad↔menü bağı) denendi ve **GERİ ALINDI**: tüm geri gönderme adımlarını tek
+  aksiyon kimliğine indiriyor, dolayısıyla girdi sözleşmesini akış genelinde
+  tekleştiriyordu — bir node'un geri göndermesine zorunlu alan eklemek hepsine
+  ekliyordu. Gerekçe kaydı: `decisions.md`.
+- Aynı node'da birden fazla geri gönderme tanımlanırsa normal kural işler: `when`i true
+  olan İLK transition seçilir (`ambiguous_transition`).
+
+### Hedef başına `label`
+
+Ayırt edici metin **aksiyonda değil HEDEFTE** durur. "Başa Gönder" ile "Şube Müdürüne
+Gönder" iki ayrı aksiyon DEĞİL, tek aksiyonun iki hedefidir.
+
+- `wft.targets[].label` **opsiyoneldir**; verilmezse gösterim hedef node'un `label`'ına
+  düşer (`display::send_back_target_label`) → `Ref.label` hiçbir koşulda boş dönmez.
+- Node label'ı ile hedef label'ı farklı soruları yanıtlar: node label'ı "bu adım kimin
+  havuzu" (her yerde aynı), hedef label'ı "**buraya geri göndermek ne demek**" — aynı
+  node, başka bir adımdan geri gönderilirken başka metin taşıyabilir.
+- Portal bu metni **doğrudan butona basar**; menü `GET .../possible-actions` yanıtında
+  `target.options[]` olarak, her öğe `Ref { id, label }` biçiminde döner.
+- Çok dillilik YOKTUR (`label` düz string).
+
+### Menü ÇALIŞMA ANINDA süzülür — `targets ∩ uğranmış node'lar` (K-2)
+
+Belgedeki `targets` listesi tasarımcının izin verdiği KÜMEdir; o node'a **bu örnekte
+uğranmış olması** gerekmez (koşullu dal seçilmedi, adım atlandı). Uğranmamış bir node'a
+"geri" göndermek geri gönderme DEĞİL **ileri atlamadır**: akış hiç görmediği bir adıma
+düşer, o adımın beklediği ctx alanları hiç yazılmamıştır. Bu yüzden:
+
+- Menü `possible-actions` yanıtında **süzülmüş** döner; hiç uğranmış hedef kalmazsa
+  **aksiyon HİÇ SUNULMAZ** (boş menülü satır, her seçimde 400 döndüren bir düğme olurdu).
+- `apply` AYNI kümeyi kapı olarak sorar: süzgeçten geçmeyen hedef
+  `400 action.target_invalid`. **Ayrı hata kodu yoktur** — istemci için "bu hedef bu işte
+  geçerli değil" tek durumdur.
+- Belgedeki **SIRA korunur**; yalnız uğranmamış öğeler düşer.
+- Uğranmış küme (`wfe_core::v22::pipeline::visited_nodes`, saf fonksiyon):
+  1. WFAH akış izi — `wf.wfah.from_node` ∪ `to_node` (`Wfes::visited_nodes`).
+     Escalation/claim_timeout ile taşınan node'lar DAHİL: WFE orada bekledi.
+  2. **Start node'u** — WFAH'ın ilk kaydının aksiyonunu taşıyan `start[]` kurallarının
+     `from`u. Start satırının `from_node`'u NULL'dır (K7: "öncesi yok") ve `to_node` ilk
+     havuzdur, yani start node'u (1)'e girmez — oysa "başa gönder" tam oraya gönderir.
+  3. Şu anki duruş — `current_node` + iptal olmayan kol node'ları.
+- **SINIR:** iptal olmuş paralel KARDEŞ kolun node'ları (1)'de kalır. Tasarım zamanı
+  kuralı (editör SB-P/SB-R) o hedefleri zaten yasaklar; bu kesişim EK bir daraltmadır,
+  onun yerine geçmez.
+- "Bu node'a geri gönderilemez" kısıtı hâlâ `targets` listesine KOYMAMAKLA ifade edilir;
+  ayrı bir bayrak yoktur (B-4/L-2 kararı).
+
+### Çalışma anı
+
+- Seçim `POST /wfe/{id}/actions` gövdesindeki **`target`** ile gelir. Zorunludur: yoksa
+  `400 action.target_required`, süzülmüş menüde olmayan hedef `400 action.target_invalid`,
+  menüsüz aksiyonda gönderilmişse `400 action.target_unexpected`. **Sessizce yok
+  sayılmaz.**
+- **`target` bir action input DEĞİLDİR:** `$ctx`'e yazılmaz, `wfes_effects` gerektirmez,
+  `$wfah` izdüşümüne girmez. Hedef bilgisi geçişin kendisinde (`path[].to`) görünür.
+  (Eskiden hedef aksiyon ANAHTARINA gömülüydü — `__gt__` anahtar ailesi; 2026-08-12'de
+  kaldırıldı, okuyucusu da yok.)
+- Menü yalnız `transitions[].wft` içinde geçerlidir (`send_back_wft_placement`): start /
+  escalation / çağrı dönüşü yollarında hedefi seçecek bir aktör yoktur.
+- Validator (tasarım zamanı): `send_back_no_targets` · `_target_unknown` · `_target_dup`
+  · `_target_self` · `send_back_wft_placement`.
+
+---
+
+## API GÖSTERİM SÖZLEŞMESİ — `Ref { id, label }` (2026-08-12, KIRICI)
+
+Kural: **istemci hiçbir string'i AYRIŞTIRMAZ.** Kimlik ile ekrana basılan ad ayrı
+alanlardır ve motor ikisini birlikte döner.
+
+```json
+{
+  "action": { "id": "dept_manager_approve", "label": "Onayla" },
+  "target": {
+    "options": [
+      { "id": "type_branch__branchClerk", "label": "Başvuruyu Hazırlayan" },
+      { "id": "self__branchManager",      "label": "Şube Müdürü" }
+    ]
+  }
+}
+```
+
+- `id` motorun kimliğidir — istemci onu GERİ GÖNDERİR, ayrıştırmaz, ekrana basmaz.
+- `label` ekrana basılan tek şeydir ve **asla null/eksik dönmez.** Belgede yoksa motor
+  `display::humanize_key` ile üretir; istemci fallback yazmaz.
+- Etiket kaynağı: aksiyonda `actions.<key>.label` (opsiyonel), node'da `nodes.<key>.label`,
+  terminalde `terminals[].label`, geri gönderme hedefinde `wft.targets[].label`. Hepsi
+  opsiyoneldir; kimlik daima object key / `id`'dir. Motorda SABİT etiket taşıyan hiçbir
+  aksiyon yoktur — gösterim daima belgeden gelir.
+- `Ref` dönen yüzeyler: `PossibleAction.action`/`target.options[]`/`branch` ·
+  `WfeView.current_node`/`branches[]`/`path[]`/`join_target` ·
+  `WfeApplyResult.current_node` · `WfahView.action`/`node` · `PoolTask.current_node`/`node`.
+- Etiketin üretildiği TEK yer `wfe_core::v22::display`'dir; simülasyon rotaları da aynı
+  çeviriyi kullanır (sim ile gerçek akış AYNI şekli döndürmek zorundadır).
+- **Çok dillilik YOKTUR:** `label` düz string'dir; `{"tr": ..., "en": ...}` biçimi
+  desteklenmez.
+
+---
+
+## HAVUZ / CLAIM / ASSIGNMENT
+
+WFE bir node'a **UNASSIGNED** girer. O node'un `c_a`'sına uyan herkes işi havuzda görür;
+işi **üstlenmek** (claim) ile **görmek** (visibility/listable) AYRI kapılardır.
+
+| Kavram | Kapı | Nerede |
+|---|---|---|
+| **Havuzda görünmek** | node `c_a` **∪** kök `listable` **∪** node `listable` **∪** `terminals[].listable` **∪** `wf_admin` | tek SQL predicate (`portal/pool.rs`) |
+| **Claim edebilmek** | YALNIZ node `c_a` | `WfeExecutor::can_claim` → matcher (§3) |
+| **ACT alabilmek** | claim sahibi olmak + transition `c_a` | `Engine::apply` §7.1 |
+
+- **Havuzda görünmek claim edebilmek DEĞİLDİR.** Görünürlük kümesi genişledikçe claim
+  kapısı GEVŞEMEZ; havuz satırı bu ayrımı `PoolTask.can_claim` alanıyla TAŞIR
+  (`GET /portal/pool/{wfe_id}/can-claim` gerekçeyi `reason` ile verir).
+- Claim **CAS**'tır: yarışta ikinci istek `200 { success: false, reason: "already_claimed" }`
+  alır (istisna değil, cevap). Sahibi tekrar claim ederse etkisizdir (idempotent).
+- **Claim node'u DEĞİŞTİRMEZ** — assignment runtime metadata'dır. Başarılı transition
+  sonrası yeni node'a UNASSIGNED girilir (assignment sıfırlanır).
+- **Claim'in kendi süresi tasarımcıdandır:** `nodes.<key>.claim_timeout` (SLA-1) verilirse
+  süre dolduğunda claim düşer/`wft` hedefine gidilir. **Verilmezse claim SÜRESİZDİR** —
+  motorda sabit bir "N dakika sonra otomatik bırak" davranışı YOKTUR.
+  (Karıştırmayın: WFD **taslak kilidi** ayrı bir kavramdır ve o da 2026-08-18'den beri
+  süresizdir — bkz. `CLAUDE.md` "WFD taslak kilidi".)
+- **Devir / havuza geri atma:** `POST /wfe/{id}/reassign`. `to` = devralacak tam aktör
+  üçlüsü; `to: null` = havuza geri bırakma (force-unclaim). Kapı
+  `nodes.<key>.reassign eşleşir VEYA wf_admin eşleşir`; hedef hâlâ node `c_a`'sına uymak
+  ZORUNDADIR (`TargetNotEligible`), yoksa claim tutar ama hiçbir aksiyon alınamaz.
+- **Aktörün KENDİ claim'ini bırakacağı bir uç YOKTUR** (`release`/`unclaim` diye bir
+  rota yok): claim ya aksiyon alınarak, ya `claim_timeout` ile, ya da yetkili devriyle
+  (`reassign`) düşer.
+- Not/dosya EKLEMEK claim ister (`409 note.requires_claim`); okuma ve kendi taslağını
+  silme istemez.
 
 ---
 

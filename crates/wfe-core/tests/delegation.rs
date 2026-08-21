@@ -116,6 +116,7 @@ fn wfes_at(node: &str) -> Wfes {
         dynctx: DynCtx(json!({})),
         wfah,
         status: WfeStatus::Active,
+        visited_nodes: vec![],
         current_node: Some(node.into()),
         end_terminal: None,
         assigned_to: None,

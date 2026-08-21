@@ -1010,7 +1010,7 @@
         }
       }
     },
-    "wftGlobalTargets": {
+    "wftSendBack": {
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1021,9 +1021,27 @@
           "type": "array",
           "minItems": 1,
           "items": {
-            "$ref": "#/$defs/wftNode"
+            "$ref": "#/$defs/sendBackTarget"
           },
-          "description": "Global aksiyon (GLB) hedef kumesi - hedefi belge degil, aksiyonu ALAN KISI secer. TEK aksiyon + TEK transition: when/c_a/wfes_effects/trigger dallara KOPYALANMAZ. Secim calisma aninda POST /wfe/{id}/actions govdesindeki 'target' ile gelir (zorunlu; listede olmayan hedef 400 action.target_invalid). Secim bir action input DEGILDIR: $ctx'e yazilmaz, wfes_effects gerektirmez, $wfah izdusumune girmez. Custom validator: global_action_no_targets / _target_unknown / _target_dup / _target_self. YALNIZ transitions[].wft icinde gecerlidir (global_action_placement)."
+          "description": "GERI GONDER hedef kumesi - hedefi belge degil, aksiyonu ALAN KISI secer. REZERVE AKSIYON ADI YOKTUR: bir aksiyonu geri gonderme yapan sey adi degil wft'inin BU FORMU olmasidir (editor adlari 'Geri Gonder', 'Geri Gonder 2'... diye uretir, her biri AYRI kimlik ve AYRI girdi sozlesmesidir). 2026-08-21'e kadar bu forma 'global aksiyon (GLB)' deniyordu; ad birakildi cunku 'global aksiyon' yalniz yetkiliye ait sistem aksiyonlarina ayrildi. TEK aksiyon + TEK transition: when/c_a/wfes_effects/trigger dallara KOPYALANMAZ. CALISMA ANINDA SUZULUR (K-2): menu 'targets kesisim ugranmis node'lar' olarak sunulur; hic ugranmis hedef kalmazsa aksiyon HIC SUNULMAZ ve apply ayni suzgeci kapi olarak sorar (400 action.target_invalid). Ugranmis kume = wf.wfah.from_node/to_node + start node'u (wfd.start[].from) + current_node/kol node'lari; bkz. wfe_core::v22::pipeline::visited_nodes. Secim calisma aninda POST /wfe/{id}/actions govdesindeki 'target' ile gelir (zorunlu). Secim bir action input DEGILDIR: $ctx'e yazilmaz, wfes_effects gerektirmez, $wfah izdusumune girmez. Custom validator (tasarim zamani): send_back_no_targets / _target_unknown / _target_dup / _target_self. YALNIZ transitions[].wft icinde gecerlidir (send_back_wft_placement)."
+        }
+      }
+    },
+    "sendBackTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node"
+      ],
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/idName",
+          "description": "Root 'nodes' katalogundaki hedef node id."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bu HEDEFIN buton metni (2026-08-21). Aksiyonun adi tasarimciya SORULMAZ (editor uretir) ve ayirt edici metin BURADA durur: ilk node icin 'Basa Gonder', sube muduru icin 'Sube Muduru'ne Gonder'. Opsiyonel - verilmezse gosterim hedef node'un label'ina duser (display::send_back_target_label), yani possible-actions yanitindaki Ref.label hicbir kosulda bos donmez. Ayni node farkli menulerde farkli metin tasiyabilir: node label'i 'bu adim kimin havuzu', hedef label'i 'buraya geri gondermek ne demek' sorusunu yanitlar."
         }
       }
     },
@@ -1185,7 +1203,7 @@
           "$ref": "#/$defs/wftSimpleTerminal"
         },
         {
-          "$ref": "#/$defs/wftGlobalTargets"
+          "$ref": "#/$defs/wftSendBack"
         },
         {
           "$ref": "#/$defs/wftConditional"

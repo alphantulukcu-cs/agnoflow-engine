@@ -2289,3 +2289,278 @@ wrong_type_input_passes_the_input_gate`.
   ihlali akışın TASARIM hatasıdır — `catch`le gizlemek bozuk verinin sessizce ilerlemesi
   demek olurdu. Gerekirse ayrı bir kararla açılır.
 
+## G0-1 spec denetimi: "yazılı değil" denenin dördü yazılıydı; kanonik yer terminology.md'dir (2026-08-20)
+
+**Sorun:** 2026-08-20 toplantısının görevlendirmesi (G0-1) yedi kavramın "**hiçbir dokümanda
+yazılı olmadığını**" ve kod yazılmadan önce spec'e işlenmesi gerektiğini söylüyor:
+`wf_admin`, global aksiyon kümesi, `send_back` + çok hedefli `wft`, node kimliği + `seq` +
+`label`, aksiyon `label`'ı, havuz/claim/release, node bazlı `x-visibility`.
+
+**Denetim (kavram bazında, kod + `docs/spec/` arandı):**
+
+| Kavram | Gerçek durum |
+|---|---|
+| `wf_admin` bloğu | **Yazılıydı** — `schema.json` `wf_admin`, `terminology.md` §WF_ADMIN, bu dosyada T‑A5, `CLAUDE.md`, `docs/superpowers/specs/2026-08-11-wf-admin-design.md` |
+| Node kimliği + `label` | **Yazılıydı** — kimlik `nodes` object key, tasarımcı verir (2026-08-12); `runtime-semantics.md` §2b |
+| Aksiyon `label` | **Yazılıydı** — `$defs/actionDef.label` + wire'da `Ref {id,label}`; etiket asla null dönmez (`display::humanize_key`) |
+| "Lock süresiz" | **Yazılıydı** — taslak kilidi T‑B4 (2026-08-18 TTL kaldırıldı); WFE claim'inde sabit TTL hiç yoktu, süre yalnız `nodes.<key>.claim_timeout`tan gelir |
+| Çok hedefli `wft` (= WFD içi geri gönderme) | **Kodda ve şemada VARDI** (`$defs/wftGlobalTargets`, `Wft::Targets`, `POST /wfe/{id}/actions` gövdesindeki `target`), `CLAUDE.md`'de anlatılıyordu — **`terminology.md`'de YOKTU** |
+| Havuz / claim | **Kodda VARDI** (havuz predicate'i, `can_claim` ayrımı, `reassign`, CAS) — kanonik spec'te toplu bölüm YOKTU |
+| Node/state bazlı `x-visibility` | **Gerçekten yoktu** — `$defs/visibility` `{c_orgu,c_r,c_u,c_a}`, `when` YOK ve dizi değil |
+
+**Kök neden — iki doküman, tek kanon.** Son iki ayın kararları (`api-contract-v2`, havuz
+projeksiyonu, GLB) `CLAUDE.md` + `schema.json` + bu dosyaya yazıldı ama
+**`terminology.md`'ye taşınmadı**. Kanonik sözlük geride kalınca kavram "hiç yazılmamış"
+göründü ve aynı tartışma yeniden açıldı. `terminology.md` §WFT hâlâ "v2.1 ile aynıdır"
+diyor ve ALTI WFT formundan yalnız üçünü sayıyordu (`{targets}`, `{parallel}`, `{collapse}`
+eksikti) — yani eksiklik GLB'ye özel değil, sistematikti.
+
+**Karar 1 — bir kavram `terminology.md`'de yoksa YAZILI DEĞİLDİR.** `CLAUDE.md` motorun
+çalışma notudur (repo'ya özel, "kod esastır"), `decisions.md` gerekçe kaydıdır; **domain
+kavramının kanonik yeri `terminology.md`**, yapısal kuralın kanonik yeri `schema.json`.
+Wire/model kararı alan her iş, `terminology.md` karşılığını AYNI işte yazar — sonraya
+bırakılmaz. Bu denetimde geriye dönük kapatılanlar: §GLB (hedef seçimli aksiyon),
+§API gösterim sözleşmesi (`Ref {id,label}`), §Havuz/Claim/Assignment ve §WFT'nin altı
+formu.
+
+**Karar 2 — "global aksiyon" adı ZATEN KULLANILIYOR; yeni küme için başka ad gerekir.**
+Şemada/kodda **GLB = global aksiyon** şu demektir: hedefi belge değil, aksiyonu ALAN KİŞİ
+seçer (`wft: {targets}`). Toplantının "global aksiyon"ı ise akış tanımından bağımsız,
+yalnız yetkiliye ait sistem aksiyonları (`cancel`, `send_to_start`, `assign_from_pool`,
+`reclaim_to_pool`). **İkisi aynı şey değil ve bugün ikincisi motorda YOK** — `wf_admin`
+üç yetki verir (claim devri · escalation fire/skip · görme) ve T‑A5 açıkça "**aksiyon
+yetkisi VERMEZ**" der. Aynı adı iki kümeye vermek A ve B bloklarını karıştırır; ikinci
+küme kararlaşırsa ADI FARKLI olur (öneri `admin_actions`). `terminology.md` §GLB bu tuzağı
+açıkça yazar.
+
+**Karar 3 — açık kalemler spec'e TEK TARAFLI YAZILMADI.** `README.md` "Çalışma Kuralları":
+*"Emin olamadığın tasarım kararında iki seçeneği açıkla ve sor; spec'i kendi başına
+genişletme."* Kararı bekleyenler ve seçenek matrisi
+`docs/2026-08-20-toplanti-spec-denetimi.md` §4'te (K-1…K-6): yetkili sistem aksiyonları +
+`allowed_global_actions` (T‑A5 değişmezini kırar) · GLB hedefinin WFAH ile kesişmesi
+(bugün liste STATİK, ileriye gönderme engellenmiyor) · hedef başına serbest metin label
+(`wftNode` şu an `additionalProperties: false`) · `x-visibility` dizi + `when`
+(`V(dynctx, actor)` imzası `wfes` almak zorunda) · `release` ucu (bugün sahip kendi
+claim'ini bırakamıyor; `reassign to:null`un kapısı `node.reassign ∪ wf_admin`) · label
+i18n (`display` bugün dil bağlamı almıyor).
+
+**Karar 4 — "geri gönderemez" için ayrı bayrak YOK** (görevlendirme B-4/L-2'nin cevabı):
+kısıt, o node'u `targets` listesine KOYMAMAKLA ifade edilir. Ayrı bir `no_send_back`
+bayrağı, aynı gerçeği iki yerde tutup çelişebilir hâle getirirdi — `terminal_when`in
+(v1 kalıntısı, "ikinci ve çelişebilen terminal-belirleme yolu") elendiği gerekçenin aynısı.
+Bu, K-2 (hedef listesi WFAH ile kesişsin mi) sorusundan BAĞIMSIZDIR.
+
+**Karar 5 — node `seq`'i EKLENMEYECEK** (kullanıcı, 2026-08-21: *"Seq kararını
+reddetmiştik"*). Görevlendirme B-1 node'a 1'den başlayan topolojik sıra istiyordu;
+reddedildi, üç gerekçeyle:
+1. Topolojik sıra bu grafta tek değil (fork/join, koşullu dallar, escalation kenarları,
+   WFC dönüşleri). Paralel kolda "hangisi önce"nin cevabı yok → keyfî tie-break kalıcı
+   sözleşme olur ve `seq - 1` yanlış node'u gösterir.
+2. Stabil olmayan İKİNCİ bir kimlik açar: node kimliği 2026-08-12'de bilinçle slug'dan
+   koparıldı; `seq` node eklenince/silinince kayar. Üstelik ad çakışır — `$wfah`
+   izdüşümünde (`{seq, action, actor, input, at}`) ve `WfeView.path[].seq`'te `seq`
+   WFAH SIRA NUMARASIDIR, başka bir eksen.
+3. UI'nin istediği veri zaten dönüyor: `GET /wfe/{id}` → `path[]`
+   (`{seq, action: Ref, from: Ref?, to: Ref?, at}`, K7). "Başa gönder" = `path[0].to`,
+   "bir öncekine gönder" = son adımın `from`'u. Statik belge sırası yerine O INSTANCE'ın
+   gerçek geçmişi — B-2'nin kabul kriteriyle ("hedefler yalnızca WFAH'ta geçmiş node'lar
+   arasından") tutarlı olan da bu.
+
+Sonuç: **ihtiyaç gerçek, karşılığı `seq` alanı DEĞİL** — "başa/bir öncekine gönder"
+`path[]` ile, hedef kümesinin daraltılması K-2 ile çözülür. `nodes.<key>`e sıra alanı
+eklenmez; şemada `seq` diye bir node alanı YOKTUR ve eklenmesi bu kararı geri almak
+demektir.
+
+**Yan bulgu, aynı gün KAPATILDI — spec'in iki kopyası ayrışmıştı.** `README.md` iki
+kopyanın "birebir aynı" tutulduğunu söylüyor; değildi: `agnoflow-frontend/docs/spec/`
+node kimliğini hâlâ **`slug(c_a)`'dan türetiliyor** diye anlatıyordu (2026-08-12'de
+KALDIRILAN kural), `decisions.md` kopyası **~600 satır geride**ydi (T‑A5, T‑B4, görünürlük
+projeksiyonu, node/terminal `listable`, `duplicate_c_a`, `format` göçü, runtime tip
+denetimi hiç yoktu), `reference-types.rs` ve `migration-notes.md` de eskiydi. Yalnız
+`schema.json` ve `examples/` senkrondu.
+
+**Editör bu dosyaları okuyup KALDIRILMIŞ bir modeli öğreniyordu** (frontend `CLAUDE.md`
+"Kitap kaldırılmış kuralları öğretemez" notu tam bu riski anlatıyor) — drift'i "ayrı görev"
+diye bırakmak, düzeltilen kararın yanında yanlış kaynağı canlı tutmak demekti.
+
+**Kapatma (2026-08-21, kullanıcı: "niye tek taraflı iş yapıyorsun"):** altı dosya
+(`terminology.md`, `runtime-semantics.md`, `decisions.md`, `migration-notes.md`,
+`reference-types.rs`, `README.md`) backend'den frontend'e **tek yönlü** kopyalandı;
+`diff -rq` ile dizin birebir aynı. **Yön kalıcıdır: kanon backend `docs/spec/`,
+frontend kopyası TÜKETİCİDİR** — frontend'de yapılan düzeltme önce backend'e yazılır,
+sonra kopyalanır. Frontend kopyasında özgün içerik olmadığı diff ile doğrulandı (tüm
+farklar eski sürümdü), o yüzden birleştirme (merge) gerekmedi.
+
+## "Global aksiyon" adı BIRAKILDI: rezerve `send_back` + hedef başına `label` (2026-08-21, KIRICI)
+
+**Sorun (kullanıcı, 2026-08-21):** *"Şu anda bizim kullandığımız GLB'yi, yani global
+aksiyonun ismini değiştireceğiz ve Geri Gönder yapacağız. Çünkü bizim implemente ettiğimiz
+şey asıl global aksiyon değil; adminin yapacağı aksiyonlar global aksiyon olacak."*
+
+İki ayrı kavram tek adı paylaşıyordu (2026-08-20 denetiminin K-1 bulgusu):
+
+| | Kodda "global aksiyon (GLB)" | Toplantıda "global aksiyon" |
+|---|---|---|
+| Kim tanımlar | Akış tasarımcısı (WFD) | Sistem (motor) |
+| Ne yapar | Hedefi çalışma anında kullanıcıya seçtirir | Akışta tanımlı olmasa bile işler |
+| Kim kullanır | Akıştaki normal aktör | Workflow Admin |
+| Bugün var mı | VAR | YOK |
+
+Ad çakışması A ve B bloklarını karıştırıyordu; "global" sıfatı da yanlıştı — mekanizma
+global değil, akışın İÇİNDE tanımlı normal bir aksiyondu.
+
+**Karar 1 — mekanizmanın adı GERİ GÖNDER, aksiyon anahtarı REZERVE `send_back`.**
+Tasarımcı bu aksiyona ad vermez. Gerekçe: rezerve adın amacı *"bu aksiyon hedef
+seçtirir mi"* sorusunu **ADDAN** cevaplanabilir kılmaktır — ad serbest kalsaydı istemci
+her belgede aynı semantiği başka isimle arayacak, soruyu ancak `wft`e bakarak
+cevaplayabilecekti. "Global aksiyon" adı bundan sonra YALNIZ yetkiliye ait sistem
+aksiyonları (K-1) için ayrılmıştır.
+
+**Karar 2 — ad ↔ menü bağı İKİ YÖNLÜ.** `action == "send_back"` olan transition hedef
+menüsü taşımak ZORUNDA (`send_back_wft_required`) **ve** hedef menüsü başka bir aksiyona
+yazılamaz (`send_back_wft_reserved`). Tek yön açık bırakılsaydı rezerve adın tek gerekçesi
+ortadan kalkardı.
+
+**Karar 3 — gösterim adı da SABİT: `"Geri Gönder"`** (`display::SEND_BACK_LABEL`; motor
+belgeye BAKMADAN döner). `actions.send_back.label` yazmak HATADIR
+(`send_back_label_fixed`) — sessizce yok saymak, tasarımcının yazdığı metnin ekranda
+çıkmadığını ancak portalda görmesi demekti (`context.required`ın WOR-70'te hard-reject
+edilme gerekçesinin aynısı). Kullanıcının ifadesiyle: *"bu yeni Geri Gönder
+aksiyonumuzun ismi sabit ve değiştirilemez şekilde Geri Gönder olacak."*
+
+**Karar 4 — ayırt edici metin HEDEFTE: `wft.targets[].label`.** Kullanıcı isteği:
+*"geri göndermek için seçili olan her node'a label yazabilmek istiyorum… ilk node'a
+gönderirken UI'da Başa Gönder demek istiyorsa o hedefin label'ını Başa Gönder
+yapabilmeli… possible actions'da bu label'ı yollayacağımızdan direkt butonuna koyabilir."*
+
+- Alan **opsiyoneldir**; verilmezse gösterim hedef node'un `label`'ına düşer
+  (`display::send_back_target_label`). Zorunlu yapılmadı çünkü `Ref.label` sözleşmesi
+  "asla boş dönmez"dir ve node label'ı zaten geçerli bir cevaptır; zorunlu kılmak tek
+  hedefli basit menülerde gereksiz yazı işi olurdu.
+- **Node label'ı ile hedef label'ı AYRI tutuldu**, ikinci bir isim alanı olarak değil:
+  node label'ı "bu adım kimin havuzu" (her yerde aynı), hedef label'ı "**buraya geri
+  göndermek ne demek**" sorusunu yanıtlar. Aynı node, iki farklı adımdan geri
+  gönderilirken iki farklı metin taşıyabilir — bu yüzden metin node'a değil MENÜ ÖĞESİNE
+  yazılır.
+- **`Ref` şekli DEĞİŞMEDİ** (`{id, label}`): değişen yalnız `label`ın kaynağı. Portal
+  zaten `option.label` basıyordu, tüketici tarafında kod değişikliği GEREKMEDİ.
+- Çekirdek gösterim ÜRETMEZ: `ActionChoice.targets` artık `SendBackChoice { node,
+  label: Option<String> }` taşır — belgedeki HAM metin. Nihai etiketi tek yer
+  (`v22::display`) çözer, `Ref`e çeviren adapter'dır (`Ref::send_back_target`).
+
+**Yeniden adlandırmalar (pre-production, geriye uyum okuyucusu YAZILMADI):**
+
+| Eski | Yeni |
+|---|---|
+| `Wft::Targets` | `Wft::SendBack` |
+| `GlobalTarget { node }` | `SendBackTarget { node, label? }` |
+| `$defs/wftGlobalTargets` | `$defs/wftSendBack` (+ yeni `$defs/sendBackTarget`) |
+| `global_action_no_targets` / `_target_unknown` / `_target_dup` / `_target_self` | `send_back_no_targets` / `_target_unknown` / `_target_dup` / `_target_self` |
+| `global_action_placement` | `send_back_wft_placement` |
+| — (yeni) | `send_back_wft_required` · `send_back_wft_reserved` · `send_back_label_fixed` |
+
+**Değişmeyenler (bilinçli):** wire hata kodları `action.target_required` /
+`_target_invalid` / `_target_unexpected` — "global" kelimesi taşımıyorlar ve istemci
+onlara göre ekran açıyor; `ApplyBody.target` alan adı; `$wfah` izdüşümü; `PossibleAction`
+şekli.
+
+**Kapsam dışı (K-2 hâlâ açık):** hedef listesi HÂLÂ STATİKTİR — WFAH geçmişiyle
+kesişmiyor, "ileriye gönderme" motor tarafından engellenmiyor. Rezerve ad bu işi
+KOLAYLAŞTIRIR (motor artık aksiyonu adından tanıyor), ama kesişme ayrı bir karardır.
+
+## Rezerve `send_back` GERİ ALINDI + K-2: menü uğranmış node'larla kesişir (2026-08-21 akşamı, KIRICI)
+
+Aynı günün ilk kararının ("rezerve `send_back` + sabit etiket") **ikinci turu**. İki
+değişiklik: rezerve ad kalktı, hedef menüsü çalışma anında süzülmeye başladı.
+
+### 1 — Rezerve ad KALKTI, kimlikler AYRIŞIYOR
+
+**Sorun (kullanıcı, aynı gün):** *"Geri Gonder sabit olmasın. Yani tek bir aksiyon
+kimliğine indirgenmesin, Geri Gonder 1, Geri Gonder 2 gibi gitsin."*
+
+Rezerve tek anahtarın kaçınılmaz sonucu, aynı kararı yazarken de not edilmişti: motorda
+`actions` bir map, anahtar da aksiyonun kimliği — tek anahtar demek **tek katalog
+girdisi**, yani **tek girdi sözleşmesi** demektir. Sonuç: bir node'un geri göndermesine
+zorunlu alan (örn. `red_gerekcesi`) eklemek akıştaki BÜTÜN geri göndermelere ekliyordu.
+İki geri göndermenin farklı girdi istemesi meşru bir ihtiyaç; rezerve ad onu imkânsız
+kılıyordu.
+
+**Karar:**
+
+| | İlk tur (geri alındı) | Yürürlükteki |
+|---|---|---|
+| Aksiyon anahtarı | rezerve `send_back` | editör üretir: `Geri_Gonder`, `Geri_Gonder_2`, … |
+| Kimlik sayısı | akış başına TEK | geri gönderme başına AYRI |
+| Girdi sözleşmesi | akış genelinde tek | her biri BAĞIMSIZ |
+| Gösterim adı | motorda sabit (`display::SEND_BACK_LABEL`) | belgede `label` — hepsine AYNI (`"Geri Gönder"`) yazılır |
+| `actions.<key>.label` | YASAK (`send_back_label_fixed`) | serbest |
+| Ad ↔ menü bağı | iki yönlü (`send_back_wft_required` / `_reserved`) | YOK |
+
+Kaldırılanlar: `SEND_BACK_ACTION` sabiti, `display::SEND_BACK_LABEL` + `action_label`
+özel hâli, `send_back_wft_required` · `send_back_wft_reserved` ·
+`send_back_label_fixed` validator kodları, editörde `isReservedActionName`.
+
+**Bir aksiyonu geri gönderme yapan şey ADI DEĞİL, `wft`inin `{targets}` formu olmasıdır.**
+İstemci de "bu aksiyon hedef seçtirir mi" sorusunu `possible-actions` yanıtındaki
+`target` alanının VARLIĞINDAN okur — ad ayrıştırmaz, yani rezerve adın gerekçesi
+(soruyu addan cevaplamak) zaten karşılanmış durumda. Editör tarafında ad SORULMAZ ama
+rezerve de değildir: `mintAction` `Geri Gönder` tabanından üretir, çakışmayı sayıyla
+ayırır ve **hepsine aynı `label`ı yazar** — kullanıcı üç ayrı kimliği tek isimle görür,
+ayırt edici metin hedeftedir.
+
+**Korunanlar:** `Wft::SendBack` · `SendBackTarget { node, label? }` (hedef başına metin) ·
+`$defs/wftSendBack`/`sendBackTarget` · `send_back_*` validator adları · "GERİ GÖNDER"
+terminolojisi. Yani ad değişikliği ve hedef label'ı DURUYOR; geri alınan yalnız rezerve
+anahtar + sabit etiket.
+
+### 2 — K-2: hedef menüsü `targets ∩ uğranmış node'lar`
+
+**Sorun:** `wft.targets` STATİKTİ. Tasarımcı "buraya geri gönderilebilir" der ama o
+node'a BU örnekte uğranmış olması gerekmezdi (koşullu dal seçilmedi, adım atlandı).
+Uğranmamış bir node'a "geri" göndermek geri gönderme değil **ileri atlamadır**: akış hiç
+görmediği bir adıma düşer, o adımın beklediği ctx alanları hiç yazılmamıştır, `when`
+koşulları boş geçmişle değerlendirilir. Görevlendirme B-2 kabul kriteri de bunu istiyordu
+("hedefler yalnızca WFAH'ta geçmiş node'lar arasından").
+
+**Karar — kesişim MOTORDA, tek saf fonksiyonda.** `wfe_core::v22::pipeline::visited_nodes(wfd, wfes)`
+üç kaynağı birleştirir:
+
+1. `Wfes::visited_nodes` — WFAH akış izi (`wf.wfah.from_node` ∪ `to_node`).
+2. **Start node'u** — WFAH'ın ilk kaydının aksiyonunu taşıyan `start[]` kurallarının
+   `from`u. Start satırının `from_node`'u NULL'dır (K7: "öncesi yok"), `to_node` ilk
+   havuzdur → start node'u (1)'e HİÇ girmez, oysa "başa gönder" tam oraya gönderir.
+   Aynı aksiyonu iki start kuralı paylaşıyorsa İKİSİ de kümeye girer: hangisinin
+   ateşlendiği WFAH'ta yazılı değildir ve ikisi de meşru bir "hazırlayan havuzu"dur;
+   fazla daraltmak "başa gönder"i sessizce yok ederdi.
+3. Şu anki duruş — `current_node` + iptal olmayan kol node'ları.
+
+- **İKİ kapı AYNI kümeye bakar:** `possible_actions` menüyü süzer (hiç hedef kalmazsa
+  aksiyonu HİÇ SUNMAZ — boş menülü satır, her seçimde 400 döndüren bir düğme olurdu),
+  `apply` aynı süzgeci kapı olarak sorar. Ayrışsalar istemci menüyü atlayıp ileri
+  atlayabilirdi.
+- **Yeni hata kodu YOK:** süzgeçten geçmeyen hedef `action.target_invalid`. İstemci için
+  "bu hedef bu işte geçerli değil" TEK durumdur; ikinci bir kod, aynı ekranı iki koda
+  bağlamak olurdu.
+- **Belgedeki SIRA korunur** — tasarımcının yazdığı sıra ekranda anlam taşıyor.
+
+**`Wfes` üzerinde YENİ ALAN: `visited_nodes: Vec<String>`.** Neden state'e girdi:
+kesişim hem menüyü hem kapıyı besliyor, ikisinin AYNI kümeye bakması zorunlu ve alan
+`Wfes`te olduğu için **her yol (gerçek store · sim · testler) onu doldurmak ZORUNDA** —
+parametre olsaydı doldurmayı atlayan bir çağıran kapıyı sessizce kapatırdı. Adapter
+(`build_wfes`) alanı K7'de eklenen kolonlardan doldurur, **ekstra sorgu YOK** (satırlar
+zaten orada). `SimState` alanı `#[serde(default)]` ile taşır ve her commit'te uğranan
+node'u ekler — sim ile gerçek akış aynı menüyü döndürmek zorundadır.
+
+**Reddedilen alternatifler:**
+
+- *`from_node`/`to_node`'u core `WfahEntry`ye taşımak* — K7 kararı bunu bilerek dışarıda
+  bırakmıştı; ihtiyaç duyulan şey satır-satır iz değil, TEKİLLEŞTİRİLMİŞ kümedir.
+- *Start satırına `from_node` yazmak* (start node'unu (1)'e sokmak için) — `PathStep.from`
+  sözleşmesini (`null` = başlangıç) kırar, portal zaman çizelgesi "başlangıç" yerine
+  havuz adı basardı. Görünür bir davranış değişikliği, istenmemişti.
+- *Kesişimi adapter/executor katmanında yapmak* — `apply` kapısı çekirdeğin dışına
+  çıkardı, sim ile gerçek akış ayrışırdı ("engine bilir kişi" ilkesi).
+
+**Kapsam dışı:** editörün tasarım zamanı kuralları (SB-P/SB-R, `pastNodesOf`) DEĞİŞMEDİ.
+İkisi artık aynı yönde çalışıyor: editör tasarım zamanı grafından "gelinmiş olabilecek"
+node'ları sunar, motor çalışma anında "gerçekten gelinmiş" olanlara indirir.

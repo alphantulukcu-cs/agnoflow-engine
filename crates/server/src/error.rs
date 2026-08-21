@@ -73,7 +73,7 @@ impl From<EngineError> for AppError {
             EngineError::NotOwner => StatusCode::FORBIDDEN,
             EngineError::Unauthorized => StatusCode::FORBIDDEN,
             EngineError::TargetNotEligible => StatusCode::BAD_REQUEST,
-            // GLB hedef seçimi — üçü de istemcinin GÖVDESİYLE ilgili, durumla değil.
+            // Geri gönderme hedef seçimi — üçü de istemcinin GÖVDESİYLE ilgili, durumla değil.
             EngineError::TargetRequired
             | EngineError::TargetInvalid(_)
             | EngineError::TargetUnexpected => StatusCode::BAD_REQUEST,
@@ -99,7 +99,7 @@ impl From<EngineError> for AppError {
             EngineError::AmbiguousAction { .. } => Some("conflict.ambiguous_action"),
             EngineError::WfeTerminal => Some("conflict.terminal"),
             EngineError::WfeExpired => Some("conflict.expired"),
-            // GLB hedef seçimi — istemci "hedef seç" ekranını hangi durumda
+            // Geri gönderme hedef seçimi — istemci "hedef seç" ekranını hangi durumda
             // göstereceğini KODDAN bilir, hata metnini ayrıştırmaz.
             EngineError::TargetRequired => Some("action.target_required"),
             EngineError::TargetInvalid(_) => Some("action.target_invalid"),

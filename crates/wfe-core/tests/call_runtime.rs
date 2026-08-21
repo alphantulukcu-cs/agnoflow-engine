@@ -98,6 +98,7 @@ fn wfes_owned(node: &str, ctx: Value, owner: Option<Uuid>) -> Wfes {
         dynctx: DynCtx(ctx),
         wfah,
         status: WfeStatus::Active,
+        visited_nodes: vec![],
         current_node: Some(node.into()),
         end_terminal: None,
         assigned_to: owner,

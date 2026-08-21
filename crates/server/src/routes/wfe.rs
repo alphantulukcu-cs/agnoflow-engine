@@ -1080,7 +1080,7 @@ struct ApplyBody {
     /// Değer `possible-actions`taki `branch.id`dir; istemci için OPAKTIR.
     #[serde(default)]
     branch: Option<String>,
-    /// GLB (global aksiyon) hedef seçimi — değer `possible-actions`taki
+    /// Geri gönderme hedef seçimi — değer `possible-actions`taki
     /// `target.options[].id`dir. `wft: {targets}` taşıyan aksiyonda ZORUNLU
     /// (400 `action.target_required`), diğerlerinde YASAK (400
     /// `action.target_unexpected`). Bir action input DEĞİLDİR: `$ctx`'e yazılmaz,

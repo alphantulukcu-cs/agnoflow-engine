@@ -269,6 +269,7 @@ impl WfeStore for MemStore {
                 wfd_id: new.wfd_id,
                 wfd_version: new.wfd_version,
                 dynctx: DynCtx(new.initial_dynctx.clone()),
+                visited_nodes: vec![],
                 wfah: Wfah(new.wfah_entries.clone()),
                 status,
                 current_node,

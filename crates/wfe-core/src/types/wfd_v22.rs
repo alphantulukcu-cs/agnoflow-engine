@@ -740,7 +740,7 @@ impl CatchDef {
     }
 }
 
-/// WFT formlardan biridir (M3, WOR-31): {node} / {terminal} / {targets} /
+/// WFT formlardan biridir (M3, WOR-31): {node} / {terminal} / {targets} (geri gönder) /
 /// {conditions, default?} / {parallel} / {collapse}. Inline `wft.c_a` YOKTUR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -751,7 +751,17 @@ pub enum Wft {
     Terminal {
         terminal: String,
     },
-    /// Global aksiyon (GLB): hedefi BELGE değil, aksiyonu alan KİŞİ seçer.
+    /// **GERİ GÖNDER**: hedefi BELGE değil, aksiyonu alan KİŞİ seçer.
+    ///
+    /// Aksiyonu geri gönderme yapan şey ADI DEĞİL, `wft`inin BU FORMU olmasıdır —
+    /// rezerve bir anahtar YOKTUR (2026-08-21 akşamı geri alındı: tek anahtar tüm
+    /// geri gönderme adımlarını TEK aksiyon kimliğine indiriyor, dolayısıyla girdi
+    /// sözleşmesini de akış genelinde tekleştiriyordu). Editör adları
+    /// `Geri Gönder`, `Geri Gönder 2`… diye üretir; her biri AYRI kimliktir.
+    /// 2026-08-21'e kadar bu forma "global aksiyon (GLB)" deniyordu; ad BIRAKILDI
+    /// çünkü "global aksiyon" akış tanımından bağımsız, yalnız yetkiliye ait sistem
+    /// aksiyonlarına (iptal / başa döndür / havuza at) ayrıldı — bu form ise akış
+    /// tasarımcısının kurduğu NORMAL bir aksiyondur.
     ///
     /// Eskiden hedef, aksiyon ANAHTARINA kodlanıyordu (`Geri_Gonder__gt__self__mudur`)
     /// ve hedef başına ayrı bir aksiyon + ayrı bir transition üretiliyordu. Bu, wire
@@ -762,8 +772,8 @@ pub enum Wft {
     ///
     /// Seçim bir action input DEĞİLDİR: `$ctx`'e yazılmaz, `wfes_effects` gerektirmez,
     /// `$wfah` izdüşümüne girmez. Hedef bilgisi geçişin kendisinde (`path[].to`) görünür.
-    Targets {
-        targets: Vec<GlobalTarget>,
+    SendBack {
+        targets: Vec<SendBackTarget>,
     },
     Conditional {
         conditions: Vec<WftCondition>,
@@ -788,15 +798,22 @@ pub enum Wft {
     },
 }
 
-/// `Wft::Targets` öğesi — seçilebilir TEK bir hedef.
+/// `Wft::SendBack` öğesi — seçilebilir TEK bir geri gönderme hedefi.
 ///
-/// Bugün yalnız `node` taşır ama düz `Vec<String>` yerine obje olmasının gerekçesi
-/// var: hedef başına `when` guard'ı / etiket gibi alanlar eklenirse şekil kırılmadan
-/// büyür. `deny_unknown_fields` — yazım hatası sessizce yutulmaz.
+/// Obje olmasının (düz `Vec<String>` değil) karşılığı 2026-08-21'de geldi: hedef
+/// başına **kendi `label`'ı** yazılabiliyor. Aksiyonun adı sabittir ("Geri Gönder"),
+/// ayırt edici metin HEDEFTE durur — tasarımcı ilk node için "Başa Gönder", şube
+/// müdürü için "Şube Müdürüne Gönder" yazar ve portal o metni doğrudan butona basar.
+/// `deny_unknown_fields` — yazım hatası sessizce yutulmaz.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GlobalTarget {
+pub struct SendBackTarget {
     pub node: String,
+    /// Bu hedefin buton metni. **Opsiyonel**: verilmezse gösterim node'un
+    /// `label`'ına düşer (`display::send_back_target_label`), yani `Ref.label` hiçbir
+    /// koşulda boş dönmez ve istemci fallback yazmaz.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 /// WOR-31: `Wft::Parallel`'in gövdesi.

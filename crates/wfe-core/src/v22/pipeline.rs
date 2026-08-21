@@ -20,9 +20,10 @@ use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
+use std::collections::BTreeSet;
 use crate::types::wfd_v22::{
-    ActionDef, AutoexecDef, CaGrantRule, CallMode, CandidateActor, CuItem, EscalationStep, JoinRule,
-    StartAs, Transition, TriggerInvocation, Wfd, Wft, WftTarget,
+    ActionDef, AutoexecDef, CaGrantRule, CallMode, CandidateActor, CuItem, EscalationStep,
+    JoinRule, SendBackTarget, StartAs, Transition, TriggerInvocation, Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
@@ -104,18 +105,27 @@ pub struct ClaimRelease {
     pub new_dynctx: Option<Value>,
 }
 
-/// `Engine::possible_actions` öğesi: uygulanabilir bir aksiyon + (GLB ise) o
-/// aksiyonun seçilebilir hedefleri.
+/// `Engine::possible_actions` öğesi: uygulanabilir bir aksiyon + (geri gönderme ise)
+/// o aksiyonun seçilebilir hedefleri.
 ///
-/// Çekirdek burada ANAHTAR taşır, etiket taşımaz: gösterim adları tek bir yerde
-/// (`v22::display`) üretilir ve dış görünüme (`Ref`) adapter katmanında çevrilir.
+/// Çekirdek burada ANAHTAR taşır, gösterim ÜRETMEZ: `SendBackChoice::label` belgedeki
+/// HAM metindir (yoksa `None`), nihai etiketi tek bir yer (`v22::display`) çözer ve
+/// dış görünüme (`Ref`) adapter katmanında çevirir.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActionChoice {
     pub action: String,
-    /// `Wft::Targets` transition'ında hedef node anahtarları (belgedeki SIRAYLA);
+    /// `Wft::SendBack` transition'ında seçilebilir hedefler (belgedeki SIRAYLA);
     /// düz aksiyonda `None` — "hedef seçimi yok" ile "hedef listesi boş" ayrımı
     /// korunsun diye `Option`, boş `Vec` değil.
-    pub targets: Option<Vec<String>>,
+    pub targets: Option<Vec<SendBackChoice>>,
+}
+
+/// `ActionChoice::targets` öğesi: hedef node anahtarı + belgedeki ham etiket.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SendBackChoice {
+    pub node: String,
+    /// `SendBackTarget::label` AYNEN — çözüm (`node_label`'a düşme) adapter'ın işi.
+    pub label: Option<String>,
 }
 
 /// `Terminal` ve `Terminated` her ikisi de "aktif değil" sınıfıdır: yeni
@@ -142,21 +152,92 @@ fn end_terminal_of(landed: Option<&CallSite>) -> Option<String> {
     }
 }
 
-/// GLB hedef seçimini transition'ın wft'sine UYGULAR.
+/// **K-2 — bu WFE'nin GERÇEKTEN uğradığı node kümesi.** Geri gönderme menüsünün
+/// çalışma anı süzgeci; saf, store'suz, sim ile gerçek akış için AYNI.
 ///
-/// `Wft::Targets` çalıştırılabilir bir hedef DEĞİLDİR — bir MENÜDÜR. Seçim
+/// Belgedeki `wft.targets` STATİKTİR: tasarımcı "buraya geri gönderilebilir" der, ama
+/// o node'a BU örnekte uğranmış olması gerekmez (koşullu dal seçilmedi, adım atlandı).
+/// Uğranmamış bir node'a "geri" göndermek geri gönderme DEĞİL ileri atlamadır: akış hiç
+/// görmediği bir adıma düşer, o adımın beklediği ctx alanları hiç yazılmamıştır ve
+/// oradaki `when` koşulları boş geçmişle değerlendirilir.
+///
+/// Küme ÜÇ kaynağın birleşimidir:
+///
+/// 1. `wfes.visited_nodes` — WFAH akış izinden (`wf.wfah.from_node`/`to_node`) gelen
+///    gövde. Escalation/claim_timeout ile taşınan node'lar DAHİLDİR: WFE orada bekledi.
+/// 2. **Start node'u** — WFAH'ın İLK kaydının aksiyonunu taşıyan `start[]` kurallarının
+///    `from`u. Start satırında `from_node` NULL'dır (K7: "öncesi yok") ve `to_node` ilk
+///    havuzdur, yani start node'u (1)'e HİÇ girmez — oysa "başa gönder" tam olarak
+///    oraya gönderir. Aynı aksiyonu iki start kuralı paylaşıyorsa İKİSİ de kümeye
+///    girer: hangisinin ateşlendiği WFAH'ta yazılı değildir ve ikisi de meşru bir
+///    "hazırlayan havuzu"dur — fazla daraltmak "başa gönder"i sessizce yok ederdi.
+/// 3. Şu anki duruş — `current_node` + iptal OLMAYAN kol node'ları. (1) bunu zaten
+///    içerir; ikinci kaynak olarak durması `visited_nodes` doldurulmamış bir çağıranda
+///    menünün BOŞ kalmasını değil, en azından bulunulan yeri döndürmesini sağlar.
+///
+/// SINIR: iptal olmuş paralel KARDEŞ kolun node'ları (1)'de kalır — tasarım zamanı
+/// kuralı (editör SB-P/SB-R) o hedefleri zaten yasaklar; bu kesişim EK bir daraltmadır,
+/// onun yerine geçmez.
+pub fn visited_nodes<'w>(wfd: &'w Wfd, wfes: &'w Wfes) -> BTreeSet<&'w str> {
+    let mut out: BTreeSet<&str> = wfes.visited_nodes.iter().map(String::as_str).collect();
+    if let Some(first) = wfes.wfah.entries().first() {
+        for rule in &wfd.start {
+            if rule.action == first.action {
+                out.insert(rule.from.as_str());
+            }
+        }
+    }
+    if let Some(node) = wfes.current_node.as_deref() {
+        out.insert(node);
+    }
+    for b in &wfes.branches {
+        if b.status != BranchStatus::Cancelled {
+            out.insert(b.branch_node.as_str());
+        }
+    }
+    out
+}
+
+/// Bir geri gönderme menüsünün BU örnekte gerçekten seçilebilir hedefleri: belgedeki
+/// sıra KORUNUR (tasarımcının yazdığı sıra ekranda anlam taşır), yalnız uğranmamış
+/// olanlar düşer.
+fn offered_targets<'w>(
+    targets: &'w [SendBackTarget],
+    visited: &BTreeSet<&str>,
+) -> Vec<&'w SendBackTarget> {
+    targets
+        .iter()
+        .filter(|t| visited.contains(t.node.as_str()))
+        .collect()
+}
+
+/// Geri gönderme hedef seçimini transition'ın wft'sine UYGULAR.
+///
+/// `Wft::SendBack` çalıştırılabilir bir hedef DEĞİLDİR — bir MENÜDÜR. Seçim
 /// yapıldıktan sonra kalan yol normal `Wft::Node` yoludur (MoveTo), yani hedef
 /// seçimi runtime'a yeni bir geçiş türü sokmaz: yalnız hangi node'a gidileceğini
 /// belirler. Bu yüzden burada `Cow` ile TEK bir noktada çözülür ve `resolve_wft`
-/// GLB'den habersiz kalır.
+/// menüden habersiz kalır.
 ///
 /// Simetri bilinçlidir: menü varsa seçim ZORUNLU, menü yoksa seçim YASAK. İkincisi
 /// sessizce yok sayılsaydı istemcinin yanlış transition'ı hedeflediği gizlenirdi.
-fn select_wft<'w>(wft: &'w Wft, target: Option<&str>) -> Result<std::borrow::Cow<'w, Wft>, EngineError> {
+fn select_wft<'w>(
+    wft: &'w Wft,
+    target: Option<&str>,
+    visited: &BTreeSet<&str>,
+) -> Result<std::borrow::Cow<'w, Wft>, EngineError> {
     match wft {
-        Wft::Targets { targets } => {
+        Wft::SendBack { targets } => {
             let chosen = target.ok_or(EngineError::TargetRequired)?;
-            if !targets.iter().any(|t| t.node == chosen) {
+            // K-2: menüde OLMAK yetmez, o node'a UĞRANMIŞ olmak da gerekir. İki kapı
+            // AYNI kümeye bakar (`offered_targets`) — `possible_actions`ın sunmadığı bir
+            // hedefi apply kabul ederse istemci menüyü atlayıp ileri atlayabilirdi.
+            // Ayrı hata kodu YOK: istemci için "bu hedef bu işte geçerli değil" tek
+            // durumdur ve `action.target_invalid` zaten onu söylüyor.
+            if !offered_targets(targets, visited)
+                .iter()
+                .any(|t| t.node == chosen)
+            {
                 return Err(EngineError::TargetInvalid(chosen.to_string()));
             }
             Ok(std::borrow::Cow::Owned(Wft::Node {
@@ -171,7 +252,6 @@ fn select_wft<'w>(wft: &'w Wft, target: Option<&str>) -> Result<std::borrow::Cow
         }
     }
 }
-
 
 /// **Kapı B** — bir commit'in `$ctx`'e YAZDIĞI değerlerin tip denetimi (2026-08-19).
 ///
@@ -410,7 +490,7 @@ impl<'a> Engine<'a> {
     /// çözer. Paralel mod dışında `None` eski davranıştır; verilirse
     /// current_node ile örtüşmek zorundadır.
     ///
-    /// `target`: GLB (`wft: {targets}`) hedef seçimi — hedefi belge değil, aksiyonu
+    /// `target`: geri gönderme (`wft: {targets}`) hedef seçimi — hedefi belge değil, aksiyonu
     /// ALAN KİŞİ seçer. `Targets` transition'ında ZORUNLU, diğerlerinde YASAK
     /// (bkz. `select_wft`). Seçim ctx'e YAZILMAZ ve `$wfah` izdüşümüne girmez:
     /// nereye gidildiği zaten geçişin kendisinde (`to_node`) görünür.
@@ -511,9 +591,9 @@ impl<'a> Engine<'a> {
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
         validate_action_input(action_def, input, &wfd.context)?;
-        // GLB hedef seçimi — effects STAGE EDİLMEDEN önce doğrulanır: reddedilecek
+        // Geri gönderme hedef seçimi — effects STAGE EDİLMEDEN önce doğrulanır: reddedilecek
         // bir aksiyon için hiçbir hesap yapılmasın.
-        let wft = select_wft(&transition.wft, target)?;
+        let wft = select_wft(&transition.wft, target, &visited_nodes(wfd, wfes))?;
         let mut staged = ctx.clone();
 
         let now = Utc::now();
@@ -736,8 +816,8 @@ impl<'a> Engine<'a> {
             .get(action)
             .ok_or_else(|| EngineError::InvalidWfd(format!("action '{action}' tanımsız")))?;
         validate_action_input(action_def, input, &wfd.context)?;
-        // GLB hedef seçimi (tek-kol yolla AYNI kural — kolda da geçerlidir).
-        let wft = select_wft(&transition.wft, target)?;
+        // Geri gönderme hedef seçimi (tek-kol yolla AYNI kural — kolda da geçerlidir).
+        let wft = select_wft(&transition.wft, target, &visited_nodes(wfd, wfes))?;
         let mut staged = ctx.clone();
 
         let now = Utc::now();
@@ -1300,10 +1380,10 @@ impl<'a> Engine<'a> {
 
     // ------------------------------------------------------ possible actions
 
-    /// Owner'ın şu an gerçekleştirebileceği aksiyonlar + (GLB ise) seçilebilir
+    /// Owner'ın şu an gerçekleştirebileceği aksiyonlar + (geri gönderme ise) seçilebilir
     /// hedefleri.
     ///
-    /// Dönüş tipi düz `Vec<String>` DEĞİLDİR: GLB'de hedef artık aksiyon anahtarına
+    /// Dönüş tipi düz `Vec<String>` DEĞİLDİR: hedef artık aksiyon anahtarına
     /// kodlanmadığı için, "hangi aksiyonlar mümkün" sorusunun cevabı "hangi hedefler
     /// seçilebilir" bilgisi olmadan eksik kalır — istemci hedef listesini WFD'yi
     /// okuyarak türetmek zorunda kalırdı.
@@ -1343,6 +1423,8 @@ impl<'a> Engine<'a> {
             return Ok(vec![]);
         }
         let ctx = wfes.dynctx.as_value().clone();
+        // K-2: geri gönderme menüsünün süzgeci — döngü başına BİR kez hesaplanır.
+        let visited = visited_nodes(wfd, wfes);
         let mut actions: Vec<ActionChoice> = Vec::new();
         for t in &wfd.transitions {
             if !t.from.contains(node_key) || actions.iter().any(|a| a.action == t.action) {
@@ -1376,14 +1458,30 @@ impl<'a> Engine<'a> {
                     continue;
                 }
             }
+            let targets = match &t.wft {
+                Wft::SendBack { targets } => {
+                    // K-2: menü ÖRNEĞE göre süzülür. Hiç uğranmış hedef kalmazsa aksiyon
+                    // HİÇ SUNULMAZ — boş menülü bir satır kullanıcıya "geri gönder" düğmesi
+                    // gösterip her seçimde 400 döndürürdü.
+                    let offered = offered_targets(targets, &visited);
+                    if offered.is_empty() {
+                        continue;
+                    }
+                    Some(
+                        offered
+                            .into_iter()
+                            .map(|g| SendBackChoice {
+                                node: g.node.clone(),
+                                label: g.label.clone(),
+                            })
+                            .collect(),
+                    )
+                }
+                _ => None,
+            };
             actions.push(ActionChoice {
                 action: t.action.clone(),
-                targets: match &t.wft {
-                    Wft::Targets { targets } => {
-                        Some(targets.iter().map(|g| g.node.clone()).collect())
-                    }
-                    _ => None,
-                },
+                targets,
             });
         }
         Ok(actions)
@@ -1683,9 +1781,7 @@ impl<'a> Engine<'a> {
         // (SLA-1'deki `collapses_parallel` fallback'iyle aynı savunma).
         let degraded = match (branch, wft) {
             (None, Wft::Collapse { collapse }) => Some(match collapse {
-                WftTarget::Node { node } => Wft::Node {
-                    node: node.clone(),
-                },
+                WftTarget::Node { node } => Wft::Node { node: node.clone() },
                 // Validator `sla_terminal_target` bunu zaten reddeder; savunma olarak
                 // terminal collapse de düz terminal devrine düşer.
                 WftTarget::Terminal { terminal } => Wft::Terminal {
@@ -1763,8 +1859,14 @@ impl<'a> Engine<'a> {
             now,
         );
 
-        let staged_calls =
-            self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
+        let staged_calls = self.stage_calls(
+            wfd,
+            landed.as_ref(),
+            &final_ctx,
+            &anchored,
+            wfes.wfe_id,
+            now,
+        )?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         Ok(TransitionCommit {
@@ -2067,8 +2169,14 @@ impl<'a> Engine<'a> {
                     &mut seq,
                     now,
                 );
-                let staged_calls =
-                    self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
+                let staged_calls = self.stage_calls(
+                    wfd,
+                    landed.as_ref(),
+                    &final_ctx,
+                    &anchored,
+                    wfes.wfe_id,
+                    now,
+                )?;
                 guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
                 Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
                     wfe_id: wfes.wfe_id,
@@ -2659,13 +2767,13 @@ impl<'a> Engine<'a> {
         let target = match wft {
             Wft::Node { node } => Target::Node(node.clone()),
             Wft::Terminal { terminal } => Target::Terminal(terminal.clone()),
-            // GLB menüsü buraya HİÇ ulaşmamalı: `select_wft` seçimi apply'ın
+            // Geri gönderme menüsü buraya HİÇ ulaşmamalı: `select_wft` seçimi apply'ın
             // başında `Wft::Node`'a indirger. Ulaşıyorsa hedef seçimi olmayan bir
-            // yerde (start / escalation / çağrı dönüşü) GLB yazılmış demektir —
-            // validator `global_action_placement` ile bunu yayından önce keser.
-            Wft::Targets { .. } => {
+            // yerde (start / escalation / çağrı dönüşü) menü yazılmış demektir —
+            // validator `send_back_wft_placement` ile bunu yayından önce keser.
+            Wft::SendBack { .. } => {
                 return Err(EngineError::InvalidWfd(
-                    "GLB (`wft: {targets}`) yalnız transitions[].wft içinde kullanılabilir".into(),
+                    "geri gönderme menüsü (`wft: {targets}`) yalnız transitions[].wft içinde kullanılabilir".into(),
                 ))
             }
             // WOR-31: fork — yalnız tekil modda geçerli. Start'ta ve paralel
@@ -3900,11 +4008,17 @@ mod tests {
         // MockOrg `self`i çapaya çözer → iki kural da origin birimine yazılır.
         let roles: Vec<&str> = out.iter().map(|c| c.role.as_str()).collect();
         assert!(roles.contains(&"mudur"), "listable grant'ı yok: {roles:?}");
-        assert!(roles.contains(&"wfAdmin"), "wf_admin grant'ı yok: {roles:?}");
+        assert!(
+            roles.contains(&"wfAdmin"),
+            "wf_admin grant'ı yok: {roles:?}"
+        );
         assert!(out.iter().all(|c| c.orgu_id == Some(origin)));
         // Node c_a'sı (memur) BURAYA GİRMEZ: o `current_c_a`nın işi, ve iş
         // bitince silinir. Karıştırılırsa bitmiş işin görünürlüğü sızar.
-        assert!(!roles.contains(&"memur"), "node c_a grant'a karışmış: {roles:?}");
+        assert!(
+            !roles.contains(&"memur"),
+            "node c_a grant'a karışmış: {roles:?}"
+        );
     }
 
     /// `when` guard'ı FALSE olan kural grant ÜRETMEZ — havuzun eski
@@ -3963,11 +4077,27 @@ mod tests {
         let wfd = grants_wfd(None);
 
         let ga = engine
-            .view_grants(&wfd, &json!({}), &Wfah::empty(), None, Uuid::new_v4(), a, Uuid::nil())
+            .view_grants(
+                &wfd,
+                &json!({}),
+                &Wfah::empty(),
+                None,
+                Uuid::new_v4(),
+                a,
+                Uuid::nil(),
+            )
             .await
             .unwrap();
         let gb = engine
-            .view_grants(&wfd, &json!({}), &Wfah::empty(), None, Uuid::new_v4(), b, Uuid::nil())
+            .view_grants(
+                &wfd,
+                &json!({}),
+                &Wfah::empty(),
+                None,
+                Uuid::new_v4(),
+                b,
+                Uuid::nil(),
+            )
             .await
             .unwrap();
 
@@ -4045,7 +4175,10 @@ mod tests {
             !roles.contains(&"memur"),
             "node c_a'sı görünürlük projeksiyonuna karışmış: {roles:?}"
         );
-        assert!(out.iter().all(|c| c.orgu_id == Some(origin)), "çapa origin değil");
+        assert!(
+            out.iter().all(|c| c.orgu_id == Some(origin)),
+            "çapa origin değil"
+        );
     }
 
     /// `when` guard'ı UYGULANIR — kök `listable` ile birebir aynı semantik.

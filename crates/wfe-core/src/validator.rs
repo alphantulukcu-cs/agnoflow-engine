@@ -78,7 +78,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_uniqueness(wfd, &mut report);
     check_duplicate_c_a(wfd, &mut report);
     check_cross_refs(wfd, &mut report);
-    check_global_targets(wfd, &mut report);
+    check_send_back(wfd, &mut report);
     check_start_rules(wfd, &mut report);
     check_wft_conditions(wfd, &mut report);
     check_graph(wfd, &mut report);
@@ -148,7 +148,9 @@ fn check_c_a_shape(wfd: &Wfd, report: &mut ValidationReport) {
     collect_key_sites(&doc, "reassign", "", &mut sites);
 
     for (path, rule) in sites {
-        let Some(obj) = rule.as_object() else { continue };
+        let Some(obj) = rule.as_object() else {
+            continue;
+        };
         if obj.contains_key("c_orgu") {
             continue; // çapalı biçim — kısıtları şema + diğer kurallar taşıyor
         }
@@ -476,7 +478,9 @@ fn check_c_u_items(wfd: &Wfd, report: &mut ValidationReport) {
     collect_key_sites(&doc, "c_u", "", &mut sites);
 
     for (path, c_u) in sites {
-        let Some(items) = c_u.as_array() else { continue };
+        let Some(items) = c_u.as_array() else {
+            continue;
+        };
         for i in 0..items.len() {
             let item = &items[i];
             let item_path = format!("{path}[{i}]");
@@ -1401,10 +1405,10 @@ fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
 }
 
 fn check_wft_refs(wfd: &Wfd, wft: &Wft, path: &str, report: &mut ValidationReport) {
-    // GLB hedefleri KENDİ kodlarıyla denetlenir (`global_action_target_unknown`) —
+    // Geri gönderme hedefleri KENDİ kodlarıyla denetlenir (`send_back_target_unknown`) —
     // burada ikinci kez jenerik `cross_ref` basılsaydı tasarımcı aynı sorunu iki
     // farklı isimle görürdü.
-    if matches!(wft, Wft::Targets { .. }) {
+    if matches!(wft, Wft::SendBack { .. }) {
         return;
     }
     for (kind, target) in wft_targets(wft) {
@@ -1432,22 +1436,29 @@ enum TargetKind {
     Terminal,
 }
 
-// ---- GLB (global aksiyon) — `wft: {targets}` ----
+// ---- GERİ GÖNDER (`send_back`) — `wft: {targets}` ----
 
-/// GLB hedef listesinin denetimi. Hedef artık aksiyon ANAHTARINA kodlanmadığı için
+/// Geri gönderme denetimi. Hedef artık aksiyon ANAHTARINA kodlanmadığı için
 /// (`Geri_Gonder__gt__self__mudur` kalktı) hataların hepsi burada, tasarımcıya dönük
 /// adlarla yakalanır; runtime'ın gördüğü tek şey "listede var mı" sorusudur.
-fn check_global_targets(wfd: &Wfd, report: &mut ValidationReport) {
+fn check_send_back(wfd: &Wfd, report: &mut ValidationReport) {
+    // REZERVE AD YOKTUR (2026-08-21 akşamı geri alındı). Aksiyonu geri gönderme yapan
+    // şey adı değil, `wft`inin bu formu olmasıdır; hangi aksiyonun hedef seçtirdiği
+    // `possible_actions` yanıtındaki `target` alanından okunur — istemcinin ad
+    // ayrıştırmasına gerek yoktur. Tek anahtar (`send_back`) denendi ve GERİ ALINDI:
+    // tüm geri gönderme adımlarını TEK aksiyon kimliğine indiriyor, dolayısıyla
+    // girdi sözleşmesini (`actions.<key>.input`) akış genelinde tekleştiriyordu —
+    // bir node'un geri göndermesine zorunlu alan eklemek hepsine ekliyordu.
     for t in &wfd.transitions {
-        let Wft::Targets { targets } = &t.wft else {
+        let Wft::SendBack { targets } = &t.wft else {
             continue;
         };
         let path = format!("transitions[{}].wft", t.id);
         if targets.is_empty() {
             report.error(
-                "global_action_no_targets",
+                "send_back_no_targets",
                 path.clone(),
-                "global aksiyonun hedef listesi boş — en az bir hedef gerekir".into(),
+                "geri gönderme hedef listesi boş — en az bir hedef gerekir".into(),
             );
         }
         let mut seen: HashSet<&str> = HashSet::new();
@@ -1455,14 +1466,14 @@ fn check_global_targets(wfd: &Wfd, report: &mut ValidationReport) {
             let at = format!("{path}.targets[{i}]");
             if !wfd.nodes.contains_key(&g.node) {
                 report.error(
-                    "global_action_target_unknown",
+                    "send_back_target_unknown",
                     at.clone(),
                     format!("bilinmeyen node '{}'", g.node),
                 );
             }
             if !seen.insert(g.node.as_str()) {
                 report.error(
-                    "global_action_target_dup",
+                    "send_back_target_dup",
                     at.clone(),
                     format!("hedef '{}' listede birden fazla kez var", g.node),
                 );
@@ -1472,10 +1483,10 @@ fn check_global_targets(wfd: &Wfd, report: &mut ValidationReport) {
             // için hiçbir şey olmamış gibi görünen sessiz bir tuzak.
             if t.from.contains(&g.node) {
                 report.error(
-                    "global_action_target_self",
+                    "send_back_target_self",
                     at,
                     format!(
-                        "hedef '{}' transition'ın kendi `from` node'u — kendine dönen global hedef anlamsızdır",
+                        "hedef '{}' transition'ın kendi `from` node'u — kendine geri göndermek anlamsızdır",
                         g.node
                     ),
                 );
@@ -1483,34 +1494,34 @@ fn check_global_targets(wfd: &Wfd, report: &mut ValidationReport) {
         }
     }
 
-    // GLB YALNIZ transition'da anlamlıdır: hedefi bir KİŞİ seçer. Start / escalation /
+    // Hedef menüsü YALNIZ transition'da anlamlıdır: hedefi bir KİŞİ seçer. Start / escalation /
     // çağrı dönüşü yollarında seçim yapacak kimse yoktur (sırasıyla: seçim taşıyan bir
     // API yok, tetikleyici system aktörü, karar çağrılanın sonucunda). Şema `$defs/wft`
     // paylaşıldığı için bu kapı burada durur — yoksa hata ancak RUNTIME'da, akış
     // tıkandığında görünürdü.
     let mut misplaced = Vec::new();
     for s in &wfd.start {
-        if matches!(s.wft, Wft::Targets { .. }) {
+        if matches!(s.wft, Wft::SendBack { .. }) {
             misplaced.push(format!("start[{}].wft", s.id));
         }
     }
     for (key, node) in &wfd.nodes {
         if let Some(call) = &node.call {
-            if matches!(call.wft, Some(Wft::Targets { .. })) {
+            if matches!(call.wft, Some(Wft::SendBack { .. })) {
                 misplaced.push(format!("nodes[{key}].call.wft"));
             }
         }
         for (j, esc) in node.escalation.iter().enumerate() {
-            if matches!(esc.wft, Some(Wft::Targets { .. })) {
+            if matches!(esc.wft, Some(Wft::SendBack { .. })) {
                 misplaced.push(format!("nodes[{key}].escalation[{j}].wft"));
             }
         }
     }
     for path in misplaced {
         report.error(
-            "global_action_placement",
+            "send_back_wft_placement",
             path,
-            "global aksiyon hedef seçimi (`targets`) yalnız transitions[].wft içinde kullanılabilir \
+            "geri gönderme hedef seçimi (`targets`) yalnız transitions[].wft içinde kullanılabilir \
              — bu yolda hedefi seçecek bir aktör yoktur"
                 .into(),
         );
@@ -1522,11 +1533,11 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
     match wft {
         Wft::Node { node } => out.push((TargetKind::Node, node.as_str())),
         Wft::Terminal { terminal } => out.push((TargetKind::Terminal, terminal.as_str())),
-        // GLB: her hedef gerçek bir çıkış kenarıdır — graf erişilebilirliği (BFS)
-        // bunları izlemek ZORUNDA, aksi halde yalnız GLB ile ulaşılan node'lar
-        // "erişilemez" görünürdü. Referans denetimi ise `check_global_targets`ta
+        // Geri gönderme: her hedef gerçek bir çıkış kenarıdır — graf erişilebilirliği
+        // (BFS) bunları izlemek ZORUNDA, aksi halde yalnız geri göndermeyle ulaşılan
+        // node'lar "erişilemez" görünürdü. Referans denetimi ise `check_send_back`te
         // kendi koduyla yapılır (bkz. `check_wft_refs`).
-        Wft::Targets { targets } => {
+        Wft::SendBack { targets } => {
             for t in targets {
                 out.push((TargetKind::Node, t.node.as_str()));
             }
@@ -2569,7 +2580,9 @@ fn check_context_named_types(wfd: &Wfd, report: &mut ValidationReport) {
     }
 
     for (path, node) in nodes {
-        let Some(map) = node.as_object() else { continue };
+        let Some(map) = node.as_object() else {
+            continue;
+        };
 
         if map.contains_key("$ref") {
             report.error(
@@ -2621,10 +2634,7 @@ fn check_context_named_types(wfd: &Wfd, report: &mut ValidationReport) {
                     report.error(
                         "context_format_cycle",
                         format!("context.$defs.{name}"),
-                        format!(
-                            "tip tanımı döngüsü: {} → {current}",
-                            seen.join(" → ")
-                        ),
+                        format!("tip tanımı döngüsü: {} → {current}", seen.join(" → ")),
                     );
                     break;
                 }
@@ -2899,7 +2909,11 @@ fn check_dollar_refs(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for t in &wfd.terminals {
         for (k, raw) in &t.wfe_end_response {
-            check_dollar_value(raw, &format!("terminals[{}].wfe_end_response[{k}]", t.id), report);
+            check_dollar_value(
+                raw,
+                &format!("terminals[{}].wfe_end_response[{k}]", t.id),
+                report,
+            );
         }
     }
     for (key, ax) in &wfd.autoexec {
@@ -3282,7 +3296,9 @@ fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
             }
             // Aksiyon kapsamı: sayılan her aksiyon bu node'dan GERÇEKTEN çıkabilmeli.
             // Yoksa kapı hiç kapanmaz — dosya zorunlu sanılır, hiçbir submit'i durdurmaz.
-            let Some(scoped) = aref.actions() else { continue };
+            let Some(scoped) = aref.actions() else {
+                continue;
+            };
             let mut seen_actions = HashSet::new();
             for action in scoped {
                 if !seen_actions.insert(action.clone()) {
@@ -3432,7 +3448,7 @@ fn wft_form_name(wft: &Wft) -> &'static str {
     match wft {
         Wft::Node { .. } => "node",
         Wft::Terminal { .. } => "terminal",
-        Wft::Targets { .. } => "targets (global aksiyon hedef seçimi)",
+        Wft::SendBack { .. } => "targets (geri gönderme hedef seçimi)",
         Wft::Conditional { .. } => "conditions (koşullu dallanma)",
         Wft::Parallel { .. } => "parallel (fork/join)",
         Wft::Collapse { .. } => "collapse (kolları düşür)",

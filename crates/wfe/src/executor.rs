@@ -115,9 +115,20 @@ impl Ref {
             id: id.to_string(),
         }
     }
+
+    /// Geri gönderme HEDEFİ: `id` hedef node anahtarı, `label` hedefin KENDİ metni
+    /// (`wft.targets[].label`), yoksa node label'ı. Node Ref'inden ayrı bir kurucu
+    /// olmasının sebebi bu: aynı node, farklı geri gönderme menülerinde farklı metin
+    /// taşıyabilir ("Başa Gönder" ile "Hazırlayan Memura Gönder" aynı node olabilir).
+    pub fn send_back_target(wfd: &Wfd, key: &str, label: Option<&str>) -> Self {
+        Ref {
+            label: display::send_back_target_label(wfd, key, label),
+            id: key.to_string(),
+        }
+    }
 }
 
-/// GLB (global aksiyon) hedef seçimi — `PossibleAction.target`.
+/// Geri gönderme hedef seçimi — `PossibleAction.target`.
 ///
 /// Yalnız `options` taşır: "Kime gönderilsin?" gibi bir başlık MOTORUN işi değil,
 /// istemcinin kendi metnidir. Motor seçeneklerin kimliğini ve gösterimini verir.
@@ -128,7 +139,9 @@ pub struct TargetChoice {
 
 /// T4 (API/sim): uygulanabilir bir aksiyon.
 ///
-/// - `target` YALNIZ GLB aksiyonlarında bulunur (`wft: {targets}`); yoksa alan hiç çıkmaz.
+/// - `target` YALNIZ rezerve `send_back` aksiyonunda bulunur (`wft: {targets}`); yoksa
+///   alan hiç çıkmaz. `options[].label` tasarımcının hedef başına yazdığı metindir —
+///   istemci onu DOĞRUDAN butona basar, kendi metnini üretmez.
 /// - `branch` YALNIZ paralel modda bulunur — aksiyonun ait olduğu kol; `id` kolun node
 ///   anahtarıdır ve istekte `branch` olarak geri gönderilir (istemci için OPAKTIR).
 #[derive(Debug, Clone, serde::Serialize)]
@@ -146,8 +159,11 @@ pub struct PossibleAction {
 pub fn to_possible_action(wfd: &Wfd, choice: ActionChoice, branch: Option<&str>) -> PossibleAction {
     PossibleAction {
         action: Ref::action(wfd, &choice.action),
-        target: choice.targets.map(|nodes| TargetChoice {
-            options: nodes.iter().map(|n| Ref::node(wfd, n)).collect(),
+        target: choice.targets.map(|targets| TargetChoice {
+            options: targets
+                .iter()
+                .map(|t| Ref::send_back_target(wfd, &t.node, t.label.as_deref()))
+                .collect(),
         }),
         branch: branch.map(|b| Ref::node(wfd, b)),
     }
@@ -1063,7 +1079,7 @@ impl WfeExecutor {
     /// `expected_rev`). `None` = kontrol yok (bugünkü davranış). `Some(n)` ve durum
     /// bu arada ilerlediyse hiçbir şey uygulanmaz, `Conflict(StaleRevision)` döner.
     ///
-    /// `target`: GLB hedef seçimi (API body `target`) — bkz. `Engine::apply`.
+    /// `target`: geri gönderme hedef seçimi (API body `target`) — bkz. `Engine::apply`.
     #[allow(clippy::too_many_arguments)]
     pub async fn apply(
         &self,
@@ -2247,6 +2263,7 @@ mod branch_hint_tests {
             wfd_id: Uuid::nil(),
             wfd_version: 1,
             dynctx: DynCtx(serde_json::json!({})),
+            visited_nodes: vec![],
             wfah: Wfah::empty(),
             status: WfeStatus::Active,
             current_node: current_node.map(String::from),

@@ -693,30 +693,143 @@ taşıyan iki kuralın `self`'i farklı şey söylemesi tasarımcı için tuzak 
 
 ## WF_ADMIN — akış-içi yetkili (T‑A5)
 
-WFD kökünde bir grant dizisi. Şekli (`{c_a, when?}`) artık ÜÇ yerle AYNIDIR — kök
-(global) `listable[]`, `nodes.<key>.listable[]` (node listable) ve `wf_admin[]` hepsi
-aynı `$defs/listableRule`/`caGrantRule` tipini kullanır ve aynı ORGTRVLANG çapasına
-(`origin_orgu_id`, "WFE'nin kendi birimi") bağlıdır. Bu kurallardan birine uyan
-aktör O AKIŞA müdahale edebilir: claim devri (node'un kendi `reassign` kuralı olmasa da),
-escalation sayacına müdahale (`fire` / `skip`), ve WFE'yi görme.
+WFD kökünde bir grant dizisi. Grant şekli (`{c_a, when?}`) ÜÇ `listable` yeriyle
+AYNIDIR — kök `listable[]`, `nodes.<key>.listable[]`, `terminals[].listable[]` — ve aynı
+ORGTRVLANG çapasına (`origin_orgu_id`, "WFE'nin kendi birimi") bağlıdır. `wf_admin` bu
+şekli **genişletir** (`$defs/wfAdminRule`): grant alanlarının yanında
+`allowed_global_actions` taşır.
 
 ```json
 "wf_admin": [
   { "c_a": { "c_orgu": { "from": {"wfah": "start", "field": "actor.orgu", "occurrence": "first"},
-                         "traverse": "self" },
-             "c_r": ["genel-mudur"] } },
+                         "traverse": "up[branch]" },
+             "c_r": ["branchManager"] },
+    "allowed_global_actions": [
+      "assign_from_pool", "reclaim_to_pool", "reassign",
+      "send_back", "send_to_start", "cancel",
+      "fire_escalation", "skip_escalation"
+    ] },
   { "c_a": { "c_u": [{ "from": "$ctx.baslatan" }] },
     "when": "$ctx.tutar > 100000" }
 ]
 ```
 
-Birinci kural "akışı BAŞLATAN kişinin biriminde genel müdür olan" demektir — yetkili akıştan
-akışa değişir; statik bir rol grant'ıyla ifade edilemez, bu yüzden C_A kuralıdır.
+Birinci kural "akışı BAŞLATAN kişinin biriminde şube müdürü olan" demektir — yetkili
+akıştan akışa değişir; statik bir rol grant'ıyla ifade edilemez, bu yüzden C_A kuralıdır.
+İkinci kural hiçbir global aksiyon vermez: o aktör akışı yalnız GÖRÜR.
 
-**AKSİYON YETKİSİ VERMEZ.** WF Admin işi yönetir, işi yapmaz: bir node'da ACT alabilmesi
-için o node'un `c_a`'sına uyması gerekir. Akışı bitirme/iptal, rastgele node'a taşıma ve
-`$ctx`'e yazma da kapsam dışıdır. agnoflow PLATFORM admini (`X-Admin-Key`) ile ilgisi
-yoktur.
+### Yetki ÖRTÜK DEĞİL, LİSTELİ (2026-08-21, A-1 — KIRICI)
+
+2026-08-21'e kadar bir `wf_admin` kuralına uymak claim devrini ve escalation
+müdahalesini **kendiliğinden** açıyordu. Artık her müdahale `allowed_global_actions`ta
+AÇIKÇA yazmak zorundadır:
+
+| | Önce | Şimdi |
+|---|---|---|
+| Kurala uyan aktör | claim devreder + escalation'a müdahale eder + görür | **yalnız görür** |
+| Müdahale nasıl açılır | otomatik | `allowed_global_actions`ta aksiyon adı yazılarak |
+| "Admin bile geri gönderemesin" | ifade EDİLEMEZ | listeden `send_back` çıkarılır |
+
+- **Boş/eksik liste = hiçbir global aksiyon** (güvenli varsayılan). Bu, mevcut
+  belgelerin adminlerini görme-yalnız hâline düşürür; kırılma BİLİNÇLİDİR — hassas
+  akışta yetkiyi daraltmanın başka bir ifade dili yoktu ve örtük yetki "yayına
+  çıkınca fark edilen" sınıftandır.
+- **Görme listeye BAĞLI DEĞİLDİR** (`can_view` (e)). Sebep yapısaldır: görünürlük
+  commit anında viewer BİLİNMEZKEN projeksiyona (`view_c_a`) yazılır, o anda "hangi
+  aksiyonu alacak" sorusunun cevabı yoktur. Aksiyon kapısı okuma anında çözülür.
+- **Çoklu kural = BİRLEŞİM.** Aktör iki kurala da uyuyorsa yetki kümesi ikisinin
+  birleşimidir (`wf_admin_global_actions`); ilk eşleşen kuralı seçip diğerini yok
+  saymak, belgede önce yazana sessiz bir öncelik verirdi.
+- `when` guard'ı kural BAŞINA işler ve `$actor` guard'da YASAKTIR
+  (`grant_when_actor_ref`) — grant'lar viewer bilinmezken yazılır.
+- Validator: hiç aksiyon vermeyen kural **uyarı** (`wf_admin_no_global_actions`, hata
+  değil — gözlemci admin meşrudur), aynı aksiyonun iki kez yazılması **hata**
+  (`wf_admin_duplicate_global_action`). Bilinmeyen aksiyon adı zaten PARSE hatasıdır.
+
+### AKSİYON YETKİSİ hâlâ VERMEZ — ayrım "global aksiyon"dadır
+
+WF Admin bir node'da **ACT alamaz**: akış aksiyonu için o node'un `c_a`'sına uyması
+gerekir, `wf_admin` bunu açmaz. `allowed_global_actions` akış aksiyonu değil **global
+aksiyon** verir; ikisi ayrı eksendir (bkz. "GLOBAL AKSIYON"). `$ctx`'e yazma da kapsam
+dışıdır. agnoflow PLATFORM admini (`X-Admin-Key`) ile ilgisi yoktur.
+
+---
+
+## GLOBAL AKSİYON — yetkiliye ait sistem aksiyonu (2026-08-21, A-2)
+
+Motorun tanımladığı, **WFD'ye yazılmayan** ve yalnız Workflow Admin'in alabildiği
+müdahaleler. Akışta hiç tanımlanmamış olsa bile çalışır — akış aksiyonundan (ACT) farkı
+budur.
+
+> **Adlandırma tuzağı.** 2026-08-21'e kadar `wft: {targets}` formuna (WFD içi geri
+> gönderme) da "global aksiyon (GLB)" deniyordu. Ad BIRAKILDI ve bu kümeye ayrıldı;
+> o mekanizmanın adı artık **GERİ GÖNDER**dir (bkz. o bölüm). İkisi AYNI ŞEY DEĞİL:
+
+| | GERİ GÖNDER (`wft: {targets}`) | GLOBAL AKSİYON |
+|---|---|---|
+| Kim tanımlar | akış tasarımcısı (WFD) | motor |
+| Kim kullanır | akıştaki normal aktör | Workflow Admin |
+| Akışta tanımlı mı | **evet** — explicit `action` + `transition` | **hayır** |
+| Yetki nereden | node `c_a` | `wf_admin[].allowed_global_actions` |
+| WFAH kaydı | aksiyonun kendi adı | `admin:<aksiyon>` |
+
+### Küme ve semantik
+
+| Aksiyon | Ne yapar | Yol |
+|---|---|---|
+| `assign_from_pool` | havuzdaki (claim edilmemiş) işi doğrudan bir kişiye atar | `POST /wfe/{id}/reassign` (`target` var, sahip yok) |
+| `reclaim_to_pool` | kişinin üzerindeki işi havuza döndürür (claim düşer) | `POST /wfe/{id}/reassign` (`target` YOK) |
+| `reassign` | kişiden kişiye devir — `reclaim` + `assign`, TEK transaction | `POST /wfe/{id}/reassign` (`target` var, sahip var) |
+| `send_back` | akışı **uğranmış** bir node'a geri atar | `POST /wfe/{id}/global-actions/send-back` |
+| `send_to_start` | start node'una döndürür, **yeni WFE AÇILMAZ** | `POST /wfe/{id}/global-actions/send-to-start` |
+| `cancel` | WFE'yi terminal-class `terminated`a sokar | `POST /wfe/{id}/global-actions/cancel` |
+| `fire_escalation` | sıradaki escalation adımını vadesinden önce tetikler | `POST /wfe/{id}/escalation/fire` |
+| `skip_escalation` | sıradaki escalation adımını atlar (audit satırı) | `POST /wfe/{id}/escalation/skip` |
+
+`GET /wfe/{id}/global-actions` bu aktörün O WFE'de alabildiklerini döndürür — UI
+düğmelerini bununla süzer. Boş liste "admin değil" DEMEZ (görme listeden bağımsızdır).
+Her uç iki kabukta da vardır: `/wfe/*` (X‑Actor-* başlıkları) ve `/portal/wfe/*` (JWT).
+
+**Devir neden AYRI bir uç değil:** üç claim aksiyonu mevcut `reassign` ucundan geçer.
+İkinci bir uç, aynı CAS/claim semantiğini iki yerden bakılır hâle getirirdi. Kapı hangi
+aksiyonu istediğini durumdan çıkarır (`target` var mı · sahip var mı) ve denetim izine
+`input.global_action` olarak yazar; `input.via = "wf_admin"` ise yetki `node.reassign`
+değil `wf_admin`'den gelmiştir.
+
+### Değişmezler
+
+1. **WFAH'a GERÇEK admin `(ORGU, U, R)` üçlüsüyle yazılır**, `system` ile DEĞİL —
+   müdahaleyi kimin yaptığı denetimin tek sorusudur. Kayıt adı `admin:<aksiyon>`; önek
+   ZORUNLU çünkü `cancel` adında bir akış aksiyonu tanımlamak serbesttir ve `$wfah`
+   izdüşümüne bakan bir `when` ikisini ayırt edemezdi (`escalate:` önekinde öğrenilen
+   ders: marker adı sözleşmedir).
+2. **`$ctx` DEĞİŞMEZ** — global aksiyon iş verisi yazmaz. Commit yine yeni bir DynCtx
+   revizyonu üretir; immutability korunur.
+3. **Terminal-class WFE'de HEPSİ reddedilir** (`cancel` dâhil, 409). İkinci iptal
+   WFAH'a ikinci bir kayıt yazardı.
+4. **`send_back` hedefi = `visited_nodes`** — K-2 ile AYNI süzgeç (WFD içi geri
+   gönderme ile paylaşılır). Uğranmamış node'a "geri" göndermek ileri atlamadır: o
+   adımın beklediği ctx alanları hiç yazılmamıştır. Bulunulan node da reddedilir
+   (işlemsiz). Hata kodu `action.target_invalid` — yeni kod YOK.
+5. **Derinlik sınırı YOKTUR** (A-4 kararı): "bir geriye / iki geriye" sorusunun cevabı
+   sayı değil LİSTEdir; hedef kümesi örneğin gerçek geçmişinden çıkar. Sınır gerekirse
+   `wf_admin` kuralında opsiyonel bir alanla eklenir, motora sayaç konmaz.
+6. **`send_to_start` yeni WFE AÇMAZ** — aynı WFE geri sarar (WFAH + DynCtx geçmişi
+   korunur; sıfırdan başlatmak izi koparırdı). Hedef `wfd.start[].from` ile SINIRLIDIR
+   (aksi halde `send_back` kapısını atlamanın yolu olurdu); belgede çok start kuralı
+   varsa seçim ZORUNLU (`action.target_required`). `visited` süzgecinden MUAFTIR: start
+   node'una tanım gereği uğranmıştır ve türetme (WFAH ilk kaydının aksiyonu ↔ start
+   kuralı) yeni bir sürümde aksiyon yeniden adlandırıldığında kaybolabilir.
+7. **`cancel` durumu `terminated`** (`end_response.reason = "ADMIN.Cancelled"`, serbest
+   metin `note`). Yeni bir `cancelled` durumu EKLENMEDİ: `Terminated` 2026-07-16'da
+   "hata değil, başarılı bitiş de değil, aktif de değil" ve açıkça "ileride manuel
+   iptal" için tanımlanmıştı. Ardıl akış TETİKLENMEZ, `end_terminal` NULL kalır (varılmış
+   bir terminal yok). `cancel` deadline'ı aşmış WFE'de de çalışır ve **bozuk `$ctx`
+   kapısını (Kapı C) koşmaz** — tıkanmış kaydın tek çıkış yolu odur.
+8. **Paralel modda `send_back`/`send_to_start` REDDEDİLİR** (400). Kolları toplayıp tek
+   node'a inmek `collapse` semantiğidir ve kol bağlamı ister; adminin kolu yoktur ve
+   hangi kolun "geri gönderen" sayılacağı kararlaştırılmadı. `cancel` paralel modda
+   ÇALIŞIR (tüm kollar iptal edilir — deadline sonlanmasının aynısı).
 
 ---
 

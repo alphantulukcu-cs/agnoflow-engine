@@ -54,9 +54,10 @@ pub struct Wfd {
     pub listable: Vec<ListableRule>,
     // T-A5 (2026-08-11) — akis-ici yetkili havuzu. `listable` ile AYNI kayit sekli ama
     // AYRI dizi: biri gorme hakki verir, oteki akisi yonetme (claim devri + escalation
-    // mudahalesi + gorunurluk). AKSIYON yetkisi VERMEZ.
+    // mudahalesi + gorunurluk). 2026-08-21 (A-1): yetki ORTUK DEGIL, LISTELI —
+    // kurala uymak yalniz GORME verir, mudahale `allowed_global_actions`ta yazmak zorunda.
     #[serde(default)]
-    pub wf_admin: Vec<CaGrantRule>,
+    pub wf_admin: Vec<WfAdminRule>,
     #[serde(default)]
     pub attachments: BTreeMap<String, AttachmentGroup>, // opsiyonel ek-belge katalogu
     // WOR-84: DEPRECATED — motor HIC okumaz (v1 kalintisi). Terminal wft: {terminal} ile
@@ -635,9 +636,10 @@ pub enum StartAs {
 
 /// C_A tabanli grant kaydi: kural + opsiyonel `when` guard'i.
 ///
-/// DORT yer bu sekli paylasir — `wfd.listable[]` (kalici gorme), `nodes.<k>.listable[]`
-/// (2026-08-13, duruma bagli), `terminals[].listable[]` (2026-08-17, sonuca bagli) ve
-/// `wfd.wf_admin[]` (akis-ici yetkili). Farklari NE VERDIKLERIDIR, nasil yazildiklari degil.
+/// UC yer bu sekli PAYLASIR — `wfd.listable[]` (kalici gorme), `nodes.<k>.listable[]`
+/// (2026-08-13, duruma bagli) ve `terminals[].listable[]` (2026-08-17, sonuca bagli).
+/// Dorduncusu `wfd.wf_admin[]` bu sekli GENISLETIR (`WfAdminRule`): ayni alanlar +
+/// `allowed_global_actions`. Farklari NE VERDIKLERIDIR, nasil yazildiklari degil.
 ///
 /// `when` guard'inda `$actor` YASAKTIR (validator `grant_when_actor_ref`): grant'lar
 /// commit aninda, viewer BILINMEZKEN projeksiyona yazilir.
@@ -647,6 +649,41 @@ pub struct CaGrantRule {
     pub c_a: CandidateActor,          // v2.2: TEK kural (coklu grant = coklu kayit)
     #[serde(default)]
     pub when: Option<String>,
+}
+
+/// `wfd.wf_admin[]` ogesi (2026-08-21, A-1) — grant kurali + o kuralin verdigi GLOBAL
+/// AKSIYON kumesi. Motor tarafinda `CaGrantRule` `flatten` ile gomulur; sema tarafinda
+/// alanlar tekrar yazilir (additionalProperties:false + allOf birlesmez).
+///
+/// BOS/EKSIK `allowed_global_actions` = admin YALNIZ gorur (guvenli varsayilan).
+///
+/// Kural sekli `flatten` ile GOMULUR (motorda da oyle): boylece `{c_a, when}` sekli tek
+/// yerde durur. `deny_unknown_fields` flatten ile birlikte DURUR ve gerekli: kaldirilinca
+/// `allowed_globl_actions` gibi yazim hatalari sessizce yutulur.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WfAdminRule {
+    #[serde(flatten)]
+    pub grant: CaGrantRule,
+    #[serde(default)]
+    pub allowed_global_actions: Vec<GlobalAction>,
+}
+
+/// GLOBAL AKSIYON — motorun tanimladigi, yalniz Workflow Admin'in alabildigi mudahale
+/// kumesi (J-2/J-3). WFD icindeki geri gondermeden (`Wft::SendBack`) AYRIDIR: o normal
+/// bir aksiyondur ve akista TANIMLI olmak zorundadir; global aksiyon akista hic
+/// tanimlanmamis olsa bile calisir.
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobalAction {
+    AssignFromPool,
+    ReclaimToPool,
+    Reassign,
+    SendBack,
+    SendToStart,
+    Cancel,
+    FireEscalation,
+    SkipEscalation,
 }
 
 /// `wfd.listable[]` ogesi — `CaGrantRule`'un alias'i (motorda da oyle).

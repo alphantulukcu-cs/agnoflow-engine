@@ -28,7 +28,9 @@ use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::Wfah;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::types::wfd_v22::WftTarget;
-use wfe_core::types::wfd_v22::{AutoexecDef, COrgu, CaGrantRule, CandidateActor, JoinRule};
+use wfe_core::types::wfd_v22::{
+    AutoexecDef, COrgu, CaGrantRule, CandidateActor, JoinRule, WfAdminRule,
+};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, BranchState, BranchStatus, ExecEnv, ExecFailure, Wfes};
@@ -411,13 +413,18 @@ async fn parallel_unrelated_actor_cannot_view() {
 fn golden_with_wf_admin(when: Option<&str>) -> Wfd {
     let mut wfd = golden();
     wfd.listable.clear(); // (d) yolunu kapat: (e) tek başına test edilsin
-    wfd.wf_admin = vec![CaGrantRule {
-        c_a: CandidateActor {
-            c_orgu: Some(COrgu::Selector("self".into())),
-            c_r: Some(vec!["creditDeptManager".into()]),
-            c_u: None,
+    // `allowed_global_actions` BOŞ: görme yetkisi global aksiyon listesinden
+    // BAĞIMSIZDIR (A-1) — hiçbir müdahaleye yetkili olmayan admin de akışı görür.
+    wfd.wf_admin = vec![WfAdminRule {
+        grant: CaGrantRule {
+            c_a: CandidateActor {
+                c_orgu: Some(COrgu::Selector("self".into())),
+                c_r: Some(vec!["creditDeptManager".into()]),
+                c_u: None,
+            },
+            when: when.map(String::from),
         },
-        when: when.map(String::from),
+        allowed_global_actions: vec![],
     }];
     wfd
 }
@@ -799,13 +806,16 @@ async fn pool_claim_decision_false_for_listable_and_wf_admin_only_viewers() {
     let orgu = Uuid::new_v4();
     // Kök `listable[0]` = branchManager (guard'sız), `wf_admin` = creditDeptManager.
     let mut wfd = golden();
-    wfd.wf_admin = vec![CaGrantRule {
-        c_a: CandidateActor {
-            c_orgu: Some(COrgu::Selector("self".into())),
-            c_r: Some(vec!["creditDeptManager".into()]),
-            c_u: None,
+    wfd.wf_admin = vec![WfAdminRule {
+        grant: CaGrantRule {
+            c_a: CandidateActor {
+                c_orgu: Some(COrgu::Selector("self".into())),
+                c_r: Some(vec!["creditDeptManager".into()]),
+                c_u: None,
+            },
+            when: None,
         },
-        when: None,
+        allowed_global_actions: vec![],
     }];
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input(30_000));
     wfes.origin_orgu_id = Some(orgu);

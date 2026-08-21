@@ -52,6 +52,10 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(reassign_wfe))
         .routes(routes!(fire_escalation))
         .routes(routes!(skip_escalation))
+        .routes(routes!(list_global_actions))
+        .routes(routes!(send_back))
+        .routes(routes!(send_to_start))
+        .routes(routes!(cancel_wfe))
         .routes(routes!(possible_actions))
         .merge(super::attachments::routes())
         .merge(super::notes::routes())
@@ -1797,6 +1801,131 @@ async fn skip_escalation(
         .skip_escalation(wfe_id, &admin, body.node.as_deref())
         .await?;
     none_pending_to_conflict(outcome).map(Json)
+}
+
+// ------------------------------------------------------- GLOBAL AKSİYONLAR (A-2)
+//
+// Yalnız Workflow Admin'in alabildiği, WFD'ye YAZILMAYAN müdahaleler. Yetki kapısı
+// çekirdektedir (`wf_admin[].allowed_global_actions`); bu kabuk aktörü çözer ve
+// gövdeyi geçirir. Uçlar AYRI (tek `POST /global-actions` + gövdede `action` değil):
+// her aksiyonun gövde sözleşmesi farklı ve OpenAPI'de ayrı görünmesi gerekiyor.
+//
+// `assign_from_pool`/`reclaim_to_pool`/`reassign` BURADA YOK — onlar mevcut
+// `POST /{id}/reassign` ucundan geçer (`target` yoksa havuza bırakma); ayrı bir uç
+// aynı claim/CAS semantiğini ikinci kez yazmak olurdu. `fire_escalation`/
+// `skip_escalation` de mevcut `escalation/fire|skip` uçlarındadır.
+
+#[derive(Deserialize, ToSchema)]
+struct SendBackBody {
+    /// Hedef node id'si — bu WFE'nin GERÇEKTEN uğradığı bir node olmak zorunda
+    /// (`GET /{id}/global-actions` bunu döndürmez; uğranmış küme
+    /// `GET /{id}` yanıtındaki `path[]`ten okunur).
+    target_node: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct SendToStartBody {
+    /// Belgede birden çok `start` kuralı varsa ZORUNLU; tek adayda gereksiz.
+    #[serde(default)]
+    target_node: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct CancelBody {
+    /// Denetim izine ve `wfe_end_response.note` alanına yazılan serbest metin.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Bu aktörün BU WFE'de alabileceği global aksiyonlar. Boş liste = müdahale yetkisi
+/// yok (WFE'yi görüyor olabilir — görme listeden bağımsızdır).
+#[utoipa::path(get, path = "/{id}/global-actions", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    responses((status = 200, description = "Aksiyon adları", body = Vec<String>)),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn list_global_actions(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+) -> Result<Json<Vec<&'static str>>, AppError> {
+    let admin = extract_actor(&headers)?;
+    Ok(Json(s.executor.admin_global_actions(wfe_id, &admin).await?))
+}
+
+/// `send_back` — akışı uğranmış bir node'a geri atar. Derinlik sınırı YOKTUR (A-4).
+#[utoipa::path(post, path = "/{id}/global-actions/send-back", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = SendBackBody,
+    responses(
+        (status = 200, description = "Varılan node", body = serde_json::Value),
+        (status = 400, description = "Hedef uğranmamış/bilinmiyor (action.target_invalid) veya paralel mod"),
+        (status = 403, description = "Aktör `send_back` global aksiyonuna yetkili değil"),
+        (status = 409, description = "WFE bitmiş veya deadline aşılmış"),
+    ),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn send_back(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<SendBackBody>,
+) -> Result<Json<wf_wfe::executor::GlobalActionOutcome>, AppError> {
+    let admin = extract_actor(&headers)?;
+    Ok(Json(
+        s.executor
+            .admin_send_back(wfe_id, &admin, &body.target_node)
+            .await?,
+    ))
+}
+
+/// `send_to_start` — akışı start node'una döndürür. **Yeni WFE AÇILMAZ**, aynı WFE
+/// geri sarar.
+#[utoipa::path(post, path = "/{id}/global-actions/send-to-start", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = SendToStartBody,
+    responses(
+        (status = 200, description = "Varılan start node'u", body = serde_json::Value),
+        (status = 400, description = "Çok adaylı start'ta hedef verilmedi (action.target_required)"),
+        (status = 403, description = "Aktör `send_to_start` global aksiyonuna yetkili değil"),
+        (status = 409, description = "WFE bitmiş veya deadline aşılmış"),
+    ),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn send_to_start(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<SendToStartBody>,
+) -> Result<Json<wf_wfe::executor::GlobalActionOutcome>, AppError> {
+    let admin = extract_actor(&headers)?;
+    Ok(Json(
+        s.executor
+            .admin_send_to_start(wfe_id, &admin, body.target_node.as_deref())
+            .await?,
+    ))
+}
+
+/// `cancel` — WFE'yi terminal-class `terminated` durumuna sokar
+/// (`wfe_end_response.reason = "ADMIN.Cancelled"`). Sonrasında aksiyon kabul edilmez.
+#[utoipa::path(post, path = "/{id}/global-actions/cancel", tag = "wfe",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = CancelBody,
+    responses(
+        (status = 200, description = "İptal edildi", body = serde_json::Value),
+        (status = 403, description = "Aktör `cancel` global aksiyonuna yetkili değil"),
+        (status = 409, description = "WFE zaten bitmiş"),
+    ),
+    security(("x_actor_orgu" = []), ("x_actor_user" = []), ("x_actor_role" = [])))]
+async fn cancel_wfe(
+    State(s): State<AppState>,
+    headers: HeaderMap,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<CancelBody>,
+) -> Result<Json<wf_wfe::executor::GlobalActionOutcome>, AppError> {
+    let admin = extract_actor(&headers)?;
+    Ok(Json(
+        s.executor
+            .admin_cancel(wfe_id, &admin, body.reason.as_deref())
+            .await?,
+    ))
 }
 
 /// "Dokunacak adım yok" çekirdekte bir CEVAPtır; HTTP'de 409 + makine kodudur.

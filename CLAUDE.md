@@ -701,14 +701,26 @@ müdahale eder ve yetkisi WFD'den doğar.
 - **Şekil `listable[]` ile AYNI** (`CaGrantRule { c_a, when? }`, `$defs/caGrantRule`) ve
   aynı matcher; dizi olması "çoklu grant = çoklu kayıt" (bir C_A kuralında VEYA yok).
   `listable` bu tipin alias'ıdır — kural şekli TEK yerde durur.
-- **Üç yetki:** (1) claim devri — kapı `node.reassign eşleşir VEYA wf_admin eşleşir`,
-  hedef hâlâ node `c_a`'sına uymak zorunda (uymayan hedef claim'i tutar ama `apply_action`
-  c_a'yı yeniden sorar → akış kilitlenir); (2) escalation müdahalesi
-  (`POST /wfe/:id/escalation/fire|skip`, YALNIZ `wf_admin` — `node.reassign` açmaz);
-  (3) görünürlük (`can_view` (e)).
-- **Aksiyon yetkisi VERMEZ.** WF Admin işi yönetir, işi yapmaz; aksiyon için node
-  `c_a`'sına uyması gerekir. Akışı bitirme/iptal, rastgele node'a taşıma ve `$ctx`'e yazma
-  da YOK.
+- **Yetki ÖRTÜK DEĞİL, LİSTELİ** (2026-08-21, A-1 — KIRICI): kurala uymak yalnız
+  **görme** verir (`can_view` (e)); her müdahale kuralın `allowed_global_actions`ında
+  AÇIKÇA yazmak zorundadır. Sekiz global aksiyon: `assign_from_pool` · `reclaim_to_pool`
+  · `reassign` · `send_back` · `send_to_start` · `cancel` · `fire_escalation` ·
+  `skip_escalation`. **Boş/eksik liste = hiçbiri** (güvenli varsayılan; hassas akışta
+  "admin bile geri gönderemesin" ancak listeden çıkararak ifade edilebilir). Eski örtük
+  davranış (kurala uymak claim devrini + escalation'ı açardı) KALDIRILDI — mevcut
+  belgelerin adminleri görme-yalnız hâline düştü, kırılma bilinçli. Kapı tek yerde:
+  `v22::grants::require_global_action` / `wf_admin_global_actions`.
+- **Çoklu kural = kümelerin BİRLEŞİMİ**; boş listeli kural eşleşme SORULMADAN atlanır
+  (sonucu değiştirmeyen org traverse'i yapmamak için). Şekil `$defs/wfAdminRule`:
+  `CaGrantRule` `flatten` ile gömülü + `allowed_global_actions`. `deny_unknown_fields`
+  flatten ile BİRLİKTE durur ve GEREKLİ — kaldırılınca alan adı yazım hatası sessizce
+  yutuluyor.
+- **Görme listeden BAĞIMSIZ**: `view_c_a` projeksiyonu commit anında viewer BİLİNMEZKEN
+  yazılır, o anda "hangi aksiyonu alacak" sorusunun cevabı yoktur.
+- **Node AKSİYONU (ACT) hâlâ VERİLMEZ.** WF Admin işi yönetir, işi yapmaz; akış aksiyonu
+  için node `c_a`'sına uyması gerekir. `$ctx`'e yazma da YOK. Claim devrinde hedef hâlâ
+  node `c_a`'sına uymak zorunda (uymayan hedef claim'i tutar ama `apply_action` c_a'yı
+  yeniden sorar → akış kilitlenir).
 - **Marker sözleşmesi:** elle tetikleme otomatik yolun AYNI marker'ını yazar
   (`escalate:<node>:<idx>`) — yayınlanmış akışlar `count($wfah, ...)` ile karar veriyor,
   ayrı ad sayımı bozar; ayrım AKTÖRDEDİR. `wfes_effects`'teki `$actor` system KALIR.

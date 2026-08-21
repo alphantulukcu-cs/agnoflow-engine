@@ -13,7 +13,7 @@
 use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::Actor;
-use crate::types::wfd_v22::{COrgu, CandidateActor, CuItem, Wfd};
+use crate::types::wfd_v22::{COrgu, CandidateActor, CuItem, Wfd, WfAdminRule};
 use crate::v22::grants::matches_grant_rules;
 use crate::v22::matcher::{authorize_or_delegated, authorize_or_delegated_anchored, MatchEnv};
 use crate::v22::ports::{BranchStatus, Wfes};
@@ -182,7 +182,8 @@ pub async fn can_view(
     if matches_grant_rules(&wfd.listable, viewer, wfes, org).await? {
         return Ok(true);
     }
-    if matches_grant_rules(&wfd.wf_admin, viewer, wfes, org).await? {
+    if matches_grant_rules(wfd.wf_admin.iter().map(WfAdminRule::grant_ref), viewer, wfes, org)
+        .await? {
         return Ok(true);
     }
     // (g) 2026-08-17 — terminal `listable[]`. KALICI grant'ların yanında durur çünkü

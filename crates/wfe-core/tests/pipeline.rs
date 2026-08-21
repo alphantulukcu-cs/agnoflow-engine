@@ -16,7 +16,7 @@ use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
     AutoexecDef, AutoexecType, COrgu, CaGrantRule, CandidateActor, ClaimTimeout, EscalationStep,
-    JoinRule, Wfd, WfesEffects, Wft, WftTarget,
+    GlobalAction, JoinRule, Wfd, WfAdminRule, WfesEffects, Wft, WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
@@ -4367,13 +4367,27 @@ async fn expr_join_identifies_branch_by_entry_node_after_move() {
 /// Golden'a WF Admin kuralı ekler: bu akışta branchManager akış yöneticisidir.
 fn golden_with_wf_admin(when: Option<&str>) -> Wfd {
     let mut wfd = golden();
-    wfd.wf_admin = vec![CaGrantRule {
-        c_a: CandidateActor {
-            c_orgu: Some(COrgu::Selector("self".into())),
-            c_r: Some(vec!["branchManager".into()]),
-            c_u: None,
+    wfd.wf_admin = vec![WfAdminRule {
+        grant: CaGrantRule {
+            c_a: CandidateActor {
+                c_orgu: Some(COrgu::Selector("self".into())),
+                c_r: Some(vec!["branchManager".into()]),
+                c_u: None,
+            },
+            when: when.map(String::from),
         },
-        when: when.map(String::from),
+        // A-1: yetki artık listeden gelir. Bu fixture "tam yetkili" admini kurar;
+        // yetkisiz admin senaryoları listeyi DARALTARAK test edilir.
+        allowed_global_actions: vec![
+            GlobalAction::AssignFromPool,
+            GlobalAction::ReclaimToPool,
+            GlobalAction::Reassign,
+            GlobalAction::SendBack,
+            GlobalAction::SendToStart,
+            GlobalAction::Cancel,
+            GlobalAction::FireEscalation,
+            GlobalAction::SkipEscalation,
+        ],
     }];
     wfd
 }
@@ -4496,7 +4510,7 @@ async fn non_matching_wf_admin_rule_does_not_authorize_reassign() {
     let runner = MockRunner::ok(0, "-", false);
     let engine = test_engine(&org, &runner);
     let mut wfd = golden_with_wf_admin(None);
-    wfd.wf_admin[0].c_a.c_r = Some(vec!["auditor".into()]); // kimse bu rolde değil
+    wfd.wf_admin[0].grant.c_a.c_r = Some(vec!["auditor".into()]); // kimse bu rolde değil
 
     let orgu = Uuid::new_v4();
     let owner = analyst(orgu);
@@ -5138,4 +5152,411 @@ async fn preexisting_corrupt_field_does_not_block_the_transition() {
         )
         .await
         .expect("bu geçişte yazılmayan bozuk alan akışı durdurmamalı");
+}
+
+// ============================================== GLOBAL AKSİYONLAR (A-2, 2026-08-21)
+//
+// Yetki artık ÖRTÜK DEĞİL: `wf_admin` kuralına uymak yalnız görme verir, her müdahale
+// `allowed_global_actions`ta yazmak zorunda. Aşağıdaki testler kapıyı (kim), süzgeci
+// (nereye) ve denetim izini (kim yaptı) ayrı ayrı sınar.
+
+/// `golden_with_wf_admin`in yetki-daraltılmış hâli: admin YALNIZ verilen aksiyonları
+/// alabilir. "Tam yetkili" fixture kapının kapalı hâlini test edemez.
+fn golden_with_admin_actions(actions: &[GlobalAction]) -> Wfd {
+    let mut wfd = golden_with_wf_admin(None);
+    wfd.wf_admin[0].allowed_global_actions = actions.to_vec();
+    wfd
+}
+
+/// Boş liste = HİÇBİR müdahale (güvenli varsayılan). Kurala uymak yetmez.
+#[tokio::test]
+async fn empty_allowed_global_actions_grants_nothing() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    assert!(
+        engine
+            .admin_global_actions(&wfd, &wfes, &admin)
+            .await
+            .unwrap()
+            .is_empty(),
+        "boş liste hiçbir aksiyon vermemeli"
+    );
+    // Eskiden bu çağrı GEÇİYORDU (kurala uymak devri açardı) — kırılma bilinçli.
+    let err = engine
+        .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
+        .await
+        .expect_err("yetkisiz admin devredemez");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// Devrin ÜÇ hâli ÜÇ ayrı yetkidir: yalnız `reclaim_to_pool` verilen admin işi havuza
+/// alabilir ama kimseye ATAYAMAZ. Hassas akışta istenen ayrım tam olarak budur.
+#[tokio::test]
+async fn reclaim_to_pool_does_not_grant_assign() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::ReclaimToPool]);
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let target = analyst(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entry = engine
+        .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
+        .await
+        .expect("havuza alma yetkisi var");
+    assert_eq!(entry.action, "unclaim");
+    assert_eq!(
+        entry.input.as_ref().unwrap()["global_action"],
+        json!("reclaim_to_pool")
+    );
+
+    let err = engine
+        .reassign(&wfd, &wfes, &admin, Some(&target), None, Utc::now())
+        .await
+        .expect_err("atama yetkisi YOK");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// Havuzdaki (sahipsiz) işi kişiye atamak `assign_from_pool`, kişiden kişiye devir
+/// `reassign` — ikisi ayrı yetkidir ve denetim izi hangisi olduğunu söyler.
+#[tokio::test]
+async fn assign_from_pool_and_reassign_are_separate_powers() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::AssignFromPool]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let target = analyst(orgu);
+    // Sahipsiz (havuzda) iş → assign_from_pool
+    let unclaimed = wfes_at("self__creditAnalyst", None, start_input());
+    let entry = engine
+        .reassign(&wfd, &unclaimed, &admin, Some(&target), None, Utc::now())
+        .await
+        .expect("havuzdan atama yetkisi var");
+    assert_eq!(
+        entry.input.as_ref().unwrap()["global_action"],
+        json!("assign_from_pool")
+    );
+
+    // Sahipli iş → `reassign` yetkisi gerekir, listede YOK
+    let claimed = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
+    let err = engine
+        .reassign(&wfd, &claimed, &admin, Some(&target), None, Utc::now())
+        .await
+        .expect_err("kişiden kişiye devir ayrı yetkidir");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// Escalation müdahalesi de listeye girdi: `wf_admin` olmak artık yetmiyor.
+#[tokio::test]
+async fn escalation_intervention_requires_its_own_power() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::Cancel]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    let err = engine
+        .skip_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect_err("skip_escalation yetkisi yok");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+    let err = engine
+        .admin_fire_escalation(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect_err("fire_escalation yetkisi yok");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+/// Çoklu kural: yetki kümesi BİRLEŞİMDİR (ilk eşleşen kural kazanmaz).
+#[tokio::test]
+async fn multiple_rules_union_their_powers() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let mut wfd = golden_with_admin_actions(&[GlobalAction::Cancel]);
+    let mut second = wfd.wf_admin[0].clone();
+    second.allowed_global_actions = vec![GlobalAction::SendBack];
+    wfd.wf_admin.push(second);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    let powers = engine
+        .admin_global_actions(&wfd, &wfes, &admin)
+        .await
+        .unwrap();
+    assert!(
+        powers.contains(&GlobalAction::Cancel) && powers.contains(&GlobalAction::SendBack),
+        "iki kuralın kümesi birleşmeli: {powers:?}"
+    );
+}
+
+/// `send_back` uğranmış bir node'a taşır ve WFAH'a GERÇEK admin ile yazılır.
+#[tokio::test]
+async fn admin_send_back_moves_to_visited_node_with_real_actor() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::SendBack]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at_visited(
+        "parent__creditDeptManager",
+        Some(manager(orgu).user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
+
+    let commit = engine
+        .admin_send_back(&wfd, &wfes, &admin, "self__creditAnalyst", Utc::now())
+        .await
+        .expect("uğranmış node'a geri gönderilebilmeli");
+    assert_eq!(
+        commit.outcome,
+        CommitOutcome::MoveTo {
+            node: "self__creditAnalyst".into()
+        }
+    );
+    let entry = &commit.wfah_entries[0];
+    assert_eq!(entry.action, "admin:send_back");
+    assert_eq!(
+        entry.actor.user_id, admin.user_id,
+        "iz 'system' değil GERÇEK admin olmalı"
+    );
+    assert_eq!(
+        commit.new_dynctx,
+        *wfes.dynctx.as_value(),
+        "global aksiyon $ctx'e yazmaz"
+    );
+}
+
+/// Uğranmamış node'a "geri" göndermek ileri atlamadır — K-2 süzgeci adminde de işler.
+#[tokio::test]
+async fn admin_send_back_rejects_unvisited_node() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::SendBack]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    let err = engine
+        .admin_send_back(&wfd, &wfes, &admin, "self__branchManager", Utc::now())
+        .await
+        .expect_err("uğranmamış hedef reddedilmeli");
+    assert!(matches!(err, EngineError::TargetInvalid(_)), "{err:?}");
+}
+
+/// Bulunulan node'a geri gönderme işlemsizdir → reddedilir.
+#[tokio::test]
+async fn admin_send_back_rejects_current_node() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::SendBack]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    let err = engine
+        .admin_send_back(&wfd, &wfes, &admin, "self__creditAnalyst", Utc::now())
+        .await
+        .expect_err("bulunulan node reddedilmeli");
+    assert!(matches!(err, EngineError::TargetInvalid(_)), "{err:?}");
+}
+
+/// `send_to_start` tek start kuralında hedef İSTEMEZ ve start node'una döner —
+/// YENİ WFE açılmaz, aynı örnek geri sarar (`wfe_id` DEĞİŞMEZ).
+#[tokio::test]
+async fn admin_send_to_start_rewinds_same_wfe() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::SendToStart]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    let commit = engine
+        .admin_send_to_start(&wfd, &wfes, &admin, None, Utc::now())
+        .await
+        .expect("başa gönderilebilmeli");
+    assert_eq!(
+        commit.outcome,
+        CommitOutcome::MoveTo {
+            node: "type_branch__branchClerk".into()
+        },
+        "start[].from'a dönmeli"
+    );
+    assert_eq!(commit.wfe_id, wfes.wfe_id, "yeni WFE açılmamalı");
+    assert_eq!(commit.wfah_entries[0].action, "admin:send_to_start");
+}
+
+/// `send_to_start` hedefi START node'u olmak zorunda: aksi halde `send_back` kapısını
+/// atlamanın yolu olurdu.
+#[tokio::test]
+async fn admin_send_to_start_rejects_non_start_target() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::SendToStart]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at_visited(
+        "parent__creditDeptManager",
+        Some(manager(orgu).user_id),
+        start_input(),
+        vec!["self__creditAnalyst".into()],
+    );
+
+    let err = engine
+        .admin_send_to_start(&wfd, &wfes, &admin, Some("self__creditAnalyst"), Utc::now())
+        .await
+        .expect_err("start olmayan hedef reddedilmeli");
+    assert!(matches!(err, EngineError::TargetInvalid(_)), "{err:?}");
+}
+
+/// `cancel` WFE'yi terminal-class `terminated`a sokar; sebep makine-okunur.
+#[tokio::test]
+async fn admin_cancel_terminates_with_reason() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::Cancel]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+
+    let commit = engine
+        .admin_cancel(&wfd, &wfes, &admin, Some("müşteri vazgeçti"), Utc::now())
+        .await
+        .expect("iptal edilebilmeli");
+    match &commit.outcome {
+        CommitOutcome::Terminated { end_response } => {
+            assert_eq!(end_response["reason"], json!("ADMIN.Cancelled"));
+            assert_eq!(end_response["note"], json!("müşteri vazgeçti"));
+        }
+        other => panic!("Terminated beklendi: {other:?}"),
+    }
+    assert_eq!(commit.wfah_entries[0].action, "admin:cancel");
+    assert_eq!(commit.wfah_entries[0].actor.user_id, admin.user_id);
+    assert!(
+        commit.end_terminal.is_none(),
+        "iptal başarılı bir terminal DEĞİL: end_terminal NULL kalmalı"
+    );
+    assert!(
+        commit.staged_calls.is_empty(),
+        "iptal ardıl akış TETİKLEMEZ"
+    );
+}
+
+/// Terminal WFE üzerinde global aksiyon REDDEDİLİR — `cancel` dâhil (idempotent
+/// "zaten iptal" bir cevap değil, çakışmadır: ikinci iptal WFAH'a ikinci kayıt yazardı).
+#[tokio::test]
+async fn global_actions_rejected_on_terminal_wfe() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None); // tam yetkili
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    wfes.status = WfeStatus::Terminated;
+
+    for err in [
+        engine
+            .admin_cancel(&wfd, &wfes, &admin, None, Utc::now())
+            .await
+            .expect_err("cancel reddedilmeli"),
+        engine
+            .admin_send_back(&wfd, &wfes, &admin, "type_branch__branchClerk", Utc::now())
+            .await
+            .expect_err("send_back reddedilmeli"),
+        engine
+            .admin_send_to_start(&wfd, &wfes, &admin, None, Utc::now())
+            .await
+            .expect_err("send_to_start reddedilmeli"),
+    ] {
+        assert!(matches!(err, EngineError::WfeTerminal), "{err:?}");
+    }
+}
+
+/// `wf_admin` kuralına UYMAYAN aktör hiçbir global aksiyon alamaz — liste dolu olsa da.
+#[tokio::test]
+async fn non_admin_gets_no_global_actions() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None); // yetkili = branchManager
+
+    let orgu = Uuid::new_v4();
+    let outsider = analyst(orgu); // admin DEĞİL
+    let wfes = wfes_at("self__creditAnalyst", Some(outsider.user_id), start_input());
+
+    assert!(engine
+        .admin_global_actions(&wfd, &wfes, &outsider)
+        .await
+        .unwrap()
+        .is_empty());
+    let err = engine
+        .admin_cancel(&wfd, &wfes, &outsider, None, Utc::now())
+        .await
+        .expect_err("admin olmayan iptal edemez");
+    assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
 }

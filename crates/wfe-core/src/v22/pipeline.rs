@@ -23,14 +23,15 @@ use crate::types::wfah::{Wfah, WfahEntry};
 use std::collections::BTreeSet;
 use crate::types::wfd_v22::{
     ActionDef, AutoexecDef, CaGrantRule, CallMode, CandidateActor, CuItem, EscalationStep,
-    JoinRule, SendBackTarget, StartAs, Transition, TriggerInvocation, Wfd, Wft, WftTarget,
+    GlobalAction, JoinRule, SendBackTarget, StartAs, Transition, TriggerInvocation, WfAdminRule,
+    Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
 use crate::v22::env::RunEnv;
 use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv, JoinEnv};
-use crate::v22::grants::matches_grant_rules;
+use crate::v22::grants::{matches_grant_rules, require_global_action, wf_admin_global_actions};
 use crate::v22::matcher::{
     authorize, authorize_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
 };
@@ -1128,9 +1129,11 @@ impl<'a> Engine<'a> {
             orgtnt_id,
         )
         .await?;
+        // Görme yetkisi `allowed_global_actions`tan BAĞIMSIZDIR: bir kurala uymak
+        // WFE'yi görmeye yeter (`can_view` (e)) — liste yalnız müdahaleyi kapılar.
         self.extend_grant_candidates(
             &mut out,
-            &wfd.wf_admin,
+            wfd.wf_admin.iter().map(WfAdminRule::grant_ref),
             ctx,
             wfah,
             current_node,
@@ -1240,17 +1243,20 @@ impl<'a> Engine<'a> {
     /// tarafından yasaklı — `grant_when_actor_ref`): projeksiyon viewer
     /// bilinmezken yazılır.
     #[allow(clippy::too_many_arguments)]
-    async fn extend_grant_candidates(
+    async fn extend_grant_candidates<'r, I>(
         &self,
         out: &mut Vec<ResolvedCandidate>,
-        rules: &[CaGrantRule],
+        rules: I,
         ctx: &Value,
         wfah: &Wfah,
         guard_node: Option<&str>,
         wfe_id: Uuid,
         origin_orgu: Uuid,
         orgtnt_id: Uuid,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), EngineError>
+    where
+        I: IntoIterator<Item = &'r CaGrantRule>,
+    {
         for rule in rules {
             if let Some(expr) = &rule.when {
                 let env = EvalEnv::new(ctx)
@@ -1341,10 +1347,31 @@ impl<'a> Engine<'a> {
         let by_wf_admin = if by_node_rule {
             false // node kuralı yetti; wf_admin sorgusu gereksiz I/O olurdu
         } else {
-            matches_grant_rules(&wfd.wf_admin, reassigner, wfes, self.org).await?
+            matches_grant_rules(
+                wfd.wf_admin.iter().map(WfAdminRule::grant_ref),
+                reassigner,
+                wfes,
+                self.org,
+            )
+            .await?
         };
         if !by_node_rule && !by_wf_admin {
             return Err(EngineError::Unauthorized);
+        }
+        // A-2: `wf_admin` yolu artık kuralın VERDİĞİ global aksiyonu ister. Üç ayrı
+        // aksiyon çünkü üçü ayrı işler ve hassas akışta ayrı ayrı kısıtlanır:
+        //   · hedef yok                → `reclaim_to_pool` (işi havuza döndür)
+        //   · hedef var, sahip yok     → `assign_from_pool` (havuzdaki işi kişiye ver)
+        //   · hedef var, sahip var     → `reassign` (kişiden kişiye devir)
+        // `node.reassign` yolu KAPILANMAZ: o akış tasarımcısının o node'a yazdığı
+        // yetkidir, global aksiyon değildir.
+        if by_wf_admin {
+            let needed = match (target.is_some(), from_owner.is_some()) {
+                (false, _) => GlobalAction::ReclaimToPool,
+                (true, false) => GlobalAction::AssignFromPool,
+                (true, true) => GlobalAction::Reassign,
+            };
+            require_global_action(&wfd.wf_admin, reassigner, needed, wfes, self.org).await?;
         }
 
         // 3. Hedef (varsa) node.c_a'ya uygun olmalı.
@@ -1368,6 +1395,16 @@ impl<'a> Engine<'a> {
         });
         if by_wf_admin {
             input["via"] = json!("wf_admin");
+            // Denetim izi hangi GLOBAL AKSIYONun kapısından geçildiğini de söyler:
+            // `action` alanı (`reassign`/`unclaim`) wire adıdır ve üç yetkiyi
+            // ayırmaz — "admin havuzdan mı atadı, kişiden mi aldı" sorusu WFAH'tan
+            // cevaplanabilmeli.
+            input["global_action"] = json!(match (target.is_some(), from_owner.is_some()) {
+                (false, _) => GlobalAction::ReclaimToPool,
+                (true, false) => GlobalAction::AssignFromPool,
+                (true, true) => GlobalAction::Reassign,
+            }
+            .as_str());
         }
         Ok(WfahEntry {
             seq,
@@ -1583,9 +1620,16 @@ impl<'a> Engine<'a> {
         if is_terminal_class(&wfes.status) {
             return Err(EngineError::WfeTerminal);
         }
-        if !matches_grant_rules(&wfd.wf_admin, admin, wfes, self.org).await? {
-            return Err(EngineError::Unauthorized);
-        }
+        // A-1 (2026-08-21): yetki artık örtük DEĞİL — `wf_admin` kuralına uymak yetmez,
+        // kural `fire_escalation`ı da vermiş olmalı. Boş listeli admin yalnız GÖRÜR.
+        require_global_action(
+            &wfd.wf_admin,
+            admin,
+            GlobalAction::FireEscalation,
+            wfes,
+            self.org,
+        )
+        .await?;
         let Some(forecast) = self.next_escalation(wfd, wfes, now, branch)? else {
             return Ok(None);
         };
@@ -1616,9 +1660,15 @@ impl<'a> Engine<'a> {
             return Err(EngineError::WfeTerminal);
         }
         // Sayaç yönetimi YALNIZ wf_admin yetkisidir; node.reassign bunu AÇMAZ.
-        if !matches_grant_rules(&wfd.wf_admin, admin, wfes, self.org).await? {
-            return Err(EngineError::Unauthorized);
-        }
+        // A-1: `skip_escalation` global aksiyonu da listede yazmak zorunda.
+        require_global_action(
+            &wfd.wf_admin,
+            admin,
+            GlobalAction::SkipEscalation,
+            wfes,
+            self.org,
+        )
+        .await?;
         let Some(forecast) = self.next_escalation(wfd, wfes, now, branch)? else {
             return Ok(None);
         };
@@ -1640,6 +1690,320 @@ impl<'a> Engine<'a> {
             },
             marker,
         }))
+    }
+
+    // ------------------------------------------------- GLOBAL AKSİYONLAR (A-2)
+    //
+    // Motorun tanımladığı, WFD'ye yazılmayan ve YALNIZ Workflow Admin'in alabildiği
+    // müdahaleler (toplantı kararı J‑2/J‑3). Üçü burada, üçü mevcut yollarda:
+    //   · `assign_from_pool` / `reclaim_to_pool` / `reassign` → `Engine::reassign`
+    //     (tek yol, üç kapı — devir mekaniği zaten oradaydı, ikinci bir kopya
+    //     claim/CAS semantiğini iki yerden bakılır hâle getirirdi)
+    //   · `fire_escalation` / `skip_escalation` → `admin_fire_escalation` / `skip_escalation`
+    //   · `send_back` / `send_to_start` / `cancel` → BURADA
+    //
+    // Üçünün de değişmezleri AYNI: (1) terminal-class WFE reddedilir, (2) WFAH'a
+    // GERÇEK admin `(ORGU, U, R)` üçlüsüyle yazılır — `system` ile DEĞİL, yoksa
+    // müdahaleyi kimin yaptığı kaybolur, (3) `$ctx` DEĞİŞMEZ (global aksiyon iş verisi
+    // yazmaz; commit yine yeni bir DynCtx revizyonu üretir, immutability korunur).
+
+    /// Bu adminin BU WFE'de alabileceği global aksiyonlar — havuz/detay ekranı
+    /// düğmeleri bununla süzülür (A-3, E-3).
+    ///
+    /// Boş küme "admin değil" DEMEZ: görme yetkisi listeden bağımsızdır.
+    pub async fn admin_global_actions(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+    ) -> Result<BTreeSet<GlobalAction>, EngineError> {
+        wf_admin_global_actions(&wfd.wf_admin, admin, wfes, self.org).await
+    }
+
+    /// `send_back` — akışı, bu WFE'nin GERÇEKTEN uğradığı bir node'a geri atar.
+    ///
+    /// WFD içindeki geri gönderme (`Wft::SendBack`) ile AYNI süzgeci kullanır
+    /// (`visited_nodes`, K-2) ama akışta tanımlı bir aksiyon GEREKTİRMEZ: hedef kümesi
+    /// belgeden değil, örneğin gerçek geçmişinden çıkar. **Derinlik sınırı YOKTUR**
+    /// (A-4): "kaç adım geriye" sorusunun cevabı listedir, sayı değil.
+    pub async fn admin_send_back(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        target_node: &str,
+        now: DateTime<Utc>,
+    ) -> Result<TransitionCommit, EngineError> {
+        self.admin_move_to(wfd, wfes, admin, GlobalAction::SendBack, target_node, now)
+            .await
+    }
+
+    /// `send_to_start` — akışı start node'una döndürür. **Yeni WFE AÇILMAZ**, aynı WFE
+    /// geri sarar (WFAH ve DynCtx geçmişi korunur; sıfırdan başlatmak izi koparırdı).
+    ///
+    /// `target_node`: belgede birden çok start kuralı varsa hangi start node'una
+    /// dönüleceği. Tek adayda `None` yeterlidir; çok adayda seçim ZORUNLUDUR — biri
+    /// keyfî olarak seçilse akış, tasarımcının hiç kastetmediği bir havuza düşerdi.
+    pub async fn admin_send_to_start(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        target_node: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<TransitionCommit, EngineError> {
+        let starts: BTreeSet<&str> = wfd.start.iter().map(|r| r.from.as_str()).collect();
+        let chosen = match (target_node, starts.len()) {
+            (Some(t), _) => {
+                // Verilen hedef bir START node'u olmak zorunda: `send_to_start` ile
+                // rastgele bir node'a taşımak, `send_back` kapısını (o da ayrı bir
+                // global aksiyon) atlamanın yolu olurdu.
+                if !starts.contains(t) {
+                    return Err(EngineError::TargetInvalid(t.to_string()));
+                }
+                t
+            }
+            (None, 1) => starts.iter().next().copied().expect("len==1"),
+            (None, 0) => {
+                return Err(EngineError::InvalidWfd(
+                    "belgede start kuralı yok: 'başa gönder' hedefi türetilemiyor".into(),
+                ))
+            }
+            (None, _) => return Err(EngineError::TargetRequired),
+        };
+        self.admin_move_to(wfd, wfes, admin, GlobalAction::SendToStart, chosen, now)
+            .await
+    }
+
+    /// `send_back` / `send_to_start` ortak gövdesi — ikisi de "WFE'yi bir node'a taşı"
+    /// işidir, farkları hedefin NEREDEN geldiği ve hangi yetkiyi istediğidir.
+    ///
+    /// Taşıma normal `Wft::Node` yolundan (`resolve_wft`) geçer: yeni bir geçiş türü
+    /// SOKULMAZ, dolayısıyla varılan node'un `trigger`ları, claim temizliği, aday
+    /// cache'i ve görünürlük projeksiyonu her aksiyondaki gibi çalışır.
+    async fn admin_move_to(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        action: GlobalAction,
+        target_node: &str,
+        now: DateTime<Utc>,
+    ) -> Result<TransitionCommit, EngineError> {
+        if is_terminal_class(&wfes.status) {
+            return Err(EngineError::WfeTerminal);
+        }
+        if self.deadline_due(wfes, now) {
+            return Err(EngineError::WfeExpired);
+        }
+        require_global_action(&wfd.wf_admin, admin, action, wfes, self.org).await?;
+        // PARALEL MOD SINIRI: kolları toplayıp tek bir node'a inmek `collapse`
+        // semantiğidir ve kol bağlamı ister (`WftMode::Branch` bir `from_node`
+        // bekler) — adminin ise kolu yoktur. Hangi kolun "geri gönderen" sayılacağı
+        // toplantıda konuşulmadı; keyfî bir kol seçip kardeşleri sessizce iptal etmek
+        // yerine AÇIKÇA reddedilir (`cancel` paralel modda ÇALIŞIR, orada tüm kollar
+        // zaten iptal edilir).
+        if wfes.join_target.is_some() {
+            return Err(EngineError::InvalidInput(format!(
+                "paralel modda '{}' desteklenmiyor: akış şu an birden çok kolda",
+                action.as_str()
+            )));
+        }
+        if !wfd.nodes.contains_key(target_node) {
+            return Err(EngineError::TargetInvalid(target_node.to_string()));
+        }
+        // K-2 ile AYNI küme: uğranmamış bir node'a "geri" göndermek geri gönderme
+        // DEĞİL ileri atlamadır (o adımın beklediği ctx alanları hiç yazılmamıştır).
+        // Süzgeç WFD içi geri göndermeyle paylaşılır — ayrışsalar adminin yolu,
+        // tasarımcının kapattığı kapıyı açardı.
+        //
+        // `send_to_start` MUAFTIR ve bu bilinçlidir: hedefi zaten `wfd.start[].from`
+        // ile sınırlıdır (yukarıda doğrulandı) ve start node'una TANIM GEREĞİ
+        // uğranmıştır — akış oradan başladı. `visited_nodes` start node'unu WFAH'ın
+        // ilk kaydının aksiyonunu start kurallarıyla eşleştirerek TÜRETİR; eşleşme
+        // kaybolduğunda (start aksiyonu yeni bir WFD sürümünde yeniden adlandırıldı,
+        // eski örnek eski adı taşıyor) "başa gönder" sessizce imkânsızlaşırdı.
+        if action != GlobalAction::SendToStart {
+            let visited = visited_nodes(wfd, wfes);
+            if !visited.contains(target_node) {
+                return Err(EngineError::TargetInvalid(target_node.to_string()));
+            }
+        }
+        // Bulunduğu node'a "geri" göndermek işlemsizdir; tasarım zamanında da yasak
+        // (`send_back_target_self`). Sessizce uygulamak claim'i düşüren ama hiçbir şey
+        // değiştirmeyen bir kayıt üretirdi.
+        if wfes.current_node.as_deref() == Some(target_node) {
+            return Err(EngineError::TargetInvalid(target_node.to_string()));
+        }
+
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let marker = global_action_marker(action);
+        let mut wfah_entries = vec![WfahEntry {
+            seq,
+            action: marker.clone(),
+            // GERÇEK admin — `system` DEĞİL (görevlendirme A-2 kabul kriteri).
+            actor: admin.clone(),
+            input: Some(json!({
+                "from": wfes.current_node,
+                "to": target_node,
+                "global_action": action.as_str(),
+            })),
+            applied_at: now,
+        }];
+        seq += 1;
+
+        // Hedefin `c_a`'sı ve `listable` kriterleri `self`/`parent` ÇAPALI olabilir;
+        // çözümleme WFE'nin kendi birimine çapalanır — adminin birimine DEĞİL, yoksa
+        // müdahale eden kişi akışın adaylarını kaydırırdı. WFAH izi yukarıda gerçek
+        // admin ile yazıldı; çapa YALNIZ çözümlemede kullanılır (escalation'daki
+        // aynı ayrım).
+        let anchored = system_actor_anchored(wfes);
+        let wft = Wft::Node {
+            node: target_node.to_string(),
+        };
+        let (outcome, final_ctx, landed) = self
+            .resolve_wft(
+                &wft,
+                wfd,
+                wfes.dynctx.as_value().clone(),
+                &wfes.wfah,
+                &anchored,
+                wfes.wfe_id,
+                None,
+                None,
+                WftMode::Single,
+            )
+            .await?;
+
+        let wfah = wfes.wfah.extended(&wfah_entries);
+        let resolved_c_a = self
+            .candidates_at(
+                &outcome,
+                landed.as_ref(),
+                wfd,
+                &final_ctx,
+                &wfah,
+                wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
+                wfes.orgtnt_id,
+            )
+            .await?;
+
+        stage_parallel_markers(
+            wfes,
+            &Trigger {
+                branch: None,
+                action: Some(&marker),
+                actor: admin,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
+
+        let staged_calls =
+            self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
+        guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
+
+        Ok(TransitionCommit {
+            wfe_id: wfes.wfe_id,
+            orgtnt_id: wfes.orgtnt_id,
+            new_dynctx: final_ctx,
+            wfah_entries,
+            outcome,
+            resolved_c_a,
+            staged_calls,
+            view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: end_terminal_of(landed.as_ref()),
+        })
+    }
+
+    /// `cancel` — WFE'yi iptal eder: terminal-class `terminated` durumuna sokar,
+    /// sonrasında hiçbir aksiyon/claim/escalation kabul edilmez.
+    ///
+    /// **Durum neden `terminated`, yeni bir `cancelled` değil:** `WfeStatus::Terminated`
+    /// 2026-07-16 SLA sözleşmesinde "hata değil, başarılı bitiş de değil — ama aktif de
+    /// değil" olarak ve açıkça "ileride manuel iptal" için tanımlandı. Ayırt etme
+    /// ihtiyacı `end_response.reason` ile karşılanır (`ADMIN.Cancelled`); yeni bir durum
+    /// kolonun CHECK kısıtından havuz SQL'ine, görünürlük projeksiyonundan raporlara
+    /// kadar her okuyucuyu genişletirdi ve "aktif değil" sınıfına üçüncü bir üye eklerdi.
+    ///
+    /// **Ardıl akış TETİKLENMEZ** (`staged_calls` boş): iptal başarılı bir bitiş
+    /// değildir, `Terminal` değildir — WFC'nin "ardılın üç sert kuralı" aynen geçerli.
+    /// Varılmış bir terminal olmadığı için `end_terminal` de NULL kalır.
+    pub async fn admin_cancel(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<TransitionCommit, EngineError> {
+        if is_terminal_class(&wfes.status) {
+            return Err(EngineError::WfeTerminal);
+        }
+        // `cancel` deadline'ı aşmış WFE'de de ÇALIŞIR: SLA süpürücüsü henüz
+        // `terminated`a taşımamış olabilir ve o satırı kapatmak tam olarak bu
+        // aksiyonun işidir (diğer global aksiyonlar `WfeExpired` ile reddedilir —
+        // onlar akışı SÜRDÜRÜR, bu bitirir).
+        require_global_action(&wfd.wf_admin, admin, GlobalAction::Cancel, wfes, self.org).await?;
+
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let marker = global_action_marker(GlobalAction::Cancel);
+        let mut input = json!({ "global_action": "cancel" });
+        if let Some(r) = reason {
+            input["reason"] = json!(r);
+        }
+        let mut wfah_entries = vec![WfahEntry {
+            seq,
+            action: marker.clone(),
+            actor: admin.clone(),
+            input: Some(input),
+            applied_at: now,
+        }];
+        seq += 1;
+
+        let outcome = CommitOutcome::Terminated {
+            end_response: match reason {
+                Some(r) => json!({"reason": "ADMIN.Cancelled", "note": r}),
+                None => json!({"reason": "ADMIN.Cancelled"}),
+            },
+        };
+        // Paralel modda iptal TÜM aktif kolları düşürür (deadline sonlanmasının aynısı).
+        stage_parallel_markers(
+            wfes,
+            &Trigger {
+                branch: None,
+                action: Some(&marker),
+                actor: admin,
+            },
+            &outcome,
+            &mut wfah_entries,
+            &mut seq,
+            now,
+        );
+
+        Ok(TransitionCommit {
+            wfe_id: wfes.wfe_id,
+            orgtnt_id: wfes.orgtnt_id,
+            // `$ctx` DEĞİŞMEZ — iptal iş verisi yazmaz. Commit yine yeni bir DynCtx
+            // revizyonu üretir, immutability korunur.
+            new_dynctx: wfes.dynctx.as_value().clone(),
+            wfah_entries,
+            outcome,
+            resolved_c_a: vec![],
+            staged_calls: vec![],
+            view_c_a: Vec::new(),
+            current_view_c_a: Vec::new(),
+            branch_c_a: Vec::new(),
+            branch_view_c_a: Vec::new(),
+            end_view_c_a: Vec::new(),
+            end_terminal: None,
+        })
     }
 
     /// Süresi dolan ilk escalation adımının index'i (M6/§8).
@@ -3583,6 +3947,16 @@ fn skipped_escalation_marker(node_key: &str, idx: usize) -> String {
 /// kırpılır ve bir `call:<anahtar>/…` satırı kaç kaydın atlandığını + tam geçmişin
 /// hangi WFE'de olduğunu söyler. Sınırın nedeni: WFAH her `load`'da TÜMÜYLE okunur.
 const MAX_INLINED_CALL_ENTRIES: usize = 100;
+
+/// Global aksiyonun WFAH kaydındaki adı: `admin:<aksiyon>`.
+///
+/// Önek ZORUNLU. İki sebep: (1) WFD aksiyon id'leri ile çakışmasın — `cancel` adında
+/// bir akış aksiyonu tanımlamak serbesttir ve `$wfah` izdüşümüne bakan bir `when`
+/// ifadesi ikisini ayırt edemezdi; (2) `escalate:` önekinde öğrenilen ders: marker
+/// adı sözleşmedir, yayınlanmış akışlar `count($wfah, ...)` ile karar veriyor.
+fn global_action_marker(action: GlobalAction) -> String {
+    format!("admin:{}", action.as_str())
+}
 
 fn system_actor_anchored(wfes: &Wfes) -> Actor {
     let anchor = wfes

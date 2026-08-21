@@ -2353,9 +2353,34 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     // aynı guard denetimine girer. `c_a` şekli ise `check_c_a_shape`'in genel
     // toplayıcısına (`collect_key_sites(doc, "c_a")`) kendiliğinden dahildir.
     for (i, a) in wfd.wf_admin.iter().enumerate() {
-        if let Some(when) = &a.when {
+        if let Some(when) = &a.grant.when {
             check(when, format!("wf_admin[{i}].when"), report);
             grant_when_actor_ref(when, format!("wf_admin[{i}].when"), report);
+        }
+        // A-1 (2026-08-21): `allowed_global_actions` boş = admin YALNIZ görür. Hata
+        // DEĞİL (gözlemci admin meşru bir yapılandırmadır) ama tasarımcının niyeti
+        // "yetki vermek" olup listeyi yazmayı unutması en olası hâl — sessiz kalmak
+        // yayın sonrası "admin düğmeleri neden yok" sorusuna dönüşür.
+        if a.allowed_global_actions.is_empty() {
+            report.warn(
+                "wf_admin_no_global_actions",
+                format!("wf_admin[{i}]"),
+                "kural hiçbir global aksiyon vermiyor: admin bu akışı yalnız GÖRÜR. \
+                 Müdahale gerekiyorsa `allowed_global_actions` yazılmalı."
+                    .into(),
+            );
+        }
+        // Aynı aksiyonu iki kez yazmak sessizce yutulurdu (küme birleşimi) — belge
+        // hatası olarak söylenir, `duplicate_c_a` deseninin aynısı.
+        let mut seen = BTreeSet::new();
+        for act in &a.allowed_global_actions {
+            if !seen.insert(*act) {
+                report.error(
+                    "wf_admin_duplicate_global_action",
+                    format!("wf_admin[{i}].allowed_global_actions"),
+                    format!("global aksiyon iki kez yazılmış: '{}'", act.as_str()),
+                );
+            }
         }
     }
     // 2026-08-13: `nodes.<key>.listable[]` kök `listable`/`wf_admin` ile AYNI şekli

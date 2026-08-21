@@ -50,18 +50,29 @@ pub struct Wfd {
     pub terminals: Vec<Terminal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listable: Vec<ListableRule>,
-    /// T‑A5: **akış-içi** yetkili havuzu. Bu kurallardan birine uyan aktör bu WFE'de
-    /// claim devredebilir (node'un kendi `reassign` kuralı olmasa bile) ve escalation
-    /// sayacına müdahale edebilir; WFE'yi görmeye de yetkilidir (`can_view` (e)).
+    /// T‑A5: **akış-içi** yetkili havuzu. Bu kurallardan birine uyan aktör WFE'yi
+    /// GÖRMEYE yetkilidir (`can_view` (e)) ve kuralın `allowed_global_actions`
+    /// listesinde yazan **global aksiyonları** alabilir.
     ///
     /// agnoflow PLATFORM admini ile karıştırılmamalıdır: bu yetki tek bir akışın
-    /// gidişatına müdahale eder ve WFD'den doğar. Aksiyon yetkisi VERMEZ — WF Admin
-    /// işi yönetir, işi yapmaz.
+    /// gidişatına müdahale eder ve WFD'den doğar.
     ///
-    /// `listable` ile aynı şekil ve aynı matcher; dizi olması "çoklu grant = çoklu
-    /// kayıt" desenidir (bir C_A kuralı içinde VEYA yoktur, §3).
+    /// **2026-08-21 (A-1): yetki artık ÖRTÜK DEĞİL, LİSTELİ.** Eskiden bir kurala
+    /// uymak claim devrini ve escalation müdahalesini KENDİLİĞİNDEN açıyordu; şimdi
+    /// her müdahale `allowed_global_actions`ta AÇIKÇA yazmak zorunda. Boş/eksik liste
+    /// = admin yalnız GÖRÜR (güvenli varsayılan). Gerekçe: hassas akışlarda "admin
+    /// bile geri gönderemesin" senaryosu ancak listeden çıkararak ifade edilebilir,
+    /// örtük yetkide böyle bir ifade dili YOKTUR.
+    ///
+    /// Görme listeye BAĞLI DEĞİLDİR: görünürlük commit anında viewer BİLİNMEZKEN
+    /// projeksiyona yazılır (`view_c_a`) — orada "hangi aksiyonu alacak" sorusunun
+    /// cevabı yoktur. Aksiyon kapısı okuma anında, görünürlük yazma anında çözülür.
+    ///
+    /// Kural şekli `listable` ile AYNIDIR (`CaGrantRule` gömülü, flatten); dizi olması
+    /// "çoklu grant = çoklu kayıt" desenidir (bir C_A kuralı içinde VEYA yoktur, §3).
+    /// Aktör birden çok kurala uyuyorsa yetki kümesi onların BİRLEŞİMİDİR.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub wf_admin: Vec<CaGrantRule>,
+    pub wf_admin: Vec<WfAdminRule>,
     /// Opsiyonel ek-belge katalogu (grup adı → grup). Node'lar `NodeDef.attachments`
     /// ile bu grupları adıyla referanslar. Engine yalnız metadata taşır; dosya I/O
     /// portal katmanındadır (bkz. server/routes/portal/attachments.rs).
@@ -1040,6 +1051,88 @@ pub struct CaGrantRule {
 
 /// `wfd.listable[]` öğesi — `CaGrantRule`'un alias'ı (bkz. o tipin yorumu).
 pub type ListableRule = CaGrantRule;
+
+/// `wfd.wf_admin[]` öğesi — grant kuralı + o kuralın verdiği **global aksiyon** kümesi.
+///
+/// Neden `CaGrantRule`ın alias'ı DEĞİL: dört grant yerinden yalnız bu biri yetki
+/// dağıtıyor, diğer üçü (kök/node/terminal `listable`) yalnız görme veriyor. Alanı
+/// paylaşılan tipe koymak, `listable`a hiçbir zaman anlamı olmayacak bir alan
+/// eklemek olurdu (ve şemada `additionalProperties: false` ile yasaklamak da
+/// imkânsızlaşırdı). `flatten` ile kural şekli TEK yerde kalır.
+/// `deny_unknown_fields` `flatten` ile BİRLİKTE durur ve bilinmeyen alanı GERÇEKTEN
+/// reddeder (ölçüldü — kaldırılınca `allowed_globl_actions` yazım hatası sessizce
+/// yutuluyor ve yetki hiç işlemiyordu). Gömülü tipin kendi `deny`i bu artan anahtarları
+/// GÖRMEZ; kapı burasıdır. Regresyon:
+/// `tests/wf_admin.rs::unknown_field_in_wf_admin_rule_is_rejected`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WfAdminRule {
+    #[serde(flatten)]
+    pub grant: CaGrantRule,
+    /// Bu kurala uyan adminin alabileceği global aksiyonlar. **Boş = hiçbiri**
+    /// (güvenli varsayılan); görme yetkisi bundan bağımsızdır.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_global_actions: Vec<GlobalAction>,
+}
+
+impl WfAdminRule {
+    /// Gömülü grant kuralı. Kapanış (`|r| &r.grant`) YERİNE fonksiyon: kapanış
+    /// higher-ranked bir imza üretmiyor (`FnOnce<(&'0 WfAdminRule,)>` iki farklı ömür
+    /// için genel değil) ve `matches_grant_rules` çağrısını taşıyan future
+    /// `tokio::spawn`e verilince derleme PATLIYOR (`timer_service` testinde ölçüldü).
+    pub fn grant_ref(&self) -> &CaGrantRule {
+        &self.grant
+    }
+}
+
+/// **Global aksiyon** — akış tasarımcısının WFD'ye yazmadığı, motorun tanımladığı ve
+/// YALNIZ Workflow Admin'in alabildiği müdahale kümesi (2026-08-21 toplantı kararı J‑2).
+///
+/// WFD içindeki "geri gönderme"den (`Wft::SendBack`) AYRIDIR: o normal bir aksiyondur,
+/// akış tasarımcısı tanımlar, akıştaki normal aktör kullanır ve akışta tanımlı OLMAK
+/// ZORUNDADIR. Global aksiyon ise akışta hiç tanımlanmamış olsa bile çalışır. 2026-08-21
+/// öncesi `Wft::SendBack` formuna da "global aksiyon (GLB)" deniyordu; ad BIRAKILDI ve
+/// bu kümeye ayrıldı.
+///
+/// WFAH'a **gerçek admin `(ORGU, U, R)` üçlüsüyle** yazılır, `system` ile DEĞİL: iz
+/// "sistem yaptı" derse müdahaleyi kimin yaptığı kaybolur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GlobalAction {
+    /// Havuzdaki (claim edilmemiş) işi doğrudan bir kişinin üzerine atar.
+    AssignFromPool,
+    /// Bir kişinin üzerindeki işi alıp havuza geri atar (claim'i düşürür).
+    ReclaimToPool,
+    /// Bir kişinin üzerindeki işi doğrudan başka birine verir — `reclaim_to_pool` +
+    /// `assign_from_pool`, TEK transaction içinde.
+    Reassign,
+    /// Akışı, bu WFE'nin GERÇEKTEN uğradığı önceki bir node'a geri atar.
+    SendBack,
+    /// Akışı start node'una döndürür — yeni WFE AÇILMAZ, aynı WFE geri sarar.
+    SendToStart,
+    /// WFE'yi iptal eder: terminal-class duruma (`terminated`) sokar.
+    Cancel,
+    /// Sıradaki escalation adımını vadesinden önce ELLE tetikler (T‑A5).
+    FireEscalation,
+    /// Sıradaki escalation adımını ATLAR — geçiş uygulanmaz, audit satırı yazılır.
+    SkipEscalation,
+}
+
+impl GlobalAction {
+    /// WFAH/API'de görünen anahtar — serde ile AYNI (`snake_case`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GlobalAction::AssignFromPool => "assign_from_pool",
+            GlobalAction::ReclaimToPool => "reclaim_to_pool",
+            GlobalAction::Reassign => "reassign",
+            GlobalAction::SendBack => "send_back",
+            GlobalAction::SendToStart => "send_to_start",
+            GlobalAction::Cancel => "cancel",
+            GlobalAction::FireEscalation => "fire_escalation",
+            GlobalAction::SkipEscalation => "skip_escalation",
+        }
+    }
+}
 
 #[cfg(test)]
 mod wft_roundtrip_tests {

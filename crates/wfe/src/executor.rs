@@ -337,6 +337,23 @@ pub enum EscalationAdminOutcome {
     NonePending,
 }
 
+/// Global aksiyon sonucu (A-2). WFE'nin AKSİYON SONRASI duruşunu taşır: istemci
+/// "geri gönderdim, şimdi nerede?" sorusunu ikinci bir istekle sormamalı.
+#[derive(Debug, serde::Serialize)]
+pub struct GlobalActionOutcome {
+    pub wfe_id: Uuid,
+    /// Uygulanan global aksiyon (`send_back` / `send_to_start` / `cancel`).
+    pub global_action: &'static str,
+    /// WFAH'a yazılan kayıt adı (`admin:<aksiyon>`) — denetim izinde aranacak değer.
+    pub marker: String,
+    /// Aksiyon sonrası WFE durumu.
+    pub status: WfeStatus,
+    /// Varılan node (`cancel`de `None`).
+    pub current_node: Option<Ref>,
+    /// WFE terminal-class'a girdi mi (`cancel` → daima `true`).
+    pub terminal: bool,
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct WfeView {
     pub wfe_id: Uuid,
@@ -1261,6 +1278,56 @@ impl WfeExecutor {
         Ok(out)
     }
 
+    /// TOPLU global aksiyon kümesi — havuz listesinin `global_actions` alanı (A-3).
+    ///
+    /// `can_claim_many` ile AYNI desen ve AYNI gerekçe: karar çekirdekte
+    /// (`Engine::admin_global_actions`), burada yalnız tek `load_many` + sürüm başına
+    /// bir WFD var, yani sorgu sayısı satır sayısından BAĞIMSIZ. Havuzda ikinci bir
+    /// yetki kuralı YOKTUR; bu alan kararı TAŞIR, ÜRETMEZ.
+    ///
+    /// Anahtar WFE'dir, kol DEĞİL: global aksiyonların hiçbiri kol-bazlı değil
+    /// (`send_back`/`send_to_start` paralel modda zaten reddedilir, `cancel` tüm
+    /// kolları düşürür, devir uçları kolu kendi `node` parametresiyle alır).
+    ///
+    /// Durumu/WFD'si okunamayan satır BOŞ küme alır (fail-closed).
+    pub async fn admin_global_actions_many(
+        &self,
+        wfe_ids: &[Uuid],
+        actor: &Actor,
+    ) -> Result<std::collections::HashMap<Uuid, Vec<&'static str>>, EngineError> {
+        use std::collections::HashMap;
+        let mut ids = wfe_ids.to_vec();
+        ids.sort_unstable();
+        ids.dedup();
+        let states = self.wfe.load_many(&ids).await?;
+        let mut wfds: HashMap<(Uuid, i32), Option<Wfd>> = HashMap::new();
+        let mut out = HashMap::with_capacity(ids.len());
+        for wfe_id in &ids {
+            let Some(wfes) = states.get(wfe_id) else {
+                out.insert(*wfe_id, Vec::new());
+                continue;
+            };
+            let vk = (wfes.wfd_id, wfes.wfd_version);
+            if !wfds.contains_key(&vk) {
+                let doc = self.wfd.fetch(vk.0, vk.1).await.ok();
+                wfds.insert(vk, doc);
+            }
+            let Some(wfd) = wfds.get(&vk).and_then(|w| w.as_ref()) else {
+                out.insert(*wfe_id, Vec::new());
+                continue;
+            };
+            let engine = self.engine_for(wfes).await?;
+            let actions = engine
+                .admin_global_actions(wfd, wfes, actor)
+                .await?
+                .into_iter()
+                .map(|a| a.as_str())
+                .collect();
+            out.insert(*wfe_id, actions);
+        }
+        Ok(out)
+    }
+
     /// Atomik claim: uygunluk matcher ile doğrulanır, yazım CAS ile yapılır.
     /// `node`: WOR-31 — paralel modda kol node'u (CAS o kolda yapılır).
     ///
@@ -1442,6 +1509,125 @@ impl WfeExecutor {
             node: skip.node,
             marker: skip.marker,
         })
+    }
+
+    // --------------------------------------------------- global aksiyonlar (A-2)
+
+    /// `send_back` — akışı uğranmış bir node'a geri atar. Yetki, hedef süzgeci ve
+    /// taşıma çekirdektedir (`Engine::admin_send_back`); burada yalnız yükleme,
+    /// projeksiyon doldurma ve commit var.
+    pub async fn admin_send_back(
+        &self,
+        wfe_id: Uuid,
+        admin: &Actor,
+        target_node: &str,
+    ) -> Result<GlobalActionOutcome, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        // Kapı C: geri gönderme bir GEÇİŞ uygular (node devri) → bozuk ctx'te
+        // reddedilir. Bozuk kaydın çıkış yolu `cancel`dir (o ctx'e dokunmaz).
+        guard_stored_ctx(&wfd, &wfes)?;
+        let engine = self.engine_for(&wfes).await?;
+        let mut commit = engine
+            .admin_send_back(&wfd, &wfes, admin, target_node, Utc::now())
+            .await?;
+        self.commit_global_action(&wfd, &wfes, admin, &mut commit, "send_back")
+            .await
+    }
+
+    /// `send_to_start` — akışı start node'una döndürür (yeni WFE AÇILMAZ).
+    /// `target_node`: belgede birden çok start kuralı varsa ZORUNLU.
+    pub async fn admin_send_to_start(
+        &self,
+        wfe_id: Uuid,
+        admin: &Actor,
+        target_node: Option<&str>,
+    ) -> Result<GlobalActionOutcome, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        guard_stored_ctx(&wfd, &wfes)?;
+        let engine = self.engine_for(&wfes).await?;
+        let mut commit = engine
+            .admin_send_to_start(&wfd, &wfes, admin, target_node, Utc::now())
+            .await?;
+        self.commit_global_action(&wfd, &wfes, admin, &mut commit, "send_to_start")
+            .await
+    }
+
+    /// `cancel` — WFE'yi terminal-class `terminated` durumuna sokar.
+    ///
+    /// **`guard_stored_ctx` KOŞMAZ** (bilinçli): iptal, bozuk `$ctx` yüzünden hiçbir
+    /// aksiyon kabul etmeyen bir kaydın TEK çıkış yoludur. Kapıyı burada da koşmak,
+    /// tıkanan akışı kapatmanın yolunu tıkanmanın kendisine bağlardı. Aksiyon `$ctx`'e
+    /// dokunmadığı için bozuk veriyi yaymaz.
+    pub async fn admin_cancel(
+        &self,
+        wfe_id: Uuid,
+        admin: &Actor,
+        reason: Option<&str>,
+    ) -> Result<GlobalActionOutcome, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        let engine = self.engine_for(&wfes).await?;
+        let mut commit = engine
+            .admin_cancel(&wfd, &wfes, admin, reason, Utc::now())
+            .await?;
+        self.commit_global_action(&wfd, &wfes, admin, &mut commit, "cancel")
+            .await
+    }
+
+    /// Üç global aksiyonun ortak commit yolu: projeksiyon doldurma → commit →
+    /// yerleşme kancaları → timer dürtme. Ayrı ayrı yazılsa biri
+    /// `fill_view_grants`ı atlar ve o WFE görünürlük projeksiyonu olmadan yoluna
+    /// devam ederdi (havuzda kaybolur).
+    async fn commit_global_action(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        admin: &Actor,
+        commit: &mut wfe_core::v22::ports::TransitionCommit,
+        global_action: &'static str,
+    ) -> Result<GlobalActionOutcome, EngineError> {
+        self.fill_view_grants(wfd, wfes, Some(admin.orgu_id), commit)
+            .await?;
+        self.wfe.commit(commit).await?;
+        self.after_wfe_settled(wfes.wfe_id, &commit.outcome).await?;
+        self.nudge_timers();
+        let node = match &commit.outcome {
+            CommitOutcome::MoveTo { node } => Some(Ref::node(wfd, node)),
+            _ => None,
+        };
+        let terminal = !matches!(commit.outcome, CommitOutcome::MoveTo { .. });
+        Ok(GlobalActionOutcome {
+            wfe_id: wfes.wfe_id,
+            global_action,
+            marker: format!("admin:{global_action}"),
+            status: if terminal {
+                WfeStatus::Terminated
+            } else {
+                WfeStatus::Active
+            },
+            current_node: node,
+            terminal,
+        })
+    }
+
+    /// Bu adminin BU WFE'de alabileceği global aksiyonlar — havuz/detay ekranı
+    /// düğmelerini süzer (A-3). Yetki kararı çekirdektedir; burada yalnız yükleme var.
+    pub async fn admin_global_actions(
+        &self,
+        wfe_id: Uuid,
+        admin: &Actor,
+    ) -> Result<Vec<&'static str>, EngineError> {
+        let wfes = self.wfe.load(wfe_id).await?;
+        let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
+        let engine = self.engine_for(&wfes).await?;
+        Ok(engine
+            .admin_global_actions(&wfd, &wfes, admin)
+            .await?
+            .into_iter()
+            .map(|a| a.as_str())
+            .collect())
     }
 
     /// Görünürlük projeksiyonunu (`view_c_a` + `current_view_c_a` + kol `c_a`/

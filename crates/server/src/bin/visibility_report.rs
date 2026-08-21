@@ -141,7 +141,8 @@ async fn main() {
         match wfd_store.fetch(row.wfd_id, row.wfd_version).await {
             Ok(wfd) => {
                 let mut reasons = viewer_relative_reasons(&wfd.listable, "listable");
-                reasons.extend(viewer_relative_reasons(&wfd.wf_admin, "wf_admin"));
+                let wf_admin_grants: Vec<_> = wfd.wf_admin.iter().map(|r| r.grant.clone()).collect();
+                reasons.extend(viewer_relative_reasons(&wf_admin_grants, "wf_admin"));
                 // 2026-08-13 node listable: kök `listable` ile AYNI şekil, AYNI
                 // çapa, AYNI projeksiyon kısıtı → aynı tarama. Kapsanmazsa
                 // rapor SAPAR: viewer'a bağlı bir node kuralı `can_view` (f)'de

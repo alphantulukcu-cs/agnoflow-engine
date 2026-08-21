@@ -154,6 +154,18 @@ pub struct PoolTask {
     /// (`reason`) hâlâ oradan okunur; istemcinin satır başına çağırmasına artık
     /// gerek yok.
     pub can_claim: bool,
+    /// **Bu satırda alabileceğim global aksiyonlar** (A-3, 2026-08-21). Boşsa alan
+    /// hiç çıkmaz — mevcut istemciler etkilenmez.
+    ///
+    /// Değer `WfeExecutor::admin_global_actions_many`den gelir; yani
+    /// `GET /wfe/{id}/global-actions` ucunun GÖVDESİ (`Engine::admin_global_actions`
+    /// → `wf_admin[].allowed_global_actions`). Havuzda ikinci bir yetki kuralı YOK.
+    ///
+    /// `can_claim` ile aynı gerekçe: kullanıcı basamayacağı düğmeyi görmemeli.
+    /// Paralel kol satırlarında değer WFE-SEVİYESİDİR (global aksiyonların hiçbiri
+    /// kol-bazlı değil), yani aynı WFE'nin kol satırları AYNI listeyi taşır.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub global_actions: Vec<&'static str>,
 }
 
 /// Havuz sorgularının KENDİ parametre sayısı: yalnız `$1` = tenant.
@@ -234,11 +246,13 @@ fn branch_pool_sql() -> String {
 }
 
 #[utoipa::path(get, path = "/", tag = "portal",
+    params(PoolScopeQuery),
     responses((status = 200, description = "Aktörün havuzundaki görevler (öncelik sıralı)", body = Vec<PoolTask>)),
     security(("bearer_jwt" = [])))]
 async fn list_pool(
     State(s): State<AppState>,
     actor: PortalActor,
+    axum::extract::Query(scope): axum::extract::Query<PoolScopeQuery>,
 ) -> Result<Json<Vec<PoolTask>>, AppError> {
     let portal_as_actor = to_actor(&actor);
     // Görünürlük filtreleri istek başına BİR kez üretilir (satır başına değil) ve
@@ -310,6 +324,7 @@ async fn list_pool(
             note_count: 0, // aşağıda doldurulur
             unread_note_count: 0, // aşağıda doldurulur
             can_claim: false, // aşağıda TOPLU olarak doldurulur
+            global_actions: Vec::new(), // aşağıda TOPLU olarak doldurulur
         });
     }
 
@@ -369,6 +384,7 @@ async fn list_pool(
             note_count: 0,  // aşağıda doldurulur
             unread_note_count: 0, // aşağıda doldurulur
             can_claim: false, // aşağıda TOPLU olarak doldurulur
+            global_actions: Vec::new(), // aşağıda TOPLU olarak doldurulur
         });
     }
 
@@ -415,6 +431,15 @@ async fn list_pool(
         .await
         .map_err(AppError::from)?;
 
+    // A-3: satır başına alınabilecek global aksiyonlar — `can_claim` ile AYNI desen
+    // (tek toplu geçiş, karar çekirdekten ödünç). `admin` kapsamı da BU kümeyi
+    // kullanır: ikinci bir "admin miyim" sorgusu, kapı ile listeyi ayrıştırırdı.
+    let admin_actions = s
+        .executor
+        .admin_global_actions_many(&rev_ids, &portal_as_actor)
+        .await
+        .map_err(AppError::from)?;
+
     for task in &mut tasks {
         task.rev = revs.get(&task.id).copied().unwrap_or(0);
         task.note_count = note_counts.get(&task.id).copied().unwrap_or(0);
@@ -423,6 +448,16 @@ async fn list_pool(
             .get(&(task.id, task.node.as_ref().map(|n| n.id.clone())))
             .copied()
             .unwrap_or(false);
+        task.global_actions = admin_actions.get(&task.id).cloned().unwrap_or_default();
+    }
+
+    // `admin` kapsamı: yalnız yönetici yetkisi olan satırlar. Yetkisi OLUP hiçbir
+    // global aksiyon verilmemiş admin (görme-yalnız) BU LİSTEDE GÖRÜNMEZ — ekran
+    // "müdahale edebileceklerim" ekranıdır ve tek düğmesi olmayan satır orada
+    // kullanıcının yapabileceği bir şey olmadığını değil, ekranın yanlış olduğunu
+    // düşündürürdü. Görme-yalnız admin akışı `mine` kapsamında ve detay ucunda görür.
+    if scope.scope == PoolScope::Admin {
+        tasks.retain(|t| !t.global_actions.is_empty());
     }
 
     // priority DESC, deadline ASC NULLS LAST, created_at ASC (sözleşme sırası).
@@ -446,6 +481,32 @@ struct CanClaimResponse {
     can_claim: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+}
+
+/// Havuz kapsamı (A-3, 2026-08-21). `mine` = bugünkü davranış (görebildiğim tüm
+/// havuz görevleri); `admin` = YALNIZ `wf_admin` yetkim olan WFE'ler (yönetici
+/// görünümü).
+///
+/// `admin` EK SATIR ÜRETMEZ, DARALTIR: `wf_admin` grant'ı zaten görünürlük
+/// projeksiyonunda (`view_c_a`) ve o satırlar `mine`da da görünüyor. Kapsam,
+/// "yönetmem gerekenler" ile "yapmam gerekenler"i ayırmak içindir.
+///
+/// `org` (amir görünümü, görevlendirme D-1) HENÜZ YOK — bu kapsam D bloğunun işi;
+/// bilinmeyen değer 400 ile reddedilir, sessizce `mine`a düşmez.
+#[derive(Debug, Default, Deserialize, IntoParams, PartialEq)]
+#[into_params(parameter_in = Query)]
+#[serde(rename_all = "snake_case")]
+struct PoolScopeQuery {
+    #[serde(default)]
+    scope: PoolScope,
+}
+
+#[derive(Debug, Default, Deserialize, PartialEq, ToSchema)]
+#[serde(rename_all = "snake_case")]
+enum PoolScope {
+    #[default]
+    Mine,
+    Admin,
 }
 
 /// WOR-31 T4: paralel modda kol seçimi — `?node=<branch_node>`; birden fazla
@@ -653,6 +714,7 @@ mod tests {
             note_count: 0,
             unread_note_count: 0,
             can_claim: false,
+            global_actions: Vec::new(),
         };
         let v = serde_json::to_value(&task).unwrap();
         for field in [
@@ -677,6 +739,56 @@ mod tests {
             v.get("can_claim"),
             Some(&Value::Bool(false)),
             "claim edilebilirlik alanı cevapta yok"
+        );
+        // A-3: boş global aksiyon listesi cevapta HİÇ ÇIKMAZ — alanı tanımayan
+        // istemci etkilenmez (aynı sözleşme: alanlar EKLENİR, düşmez).
+        assert!(
+            v.get("global_actions").is_none(),
+            "boş global_actions serileşmemeli: {v}"
+        );
+    }
+
+    /// A-3: yetki VARSA alan çıkar ve aksiyon adlarını taşır — UI düğmeleri bunu okur.
+    #[test]
+    fn pool_task_carries_global_actions_when_granted() {
+        let task = PoolTask {
+            id: Uuid::nil(),
+            title: "x".into(),
+            workflow_id: Uuid::nil(),
+            status: "active".into(),
+            current_node: None,
+            created_at: DateTime::from_timestamp_nanos(0),
+            claimed_by: None,
+            deadline: None,
+            claimed_at: None,
+            claim_deadline: None,
+            priority: 1,
+            node: None,
+            rev: 0,
+            note_count: 0,
+            unread_note_count: 0,
+            can_claim: false,
+            global_actions: vec!["send_back", "cancel"],
+        };
+        let v = serde_json::to_value(&task).unwrap();
+        assert_eq!(
+            v["global_actions"],
+            serde_json::json!(["send_back", "cancel"])
+        );
+    }
+
+    /// Kapsam varsayılanı `mine`dır ve bilinmeyen değer SESSİZCE ona düşmez —
+    /// `?scope=organizasyon` yazan istemci "hepsini görüyorum" sanmamalı.
+    #[test]
+    fn pool_scope_defaults_to_mine_and_rejects_unknown() {
+        assert_eq!(PoolScopeQuery::default().scope, PoolScope::Mine);
+        assert_eq!(
+            serde_json::from_value::<PoolScope>(serde_json::json!("admin")).unwrap(),
+            PoolScope::Admin
+        );
+        assert!(
+            serde_json::from_value::<PoolScope>(serde_json::json!("org")).is_err(),
+            "org kapsamı henüz YOK (D-1) — sessizce kabul edilmemeli"
         );
     }
 

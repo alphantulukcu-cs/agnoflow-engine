@@ -25,6 +25,10 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .routes(routes!(submit_action))
         .routes(routes!(portal_fire_escalation))
         .routes(routes!(portal_skip_escalation))
+        .routes(routes!(portal_global_actions))
+        .routes(routes!(portal_send_back))
+        .routes(routes!(portal_send_to_start))
+        .routes(routes!(portal_cancel))
         .merge(super::attachments::routes())
         .merge(super::notes::routes())
         .with_state(state)
@@ -102,6 +106,18 @@ struct WfeDetailResponse {
     /// `conflict.stale_revision` alır ve jenerik toast yerine "bu görev artık
     /// sizde değil, sayfa yenileniyor" diyebilir.
     rev: u32,
+    /// A-3: bu kullanıcının BU WFE'de alabileceği **global aksiyonlar** (admin
+    /// müdahaleleri). Boşsa alan hiç çıkmaz.
+    ///
+    /// `available_actions` ile KARIŞTIRILMAMALI: o akış aksiyonlarıdır (node `c_a` +
+    /// claim gerektirir), bu ise `wf_admin[].allowed_global_actions`tan gelir ve
+    /// claim GEREKTİRMEZ. Ayrı bir alan olması bu ayrımı taşır — tek listede
+    /// birleşseler istemci "Onayla" ile "İptal Et"i aynı kapıdan geçmiş sanardı.
+    ///
+    /// Detay ucunda dönmesi ikinci bir isteği ortadan kaldırır; aynı değer
+    /// `GET /portal/wfe/{id}/global-actions`ten de okunabilir.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    global_actions: Vec<&'static str>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -222,6 +238,11 @@ async fn get_wfe_detail(
         join_target: view.join_target,
         claim_as: view.claim_as,
         rev: view.rev,
+        global_actions: s
+            .executor
+            .admin_global_actions(wfe_id, &portal_actor)
+            .await
+            .map_err(AppError::from)?,
     }))
 }
 
@@ -410,4 +431,116 @@ async fn portal_skip_escalation(
         .skip_escalation(wfe_id, &to_actor(&actor), body.node.as_deref())
         .await?;
     crate::routes::wfe::none_pending_to_conflict(outcome).map(Json)
+}
+
+// ------------------------------------------------------- GLOBAL AKSİYONLAR (A-2)
+//
+// `/wfe/*` ağacındaki ikizlerin ince kabuğu — tek fark aktörün JWT'den çözülmesi.
+// Yetki (`wf_admin[].allowed_global_actions`), hedef süzgeci ve terminal kontrolü
+// çekirdektedir; burada karar YOK.
+
+#[derive(Deserialize, ToSchema)]
+struct PortalSendBackBody {
+    target_node: String,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct PortalSendToStartBody {
+    #[serde(default)]
+    target_node: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+struct PortalCancelBody {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Bu kullanıcının BU WFE'de alabileceği global aksiyonlar — admin paneli
+/// düğmelerini bununla süzer (E-3). Boş liste = müdahale yetkisi yok.
+#[utoipa::path(get, path = "/{id}/global-actions", tag = "portal",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    responses((status = 200, description = "Aksiyon adları", body = Vec<String>)),
+    security(("bearer_jwt" = [])))]
+async fn portal_global_actions(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+) -> Result<Json<Vec<&'static str>>, AppError> {
+    Ok(Json(
+        s.executor
+            .admin_global_actions(wfe_id, &to_actor(&actor))
+            .await?,
+    ))
+}
+
+/// `send_back` — akışı uğranmış bir node'a geri atar (derinlik sınırı YOK, A-4).
+#[utoipa::path(post, path = "/{id}/global-actions/send-back", tag = "portal",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = PortalSendBackBody,
+    responses(
+        (status = 200, description = "Varılan node", body = serde_json::Value),
+        (status = 400, description = "Hedef uğranmamış/bilinmiyor (action.target_invalid) veya paralel mod"),
+        (status = 403, description = "`send_back` global aksiyonuna yetkili değil"),
+        (status = 409, description = "WFE bitmiş veya deadline aşılmış"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn portal_send_back(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<PortalSendBackBody>,
+) -> Result<Json<wf_wfe::executor::GlobalActionOutcome>, AppError> {
+    Ok(Json(
+        s.executor
+            .admin_send_back(wfe_id, &to_actor(&actor), &body.target_node)
+            .await?,
+    ))
+}
+
+/// `send_to_start` — akışı start node'una döndürür (yeni WFE AÇILMAZ).
+#[utoipa::path(post, path = "/{id}/global-actions/send-to-start", tag = "portal",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = PortalSendToStartBody,
+    responses(
+        (status = 200, description = "Varılan start node'u", body = serde_json::Value),
+        (status = 400, description = "Çok adaylı start'ta hedef verilmedi (action.target_required)"),
+        (status = 403, description = "`send_to_start` global aksiyonuna yetkili değil"),
+        (status = 409, description = "WFE bitmiş veya deadline aşılmış"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn portal_send_to_start(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<PortalSendToStartBody>,
+) -> Result<Json<wf_wfe::executor::GlobalActionOutcome>, AppError> {
+    Ok(Json(
+        s.executor
+            .admin_send_to_start(wfe_id, &to_actor(&actor), body.target_node.as_deref())
+            .await?,
+    ))
+}
+
+/// `cancel` — WFE'yi terminal-class `terminated` durumuna sokar.
+#[utoipa::path(post, path = "/{id}/global-actions/cancel", tag = "portal",
+    params(("id" = Uuid, Path, description = "WFE id")),
+    request_body = PortalCancelBody,
+    responses(
+        (status = 200, description = "İptal edildi", body = serde_json::Value),
+        (status = 403, description = "`cancel` global aksiyonuna yetkili değil"),
+        (status = 409, description = "WFE zaten bitmiş"),
+    ),
+    security(("bearer_jwt" = [])))]
+async fn portal_cancel(
+    State(s): State<AppState>,
+    actor: PortalActor,
+    Path(wfe_id): Path<Uuid>,
+    Json(body): Json<PortalCancelBody>,
+) -> Result<Json<wf_wfe::executor::GlobalActionOutcome>, AppError> {
+    Ok(Json(
+        s.executor
+            .admin_cancel(wfe_id, &to_actor(&actor), body.reason.as_deref())
+            .await?,
+    ))
 }

@@ -140,10 +140,10 @@
       }
     },
     "wf_admin": {
-      "description": "T‑A5 WF Admin: akış-içi yetkili havuzu. Bu kurallardan birine uyan aktör bu WFE'de claim devredebilir (node'un kendi reassign kuralı olmasa bile), escalation sayacına müdahale edebilir ve WFE'yi görebilir. agnoflow PLATFORM admini ile ilgisi yoktur; aksiyon yetkisi VERMEZ.",
+      "description": "T-A5 WF Admin: akis-ici yetkili havuzu. Bir kurala uyan aktor bu WFE'yi GORUR (can_view (e)) ve kuralin `allowed_global_actions` listesinde yazan GLOBAL AKSIYONLARI alabilir. agnoflow PLATFORM admini (X-Admin-Key) ile ilgisi yoktur. 2026-08-21 (A-1): yetki artik ORTUK DEGIL, LISTELI - eskiden kurala uymak claim devrini ve escalation mudahalesini kendiliginden aciyordu. Bos/eksik liste = admin YALNIZ GORUR (guvenli varsayilan); hassas akista 'admin bile geri gonderemesin' ancak listeden cikararak ifade edilebilir. Gorme listeye BAGLI DEGILDIR: gorunurluk commit aninda viewer bilinmezken projeksiyona (view_c_a) yazilir, aksiyon kapisi ise okuma aninda cozulur. Aktor birden cok kurala uyuyorsa yetki kumesi BIRLESIMDIR (wf_admin_global_actions).",
       "type": "array",
       "items": {
-        "$ref": "#/$defs/caGrantRule"
+        "$ref": "#/$defs/wfAdminRule"
       }
     },
     "attachments": {
@@ -1498,7 +1498,7 @@
       "description": "2026-08-03 (WOR-56/SLA-2): node hedefli collapse. SLA-2'de kullanilinca sure dolunca kardes kollar cancelled, paralel mod kapanir ve WFE bu node'a gider. Kaynak node bir paralel KOLUN ICINDE olmak ZORUNDA (validator escalation_collapse_outside_parallel). Paralel baglam yoksa duz {node} devrine duser (runtime savunmasi)."
     },
     "caGrantRule": {
-      "description": "C_A tabanlı grant kaydı: kural + opsiyonel when guard'ı. DÖRT yer bu şekli paylaşır: kök `listable[]` (kalıcı görme), `nodes.<key>.listable[]` (2026-08-13, duruma bağlı — WFE o node'da iken görme), `terminals[].listable[]` (2026-08-17, sonuca bağlı — WFE BU terminal'de bittiyse görme; terminal'den çıkış olmadığı için kalıcı) ve `wf_admin[]` (akış-içi yetkili).",
+      "description": "C_A tabanli grant kaydi: kural + opsiyonel when guard'i. UC yer bu sekli PAYLASIR: kok `listable[]` (kalici gorme), `nodes.<key>.listable[]` (2026-08-13, duruma bagli - WFE o node'da iken gorme) ve `terminals[].listable[]` (2026-08-17, sonuca bagli - WFE BU terminal'de bittiyse gorme; terminal'den cikis olmadigi icin kalici). DORDUNCUSU `wf_admin[]` bu sekli GENISLETIR ($defs/wfAdminRule: ayni alanlar + allowed_global_actions) cunku 2026-08-21'den beri yalniz o yetki dagitir; digerleri yalniz gorme verir.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -1512,6 +1512,43 @@
           "$ref": "#/$defs/expression"
         }
       }
+    },
+    "wfAdminRule": {
+      "description": "wf_admin[] ogesi: caGrantRule'un alanlari (c_a + opsiyonel when) + o kuralin verdigi global aksiyon kumesi. $ref ile caGrantRule'a baglanmaz cunku additionalProperties:false ile allOf birlesimi ek alani reddeder; alanlar bilincli olarak TEKRAR yazilir ve iki tanimin ayrismasini reference_types_parity + schema testleri yakalar. Dort grant yerinden YALNIZ bu biri yetki dagitir (digerleri: kok/node/terminal listable = yalniz gorme), bu yuzden alan paylasilan tipe KONMAZ.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "c_a"
+      ],
+      "properties": {
+        "c_a": {
+          "$ref": "#/$defs/candidateActor"
+        },
+        "when": {
+          "$ref": "#/$defs/expression"
+        },
+        "allowed_global_actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/globalAction"
+          },
+          "description": "Bu kurala uyan adminin alabilecegi global aksiyonlar. BOS/EKSIK = hicbiri (guvenli varsayilan, yalniz gorme). Ayni aksiyonu iki kez yazmak custom validator hatasidir (wf_admin_duplicate_global_action); hic aksiyon vermeyen kural uyari verir (wf_admin_no_global_actions)."
+        }
+      }
+    },
+    "globalAction": {
+      "description": "GLOBAL AKSIYON - akis tasarimcisinin WFD'ye YAZMADIGI, motorun tanimladigi ve yalniz Workflow Admin'in alabildigi mudahale kumesi (2026-08-21 toplanti karari J-2/J-3). WFD icindeki geri gondermeden (wft: {targets}) AYRIDIR: o normal bir aksiyondur, akista tanimli olmak zorundadir ve normal aktor kullanir; global aksiyon akista hic tanimlanmamis olsa bile calisir. 2026-08-21 oncesi wft:{targets} formuna da 'global aksiyon (GLB)' deniyordu - ad BIRAKILDI ve bu kumeye ayrildi. SEMANTIK: assign_from_pool = havuzdaki (claim edilmemis) isi dogrudan bir kisiye atar; reclaim_to_pool = kisinin uzerindeki isi havuza dondurur (claim duser); reassign = reclaim_to_pool + assign_from_pool, TEK transaction; send_back = akisi bu WFE'nin GERCEKTEN ugradigi onceki bir node'a geri atar (hedef kumesi visited_nodes, K-2 ile ayni suzgec; derinlik siniri YOKTUR - A-4); send_to_start = start node'una dondurur, YENI WFE ACILMAZ (ayni WFE geri sarar); cancel = WFE'yi terminal-class 'terminated' durumuna sokar (reason ADMIN.Cancelled), sonrasinda hicbir aksiyon kabul edilmez; fire_escalation / skip_escalation = T-A5 escalation sayaci mudahalesi. HEPSI WFAH'a GERCEK admin (ORGU,U,R) ucluyle yazilir, 'system' ile DEGIL.",
+      "type": "string",
+      "enum": [
+        "assign_from_pool",
+        "reclaim_to_pool",
+        "reassign",
+        "send_back",
+        "send_to_start",
+        "cancel",
+        "fire_escalation",
+        "skip_escalation"
+      ]
     }
   }
 }

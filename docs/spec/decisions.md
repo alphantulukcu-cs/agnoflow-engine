@@ -2564,3 +2564,133 @@ node'u ekler — sim ile gerçek akış aynı menüyü döndürmek zorundadır.
 **Kapsam dışı:** editörün tasarım zamanı kuralları (SB-P/SB-R, `pastNodesOf`) DEĞİŞMEDİ.
 İkisi artık aynı yönde çalışıyor: editör tasarım zamanı grafından "gelinmiş olabilecek"
 node'ları sunar, motor çalışma anında "gerçekten gelinmiş" olanlara indirir.
+
+---
+
+## Global aksiyon kümesi: `wf_admin.allowed_global_actions` (2026-08-21, A-1 — KIRICI)
+
+**Girdi:** 2026-08-20 toplantısı, `gorevlendirme.md` § A-1/A-2 · önceki denetimin açık
+maddesi K-1 (`docs/2026-08-20-toplanti-spec-denetimi.md`).
+
+**Karar 1 — `wf_admin` yetki dağıtır, ama YALNIZ listede yazanı.** T‑A5'in
+"`wf_admin` aksiyon yetkisi VERMEZ" değişmezi **kısmen kaldırıldı**: node aksiyonu
+(ACT) hâlâ VERİLMEZ — o node `c_a`'sına bağlıdır — ama motorun tanımladığı **global
+aksiyon** kümesinden listede yazanlar verilir. Toplantı kararı J‑2/J‑3: global
+aksiyonlar yalnız Workflow Admin'e aittir ve hangilerini alacağı **tasarım aşamasında**
+seçilir.
+
+K-1'in üç seçeneğinden **(a) `wf_admin`'in kapsamını genişlet** uygulandı. (b) "bunları
+WFD'de normal aksiyon olarak tanımlat" reddedildi: global aksiyonun tanımı gereği
+"akışta hiç tanımlanmamış olsa bile çalışır" (J‑2) — normal aksiyona çevirmek onu her
+WFD'ye elle kopyalamak, unutulan yerde de müdahalesiz kalmak demekti. (c) "yalnız
+`cancel`" reddedildi: aynı kapı iki farklı yerde iki kez yazılırdı.
+
+**Karar 2 — yetki ÖRTÜK DEĞİL, LİSTELİ; boş liste = yalnız görme.** Eskiden kurala
+uymak claim devrini + escalation müdahalesini kendiliğinden açıyordu. Artık **sekiz
+aksiyonun HEPSİ** (`assign_from_pool`, `reclaim_to_pool`, `reassign`, `send_back`,
+`send_to_start`, `cancel`, `fire_escalation`, `skip_escalation`) `allowed_global_actions`
+kapısından geçer. Eski davranışı korumak (liste yoksa üç yetki sürsün) REDDEDİLDİ:
+üretim öncesindeyiz ve geriye uyum kodu borçtur; ayrıca "güvenli varsayılan" kriteri
+(görevlendirme A-1) ancak boş listenin HİÇBİR şey vermesiyle sağlanır. Mevcut
+belgelerin adminleri görme-yalnız hâline düşer — kırılma bilinçlidir.
+
+**Karar 3 — `escalation fire/skip` de kümeye girdi.** Görevlendirmedeki liste altı
+aksiyondu; escalation müdahalesi orada yoktu ama `wf_admin`in bugün verdiği bir
+yetkiydi. Dışarıda bırakmak, "adminin yetkileri tek yerde yazılıdır" iddiasını ilk
+günden kırardı: iki yetki listede, biri örtük kalırdı.
+
+**Karar 4 — görme listeden BAĞIMSIZ.** `can_view` (e) ve `view_c_a` projeksiyonu
+`allowed_global_actions`a BAKMAZ. Sebep yapısaldır: projeksiyon commit anında, viewer
+BİLİNMEZKEN yazılır — "bu kişi hangi aksiyonu alabilir" sorusunun o anda cevabı yoktur.
+Görünürlüğü listeye bağlamak, `view_c_a`yı aksiyon başına ayrıştırmak (kolon başına bir
+küme) demekti.
+
+**Karar 5 — çoklu kural = kümelerin BİRLEŞİMİ** (`wf_admin_global_actions`). "İlk
+eşleşen kural kazanır" reddedildi: `listable`/`wf_admin` dizisinin anlamı "çoklu grant =
+çoklu kayıt"tır (kural içinde VEYA yoktur), dolayısıyla iki kayıt iki grant demektir.
+Boş listeli kural eşleşme SORULMADAN atlanır — sonucu değiştirmeyen org traverse'i
+yapmamak için.
+
+**Şekil.** `wf_admin[]` öğesi artık `caGrantRule` DEĞİL, onu genişleten
+`$defs/wfAdminRule`: motor tarafında `CaGrantRule` `flatten` ile gömülüdür (kural şekli
+tek yerde kalır), şema tarafında alanlar tekrar yazılır — `additionalProperties: false`
+ile `allOf` birleşimi ek alanı reddeder. `deny_unknown_fields` `flatten` ile BİRLİKTE
+durur ve gereklidir: kaldırıldığında `allowed_globl_actions` yazım hatası sessizce
+yutuluyor ve yetki hiç işlemiyordu (ölçüldü; regresyon testi
+`tests/wf_admin.rs::unknown_field_in_wf_admin_rule_is_rejected`).
+
+Alanı paylaşılan `caGrantRule`a KOYMAMAK bilinçli: dört grant yerinden yalnız biri yetki
+dağıtır, diğer üçü (kök/node/terminal `listable`) yalnız görme verir — alan orada olsa
+`listable`da hiçbir zaman anlamı olmayan bir alan olurdu.
+
+---
+
+## Global aksiyon semantiği: `send_back` · `send_to_start` · `cancel` (2026-08-21, A-2/A-3/A-4)
+
+**Karar 1 — üç claim aksiyonu MEVCUT `reassign` ucundan geçer.** `assign_from_pool`,
+`reclaim_to_pool` ve `reassign` için yeni uç açılmadı: devir mekaniği (CAS, hedefin node
+`c_a`'sına uygunluğu, kol ipucu) zaten `Engine::reassign`daydı ve ikinci bir yol aynı
+semantiği iki yerden bakılır hâle getirirdi. Kapı hangi aksiyonu istediğini DURUMDAN
+çıkarır (`target` var mı · o an sahip var mı) ve izi `input.global_action` olarak yazar.
+Üçünün ayrı yetki olması bilinçli: "havuza alabilir ama kimseye atayamaz" hassas akışta
+istenen ayrımdır.
+
+**Karar 2 — `send_back` hedefi K-2 süzgecini PAYLAŞIR.** Adminin yolu `visited_nodes`
+kesişimini atlayamaz; atlasaydı akış tasarımcısının kapattığı kapıyı açardı (uğranmamış
+node = ileri atlama, o adımın beklediği ctx alanları hiç yazılmamış). Bulunulan node da
+reddedilir (`send_back_target_self`in çalışma anı karşılığı). Yeni hata kodu YOK:
+`action.target_invalid`.
+
+**Karar 3 (A-4) — DERİNLİK SINIRI YOK.** Toplantıda açık kalan "bir geriye, iki geriye…
+sınırlayacak mıyız?" sorusunun cevabı: sınır KOYULMADI. Gerekçe: hedef kümesi belgeden
+değil ÖRNEĞİN GERÇEK GEÇMİŞİNDEN çıkıyor (`visited_nodes`), yani "kaç adım geriye"
+sorusunun anlamlı karşılığı bir sayı değil bir LİSTEdir. Sayı sınırı ayrıca paralel
+kollarda ve koşullu dallarda yanlış cevap verir: WFAH sırasında "iki geri" farklı bir
+kolun node'una denk gelebilir. Sınır gerçekten gerekirse `wf_admin` kuralına opsiyonel
+bir alan eklenir (`max_send_back_depth`); motora sayaç KONMADI. `seq` reddi (2026-08-21)
+ile aynı gerekçe ailesi.
+
+**Karar 4 — `send_to_start` yeni WFE AÇMAZ ve `visited` süzgecinden MUAFTIR.** Aynı WFE
+geri sarar: WFAH + DynCtx geçmişi korunur (sıfırdan başlatmak izi koparır ve `wfe_id`ye
+bağlı her şeyi — ekler, notlar, WFC bağları — öksüz bırakırdı). Hedef `wfd.start[].from`
+ile SINIRLIDIR; aksi halde `send_back` kapısını atlamanın yolu olurdu. Süzgeç muafiyeti:
+start node'una tanım gereği uğranmıştır, ama `visited_nodes` onu WFAH'ın ilk kaydının
+aksiyonunu `start[]` kurallarıyla eşleştirerek TÜRETİR — yeni bir WFD sürümünde start
+aksiyonu yeniden adlandırılırsa eşleşme kaybolur ve "başa gönder" sessizce imkânsızlaşır.
+Çok start kuralında seçim ZORUNLU (`action.target_required`); birini keyfî seçmek akışı
+tasarımcının kastetmediği havuza düşürürdü.
+
+**Karar 5 — `cancel` durumu `terminated`, YENİ durum eklenmedi.** Görevlendirme
+`status = "cancelled"` diyordu; semantiği karşılandı, literali karşılanmadı.
+`WfeStatus::Terminated` 2026-07-16'da "hata değil, başarılı bitiş değil, aktif de değil"
+ve açıkça *"ileride manuel iptal"* için tanımlanmıştı. Yeni bir durum, CHECK kısıtından
+havuz SQL'ine, görünürlük projeksiyonundan raporlara kadar her okuyucuyu genişletir ve
+"aktif değil" sınıfına üçüncü bir üye ekler. Ayrım `end_response.reason =
+"ADMIN.Cancelled"` (+ serbest metin `note`) ile taşınır. Ardıl akış TETİKLENMEZ,
+`end_terminal` NULL kalır. **İki muafiyet:** `cancel` deadline'ı aşmış WFE'de de çalışır
+(diğer global aksiyonlar `WfeExpired` ile reddedilir — onlar akışı SÜRDÜRÜR, bu bitirir)
+ve **Kapı C'yi (`guard_stored_ctx`) KOŞMAZ**: bozuk `$ctx` yüzünden hiçbir aksiyon kabul
+etmeyen kaydın tek çıkış yolu odur, kapıyı orada da koşmak tıkanmayı kendi çözümüne
+kilitlerdi.
+
+**Karar 6 — paralel modda `send_back`/`send_to_start` REDDEDİLİR (400).** Kolları
+toplayıp tek node'a inmek `collapse` semantiğidir ve kol bağlamı ister (`WftMode::Branch`
+bir `from_node` bekler); adminin kolu yoktur ve hangi kolun "geri gönderen" sayılacağı
+toplantıda konuşulmadı. Keyfî bir kol seçip kardeşleri sessizce iptal etmek yerine açık
+ret. `cancel` paralel modda ÇALIŞIR (tüm kollar iptal — deadline sonlanmasının aynısı).
+
+**Karar 7 — WFAH kaydı `admin:<aksiyon>` öneklidir.** `cancel` adında bir akış aksiyonu
+tanımlamak serbesttir ve `$wfah` izdüşümüne bakan bir `when` ifadesi ikisini ayırt
+edemezdi. `escalate:` önekinde öğrenilen ders: marker adı sözleşmedir. Aktör GERÇEK
+admindir, `system` DEĞİL.
+
+**Karar 8 (A-3) — admin havuzu EK SATIR ÜRETMEZ, DARALTIR.** `wf_admin` grant'ı zaten
+`view_c_a` projeksiyonundadır, yani o satırlar bugünkü havuzda da görünüyor.
+`?scope=admin` "yönetmem gerekenler" ile "yapmam gerekenler"i ayırır ve
+`global_actions` boş olan satırları düşürür — tek düğmesi olmayan satır o ekranda
+kullanıcıya "ekran yanlış" izlenimi verirdi (görme-yalnız admin akışı `mine` kapsamında
+ve detay ucunda görür). Satır başına aksiyon listesi `can_claim` deseniyle TOPLU
+hesaplanır (`admin_global_actions_many`: tek `load_many` + sürüm başına bir WFD);
+havuzda ikinci bir yetki kuralı YOKTUR. `?scope=org` (amir görünümü) D-1'in işidir ve
+bilinmeyen kapsam 400 ile reddedilir — sessizce `mine`a düşmek "hepsini görüyorum"
+sanısı yaratırdı.

@@ -130,7 +130,7 @@ mod tests {
 
 #[cfg(test)]
 mod fixture_audit {
-    //! Depodaki TÜM örnek/fixture belgeleri şema kapısından geçmek ZORUNDA — okuma yolu da
+    //! Spec deposundaki TÜM örnek belgeler şema kapısından geçmek ZORUNDA — okuma yolu da
     //! doğrulandığı için (2026-08-07 kararı) şemaya uymayan bir belge çalıştırılamaz.
     use super::*;
 
@@ -147,12 +147,5 @@ mod fixture_audit {
         check("kredi-kullandirim", include_str!("../../../docs/spec/examples/kredi-kullandirim.json"));
         check("kredi-skor", include_str!("../../../docs/spec/examples/kredi-skor.json"));
         check("paralel-onay", include_str!("../../../docs/spec/examples/paralel-onay.json"));
-    }
-
-    #[test]
-    fn test_fixtures_conform() {
-        check("fixtures/kredi-basvuru.golden", include_str!("../tests/fixtures/kredi-basvuru.golden.json"));
-        check("fixtures/paralel-onay", include_str!("../tests/fixtures/paralel-onay.json"));
-        check("fixtures/belge-onay", include_str!("../tests/fixtures/belge-onay.json"));
     }
 }

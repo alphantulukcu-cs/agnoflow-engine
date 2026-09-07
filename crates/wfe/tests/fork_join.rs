@@ -27,7 +27,7 @@ use wfe_core::v22::ports::{
 use wfe_core::{ConflictKind, EngineError};
 
 const PARALLEL_FIXTURE: &str =
-    include_str!("../../wfe-core/tests/fixtures/paralel-onay.json");
+    include_str!("../../../docs/spec/examples/paralel-onay.json");
 
 // ---- mock'lar (pipeline.rs kalıbı; authorize anchor = actor.orgu_id) ----------
 

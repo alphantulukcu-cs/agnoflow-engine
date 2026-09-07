@@ -2,7 +2,10 @@
 
 Bu repo **WFD v2.2** (Named Nodes, Single-Rule C_A) modelini çalıştıran çok-tenant'lı
 workflow engine'dir. Spec ile kod çelişirse SPEC kazanır: kanonik dosyalar
-`docs/spec/` altındadır (kaynak: WFD-EDITOR reposu `docs/spec/`; senkron tutulur).
+`docs/spec/` altındadır. **`docs/spec/` bir GIT SUBMODULE'dür** — kanonik kaynak
+`agnoflow-spec` deposudur (D05, 2026-09-04); bu repoda düzenlenmez, submodule içinde
+commit'lenir ve buradan SHA bump edilir. Klondan sonra `git submodule update --init`
+ZORUNLU: eksikse `include_str!` DERLEME ANINDA patlar.
 Alınan tasarım kararları: `docs/spec/decisions.md`. **Henüz karara bağlanmamış konular ve
 2026-08-20 toplantı kavramlarının spec denetimi: `docs/2026-08-20-toplanti-spec-denetimi.md`
 — "şu kavram var mı?" sorusunu oradan sor** (yetkili sistem aksiyonları,
@@ -63,7 +66,7 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
   `ENGINE_ONLY` listesinde GEREKÇESİYLE yazılır. Sebep: `docs/` altında olduğu için
   hiçbir derleyici bakmıyordu ve sessizce çürümüştü (2026-08-17 ölçümü: 8 tip + 10'dan
   fazla alan eksik, `c_u` hâlâ `Vec<String>`). Motora alan eklenince ORASI da güncellenir.
-- **`docs/spec/schema.json` RUNTIME kapısıdır** (`wfe_core::schema`, `include_str!` ile gömülü): `Wfd::from_value_checked`/`from_json_checked` upload/publish/submit/approve/**fetch**, `/wfd/validate`, `/wfe/simulate` ve senaryo koşumunda şemayı zorlar — serde `minItems`/`pattern` bilmez, elle yazılan JSON o boşluktan giriyordu (`"c_r": []`). Taslak KAYDI kapsam dışı; ham `from_value` testler için açık. Şema değişirse frontend kopyası (`src/schema/wfd.schema.json`) birlikte güncellenir.
+- **`docs/spec/schema.json` RUNTIME kapısıdır** (`wfe_core::schema`, `include_str!` ile gömülü): `Wfd::from_value_checked`/`from_json_checked` upload/publish/submit/approve/**fetch**, `/wfd/validate`, `/wfe/simulate` ve senaryo koşumunda şemayı zorlar — serde `minItems`/`pattern` bilmez, elle yazılan JSON o boşluktan giriyordu (`"c_r": []`). Taslak KAYDI kapsam dışı; ham `from_value` testler için açık. Şema TEK kopyadır (`agnoflow-spec` submodule'ü); frontend aynı submodule'ü pinler.
 
 - **Senaryo sidecar'ında `folders` alanı FRONTEND'e aittir** (2026-08-20). `ScenarioSet`
   onu bilmez ve bilmesi de gerekmiyor: `put_scenarios` gövdeyi doğrulamak için
@@ -79,7 +82,7 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
 
 ## Çalışma kuralları
 
-- Her değişiklikten sonra `cargo test --workspace`; golden fixture (`docs/spec/examples/kredi-basvuru.golden.json`) DEĞİŞTİRİLMEZ — kod fixture'a uyar. (Tek istisna: WOR-70/2026-07-29, spec değişikliği gereği kullanıcı onayıyla. Kural yürürlükte.) Fixture'ların `crates/wfe-core/tests/fixtures/` kopyaları senkron tutulur.
+- Her değişiklikten sonra `cargo test --workspace`; golden fixture (`docs/spec/examples/kredi-basvuru.golden.json`) DEĞİŞTİRİLMEZ — kod fixture'a uyar. (Tek istisna: WOR-70/2026-07-29, spec değişikliği gereği kullanıcı onayıyla. Kural yürürlükte.) Testler örnek belgeleri submodule'ün `docs/spec/examples/` dizininden okur — fixture kopyası YOK.
 - Context'e TEK yazma yolu `wfes_effects`'tir (WOR-70): aksiyon girdisi ctx'e kendiliğinden yazılmaz, `$action.input.<yol>` ile açıkça yazılır. `context.required` ve alan içi `required` YASAK.
 - Zamana bağlı testlerde `#[tokio::test(start_paused = true)]` kullan (retry/timeout gerçek beklemeden koşar).
 - Migration'lar psql ile manuel uygulanır (`migrations/org`, `migrations/wf` sırasıyla); sqlx migrate kullanılmıyor.

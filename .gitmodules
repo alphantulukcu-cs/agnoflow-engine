@@ -1,0 +1,3 @@
+[submodule "docs/spec"]
+	path = docs/spec
+	url = git@gitlab.cs.com.tr:agnoflow/config/agnoflow-spec.git

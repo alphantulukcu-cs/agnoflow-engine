@@ -33,9 +33,9 @@ use wfe_core::v22::ports::{
 };
 use wfe_core::EngineError;
 
-const CALLER: &str = include_str!("../../wfe-core/tests/fixtures/akis-cagrisi.json");
-const SKOR: &str = include_str!("../../wfe-core/tests/fixtures/kredi-skor.json");
-const KULLANDIRIM: &str = include_str!("../../wfe-core/tests/fixtures/kredi-kullandirim.json");
+const CALLER: &str = include_str!("../../../docs/spec/examples/akis-cagrisi.json");
+const SKOR: &str = include_str!("../../../docs/spec/examples/kredi-skor.json");
+const KULLANDIRIM: &str = include_str!("../../../docs/spec/examples/kredi-kullandirim.json");
 
 // ---- mock'lar --------------------------------------------------------------
 

@@ -5,9 +5,9 @@ use serde_json::{json, Value};
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::validator::{expression_issues, validate, ValidationReport};
 
-const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
-const PARALLEL_FIXTURE: &str = include_str!("fixtures/paralel-onay.json");
-const ATTACHMENT_FIXTURE: &str = include_str!("fixtures/belge-onay.json");
+const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
+const PARALLEL_FIXTURE: &str = include_str!("../../../docs/spec/examples/paralel-onay.json");
+const ATTACHMENT_FIXTURE: &str = include_str!("../../../docs/spec/examples/belge-onay.json");
 
 fn fixture_value() -> Value {
     serde_json::from_str(FIXTURE).unwrap()

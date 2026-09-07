@@ -10,9 +10,9 @@ use serde_json::{json, Value};
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::validator::{validate, validate_with, ValidationReport, WfdProvider};
 
-const CALLER: &str = include_str!("fixtures/akis-cagrisi.json");
-const SKOR: &str = include_str!("fixtures/kredi-skor.json");
-const KULLANDIRIM: &str = include_str!("fixtures/kredi-kullandirim.json");
+const CALLER: &str = include_str!("../../../docs/spec/examples/akis-cagrisi.json");
+const SKOR: &str = include_str!("../../../docs/spec/examples/kredi-skor.json");
+const KULLANDIRIM: &str = include_str!("../../../docs/spec/examples/kredi-kullandirim.json");
 
 /// Sahte WFD deposu. `version: None` = "en son yayınlanmış" — testte tek sürüm var.
 struct Catalog(Vec<Wfd>);
@@ -118,7 +118,7 @@ fn callee_fixtures_are_valid() {
 #[test]
 fn wfd_without_calls_triggers_no_call_rules() {
     let golden: Value =
-        serde_json::from_str(include_str!("fixtures/kredi-basvuru.golden.json")).unwrap();
+        serde_json::from_str(include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json")).unwrap();
     let report = full(golden);
     assert!(
         !report.errors.iter().any(|e| e.code.starts_with("call_")),

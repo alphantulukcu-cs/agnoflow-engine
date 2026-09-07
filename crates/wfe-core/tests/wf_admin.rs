@@ -102,7 +102,7 @@ fn empty_allowed_global_actions_is_not_serialized() {
 
 // ── yardımcılar ─────────────────────────────────────────────────────────────
 
-const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
+const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 
 fn wfd_with_admin(wf_admin: serde_json::Value) -> Wfd {
     let mut doc = base_doc();

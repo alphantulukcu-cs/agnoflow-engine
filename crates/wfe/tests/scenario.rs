@@ -15,7 +15,7 @@ use wfe_core::v22::pipeline::Engine;
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv, ExecFailure};
 use wfe_core::EngineError;
 
-const GOLDEN: &str = include_str!("../../wfe-core/tests/fixtures/kredi-basvuru.golden.json");
+const GOLDEN: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 
 struct MockOrg;
 #[async_trait]
@@ -209,8 +209,8 @@ async fn call_return_without_a_waiting_call_fails_the_scenario() {
 
 // ── paralel kol ve WFC çağrı dönüşü ─────────────────────────────────────────
 
-const PARALLEL: &str = include_str!("../../wfe-core/tests/fixtures/paralel-onay.json");
-const CALLER: &str = include_str!("../../wfe-core/tests/fixtures/akis-cagrisi.json");
+const PARALLEL: &str = include_str!("../../../docs/spec/examples/paralel-onay.json");
+const CALLER: &str = include_str!("../../../docs/spec/examples/akis-cagrisi.json");
 
 fn parallel_scenario() -> Scenario {
     let mut s = base_scenario();
@@ -342,7 +342,7 @@ async fn failed_call_return_status_reaches_the_engine() {
 // `SimState.attachments`tır. `expectReject` ise NEGATİF testi mümkün kılar:
 // "belge yüklenmeden onaylanamaz" artık kanıtlanabilir bir senaryodur.
 
-const BELGE: &str = include_str!("../../wfe-core/tests/fixtures/belge-onay.json");
+const BELGE: &str = include_str!("../../../docs/spec/examples/belge-onay.json");
 
 fn belge() -> (Wfd, serde_json::Value) {
     (

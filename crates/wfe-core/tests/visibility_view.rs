@@ -36,8 +36,8 @@ use wfe_core::v22::pipeline::{ClaimCheck, Engine};
 use wfe_core::v22::ports::{AutoexecRunner, BranchState, BranchStatus, ExecEnv, ExecFailure, Wfes};
 use wfe_core::v22::visibility::can_view;
 
-const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
-const PARALLEL_FIXTURE: &str = include_str!("fixtures/paralel-onay.json");
+const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
+const PARALLEL_FIXTURE: &str = include_str!("../../../docs/spec/examples/paralel-onay.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).unwrap()

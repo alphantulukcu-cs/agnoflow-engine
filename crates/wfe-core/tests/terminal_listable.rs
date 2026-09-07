@@ -28,7 +28,7 @@ use wfe_core::v22::pipeline::Engine;
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv, ExecFailure, Wfes};
 use wfe_core::v22::visibility::can_view;
 
-const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
+const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 
 // ── şema kapısı (docs/spec/schema.json) ─────────────────────────────────────
 

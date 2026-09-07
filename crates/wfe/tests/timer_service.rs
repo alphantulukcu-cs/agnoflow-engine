@@ -31,7 +31,7 @@ use wfe_core::v22::ports::{
 use wfe_core::EngineError;
 
 const FIXTURE: &str =
-    include_str!("../../wfe-core/tests/fixtures/kredi-basvuru.golden.json");
+    include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 
 // ---- mock'lar (wfe-core/tests/pipeline.rs kalıbı) --------------------------
 

@@ -4,7 +4,7 @@
 
 use wfe_core::types::wfd_v22::{COrgu, CandidateActor, Wfd};
 
-const FIXTURE: &str = include_str!("fixtures/kredi-basvuru.golden.json");
+const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 
 fn golden() -> Wfd {
     Wfd::from_json(FIXTURE).expect("golden fixture v2.2 parse etmeli")

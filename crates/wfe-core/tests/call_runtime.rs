@@ -23,7 +23,7 @@ use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::pipeline::Engine;
 use wfe_core::v22::ports::{AutoexecRunner, CallSite, CommitOutcome, ExecEnv, ExecFailure, Wfes};
 
-const CALLER: &str = include_str!("fixtures/akis-cagrisi.json");
+const CALLER: &str = include_str!("../../../docs/spec/examples/akis-cagrisi.json");
 
 fn caller_wfd() -> Wfd {
     Wfd::from_json(CALLER).unwrap()

@@ -3939,7 +3939,19 @@ async fn nested_parallel_at_runtime_is_rejected() {
 async fn start_wft_parallel_is_rejected_at_runtime() {
     // Validator start'ta parallel'i reddeder; runtime koruması bağımsız çalışmalı.
     let mut wfd = paralel();
-    wfd.start[0].wft = wfd.transitions[0].wft.clone(); // t_fork'un parallel wft'i
+    // v2.3: fork'un `wft`i aksiyon kaydında. Belgeden parallel taşıyan kaydı bul.
+    let fork_wft = wfd
+        .actions
+        .values()
+        .find(|a| matches!(a.wft, wfe_core::types::wfd_v22::Wft::Parallel { .. }))
+        .expect("paralel fixture bir fork taşımalı")
+        .wft
+        .clone();
+    let start_action = wfd.start[0].action.clone();
+    wfd.actions
+        .get_mut(&start_action)
+        .expect("start aksiyonu")
+        .wft = fork_wft;
 
     let org = MockOrg {
         role_assigned: true,

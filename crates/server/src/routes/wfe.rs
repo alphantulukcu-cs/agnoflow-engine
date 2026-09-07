@@ -138,7 +138,11 @@ pub(crate) async fn assert_can_start(
                 continue;
             }
         }
-        let Some(node) = wfd.nodes.get(&rule.from) else {
+        // v2.3 (`Ç7+Ç8`): başlatan node = start AKSİYONUNUN `from`u.
+        let Some(action_def) = wfe_core::types::wfd_v22::start_action(wfd, rule) else {
+            continue;
+        };
+        let Some(node) = wfd.nodes.get(&action_def.from) else {
             continue;
         };
         let env = MatchEnv {
@@ -146,7 +150,9 @@ pub(crate) async fn assert_can_start(
             wfah: &empty_wfah,
             orgtnt_id,
         };
-        if authorize(&node.c_a, actor, env, &*s.executor.org).await? {
+        // ⚠️ `E04`: start yolunda grant SORULMAZ (`start_c_a()`), çünkü defter boşken
+        // açık grant kümesi yapısal olarak boştur.
+        if authorize(node.start_c_a(), actor, env, &*s.executor.org).await? {
             return Ok(());
         }
     }
@@ -820,7 +826,11 @@ fn start_gate_target(
             _ => return None,
         },
     };
-    Some((rule.from.clone(), rule.action.clone()))
+    // ⚠️ Bu, sunucuda `start[].from` okuyan **İKİNCİ** yerdir ve `Ç7+Ç8` yalnız
+    // `assert_can_start`ı saymıştı — `P02` bunu buldu. İkisi de düzeltildi; biri
+    // atlanırsa belge kapısı ile gerçek kapı ayrı node'a bakar.
+    let action_def = wfe_core::types::wfd_v22::start_action(wfd, rule)?;
+    Some((action_def.from.clone(), rule.action.clone()))
 }
 
 #[derive(Deserialize, ToSchema)]

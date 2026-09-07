@@ -74,8 +74,11 @@ async fn list_wfds(
 
         let mut can_start = false;
         for rule in &wfd.start {
-            // Simetrik start: initiator yetkisi `from` node'unun c_a'sında.
-            let Some(node) = wfd.nodes.get(&rule.from) else {
+            // v2.3 (`Ç7+Ç8`): başlatan node = start AKSİYONUNUN `from`u.
+            let Some(action_def) = wfe_core::types::wfd_v22::start_action(&wfd, rule) else {
+                continue;
+            };
+            let Some(node) = wfd.nodes.get(&action_def.from) else {
                 continue;
             };
             let env = MatchEnv {
@@ -83,7 +86,10 @@ async fn list_wfds(
                 wfah: &empty_wfah,
                 orgtnt_id: actor.orgtnt_id,
             };
-            if authorize(&node.c_a, &portal_actor, env, &*s.executor.org)
+            // ⚠️ `E04`: **START YOLUNDA GRANT SORULMAZ** — `start_c_a()` accessor'ı
+            // bunu adıyla söyler. Gerekçe yapısaldır: start'ta defter boştur, defterde
+            // `escalate:` satırı olamaz, dolayısıyla açık grant kümesi BOŞTUR.
+            if authorize(node.start_c_a(), &portal_actor, env, &*s.executor.org)
                 .await
                 .unwrap_or(false)
             {

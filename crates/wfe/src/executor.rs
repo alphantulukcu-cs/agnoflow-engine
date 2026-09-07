@@ -216,18 +216,14 @@ pub async fn possible_actions_for(
 /// wfe-seviyesi current_node taşımaz (kol durumu T3/T4'te ayrıca sunulur);
 /// `JoinComplete` iç `next` outcome'una göre sınıflanır.
 fn outcome_view(outcome: &CommitOutcome) -> (bool, Option<String>, Option<Value>) {
-    match outcome {
-        CommitOutcome::MoveTo { node } => (false, Some(node.clone()), None),
-        CommitOutcome::Terminal { end_response } => (true, None, Some(end_response.clone())),
-        CommitOutcome::Failed { end_response } => (true, None, Some(end_response.clone())),
-        CommitOutcome::Terminated { end_response } => (true, None, Some(end_response.clone())),
-        CommitOutcome::ForkTo { .. }
-        | CommitOutcome::BranchMoveTo { .. }
-        | CommitOutcome::BranchArrived { .. } => (false, None, None),
-        CommitOutcome::JoinComplete { next, .. } => outcome_view(next),
-        // WOR-56: node hedefli collapse — paralel mod biter, WFE aktif olarak `node`'a.
-        CommitOutcome::CollapseTo { node, .. } => (false, Some(node.clone()), None),
-    }
+    // v2.3 (`E03`/S1): `outcome_view` KENDİ `match` LİSTESİNİ TUTMAZ — `resolution()`a
+    // devreder. İmza DEĞİŞMEDİ, dört çağıranın hiçbiri değişmedi.
+    //
+    // `StayAt` kolunda `(false, Some(node), None)` döner — `CollapseTo` ile BİREBİR
+    // aynı şekil, çünkü ikinci alanın anlamı artık "işin DURDUĞU node".
+    let (status, node, end) = outcome.resolution();
+    let terminal = !matches!(status, WfeStatus::Active);
+    (terminal, node.map(str::to_string), end.cloned())
 }
 
 pub struct WfeExecutor {

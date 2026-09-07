@@ -95,24 +95,11 @@ impl MemStore {
 }
 
 fn outcome_parts(outcome: &CommitOutcome) -> (WfeStatus, Option<String>, Option<Value>) {
-    match outcome {
-        CommitOutcome::MoveTo { node } => (WfeStatus::Active, Some(node.clone()), None),
-        CommitOutcome::Terminal { end_response } => {
-            (WfeStatus::Terminal, None, Some(end_response.clone()))
-        }
-        CommitOutcome::Failed { end_response } => {
-            (WfeStatus::Error, None, Some(end_response.clone()))
-        }
-        CommitOutcome::Terminated { end_response } => {
-            (WfeStatus::Terminated, None, Some(end_response.clone()))
-        }
-        // WOR-31: paralel outcome'lar aktiftir; kol durumu bu mock'ta izlenmez.
-        CommitOutcome::ForkTo { .. }
-        | CommitOutcome::BranchMoveTo { .. }
-        | CommitOutcome::BranchArrived { .. } => (WfeStatus::Active, None, None),
-        CommitOutcome::JoinComplete { next, .. } => outcome_parts(next),
-        CommitOutcome::CollapseTo { node, .. } => (WfeStatus::Active, Some(node.clone()), None),
-    }
+    // v2.3 (`E02`/S3): kopyalanmış `match` mantığı KALKTI — tek gerçek kaynak
+    // `CommitOutcome::resolution()`. Beş ayrı kopya vardı ve her yeni varyantta
+    // beşinin de elle güncellenmesi gerekiyordu.
+    let (status, node, end) = outcome.resolution();
+    (status, node.map(str::to_string), end.cloned())
 }
 
 #[async_trait]

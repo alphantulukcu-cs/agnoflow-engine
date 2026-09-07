@@ -91,6 +91,7 @@ pub fn send_back_target_label(wfd: &Wfd, node_key: &str, target_label: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::wfd_v22::Wft;
     use crate::types::wfd_v22::{ActionDef, InputDef, NodeDef};
     use serde_json::json;
 
@@ -132,6 +133,17 @@ mod tests {
             input: InputDef {
                 required: vec![],
                 optional: vec![],
+            },
+            // v2.3 (`Ç5`): yönlendirme alanları aksiyon kaydına indi. Bu test yalnız
+            // GÖSTERİM adını sınıyor, yönlendirmeyi değil — alanlar en yalın geçerli
+            // değerlerle doldurulur.
+            from: "self__gm".into(),
+            when: None,
+            extra_c_a: None,
+            wfes_effects: None,
+            trigger: vec![],
+            wft: Wft::Terminal {
+                terminal: "t_done".into(),
             },
         }
     }

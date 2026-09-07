@@ -162,6 +162,25 @@ pub enum CommitOutcome {
     MoveTo {
         node: String,
     },
+    /// v2.3 (`E02`) — **"YERİNDE KAL AMA YAZ".** Escalation ateşlemesinin yazma yolu.
+    ///
+    /// Öteki varyantların HEPSİ hareket taşır; escalation artık iş taşımadığı (`Ç9`)
+    /// ama bir şey YAZDIĞI (marker + genişlemiş havuz kolonu) için bu kol gerekti.
+    ///
+    /// `StayAt` kolunda **node/status/claim'e DOKUNULMAZ**. Yazılanlar tek
+    /// transaction'da: WFAH satırı (`escalate:<node>:<idx>`, hareket taşımaz →
+    /// `from_node`/`to_node` = `None`), varsa `wfes_effects` ctx satırı ve
+    /// projeksiyon kolonları (`current_c_a` + `current_view_c_a`).
+    ///
+    /// ⚠️ `create` (start) yolu `StayAt` alırsa **HATA döndürür**: start'ta defter
+    /// boştur, açık grant kümesi yapısal olarak boştur, grant açılamaz.
+    ///
+    /// ⚠️ Yeni bir `WfeStore` metodu AÇILMAZ — mevcut `commit` yolundan geçer ve
+    /// projeksiyon yalnız `fill_view_grants` üzerinden yazılır (backend `CLAUDE.md`
+    /// kuralı: "Projeksiyonu yazan tek yol `fill_view_grants`").
+    StayAt {
+        node: String,
+    },
     Terminal {
         end_response: Value,
     },
@@ -258,22 +277,76 @@ pub enum CollapseCause {
     SentBack,
 }
 
+/// v2.3 (`E02`/S1-EK) — **`CommitOutcome` ÜZERİNDE JOKER YASAK.**
+///
+/// `_ =>` ve `other =>` kolları bu enum için YASAKTIR ve bu bir stil tercihi değil,
+/// bir GÜVENCE mekanizmasıdır: `StayAt` eklendiğinde joker taşıyan match'ler onu
+/// SESSİZCE yuttu — yeni varyantın işlenmediği hiçbir yerde derleyici uyarmadı.
+/// Ölçüm: enum'a varyant eklendiğinde yalnız 7 exhaustive match hata verdi, geri
+/// kalan joker kolları sorunu gizledi.
+///
+/// Çözüm, çağıranların `match` görmesini BIRAKMASI: aşağıdaki metotlar "hangi soru"yu
+/// tek yerde jokersiz cevaplar, çağıranlar metodu çağırır. Yeni bir varyant eklenince
+/// derleyici BURAYI gösterir ve cevap bir kez verilir.
+///
+/// ⚠️ `#[non_exhaustive]` **KONULMAZ:** tip `wfe-core`'da, match'lerin çoğu `wfe`
+/// crate'inde; attribute dış crate'te `_` kolunu ZORUNLU kılar ve tam bu deliği
+/// geri açar.
+///
+/// ⚠️ Clippy'nin `wildcard_enum_match_arm` lint'ine GÜVENİLMEZ — garantiyi
+/// **derleyici** verir.
 impl CommitOutcome {
-    /// K7/Ç2: bu geçişin HAREKET satırına yazılacak "nereye gidildi".
+    /// Statü + varılan node + bitiş yanıtı. Tek gerçek kaynak: `outcome_view` ve
+    /// `outcome_parts`ın beş kopyası buna devreder.
+    ///
+    /// ⚠️ İkinci alanın anlamı v2.3'te YENİDEN TANIMLANDI (`E03`/S2): "varılan node"
+    /// değil **"işin DURDUĞU node"**. Yeni kural tek cümle: *işin durduğu node'un
+    /// `listable[]`ı geçerlidir; hiçbir node'da durmuyorsa liste boştur.* `StayAt`
+    /// bu yüzden `CollapseTo` ile BİREBİR AYNI şekli döndürür.
+    pub fn resolution(&self) -> (crate::types::wfe::WfeStatus, Option<&str>, Option<&Value>) {
+        use crate::types::wfe::WfeStatus;
+        match self {
+            CommitOutcome::MoveTo { node } => (WfeStatus::Active, Some(node.as_str()), None),
+            CommitOutcome::StayAt { node } => (WfeStatus::Active, Some(node.as_str()), None),
+            CommitOutcome::Terminal { end_response } => {
+                (WfeStatus::Terminal, None, Some(end_response))
+            }
+            CommitOutcome::Failed { end_response } => (WfeStatus::Error, None, Some(end_response)),
+            CommitOutcome::Terminated { end_response } => {
+                (WfeStatus::Terminated, None, Some(end_response))
+            }
+            // Paralel outcome'lar aktiftir ve wfe-seviyesi `current_node` taşımaz
+            // (kol durumu `wfe_branch` satırlarından okunur).
+            CommitOutcome::ForkTo { .. }
+            | CommitOutcome::BranchMoveTo { .. }
+            | CommitOutcome::BranchArrived { .. } => (WfeStatus::Active, None, None),
+            CommitOutcome::JoinComplete { next, .. } => next.resolution(),
+            CommitOutcome::CollapseTo { node, .. } => {
+                (WfeStatus::Active, Some(node.as_str()), None)
+            }
+        }
+    }
+
+    /// Bu outcome bir HAREKET taşıyorsa varılan node.
+    ///
+    /// ⚠️ `StayAt`te **`None`** — `Ç2` gereği marker satırı hareket taşımaz
+    /// (`from_node`/`to_node` = `None`). "İşin durduğu node"u isteyen çağıran
+    /// `resolution()` kullanmalıdır; ikisi `StayAt`te BİLİNÇLE ayrışır.
     ///
     /// `ForkTo` birden çok hedefe dağılır (kol satırları `wf.wfe_branch`'te zaten
     /// satır satır var) → `None`. `JoinComplete` kendi hedefini taşımaz, gerçek
     /// hedef içteki `next` outcome'undadır → recursive.
     pub fn to_node(&self) -> Option<&str> {
         match self {
-            CommitOutcome::MoveTo { node }
-            | CommitOutcome::BranchMoveTo { node, .. }
-            | CommitOutcome::CollapseTo { node, .. } => Some(node),
+            CommitOutcome::MoveTo { node } => Some(node.as_str()),
+            CommitOutcome::BranchMoveTo { node, .. } => Some(node.as_str()),
+            CommitOutcome::CollapseTo { node, .. } => Some(node.as_str()),
             CommitOutcome::JoinComplete { next, .. } => next.to_node(),
-            CommitOutcome::ForkTo { .. }
+            CommitOutcome::StayAt { .. }
             | CommitOutcome::Terminal { .. }
             | CommitOutcome::Failed { .. }
             | CommitOutcome::Terminated { .. }
+            | CommitOutcome::ForkTo { .. }
             | CommitOutcome::BranchArrived { .. } => None,
         }
     }
@@ -283,6 +356,9 @@ impl CommitOutcome {
     /// `MoveTo`/`ForkTo`/`Terminal`/`Failed`/`Terminated`'da böyle bir alan YOKTUR;
     /// o yollarda kaynak node'u satırı üreten kod bilir (`wfes.current_node`) ve
     /// `Engine::stamp_movement`'a verir.
+    ///
+    /// ⚠️ `StayAt`te de **`None`** (`Ç2`): marker satırı hareket taşımaz, dolayısıyla
+    /// `from_node` de yoktur.
     pub fn from_node(&self) -> Option<&str> {
         match self {
             CommitOutcome::BranchMoveTo { from_node, .. }
@@ -291,11 +367,32 @@ impl CommitOutcome {
             // Ç4-EK/S5: admin yolunda kaynak node YOKTUR — satırın `from_node`'u
             // `stamp_movement`'ın fallback'ine düşer (paralel modda o da NULL).
             CommitOutcome::CollapseTo { from_node, .. } => from_node.as_deref(),
-            CommitOutcome::MoveTo { .. }
+            CommitOutcome::StayAt { .. }
+            | CommitOutcome::MoveTo { .. }
             | CommitOutcome::ForkTo { .. }
             | CommitOutcome::Terminal { .. }
             | CommitOutcome::Failed { .. }
             | CommitOutcome::Terminated { .. } => None,
+        }
+    }
+
+    /// Bu outcome bir claim'i düşürür mü — node değişimi assignment'ı sıfırlar.
+    ///
+    /// ⚠️ `StayAt` claim'i **DÜŞÜRMEZ**: iş yerinde kalır, sahibi de. (Guard'ı false'a
+    /// dönen grant sayesinde claim almış aktörün claim'i AYRI bir mekanizmayla
+    /// düşürülür — `claim_recheck`, `E02`/S2.)
+    pub fn clears_claim(&self) -> bool {
+        match self {
+            CommitOutcome::MoveTo { .. }
+            | CommitOutcome::Terminal { .. }
+            | CommitOutcome::Failed { .. }
+            | CommitOutcome::Terminated { .. }
+            | CommitOutcome::ForkTo { .. }
+            | CommitOutcome::CollapseTo { .. } => true,
+            CommitOutcome::StayAt { .. }
+            | CommitOutcome::BranchMoveTo { .. }
+            | CommitOutcome::BranchArrived { .. } => false,
+            CommitOutcome::JoinComplete { next, .. } => next.clears_claim(),
         }
     }
 }

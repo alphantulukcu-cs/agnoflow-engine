@@ -763,11 +763,11 @@ fn check_node_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut Validatio
         }
     }
     // WFC node'u insan ACT'i almaz: bekleme bir durumdur, havuz değildir.
-    for t in &wfd.transitions {
-        if t.from.contains(node_key) {
+    for (action_key, t) in &wfd.actions {
+        if t.from == *node_key {
             report.error(
                 "call_node_has_action",
-                format!("transitions[{}].from", t.id),
+                format!("actions.{action_key}.from"),
                 format!(
                     "'{node_key}' bir alt akış çağrısı node'u — buradan aksiyon alınamaz. \
                      Akış çağrılan bittiğinde `call.wft` ile kendi ilerler"
@@ -796,7 +796,11 @@ fn check_node_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut Validatio
             }
         }
     }
-    if wfd.start.iter().any(|s| s.from == node_key) {
+    // v2.3: "başlatan node" = start aksiyonunun `from`u (`Ç7+Ç8`: `start[].from` silindi,
+    // aynı gerçek iki yerde tutulmaz).
+    if wfd.start.iter().any(|s| {
+        crate::types::wfd_v22::start_action(wfd, s).is_some_and(|a| a.from == *node_key)
+    }) {
         report.error(
             "call_node_is_start",
             format!("nodes[{node_key}]"),
@@ -928,8 +932,9 @@ fn callee_inputs(callee: &Wfd, start_id: Option<&str>) -> Option<CalleeInputs> {
         .chain(action.input.optional.iter().map(|p| (p.clone(), false)))
         .collect();
 
+    // v2.3: start gövdesi aksiyon kaydında — `wfes_effects` de oradan okunur.
     let mut types = HashMap::new();
-    if let Some(effects) = &rule.wfes_effects {
+    if let Some(effects) = &action.wfes_effects {
         for (ctx_path, raw) in &effects.set {
             if let Some(input_path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) {
                 if let Some(ty) = schema_type_at(&callee.context, ctx_path) {
@@ -1220,16 +1225,10 @@ fn find_cycle(
 // ---- §1: uniqueness ----
 
 fn check_uniqueness(wfd: &Wfd, report: &mut ValidationReport) {
-    let mut seen = HashSet::new();
-    for (i, t) in wfd.transitions.iter().enumerate() {
-        if !seen.insert(t.id.clone()) {
-            report.error(
-                "unique",
-                format!("transitions[{i}]"),
-                format!("transition id '{}' birden fazla kez tanımlı", t.id),
-            );
-        }
-    }
+    // v2.3 (`Ç5`): transition id KAVRAMI ÖLDÜ — yönlendirme kuralının kimliği
+    // `actions` map ANAHTARIDIR ve map anahtarı yapısal olarak tekildir. Ham JSON'daki
+    // çift anahtar ise ayrıştırıcıya hiç ulaşmadan `dupkeys` kapısında reddedilir
+    // (`E10`), yani burada sayılacak bir tekrar kalmaz.
     let mut seen = HashSet::new();
     for (i, s) in wfd.start.iter().enumerate() {
         if !seen.insert(s.id.clone()) {
@@ -1341,24 +1340,19 @@ fn check_duplicate_c_a(wfd: &Wfd, report: &mut ValidationReport) {
 // ---- §1: cross-reference ----
 
 fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
-    for (i, t) in wfd.transitions.iter().enumerate() {
-        let path = format!("transitions[{}]", t.id);
-        for node in t.from.iter() {
-            if !wfd.nodes.contains_key(node) {
-                report.error(
-                    "cross_ref",
-                    format!("{path}.from"),
-                    format!("bilinmeyen node '{node}'"),
-                );
-            }
-        }
-        if !wfd.actions.contains_key(&t.action) {
+    for (action_key, t) in &wfd.actions {
+        let path = format!("actions.{action_key}");
+        if !wfd.nodes.contains_key(&t.from) {
             report.error(
                 "cross_ref",
-                format!("{path}.action"),
-                format!("bilinmeyen action '{}'", t.action),
+                format!("{path}.from"),
+                format!("bilinmeyen node '{}'", t.from),
             );
         }
+        // v2.3 (`Ç5`): `transitions[].action` cross-ref denetimi ÖLDÜ. Kural, bir
+        // transition'ın `actions` katalogunda var olmayan bir aksiyona işaret
+        // edebilmesi yüzünden vardı; artık aksiyonun KENDİSİ katalog girdisidir
+        // (kimlik = map anahtarı), yani "bilinmeyen aksiyon" yapısal olarak imkânsız.
         for (j, trig) in t.trigger.iter().enumerate() {
             if !wfd.autoexec.contains_key(&trig.use_) {
                 report.error(
@@ -1369,32 +1363,15 @@ fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
             }
         }
         check_wft_refs(wfd, &t.wft, &format!("{path}.wft"), report);
-        let _ = i;
     }
-    for s in &wfd.start {
-        let path = format!("start[{}]", s.id);
-        for (j, trig) in s.trigger.iter().enumerate() {
-            if !wfd.autoexec.contains_key(&trig.use_) {
-                report.error(
-                    "cross_ref",
-                    format!("{path}.trigger[{j}]"),
-                    format!("bilinmeyen autoexec '{}'", trig.use_),
-                );
-            }
-        }
-        check_wft_refs(wfd, &s.wft, &format!("{path}.wft"), report);
-    }
+    // v2.3 (`Ç7+Ç8`): start için AYRI cross-ref döngüsü GEREKMEZ. Gövde (`trigger`,
+    // `wft`) aksiyon kaydına indi ve yukarıdaki `wfd.actions` döngüsü onu zaten
+    // denetliyor. İkinci bir döngü aynı hatayı iki kez raporlardı.
     for (key, node) in &wfd.nodes {
-        for (j, esc) in node.escalation.iter().enumerate() {
-            if let Some(wft) = &esc.wft {
-                check_wft_refs(
-                    wfd,
-                    wft,
-                    &format!("nodes[{key}].escalation[{j}].wft"),
-                    report,
-                );
-            }
-        }
+        // v2.3 (`Ç9`): escalation'ın `wft`i YOK — hedefi olmayan bir kademe için
+        // cross-ref denetlenecek bir referans da yok. `grant.c_a`nın kendi kuralları
+        // ayrı issue'nun işi (`E13`).
+        let _ = &node.escalation;
         // WFC node'unun çıkışı `call.wft`'dir — normal bir wft kenarı gibi doğrulanır.
         if let Some(call) = &node.call {
             if let Some(wft) = &call.wft {
@@ -1449,11 +1426,11 @@ fn check_send_back(wfd: &Wfd, report: &mut ValidationReport) {
     // tüm geri gönderme adımlarını TEK aksiyon kimliğine indiriyor, dolayısıyla
     // girdi sözleşmesini (`actions.<key>.input`) akış genelinde tekleştiriyordu —
     // bir node'un geri göndermesine zorunlu alan eklemek hepsine ekliyordu.
-    for t in &wfd.transitions {
+    for (action_key, t) in &wfd.actions {
         let Wft::SendBack { targets } = &t.wft else {
             continue;
         };
-        let path = format!("transitions[{}].wft", t.id);
+        let path = format!("actions.{action_key}.wft");
         if targets.is_empty() {
             report.error(
                 "send_back_no_targets",
@@ -1501,8 +1478,12 @@ fn check_send_back(wfd: &Wfd, report: &mut ValidationReport) {
     // tıkandığında görünürdü.
     let mut misplaced = Vec::new();
     for s in &wfd.start {
-        if matches!(s.wft, Wft::SendBack { .. }) {
-            misplaced.push(format!("start[{}].wft", s.id));
+        // v2.3: start aksiyonunun `wft`i. Kural KALIR — geri gönderme bir başlatma
+        // biçimi değildir; yalnız okuma yolu değişti.
+        if crate::types::wfd_v22::start_action(wfd, s)
+            .is_some_and(|a| matches!(a.wft, Wft::SendBack { .. }))
+        {
+            misplaced.push(format!("actions.{}.wft (start)", s.action));
         }
     }
     for (key, node) in &wfd.nodes {
@@ -1511,11 +1492,7 @@ fn check_send_back(wfd: &Wfd, report: &mut ValidationReport) {
                 misplaced.push(format!("nodes[{key}].call.wft"));
             }
         }
-        for (j, esc) in node.escalation.iter().enumerate() {
-            if matches!(esc.wft, Some(Wft::SendBack { .. })) {
-                misplaced.push(format!("nodes[{key}].escalation[{j}].wft"));
-            }
-        }
+        // v2.3: escalation `wft` taşımaz → orada yanlış yerleşmiş bir SendBack olamaz.
     }
     for path in misplaced {
         report.error(
@@ -1610,14 +1587,9 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
                 format!("bilinmeyen action '{}'", s.action),
             );
         }
-        // V1: from var olan bir node'a işaret etmeli
-        if wfd.nodes.get(&s.from).is_none() {
-            report.error(
-                "cross_ref",
-                format!("{path}.from"),
-                format!("start.from bilinmeyen node '{}'", s.from),
-            );
-        }
+        // v2.3 (`E11` hükmü): V1 — `start[].from` node varlık denetimi **SİLİNDİ**.
+        // Alan artık YOK; `ActionDef.from` kendi cross-ref kuralıyla denetleniyor
+        // (`check_cross_refs`), yani aynı garanti tek yerden geliyor.
     }
 }
 
@@ -1632,18 +1604,12 @@ fn check_wft_conditions(wfd: &Wfd, report: &mut ValidationReport) {
         }
         check_dead_conditions(wft, &path, report);
     };
-    for t in &wfd.transitions {
-        visit(&t.wft, format!("transitions[{}].wft", t.id), report);
+    for (action_key, t) in &wfd.actions {
+        visit(&t.wft, format!("actions.{action_key}.wft"), report);
     }
-    for s in &wfd.start {
-        visit(&s.wft, format!("start[{}].wft", s.id), report);
-    }
+    // v2.3: start'ın `wft`i aksiyon kaydında — yukarıdaki `wfd.actions` döngüsü kapsar.
     for (key, node) in &wfd.nodes {
-        for (j, esc) in node.escalation.iter().enumerate() {
-            if let Some(wft) = &esc.wft {
-                visit(wft, format!("nodes[{key}].escalation[{j}].wft"), report);
-            }
-        }
+        // v2.3: escalation `wft` taşımaz — ölü koşul aranacak bir hedef yok.
         if let Some(call) = &node.call {
             if let Some(wft) = &call.wft {
                 visit(wft, format!("nodes[{key}].call.wft"), report);
@@ -1742,11 +1708,15 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
     }
 
     for s in &wfd.start {
-        // Simetrik start: `from` node bir KAYNAKtır — hiçbir wft hedefi olmasa da
-        // (V2 zaten yasaklar) erişilebilir sayılır, dead-node uyarısı vermemeli.
-        reached_nodes.insert(s.from.clone());
+        // v2.3 (`Ç7+Ç8`): BFS'in START AYAĞI artık aksiyon kaydından okur. Başlatan
+        // node = start aksiyonunun `from`u; o node bir KAYNAKtır ve hiçbir wft hedefi
+        // olmasa da erişilebilir sayılır (dead-node uyarısı vermemeli).
+        let Some(action) = crate::types::wfd_v22::start_action(wfd, s) else {
+            continue; // bozuk belge — `start_action` kuralı raporlar
+        };
+        reached_nodes.insert(action.from.clone());
         absorb(
-            wft_targets(&s.wft),
+            wft_targets(&action.wft),
             &mut reached_nodes,
             &mut reached_terminals,
             &mut queue,
@@ -1754,8 +1724,8 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
     }
 
     while let Some(node_key) = queue.pop_front() {
-        for t in &wfd.transitions {
-            if t.from.contains(&node_key) {
+        for t in wfd.actions.values() {
+            if t.from == node_key {
                 absorb(
                     wft_targets(&t.wft),
                     &mut reached_nodes,
@@ -1765,16 +1735,17 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
             }
         }
         if let Some(node) = wfd.nodes.get(&node_key) {
-            for esc in &node.escalation {
-                if let Some(wft) = &esc.wft {
-                    absorb(
-                        wft_targets(wft),
-                        &mut reached_nodes,
-                        &mut reached_terminals,
-                        &mut queue,
-                    );
-                }
-            }
+            // ⚠️ v2.3 (`E08` FAZ 2 + `Ç9`): **ESCALATION ARTIK BİR GRAF KENARI DEĞİL.**
+            // BFS'in escalation ayağı ÇIKARILDI — kademe iş taşımadığı için hedefi de
+            // yok; yalnız o node'un yetki havuzunu genişletiyor.
+            //
+            // Bunun iki bilinçli sonucu var ve ikisi de HATA seviyesindedir:
+            //   (a) yalnız escalation ile "erişilen" bir node artık `WFD.Unreachable`
+            //   (b) tek çıkışı escalation olan node artık `no_exit`
+            // Bedel ÖLÇÜLDÜ ve sıfır: 6 örnek belgenin hiçbirinde tek çıkışı escalation
+            // olan node yok (golden'ın iki escalation'lı node'unun ikisinin de aksiyon
+            // çıkışı var).
+            let _ = &node.escalation;
             // WFC-RETURN de bir çıkıştır (BFS'e girmezse hedefi "unreachable" görünür).
             if let Some(call) = &node.call {
                 if let Some(wft) = &call.wft {
@@ -1786,23 +1757,10 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
                     );
                 }
             }
-            // SLA-1: claim_timeout.wft de bir çıkıştır (node/terminal hedefi
-            // BFS'e dahil edilmezse hedef yanlışlıkla "unreachable" görünür).
-            if let Some(ct) = &node.claim_timeout {
-                if let Some(target) = &ct.wft {
-                    let kind = if wfd.nodes.contains_key(target) {
-                        TargetKind::Node
-                    } else {
-                        TargetKind::Terminal
-                    };
-                    absorb(
-                        vec![(kind, target.as_str())],
-                        &mut reached_nodes,
-                        &mut reached_terminals,
-                        &mut queue,
-                    );
-                }
-            }
+            // v2.3 (K13 + K19): `claim_timeout.wft` KALKTI — claim timeout artık YALNIZ
+            // claim'i bırakır, iş taşımaz. Dolayısıyla BFS'in claim_timeout ayağı da
+            // yok; escalation'la aynı gerekçe (bkz. yukarıdaki Faz 2 notu).
+            let _ = &node.claim_timeout;
         }
     }
 
@@ -1828,55 +1786,50 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
         }
     }
 
-    // çıkışsız node: ne transition kaynağı ne escalation'ı var
-    // (start node'unun çıkışı start kuralının wft'sidir — no_exit muaf)
-    let start_from: HashSet<&str> = wfd.start.iter().map(|s| s.from.as_str()).collect();
+    // Çıkışsız node.
+    //
+    // ⚠️ v2.3 (`E08` FAZ 2): şarttan **`&& node.escalation.is_empty()` DÜŞTÜ.**
+    // Escalation artık iş taşımıyor (`Ç9`), yani bir ÇIKIŞ DEĞİL — tek "çıkışı"
+    // escalation olan node'da iş sonsuza kadar orada kalırdı. K10'un vaadi
+    // ("escalation iş taşımaz") ancak iş taşımayan bir çıkışı çıkış saymayı
+    // bırakınca denetlenebilir hâle gelir.
+    //
+    // Start node'unun çıkışı start aksiyonunun `wft`sidir — `no_exit`ten muaf.
+    let start_from: HashSet<&str> = wfd
+        .start
+        .iter()
+        .filter_map(|s| crate::types::wfd_v22::start_action(wfd, s))
+        .map(|a| a.from.as_str())
+        .collect();
     for (key, node) in &wfd.nodes {
         if start_from.contains(key.as_str()) {
             continue;
         }
-        // WFC node'unun çıkışı `call.wft`'dir — insan ACT'i almadığı için transition
+        // WFC node'unun çıkışı `call.wft`'dir — insan ACT'i almadığı için aksiyon
         // aramak yanlış olur (aksine `call_node_has_action` bunu yasaklar).
         if node.call.is_some() {
             continue;
         }
-        let has_transition = wfd.transitions.iter().any(|t| t.from.contains(key));
-        if !has_transition && node.escalation.is_empty() {
+        if !wfd.actions.values().any(|t| t.from == *key) {
             report.error(
                 "no_exit",
                 format!("nodes[{key}]"),
-                format!("'{key}' çıkışsız — transition veya escalation gerekli"),
+                format!(
+                    "'{key}' çıkışsız — buradan çıkan bir aksiyon gerekli. Escalation \
+                     ÇIKIŞ SAYILMAZ: iş taşımaz, yalnız yetki havuzunu genişletir"
+                ),
             );
         }
     }
 
-    // aynı (node, action) için çoklu transition
-    let mut groups: HashMap<(&str, &str), Vec<&crate::types::wfd_v22::Transition>> = HashMap::new();
-    for t in &wfd.transitions {
-        for node in t.from.iter() {
-            groups.entry((node, t.action.as_str())).or_default().push(t);
-        }
-    }
-    for ((node, action), group) in groups {
-        if group.len() < 2 {
-            continue;
-        }
-        let without_when = group.iter().filter(|t| t.when.is_none()).count();
-        let ids: Vec<&str> = group.iter().map(|t| t.id.as_str()).collect();
-        if without_when >= 2 {
-            report.error(
-                "ambiguous_transition",
-                format!("transitions[{}]", ids.join(",")),
-                format!("({node}, {action}) için birden fazla when'siz transition — belirsiz"),
-            );
-        } else {
-            report.warn(
-                "ambiguous_transition",
-                format!("transitions[{}]", ids.join(",")),
-                format!("({node}, {action}) için çoklu transition — runtime ilk-match uygular"),
-            );
-        }
-    }
+    // v2.3 (`Ç5` + `Ç10`): `ambiguous_transition` KURALI ÖLDÜ.
+    //
+    // Kural, aynı `(node, action)` çiftine birden çok `transitions[]` girdisi
+    // yazılabildiği için vardı ve "runtime ilk-match uygular" diyordu. v2.3'te
+    // yönlendirme kuralı aksiyon kaydının İÇİNDE: bir aksiyon anahtarı bir kez
+    // tanımlanır, dolayısıyla aynı çift için ikinci bir kural YAZILAMAZ — belirsizlik
+    // yapısal olarak imkânsız. `Ç10` "sıra artık seçim yapmaz" hükmüyle ilk-match
+    // semantiğini de kaldırdı.
 }
 
 // ---- WOR-31: Parallel fork/join — branch/join şekli + subgraph kısıtları ----
@@ -1918,19 +1871,25 @@ fn branch_refs_in(expr: &str) -> Vec<String> {
 
 fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
     // Parallel wft start kuralında kullanılamaz.
+    // v2.3 (`E08` Faz 1): `parallel_start` ve `collapse_start` YASAKLARI **KALKMAZ** —
+    // yalnız okunan anahtar `start[<id>].wft` yerine `actions.<x>.wft` oldu.
     for s in &wfd.start {
-        if matches!(&s.wft, Wft::Parallel { .. }) {
+        let Some(action) = crate::types::wfd_v22::start_action(wfd, s) else {
+            continue;
+        };
+        let path = format!("actions.{}.wft (start)", s.action);
+        if matches!(&action.wft, Wft::Parallel { .. }) {
             report.error(
                 "parallel_start",
-                format!("start[{}].wft", s.id),
+                path.clone(),
                 "Parallel wft start kuralında kullanılamaz".into(),
             );
         }
         // WOR-56: collapse yalnız paralel dal içinde anlamlıdır — start'ta yasak.
-        if matches!(&s.wft, Wft::Collapse { .. }) {
+        if matches!(&action.wft, Wft::Collapse { .. }) {
             report.error(
                 "collapse_start",
-                format!("start[{}].wft", s.id),
+                path,
                 "Collapse wft start kuralında kullanılamaz (WOR-56)".into(),
             );
         }
@@ -1943,10 +1902,10 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
         spec: &'a ParallelSpec,
     }
     let mut forks: Vec<Fork> = Vec::new();
-    for t in &wfd.transitions {
+    for (action_key, t) in &wfd.actions {
         if let Wft::Parallel { parallel } = &t.wft {
             forks.push(Fork {
-                path: format!("transitions[{}].wft", t.id),
+                path: format!("actions.{action_key}.wft"),
                 spec: parallel,
             });
         }
@@ -2152,14 +2111,14 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                     continue;
                 }
 
-                for t in &wfd.transitions {
-                    if !t.from.contains(node_key) {
+                for (action_key, t) in &wfd.actions {
+                    if t.from != *node_key {
                         continue;
                     }
                     if matches!(&t.wft, Wft::Parallel { .. }) {
                         report.error(
                             "parallel_nested",
-                            format!("transitions[{}].wft", t.id),
+                            format!("actions.{action_key}.wft"),
                             "branch subgraph içinde iç içe (nested) Parallel yasak".into(),
                         );
                         continue;
@@ -2360,8 +2319,8 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         }
     };
 
-    for t in &wfd.transitions {
-        let path = format!("transitions[{}]", t.id);
+    for (action_key, t) in &wfd.actions {
+        let path = format!("actions.{action_key}");
         if let Some(when) = &t.when {
             check(when, format!("{path}.when"), report);
         }
@@ -2372,21 +2331,10 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         }
         visit_wft(&t.wft, &format!("{path}.wft"), report);
     }
-    for s in &wfd.start {
-        let path = format!("start[{}]", s.id);
-        for (j, trig) in s.trigger.iter().enumerate() {
-            if let Some(when) = &trig.when {
-                check(when, format!("{path}.trigger[{j}].when"), report);
-            }
-        }
-        visit_wft(&s.wft, &format!("{path}.wft"), report);
-    }
+    // v2.3: start'ın `when`/`trigger`/`wft`i aksiyon kaydında — yukarıdaki `actions`
+    // döngüsü kapsıyor. Escalation ise `wft` taşımıyor (`Ç9`).
     for (key, node) in &wfd.nodes {
-        for (j, esc) in node.escalation.iter().enumerate() {
-            if let Some(wft) = &esc.wft {
-                visit_wft(wft, &format!("nodes[{key}].escalation[{j}].wft"), report);
-            }
-        }
+        let _ = &node.escalation;
         if let Some(call) = &node.call {
             if let Some(wft) = &call.wft {
                 visit_wft(wft, &format!("nodes[{key}].call.wft"), report);
@@ -2795,22 +2743,13 @@ fn paths_overlap(a: &str, b: &str) -> bool {
 fn each_effects(wfd: &Wfd) -> Vec<(String, &WfesEffects)> {
     let mut out: Vec<(String, &WfesEffects)> = Vec::new();
 
-    for s in &wfd.start {
-        let path = format!("start[{}]", s.id);
-        if let Some(e) = &s.wfes_effects {
-            out.push((path.clone(), e));
-        }
-        for trig in &s.trigger {
-            if let Some(c) = &trig.catch {
-                out.push((
-                    format!("{path}.trigger[{}].catch", trig.use_),
-                    &c.wfes_effects,
-                ));
-            }
-        }
-    }
-    for (i, t) in wfd.transitions.iter().enumerate() {
-        let path = format!("transitions[{i}]");
+    // v2.3: start'ın effects'i ve trigger catch'leri aksiyon kaydında — aşağıdaki
+    // `actions` döngüsü ikisini de topluyor. Ayrı start döngüsü aynı effect'i İKİ KEZ
+    // listeler ve `context_field_never_written` gibi sayım kuralları bozulurdu.
+    // ⚠️ `E09` (`set_when`) bu fonksiyonun TÜKETİCİLERİNİ genişletiyor; burada yalnız
+    // iterasyon yüzeyi `transitions` → `actions`a taşındı. İki iş aynı gövdede kesişir.
+    for (action_key, t) in &wfd.actions {
+        let path = format!("actions.{action_key}");
         if let Some(e) = &t.wfes_effects {
             out.push((path.clone(), e));
         }
@@ -3081,17 +3020,14 @@ fn check_action_input_consumed(wfd: &Wfd, report: &mut ValidationReport) {
         refs
     };
 
-    for s in &wfd.start {
+    // v2.3 (`Ç7+Ç8` hükmü): `unused_action_input`in START DÖNGÜSÜ **SİLİNDİ**. Start
+    // gövdesi aksiyon kaydına indiği için start aksiyonu da aşağıdaki `actions`
+    // döngüsünden geçer; ayrı döngü aynı aksiyonu iki kez kaydeder ve "bildirilen ama
+    // tüketilmeyen girdi" sayımını bozardı.
+    for (action_key, t) in &wfd.actions {
         rules.push((
-            format!("start[{}]", s.id),
-            &s.action,
-            refs_for(s.wfes_effects.as_ref(), &s.trigger),
-        ));
-    }
-    for t in &wfd.transitions {
-        rules.push((
-            format!("transitions[{}]", t.id),
-            &t.action,
+            format!("actions.{action_key}"),
+            action_key,
             refs_for(t.wfes_effects.as_ref(), &t.trigger),
         ));
     }
@@ -3186,48 +3122,22 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
         });
     };
 
-    for s in &wfd.start {
-        if let Some(e) = &s.wfes_effects {
-            for path in e.set.keys() {
-                let site = format!("start[{}]", s.id);
-                // Start kuralları da (from, action) üzerinden ilk-match'tir.
-                push_rule(
-                    path,
-                    &s.action,
-                    e,
-                    site,
-                    Some((s.action.clone(), vec![s.from.clone()])),
-                    &mut writers,
-                );
-            }
-        }
-        for trig in &s.trigger {
-            if let Some(c) = &trig.catch {
-                for path in c.wfes_effects.set.keys() {
-                    writers.push(EffectWriter {
-                        path: path.clone(),
-                        site: format!("start[{}] catch", s.id),
-                        optional_sourced: false,
-                        excl: None,
-                    });
-                }
-            }
-        }
-    }
-    for t in &wfd.transitions {
+    // v2.3 (`Ç7+Ç8`): start için AYRI döngü GEREKMEZ — gövde (`wfes_effects`,
+    // `trigger`) aksiyon kaydına indi ve aşağıdaki `wfd.actions` döngüsü onu kapsıyor.
+    // İkinci bir döngü aynı effect'i iki kez sayar; `unused_action_input` için `Ç7+Ç8`
+    // bu silmeyi ADIYLA emrediyor.
+    for (action_key, t) in &wfd.actions {
         if let Some(e) = &t.wfes_effects {
             for path in e.set.keys() {
-                // Site etiketi node'u da taşır: aynı aksiyonun iki kuralı varsa
-                // "X — aynı alanı X da yazıyor" okunmaz bir mesaj üretiyordu.
-                let mut froms: Vec<String> = t.from.iter().into_iter().map(String::from).collect();
-                froms.sort();
-                let site = format!("'{}' aksiyonu ({})", t.action, froms.join(", "));
+                // Site etiketi node'u da taşır. v2.3'te `from` TEK string (`K3`), yani
+                // eskiden gereken sıralı birleştirme de düştü.
+                let site = format!("'{action_key}' aksiyonu ({})", t.from);
                 push_rule(
                     path,
-                    &t.action,
+                    action_key,
                     e,
                     site,
-                    Some((t.action.clone(), froms)),
+                    Some((action_key.clone(), vec![t.from.clone()])),
                     &mut writers,
                 );
             }
@@ -3237,7 +3147,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
                 for path in c.wfes_effects.set.keys() {
                     writers.push(EffectWriter {
                         path: path.clone(),
-                        site: format!("transitions[{}] catch", t.id),
+                        site: format!("actions.{action_key} catch"),
                         optional_sourced: false,
                         excl: None,
                     });
@@ -3399,17 +3309,14 @@ fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
                         format!("aksiyon '{action}' bu kapsamda birden fazla sayılmış"),
                     );
                 }
-                // Start bloğu da bir aksiyondur (M16: `start[].action` actions{} içinde
-                // normal bir ACT'tir) — yalnız transition'lara bakmak, başlatma
-                // aksiyonuna konan belge kapısını "ulaşılmaz" sanıp reddederdi.
+                // v2.3: aksiyon kaydı `from`u kendisi taşır, yani "bu aksiyon bu
+                // node'dan alınabilir mi" tek bakışta sorulur. Start aksiyonu da aynı
+                // kayıttan geçer (`start[]` yalnız `{id, action}`) — ayrı bir start
+                // döngüsü GEREKMEZ, `Ç7+Ç8` o gövdeyi aksiyona indirdi.
                 let reachable = wfd
-                    .transitions
-                    .iter()
-                    .any(|t| t.action == *action && t.from.contains(node_key))
-                    || wfd
-                        .start
-                        .iter()
-                        .any(|s| s.action == *action && s.from == *node_key);
+                    .actions
+                    .get(action.as_str())
+                    .is_some_and(|a| a.from == *node_key);
                 if !reachable {
                     report.error(
                         "attachment_action_ref",
@@ -3442,25 +3349,17 @@ fn check_effect_paths(wfd: &Wfd, report: &mut ValidationReport) {
         }
     };
 
-    for s in &wfd.start {
-        check_effects(&s.wfes_effects, &format!("start[{}]", s.id), report);
-        for (j, trig) in s.trigger.iter().enumerate() {
-            if let Some(c) = &trig.catch {
-                check_effects(
-                    &Some(c.wfes_effects.clone()),
-                    &format!("start[{}].trigger[{j}].catch", s.id),
-                    report,
-                );
-            }
-        }
-    }
-    for t in &wfd.transitions {
-        check_effects(&t.wfes_effects, &format!("transitions[{}]", t.id), report);
+    // v2.3 (`Ç7+Ç8`): start için AYRI döngü GEREKMEZ — gövde (`wfes_effects`,
+    // `trigger`) aksiyon kaydına indi ve aşağıdaki `wfd.actions` döngüsü onu kapsıyor.
+    // İkinci bir döngü aynı effect'i iki kez sayar; `unused_action_input` için `Ç7+Ç8`
+    // bu silmeyi ADIYLA emrediyor.
+    for (action_key, t) in &wfd.actions {
+        check_effects(&t.wfes_effects, &format!("actions.{action_key}"), report);
         for (j, trig) in t.trigger.iter().enumerate() {
             if let Some(c) = &trig.catch {
                 check_effects(
                     &Some(c.wfes_effects.clone()),
-                    &format!("transitions[{}].trigger[{j}].catch", t.id),
+                    &format!("actions.{action_key}.trigger[{j}].catch"),
                     report,
                 );
             }
@@ -3515,11 +3414,12 @@ fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
         }
     };
 
-    for s in &wfd.start {
-        check_triggers(&s.trigger, &format!("start[{}]", s.id), report);
-    }
-    for t in &wfd.transitions {
-        check_triggers(&t.trigger, &format!("transitions[{}]", t.id), report);
+    // v2.3 (`Ç7+Ç8`): start için AYRI döngü GEREKMEZ — gövde (`wfes_effects`,
+    // `trigger`) aksiyon kaydına indi ve aşağıdaki `wfd.actions` döngüsü onu kapsıyor.
+    // İkinci bir döngü aynı effect'i iki kez sayar; `unused_action_input` için `Ç7+Ç8`
+    // bu silmeyi ADIYLA emrediyor.
+    for (action_key, t) in &wfd.actions {
+        check_triggers(&t.trigger, &format!("actions.{action_key}"), report);
     }
 }
 
@@ -3581,7 +3481,7 @@ fn check_sla_effect_namespaces(effects: &WfesEffects, path: &str, report: &mut V
 /// devirlerdir, hedefi kolun parçası yapmaz.
 fn parallel_interior_nodes(wfd: &Wfd) -> HashSet<&str> {
     let mut interior: HashSet<&str> = HashSet::new();
-    for t in &wfd.transitions {
+    for t in wfd.actions.values() {
         let Wft::Parallel { parallel: spec } = &t.wft else {
             continue;
         };
@@ -3596,8 +3496,8 @@ fn parallel_interior_nodes(wfd: &Wfd) -> HashSet<&str> {
                 continue; // join kolun parçası değildir — ötesine geçilmez.
             }
             interior.insert(node_key);
-            for tr in &wfd.transitions {
-                if !tr.from.contains(node_key) {
+            for tr in wfd.actions.values() {
+                if tr.from != *node_key {
                     continue;
                 }
                 if matches!(&tr.wft, Wft::Collapse { .. } | Wft::Parallel { .. }) {
@@ -3618,84 +3518,30 @@ fn parallel_interior_nodes(wfd: &Wfd) -> HashSet<&str> {
 }
 
 fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
-    // Yalnız gerçekten collapse isteyen bir SLA görülürse hesaplanır (BFS bedeli).
-    let wants_collapse = wfd.nodes.values().any(|n| {
-        n.claim_timeout
-            .as_ref()
-            .is_some_and(|ct| ct.collapses_parallel)
-            || n.escalation
-                .iter()
-                .any(|e| matches!(&e.wft, Some(Wft::Collapse { .. })))
-    });
-    let interior = if wants_collapse {
-        parallel_interior_nodes(wfd)
-    } else {
-        HashSet::new()
-    };
-
+    // ⚠️ v2.3 (`E08` Faz 1) — BU FONKSİYONUN KALKANLARININ ÇOĞU ÖLDÜ.
+    //
+    // Silinen kurallar ve DAYANAKLARININ neden yok olduğu:
+    //
+    // | kural | neden öldü |
+    // |---|---|
+    // | `escalation_terminate_removed` | `EscalationStep.terminate` ALANI da silindi (`E08`/S2). Alan 2026-07-28'den beri ölüydü ve yalnız eski belgeye güzel hata vermek için deserialize ediliyordu; Değişmez #9 gereği o okuyucu saf borçtu. Bedeli: eski belge artık ham `deny_unknown_fields` hatası alır |
+    // | `escalation_wft_required` | `esc.wft` YOK — yerine `grant` geldi ve **zorunlu alan** olduğu için eksikliği serde'de patlar (`Ç9`) |
+    // | `sla_target_not_node` · `sla_terminal_target` (İKİ kullanımı) | escalation'ın HEDEFİ yok; "hedef node olmalı" diye bir kural kalmadı. Ad tamamen ölür (`E08`/S3) |
+    // | `escalation_collapse_outside_parallel` | escalation `Wft::Collapse` taşıyamaz — `wft` yok |
+    // | `claim_timeout_collapse_requires_wft` · `claim_timeout_collapse_outside_parallel` | `ClaimTimeout`tan `wft` ve `collapses_parallel` KALKTI (K13 + K19): claim timeout artık YALNIZ claim'i bırakır, iş taşımaz |
+    //
+    // `claim_timeout_collapse_no_parallel` kuralı motorda **HİÇ YAZILMAMIŞTI** — yalnız
+    // `docs/spec/decisions.md`'de duruyordu; oradaki satır ayrı iş (Aşama 5).
+    //
+    // GERİYE KALAN: `claim_timeout` denetimi yalnız `after` süre biçimi + `wfes_effects`
+    // namespace kontrolüne iner. Escalation tarafında `grant`ın tasarım zamanı kuralları
+    // (`escalation_grant_noop` + `grant_when_namespace`) AYRI issue'nun işidir (`E13`).
     for (key, node) in &wfd.nodes {
         for (j, esc) in node.escalation.iter().enumerate() {
             let path = format!("nodes[{key}].escalation[{j}]");
-            // 2026-07-28: SLA-2 akışı BİTİREMEZ — `terminate` kaldırıldı, `wft` zorunlu.
-            if esc.terminate.is_some() {
-                report.error(
-                    "escalation_terminate_removed",
-                    format!("{path}.terminate"),
-                    "`terminate` kaldırıldı — SLA-2 akışı bitiremez; yalnız root `timeout` (SLA-3) bitirir. Adımı bir node hedefine (`wft`) çevirin ya da adımı kaldırın".into(),
-                );
-            }
-            if esc.wft.is_none() {
-                report.error(
-                    "escalation_wft_required",
-                    path.clone(),
-                    "escalation adımı bir node hedefi (`wft`) içermelidir".into(),
-                );
-            }
-            // SLA-2 hedefi `{node}` ya da (2026-08-03, WOR-56/SLA-2) node hedefli
-            // `{collapse:{node}}` olabilir. Terminal (akışı bitirir), conditions
-            // (dallanma kararı) ve parallel (fork) formları hâlâ bir AKSİYONUN
-            // verebileceği kararlardır — bir zamanlayıcının değil.
-            //
-            // Collapse İSTİSNASI: "kimse süresinde bakmadıysa paraleli kapat" bir
-            // dallanma kararı DEĞİLDİR — hedef tektir ve tasarım anında sabittir;
-            // yalnız "paralel modu bitir + kardeşleri düşür" yan etkisi eklenir.
-            // Akışı yine bitirmez: collapse hedefi de terminal olamaz.
-            match &esc.wft {
-                None | Some(Wft::Node { .. }) => {}
-                Some(Wft::Collapse {
-                    collapse: WftTarget::Node { .. },
-                }) => {}
-                Some(Wft::Terminal { terminal })
-                | Some(Wft::Collapse {
-                    collapse: WftTarget::Terminal { terminal },
-                }) => report.error(
-                    "sla_terminal_target",
-                    format!("{path}.wft"),
-                    format!(
-                        "SLA-2 escalation hedefi terminal olamaz ('{terminal}') — SLA yalnız node'lar arası devirdir; akışı zaman aşımıyla bitiren tek kural root `timeout` (SLA-3)"
-                    ),
-                ),
-                Some(other) => report.error(
-                    "sla_target_not_node",
-                    format!("{path}.wft"),
-                    format!(
-                        "SLA-2 escalation hedefi `{{node}}` ya da `{{collapse:{{node}}}}` olabilir — '{}' formu kullanılamaz. Dallanma/fork bir aksiyonun kararıdır; SLA sıradaki havuza devreder (istenirse paraleli sonlandırarak)",
-                        wft_form_name(other)
-                    ),
-                ),
-            }
-            // 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da kullanılabilir:
-            // paralel akışa bağlı olmayan bir node'un süresi dolduğunda düşürülecek
-            // kardeş kol yoktur, "paraleli sonlandır" anlamsız bir ayardır.
-            if matches!(&esc.wft, Some(Wft::Collapse { .. })) && !interior.contains(key.as_str()) {
-                report.error(
-                    "escalation_collapse_outside_parallel",
-                    format!("{path}.wft"),
-                    format!(
-                        "'{key}' bir paralel kolun içinde değil — SLA-2 collapse hedefi yalnız fork ile join arasındaki node'larda kullanılabilir. Hedefi düz `{{node}}` formuna çevirin"
-                    ),
-                );
-            }
+            // ⚠️ `esc.after` süre biçimi v2.2'de de DENETLENMİYORDU ve bu Faz 1'de
+            // DEĞİŞMEZ: yeni bir kural eklemek fazın "davranış korunur" şartını bozar.
+            // Eksikliği ayrı bir kalem (bkz. `claim_timeout` tarafındaki emsal).
             if let Some(effects) = &esc.wfes_effects {
                 check_sla_effect_namespaces(effects, &format!("{path}.wfes_effects"), report);
             }
@@ -3707,47 +3553,6 @@ fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
             }
             if let Some(effects) = &ct.wfes_effects {
                 check_sla_effect_namespaces(effects, &format!("{path}.wfes_effects"), report);
-            }
-            if let Some(target) = &ct.wft {
-                // SLA-1 hedefi YALNIZ node olabilir (2026-07-28). Terminal referansı
-                // ayrı bir hata verir; hiç bilinmiyorsa cross_ref.
-                if wfd.terminals.iter().any(|t| t.id == *target) {
-                    report.error(
-                        "sla_terminal_target",
-                        format!("{path}.wft"),
-                        format!(
-                            "SLA-1 claim_timeout hedefi terminal olamaz ('{target}') — bir node seçin ya da hedefi kaldırıp claim'i havuza bırakın"
-                        ),
-                    );
-                } else if !wfd.nodes.contains_key(target) {
-                    report.error(
-                        "cross_ref",
-                        format!("{path}.wft"),
-                        format!("bilinmeyen node '{target}'"),
-                    );
-                }
-            }
-            // WOR-56/SLA-1 (2026-08-03): "paraleli sonlandır" tercihi. Collapse'ın
-            // GİDECEĞİ bir hedef olmak zorunda — `wft` yoksa "aynı havuza dön"
-            // demektir ve kolları düşürmenin anlamı kalmaz.
-            if ct.collapses_parallel && ct.wft.is_none() {
-                report.error(
-                    "claim_timeout_collapse_requires_wft",
-                    path.clone(),
-                    "SLA-1 'collapses_parallel' bir node hedefi (`wft`) ister — paraleli sonlandırıp nereye gidileceği belirsiz kalamaz; hedef verin ya da bayrağı kaldırın".into(),
-                );
-            }
-            // 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da kullanılabilir:
-            // paralel akışa bağlı olmayan bir node'un süresi dolduğunda düşürülecek
-            // kardeş kol yoktur, "paraleli sonlandır" anlamsız bir ayardır.
-            if ct.collapses_parallel && !interior.contains(key.as_str()) {
-                report.error(
-                    "claim_timeout_collapse_outside_parallel",
-                    format!("{path}.collapses_parallel"),
-                    format!(
-                        "'{key}' bir paralel kolun içinde değil — 'collapses_parallel' yalnız fork ile join arasındaki node'larda kullanılabilir. Bayrağı kaldırın"
-                    ),
-                );
             }
         }
     }

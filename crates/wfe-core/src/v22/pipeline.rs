@@ -2,7 +2,9 @@
 //!
 //! ```text
 //! 1. WFE assigned mi? Actor owner mı? Değilse ACT reddedilir.
-//! 2. transition.c_a varsa: owner bu EK kurala da match etmeli (§3).
+//! 2. `actions.<x>.extra_c_a` varsa: owner bu EK kurala da match etmeli (§3).
+//!    (v2.3/`Ç6`: eskiden `transitions[].c_a` idi; ad `extra_c_a` oldu, anlamı aynı —
+//!    node havuzunu DARALTAN ek kısıt.)
 //! 3. current_node ∈ transition.from? Değilse aday değildir.
 //! 4. Adaylar array sırasıyla; when'i true olan İLK transition seçilir.
 //! 5. Action input validate edilir.
@@ -23,7 +25,7 @@ use crate::types::wfah::{Wfah, WfahEntry};
 use std::collections::{BTreeSet, VecDeque};
 use crate::types::wfd_v22::{
     ActionDef, AutoexecDef, CaGrantRule, CallMode, CandidateActor, CuItem, EscalationStep,
-    GlobalAction, JoinRule, SendBackTarget, StartAs, Transition, TriggerInvocation, WfAdminRule,
+    GlobalAction, JoinRule, SendBackTarget, StartAs, StartRule, TriggerInvocation, WfAdminRule,
     Wfd, Wft, WftTarget,
 };
 use crate::types::wfe::WfeStatus;
@@ -187,9 +189,12 @@ fn end_terminal_of(landed: Option<&CallSite>) -> Option<String> {
 pub fn visited_nodes<'w>(wfd: &'w Wfd, wfes: &'w Wfes) -> BTreeSet<&'w str> {
     let mut out: BTreeSet<&str> = wfes.visited_nodes.iter().map(String::as_str).collect();
     if let Some(first) = wfes.wfah.entries().first() {
+        // v2.3: "başlatan node" = start aksiyonunun `from`u (`Ç7+Ç8`).
         for rule in &wfd.start {
             if rule.action == first.action {
-                out.insert(rule.from.as_str());
+                if let Some(a) = crate::types::wfd_v22::start_action(wfd, rule) {
+                    out.insert(a.from.as_str());
+                }
             }
         }
     }
@@ -341,47 +346,84 @@ impl<'a> Engine<'a> {
         let empty_ctx = json!({});
         let empty_wfah = Wfah::empty();
 
-        // Actor'ün başlatabildiği ilk kural (istenirse action adına daraltılmış)
-        let mut rule = None;
-        for r in &wfd.start {
-            if let Some(a) = action {
-                if r.action != a {
-                    continue;
-                }
-            }
-            // Simetrik start: initiator yetkisi `from` node'unun c_a'sında yaşar.
-            let node = wfd.nodes.get(&r.from).ok_or_else(|| {
-                EngineError::InvalidWfd(format!("start.from bilinmeyen node: '{}'", r.from))
-            })?;
-            let env = MatchEnv {
-                ctx: &empty_ctx,
-                wfah: &empty_wfah,
-                orgtnt_id,
-            };
-            if authorize(&node.c_a, actor, env, self.org).await? {
-                rule = Some(r);
-                break;
-            }
-        }
-        let rule = rule.ok_or(EngineError::StartNotEligible)?;
-
-        // §7.5 simetrisi: start input'u da transition input'ları gibi doğrulanır —
-        // action.input.required mevcut olmalı, bildirilmemiş yol reddedilir; başlangıç
+        // §7.5 simetrisi: start input'u transition input'ları gibi doğrulanır —
+        // `action.input.required` mevcut olmalı, bildirilmemiş yol reddedilir; başlangıç
         // ctx'i YALNIZ bildirilen yollardan + effects'ten tohumlanır (serbest-form
-        // context enjeksiyonu kapalı).
+        // context enjeksiyonu kapalı). Normalizasyon SEÇİMDEN ÖNCE yapılır çünkü
+        // `validate_action_input` artık seçim döngüsünün İÇİNDE koşuyor.
         let input_norm = match input {
             Value::Object(_) => input.clone(),
             Value::Null => json!({}),
             _ => return Err(EngineError::InvalidInput("start input obje olmalı".into())),
         };
         let input = &input_norm;
-        let action_def = wfd.actions.get(&rule.action).ok_or_else(|| {
-            EngineError::InvalidWfd(format!(
-                "start action '{}' actions içinde tanımsız",
-                rule.action
-            ))
-        })?;
-        validate_action_input(action_def, input, &wfd.context)?;
+
+        // Aktörün başlatabildiği ilk kural (istenirse action adına daraltılmış).
+        //
+        // v2.3 (`Ç7+Ç8` + `E11`) — **SEÇİM SIRASI BAĞLAYICI: yetki → input → when.**
+        // Bugüne kadar `Engine::start` `when`e HİÇ BAKMIYORDU ve
+        // `validate_action_input` seçimden SONRA koşuyordu. Yeni sıranın gerekçesi:
+        //   1. yetki  — `nodes[action.from].c_a` (+ varsa `extra_c_a`, AND'lenir)
+        //   2. input  — `when`den ÖNCE, ki `$action.input.*` DOĞRULANMAMIŞ girdi
+        //               üzerinden okunmasın. Bugünkü SERT reddi aynen korunur (`?`):
+        //               yetkili bir kuralın girdisi bozuksa sıradakine düşülmez.
+        //   3. when   — false → SIRADAKİ start kuralına geç.
+        // Hiçbiri tutmazsa `StartNotEligible` (yeni hata türü AÇILMAZ).
+        let mut selected: Option<(&StartRule, &ActionDef)> = None;
+        for r in &wfd.start {
+            if let Some(a) = action {
+                if r.action != a {
+                    continue;
+                }
+            }
+            let Some(action_def) = wfd.actions.get(&r.action) else {
+                // Bozuk belge: validator `start_action` bunu yakalar. Runtime'da
+                // sıradaki kurala geçilir — tek kural buysa `StartNotEligible` döner.
+                continue;
+            };
+            // Simetrik start: initiator yetkisi start aksiyonunun `from` node'unun
+            // `c_a`'sında yaşar (`Ç7+Ç8`: `start[].from` silindi, aynı gerçek iki
+            // yerde tutulmaz).
+            let node = wfd.nodes.get(&action_def.from).ok_or_else(|| {
+                EngineError::InvalidWfd(format!(
+                    "actions.{}.from bilinmeyen node: '{}'",
+                    r.action, action_def.from
+                ))
+            })?;
+            let env = MatchEnv {
+                ctx: &empty_ctx,
+                wfah: &empty_wfah,
+                orgtnt_id,
+            };
+            if !authorize(&node.c_a, actor, env, self.org).await? {
+                continue;
+            }
+            // `extra_c_a` havuzu DARALTIR (`Ç6`) — start yolunda da AND'lenir.
+            if let Some(extra_rule) = &action_def.extra_c_a {
+                let env = MatchEnv {
+                    ctx: &empty_ctx,
+                    wfah: &empty_wfah,
+                    orgtnt_id,
+                };
+                if !authorize_anchored(extra_rule, actor, None, env, self.org).await? {
+                    continue;
+                }
+            }
+            validate_action_input(action_def, input, &wfd.context)?;
+            if let Some(expr) = &action_def.when {
+                let env = EvalEnv::new(&empty_ctx)
+                    .with_wfah(&empty_wfah, &ValidRules::for_version(wfd))
+                    .with_actor(actor)
+                    .with_wfe_id(wfe_id)
+                    .with_action_input(input);
+                if !evaluate_bool(expr, &env)? {
+                    continue;
+                }
+            }
+            selected = Some((r, action_def));
+            break;
+        }
+        let (rule, action_def) = selected.ok_or(EngineError::StartNotEligible)?;
         let mut staged = json!({});
 
         let now = Utc::now();
@@ -406,7 +448,7 @@ impl<'a> Engine<'a> {
             (None, None) => None,
         };
 
-        if let Some(effects) = &rule.wfes_effects {
+        if let Some(effects) = &action_def.wfes_effects {
             let env = EffectEnv {
                 env: self.env.public(),
                 call: None,
@@ -441,7 +483,7 @@ impl<'a> Engine<'a> {
         seq += 1;
 
         self.run_triggers(
-            &rule.trigger,
+            &action_def.trigger,
             wfd,
             &mut staged,
             &mut wfah_entries,
@@ -460,7 +502,7 @@ impl<'a> Engine<'a> {
         // §7.8 — nereye gidiyoruz?
         let (outcome, final_ctx, landed) = self
             .resolve_wft(
-                &rule.wft,
+                &action_def.wft,
                 wfd,
                 staged,
                 &empty_wfah,
@@ -590,35 +632,31 @@ impl<'a> Engine<'a> {
             _ => {}
         }
 
-        // §7.3–7.4 — aday transitions, ilk when-match
+        // §7.3–7.4 — aksiyon kaydı + `when` kapısı
+        //
+        // v2.3 (`Ç5` + `Ç10`): **İLK-MATCH SEMANTİĞİ ÖLDÜ.** Eskiden aynı
+        // `(node, action)` çifti için birden çok `transitions[]` girdisi olabiliyor,
+        // motor da dizi sırasında ilk `when`i tutanı seçiyordu — `Ç10` "sıra artık
+        // seçim yapmaz" dedi. Artık kimlik map anahtarıdır: aday YA TEKTİR ya da yoktur.
+        // `when` false dönerse aksiyon o an ALINAMAZ (ikinci bir adaya düşülmez).
         let ctx = wfes.dynctx.as_value().clone();
-        let mut selected = None;
-        for t in &wfd.transitions {
-            if t.action != action || !t.from.contains(current_node) {
-                continue;
-            }
-            let matches = match &t.when {
-                None => true,
-                Some(expr) => {
-                    let env = EvalEnv::new(&ctx)
-                        .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
-                        .with_node(Some(current_node))
-                        .with_actor(actor)
-                        .with_wfe_id(wfes.wfe_id)
-                        .with_action_input(input);
-                    evaluate_bool(expr, &env)?
-                }
-            };
-            if matches {
-                selected = Some(t);
-                break;
-            }
-        }
+        let selected = wfd.actions.get(action).filter(|t| t.from == *current_node);
         let transition =
             selected.ok_or_else(|| EngineError::TransitionNotFound(action.to_string()))?;
+        if let Some(expr) = &transition.when {
+            let env = EvalEnv::new(&ctx)
+                .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
+                .with_node(Some(current_node))
+                .with_actor(actor)
+                .with_wfe_id(wfes.wfe_id)
+                .with_action_input(input);
+            if !evaluate_bool(expr, &env)? {
+                return Err(EngineError::TransitionNotFound(action.to_string()));
+            }
+        }
 
         // §7.2 — ek yetki kısıtı
-        if let Some(extra_rule) = &transition.c_a {
+        if let Some(extra_rule) = &transition.extra_c_a {
             let env = MatchEnv {
                 ctx: &ctx,
                 wfah: &wfes.wfah,
@@ -814,31 +852,32 @@ impl<'a> Engine<'a> {
 
         // §7.3–7.4 kol-bazlı aday seçimi
         let ctx = wfes.dynctx.as_value().clone();
-        let mut matched: Vec<(&BranchState, &Transition)> = Vec::new();
+        let mut matched: Vec<(&BranchState, &ActionDef)> = Vec::new();
         for b in active.iter().copied() {
             if node_hint.is_some_and(|h| h != b.branch_node) {
                 continue;
             }
-            for t in &wfd.transitions {
-                if t.action != action || !t.from.contains(&b.branch_node) {
-                    continue;
+            // v2.3: tek-kol yolundaki ile AYNI mantık — aday tek bir aksiyon kaydıdır,
+            // ilk-match döngüsü yok (`Ç10`). Kolun BELİRSİZLİĞİ (`AmbiguousAction`)
+            // aşağıda AYNEN kalır: o, aynı aksiyonu birden çok AKTİF KOLUN taşıması
+            // durumudur ve aksiyon kaydının tekilliğiyle ilgisi yoktur.
+            let Some(t) = wfd.actions.get(action).filter(|t| t.from == b.branch_node) else {
+                continue;
+            };
+            let matches = match &t.when {
+                None => true,
+                Some(expr) => {
+                    let env = EvalEnv::new(&ctx)
+                        .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
+                        .with_node(Some(&b.branch_node))
+                        .with_actor(actor)
+                        .with_wfe_id(wfes.wfe_id)
+                        .with_action_input(input);
+                    evaluate_bool(expr, &env)?
                 }
-                let matches = match &t.when {
-                    None => true,
-                    Some(expr) => {
-                        let env = EvalEnv::new(&ctx)
-                            .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
-                            .with_node(Some(&b.branch_node))
-                            .with_actor(actor)
-                            .with_wfe_id(wfes.wfe_id)
-                            .with_action_input(input);
-                        evaluate_bool(expr, &env)?
-                    }
-                };
-                if matches {
-                    matched.push((b, t));
-                    break;
-                }
+            };
+            if matches {
+                matched.push((b, t));
             }
         }
         let (branch, transition) = match matched.len() {
@@ -862,7 +901,7 @@ impl<'a> Engine<'a> {
         }
 
         // §7.2 — ek yetki kısıtı
-        if let Some(extra_rule) = &transition.c_a {
+        if let Some(extra_rule) = &transition.extra_c_a {
             let env = MatchEnv {
                 ctx: &ctx,
                 wfah: &wfes.wfah,
@@ -1614,8 +1653,11 @@ impl<'a> Engine<'a> {
         // K-2: geri gönderme menüsünün süzgeci — döngü başına BİR kez hesaplanır.
         let visited = visited_nodes(wfd, wfes);
         let mut actions: Vec<ActionChoice> = Vec::new();
-        for t in &wfd.transitions {
-            if !t.from.contains(node_key) || actions.iter().any(|a| a.action == t.action) {
+        // v2.3: kimlik map anahtarı olduğu için "aynı aksiyon iki kez sunulmasın"
+        // tekilleştirmesi (`actions.iter().any(...)`) GEREKSİZ — map bir anahtarı bir kez
+        // taşır. `Ç5` bu ayıklamayı yapısal olarak yaptı.
+        for (action_key, t) in &wfd.actions {
+            if t.from != *node_key {
                 continue;
             }
             let when_ok = match &t.when {
@@ -1633,7 +1675,7 @@ impl<'a> Engine<'a> {
             if !when_ok {
                 continue;
             }
-            if let Some(extra_rule) = &t.c_a {
+            if let Some(extra_rule) = &t.extra_c_a {
                 let env = MatchEnv {
                     ctx: &ctx,
                     wfah: &wfes.wfah,
@@ -1668,7 +1710,7 @@ impl<'a> Engine<'a> {
                 _ => None,
             };
             actions.push(ActionChoice {
-                action: t.action.clone(),
+                action: action_key.clone(),
                 targets,
             });
         }
@@ -1913,7 +1955,13 @@ impl<'a> Engine<'a> {
         target_node: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<TransitionCommit, EngineError> {
-        let starts: BTreeSet<&str> = wfd.start.iter().map(|r| r.from.as_str()).collect();
+        // v2.3: START node'ları start aksiyonlarının `from`larıdır (`Ç7+Ç8`).
+        let starts: BTreeSet<&str> = wfd
+            .start
+            .iter()
+            .filter_map(|r| crate::types::wfd_v22::start_action(wfd, r))
+            .map(|a| a.from.as_str())
+            .collect();
         let chosen = match (target_node, starts.len()) {
             (Some(t), _) => {
                 // Verilen hedef bir START node'u olmak zorunda: `send_to_start` ile
@@ -2292,24 +2340,24 @@ impl<'a> Engine<'a> {
             staged = apply_effects(&staged, effects, &env)?;
         }
 
-        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         // WOR-63: collapse marker'larına tetikleyici olarak da yazılır.
         let trigger_action = escalation_marker(node_key, step_idx);
-        // WOR-56/SLA-2 (2026-08-03): collapse ateşlenecekse audit'e yazılır — `collapse`
-        // anahtarı YALNIZ gerçek collapse'ta görünür (eski kayıtların şekli korunur).
-        let collapsing = branch.is_some() && matches!(&step.wft, Some(Wft::Collapse { .. }));
         // Ç4/E14: kol escalation'ında satır O KOLDA üretilir.
         let (branch_entry, branch_round) = branch_label(wfes, branch);
-        let mut wfah_entries = vec![WfahEntry {
+        // v2.3 (`Ç9` + `E02`): marker payload'u `{after, grant}` olur — `when` metni
+        // deftere AYNEN yazılır (`E13` hükmü: guard'ın ne olduğu audit izinde durur).
+        // `collapse` anahtarı ÖLDÜ: escalation collapse edemez, `wft` taşımıyor.
+        let mut grant_payload = json!({"c_a": step.grant.c_a});
+        if let Some(when) = &step.grant.when {
+            grant_payload["when"] = json!(when);
+        }
+        let wfah_entries = vec![WfahEntry {
             seq,
             action: trigger_action.clone(),
             // Elle tetiklemede iz admini gösterir; otomatik yolda system aktörü.
             actor: by.cloned().unwrap_or_else(|| system.clone()),
-            input: Some(if collapsing {
-                json!({"after": step.after, "collapse": true})
-            } else {
-                json!({"after": step.after})
-            }),
+            input: Some(json!({"after": step.after, "grant": grant_payload})),
             applied_at: now,
             // Ç2: escalation MARKER satırıdır — akış izi taşımaz (v2.3/C ekseni:
             // escalation node değiştirmeyecek; taşıma yolu `R02` ile düşer).
@@ -2319,113 +2367,52 @@ impl<'a> Engine<'a> {
             branch_entry,
             branch_round,
         }];
-        seq += 1;
 
-        // `wft` zorunludur (validator `escalation_wft_required`) ve yalnız `{node}` ya
-        // da node hedefli `{collapse:{node}}` formu geçerlidir (`sla_target_not_node` /
-        // `sla_terminal_target`): SLA-2 akışı bitirmez, dallanma/fork kararı vermez.
-        // `resolve_wft` genel yolu korunur (paralel modda BranchMoveTo / CollapseTo
-        // çözümü oradan gelir).
-        let wft = step.wft.as_ref().ok_or_else(|| {
-            EngineError::InvalidWfd(format!(
-                "escalation adımı wft içermeli: {node_key}[{step_idx}]"
-            ))
-        })?;
-        // WOR-56/SLA-2 (2026-08-03): collapse yalnız KOL bağlamında anlamlıdır. Validator
-        // collapse hedefini yalnız fork-join arasındaki node'larda kabul eder
-        // (`escalation_collapse_outside_parallel`); yine de kol içi bir node grafın
-        // başka bir yerinden erişilebilir → o çağrıda WFE paralel modda olmaz. Hata
-        // vermek WFE'yi zaman aşımında kilitlerdi → düz `{node}` devrine düşülür
-        // (SLA-1'deki `collapses_parallel` fallback'iyle aynı savunma).
-        let degraded = match (branch, wft) {
-            (None, Wft::Collapse { collapse }) => Some(match collapse {
-                WftTarget::Node { node } => Wft::Node { node: node.clone() },
-                // Validator `sla_terminal_target` bunu zaten reddeder; savunma olarak
-                // terminal collapse de düz terminal devrine düşer.
-                WftTarget::Terminal { terminal } => Wft::Terminal {
-                    terminal: terminal.clone(),
-                },
-            }),
-            _ => None,
+        // v2.3 (`Ç9` + `E02`) — **ESCALATION İŞ TAŞIMAZ.**
+        //
+        // Eski gövde `step.wft`i çözüp `resolve_wft` ile işi başka node'a TAŞIYORDU
+        // (paralel modda `BranchMoveTo`/`CollapseTo`, tek-kolda `MoveTo`). Hepsi
+        // silindi: kademe artık bir hedef değil bir **yetki kuralı** (`grant`) veriyor.
+        //
+        // Silinenler ve neden:
+        //   - `resolve_wft` çağrısı → çözülecek hedef yok
+        //   - `degraded` fallback'i (kol dışı collapse → düz devir) → collapse yok
+        //   - `WftMode::Branch`/`Single` ayrımı → hareket yok, kol/tek-kol farkı
+        //     yönlendirmeyi değiştirmiyor
+        //   - `stage_parallel_markers` → kol hareketi olmadığı için kol marker'ı da yok
+        //   - "kol escalation'ı için WFE paralel modda değil" hatası → escalation artık
+        //     paralel moddan bağımsız; kol içindeki bir node'un havuzu da genişletilebilir
+        //
+        // Sonuç: `CommitOutcome::StayAt` — node/status/claim'e dokunulmaz, yalnız
+        // marker + ctx + genişlemiş havuz kolonu yazılır.
+        let outcome = CommitOutcome::StayAt {
+            node: node_key.to_string(),
         };
-        let wft = degraded.as_ref().unwrap_or(wft);
-        let all_entries = all_entry_nodes(wfes);
-        let arrived_entries = branch
-            .map(|b| arrived_entries_with(wfes, b))
-            .unwrap_or_default();
-        let mode = match (branch, wfes.join_target.as_ref()) {
-            (Some(b), Some(join)) => WftMode::Branch {
-                join,
-                from_node: b,
-                others_active: active_others(wfes, b),
-                rule: &wfes.join_rule,
-                all_entries: &all_entries,
-                arrived_entries: &arrived_entries,
-            },
-            (Some(_), None) => {
-                return Err(EngineError::InvalidWfd(
-                    "kol escalation'ı için WFE paralel modda değil".into(),
-                ))
-            }
-            (None, _) => WftMode::Single,
-        };
-        // Hedefin c_a'sı ve `wfd.listable` kriterleri `self`/`parent` ÇAPALI olabilir;
-        // saf sistem aktörünün nil orgu'su ile çözülemezler (bkz.
-        // `system_actor_anchored` ve WFC dönüş yolundaki aynı gerekçe). WFAH
-        // marker'ı ve SLA effects'i YUKARIDA saf `system` ile yazıldı — audit izi
-        // değişmez; çapa YALNIZ çözümlemede kullanılır.
+        let final_ctx = staged;
+        let landed: Option<CallSite> = None;
+
+        // Hedefin `c_a`'sı ve `wfd.listable` kriterleri `self`/`parent` ÇAPALI olabilir;
+        // saf sistem aktörünün nil orgu'su ile çözülemezler. WFAH marker'ı ve SLA
+        // effects'i YUKARIDA saf `system` ile yazıldı — audit izi değişmez; çapa YALNIZ
+        // çözümlemede kullanılır.
         let anchored = system_actor_anchored(wfes);
-        let (outcome, final_ctx, landed) = self
-            .resolve_wft(
-                wft,
-                wfd,
-                staged,
-                &wfes.wfah,
-                &anchored,
-                wfes.wfe_id,
-                None,
-                None,
-                mode,
-                // SLA-2 bir geri gönderme DEĞİLDİR (hedefi tasarım anında sabittir);
-                // paraleli kapatmak isteyen escalation `{collapse:{node}}` yazar.
-                false,
-            )
-            .await?;
 
-        // Escalation marker'ı işlendi — varılan yeri kim yapabilir?
+        // ⚠️ Yazılacak DEĞER `E04`ün `node_candidates`ından gelir: `node.c_a ∪ açılmış
+        // grantlar`ın ÇÖZÜLMÜŞ aday listesi. Marker YUKARIDA deftere eklendi, bu yüzden
+        // grant kümesi POST-APPEND defter üzerinden hesaplanır — yoksa yeni ateşlenen
+        // kademenin grant'ı bir commit GEÇ yazılırdı (aynı sınıf hata
+        // `view_grants_wfah_anchor` testinde bir kez yaşandı).
         let wfah = wfes.wfah.extended(&wfah_entries);
         let resolved_c_a = self
-            .candidates_at(
-                &outcome,
-                landed.as_ref(),
+            .node_candidates(
+                node_key,
                 wfd,
                 &final_ctx,
                 &wfah,
-                // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
                 wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
                 wfes.orgtnt_id,
             )
             .await?;
-
-        // Ç4-EK/S5: kol escalation'ı bir KOLU tetikleyicidir (aktörü sistem olsa da);
-        // WFE-geneli escalation'da kol yoktur.
-        let trigger_kind = match branch {
-            Some(_) => TriggerKind::Branch,
-            None => TriggerKind::System,
-        };
-        stage_parallel_markers(
-            wfes,
-            &Trigger {
-                kind: trigger_kind,
-                branch,
-                action: Some(&trigger_action),
-                actor: &system,
-            },
-            &outcome,
-            &mut wfah_entries,
-            &mut seq,
-            now,
-        );
 
         let staged_calls = self.stage_calls(
             wfd,
@@ -2605,7 +2592,7 @@ impl<'a> Engine<'a> {
             EngineError::InvalidWfd(format!("node '{node_key}' claim_timeout taşımıyor"))
         })?;
         let system = system_actor();
-        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         // Ç4/E14: kolun claim'i düşüyorsa satır O KOLDA — iki dal da aynı etiketi taşır.
         let (branch_entry, branch_round) = branch_label(wfes, branch);
         // Ç1-EK: marker adı `claim_timeout:` DEĞİL `claim_released:`. İki olay tek
@@ -2660,180 +2647,32 @@ impl<'a> Engine<'a> {
             staged = apply_effects(&staged, effects, &env)?;
         }
 
-        match &ct.wft {
-            None => {
-                let wfah_entry = WfahEntry {
-                    seq,
-                    action: marker,
-                    actor: system,
-                    // Ç1-EK/E12 payload'ı: `reason` kapalı listedir (Rust enum);
-                    // `after` YALNIZ `reason: "timeout"` satırlarında yazılır.
-                    input: Some(released_input(&ct.after)),
-                    applied_at: now,
-                    // Ç2: yalnız claim düşer, node DEĞİŞMEZ — marker satırı.
-                    from_node: None,
-                    to_node: None,
-                    // Ç4: kolun claim'i düşüyorsa satır O KOLDA.
-                    branch_entry,
-                    branch_round,
-                };
-                Ok(ClaimTimeoutOutcome::Release(ClaimRelease {
-                    wfah_entry,
-                    new_dynctx: has_effects.then_some(staged),
-                }))
-            }
-            Some(target) => {
-                // Bare string hedef — validator `sla_terminal_target` gereği yalnız
-                // node olabilir; referansın varlığı `cross_ref` ile garantidir.
-                //
-                // WOR-56/SLA-1 (2026-08-03): tasarımcı `collapses_parallel` işaretlediyse
-                // ve SLA gerçekten bir KOL bağlamında tetiklendiyse hedef `{collapse:{node}}`
-                // sarmalayıcısına alınır → kardeş kollar iptal, paralel mod kapanır, WFE
-                // hedefe gider (`CommitOutcome::CollapseTo`).
-                //
-                // Paralel modda DEĞİLKEN bayrak yok sayılır ve düz devir uygulanır. Bu bir
-                // SAVUNMA yoludur, normal yol değil: validator bayrağı yalnız fork-join
-                // arasındaki node'larda kabul eder (`claim_timeout_collapse_outside_parallel`).
-                // Ama kol içi bir node grafın başka bir yerinden de erişilebilir (kol dışı
-                // bir transition oraya gidebilir) — o durumda WFE paralel modda olmaz ve
-                // `resolve_wft` collapse'ı Single modda hata sayar. Hata vermek WFE'yi zaman
-                // aşımında kilitlerdi; devir yine yapılır, yalnız düşürecek kol yoktur.
-                let collapse = ct.collapses_parallel && branch.is_some();
-                let wft = if collapse {
-                    Wft::Collapse {
-                        collapse: WftTarget::Node {
-                            node: target.clone(),
-                        },
-                    }
-                } else {
-                    Wft::Node {
-                        node: target.clone(),
-                    }
-                };
-                let mut wfah_entries = vec![WfahEntry {
-                    seq,
-                    action: marker.clone(),
-                    actor: system.clone(),
-                    // E12: devir yolu da `claim_released:` yazar, dolayısıyla ORTAK
-                    // şekle uyar. `wft` (ve collapse'ta `collapse`) ailenin dışındaki
-                    // audit alanlarıdır: hedefi yalnız bu satır taşır. `collapse`
-                    // anahtarı YALNIZ collapse'ta yazılır.
-                    input: Some({
-                        let mut input = released_input(&ct.after);
-                        input["wft"] = json!(target);
-                        if collapse {
-                            input["collapse"] = json!(true);
-                        }
-                        input
-                    }),
-                    applied_at: now,
-                    // Ç2: claim timeout MARKER satırıdır (v2.3/C ekseni: devir yolu
-                    // `Ç1-EK`/`R02` ile düşer, timeout yalnız claim'i bırakır).
-                    from_node: None,
-                    to_node: None,
-                    // Ç4: kol claim timeout'unda satır O KOLDA üretilir.
-                    branch_entry,
-                    branch_round,
-                }];
-                seq += 1;
-                let all_entries = all_entry_nodes(wfes);
-                let arrived_entries = branch
-                    .map(|b| arrived_entries_with(wfes, b))
-                    .unwrap_or_default();
-                let mode = match (branch, wfes.join_target.as_ref()) {
-                    (Some(b), Some(join)) => WftMode::Branch {
-                        join,
-                        from_node: b,
-                        others_active: active_others(wfes, b),
-                        rule: &wfes.join_rule,
-                        all_entries: &all_entries,
-                        arrived_entries: &arrived_entries,
-                    },
-                    (Some(_), None) => {
-                        return Err(EngineError::InvalidWfd(
-                            "kol claim timeout'u için WFE paralel modda değil".into(),
-                        ))
-                    }
-                    (None, _) => WftMode::Single,
-                };
-                // SLA-2 ile aynı gerekçe: hedef c_a'sı / `listable` çapalı olabilir,
-                // çözüm nil-orgu sistem aktörüyle yapılamaz. Audit izi saf `system`.
-                let anchored = system_actor_anchored(wfes);
-                let (outcome, final_ctx, landed) = self
-                    .resolve_wft(
-                        &wft,
-                        wfd,
-                        staged,
-                        &wfes.wfah,
-                        &anchored,
-                        wfes.wfe_id,
-                        None,
-                        None,
-                        mode,
-                        // SLA-1 de geri gönderme değildir (bkz. `fire_escalation`).
-                        false,
-                    )
-                    .await?;
-                // Timeout marker'ı işlendi — varılan yeri kim yapabilir?
-                let wfah = wfes.wfah.extended(&wfah_entries);
-                let resolved_c_a = self
-                    .candidates_at(
-                        &outcome,
-                        landed.as_ref(),
-                        wfd,
-                        &final_ctx,
-                        &wfah,
-                        // Çapa WFE'nin kendi birimi; işlemi yapan kişiyle DEĞİŞMEZ.
-                        wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
-                        wfes.orgtnt_id,
-                    )
-                    .await?;
-                // Ç4-EK/S5: bkz. `fire_escalation` — aynı ayrım.
-                let trigger_kind = match branch {
-                    Some(_) => TriggerKind::Branch,
-                    None => TriggerKind::System,
-                };
-                stage_parallel_markers(
-                    wfes,
-                    &Trigger {
-                        kind: trigger_kind,
-                        branch,
-                        action: Some(&marker),
-                        actor: &system,
-                    },
-                    &outcome,
-                    &mut wfah_entries,
-                    &mut seq,
-                    now,
-                );
-                let staged_calls = self.stage_calls(
-                    wfd,
-                    landed.as_ref(),
-                    &final_ctx,
-                    &anchored,
-                    wfes.wfe_id,
-                    now,
-                )?;
-                guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
-                Ok(ClaimTimeoutOutcome::Move(TransitionCommit {
-                    wfe_id: wfes.wfe_id,
-                    orgtnt_id: wfes.orgtnt_id,
-                    new_dynctx: final_ctx,
-                    wfah_entries,
-                    outcome,
-                    resolved_c_a,
-                    staged_calls,
-                    // Görünürlük projeksiyonu saf pipeline'da BOŞ bırakılır: org portuna ve
-                    // WFE'nin çapasına ihtiyaç duyar, `WfeExecutor::fill_view_grants` doldurur.
-                    view_c_a: Vec::new(),
-                    current_view_c_a: Vec::new(),
-                    branch_c_a: Vec::new(),
-                    branch_view_c_a: Vec::new(),
-                    end_view_c_a: Vec::new(),
-                    end_terminal: end_terminal_of(landed.as_ref()),
-                }))
-            }
-        }
+        // v2.3 (K13 + K19): **CLAIM TIMEOUT ARTIK İŞ TAŞIMAZ.** `ClaimTimeout`tan `wft` ve
+        // `collapses_parallel` KALKTI; süre dolduğunda yapılan tek şey claim'i BIRAKMAK.
+        //
+        // Eski `Some(target)` dalı (devir + opsiyonel collapse) tamamen SİLİNDİ:
+        //   - devir hedefi yok → `CommitOutcome::MoveTo` üretilmiyor
+        //   - `collapses_parallel` yok → kardeş kol iptali / paralel kapanışı yok
+        // Zamanlayıcı yönlendirme kararı VERMEZ; iş node'da kalır ve havuza döner.
+        let wfah_entry = WfahEntry {
+            seq,
+            action: marker,
+            actor: system,
+            // Ç1-EK/E12 payload'ı: `reason` kapalı listedir (Rust enum);
+            // `after` YALNIZ `reason: "timeout"` satırlarında yazılır.
+            input: Some(released_input(&ct.after)),
+            applied_at: now,
+            // Ç2: yalnız claim düşer, node DEĞİŞMEZ — marker satırı.
+            from_node: None,
+            to_node: None,
+            // Ç4: kolun claim'i düşüyorsa satır O KOLDA.
+            branch_entry,
+            branch_round,
+        };
+        Ok(ClaimTimeoutOutcome::Release(ClaimRelease {
+            wfah_entry,
+            new_dynctx: has_effects.then_some(staged),
+        }))
     }
 
     // ------------------------------------------------------------- internals
@@ -3784,9 +3623,29 @@ impl<'a> Engine<'a> {
         let node = wfd.nodes.get(node_key).ok_or_else(|| {
             EngineError::InvalidWfd(format!("wft hedefi bilinmeyen node '{node_key}'"))
         })?;
-        // `listable` katlaması 2026-08-13'te kalktı → union kalmadı, doğrudan döner.
-        self.resolve_candidates(&node.c_a, staged, wfah, anchor_orgu, orgtnt_id)
-            .await
+        // ⚠️ v2.3 (`E04`): **`node.c_a ∪ AÇILMIŞ GRANTLAR`.** Escalation havuzu
+        // genişletiyor (`Ç9`), dolayısıyla bu kolonun değeri artık yalnız node'un
+        // kendi kuralı DEĞİL. Genişletmenin BURADA olması bilinçli: havuz kolonlarını
+        // (`wfe.current_c_a`, `wfe_branch.c_a`) yazan her yol bu fonksiyondan geçiyor,
+        // yani atlanabilecek ikinci bir yol yok.
+        //
+        // ⚠️ **Guard'lar YOK SAYILIR** — kolon over-inclusive bir cache'tir (`E03`):
+        // commit anında viewer bilinmez ve `when` kişiye bağlı olabilir. Ayrım OKUMA
+        // anında yapılır ("görebilir ≠ yapabilir", `P05`/G).
+        let mut out = self
+            .resolve_candidates(node.act_c_a(), staged, wfah, anchor_orgu, orgtnt_id)
+            .await?;
+        for grant in crate::v22::grants::open_grants(wfd, wfah, node_key) {
+            let extra = self
+                .resolve_candidates(&grant.c_a, staged, wfah, anchor_orgu, orgtnt_id)
+                .await?;
+            for cand in extra {
+                if !out.contains(&cand) {
+                    out.push(cand);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Terminal hedefi: terminal.wfes_effects uygulanır, wfe_end_response
@@ -3957,8 +3816,10 @@ fn fork_subgraph(wfd: &Wfd, entries: &[String], join: &WftTarget) -> BTreeSet<St
         if Some(node_key.as_str()) == join_node {
             continue;
         }
-        for t in &wfd.transitions {
-            if !t.from.contains(&node_key) {
+        // Ç5: yönlendirme kuralı aksiyonun KENDİ kaydında; `from` TEK node'dur
+        // (eskiden `transitions[].from` bir listeydi ve `contains` sorulurdu).
+        for t in wfd.actions.values() {
+            if t.from != node_key {
                 continue;
             }
             for target in subgraph_edges(&t.wft) {
@@ -4071,14 +3932,6 @@ fn active_branch<'w>(wfes: &'w Wfes, node: &str) -> Option<&'w BranchState> {
     wfes.branches
         .iter()
         .find(|b| b.status == BranchStatus::Active && b.branch_node == node)
-}
-
-/// Verilen kol DIŞINDAKİ aktif kol sayısı.
-fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
-    wfes.branches
-        .iter()
-        .filter(|b| b.status == BranchStatus::Active && b.branch_node != branch_node)
-        .count()
 }
 
 /// WOR-73: fork'un TÜM kollarının giriş node'ları (kol kimlikleri, `branches`

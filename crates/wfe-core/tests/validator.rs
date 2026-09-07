@@ -403,38 +403,6 @@ fn node_without_exit_is_error() {
     );
 }
 
-#[test]
-fn duplicate_from_action_without_when_is_error() {
-    let mut v = fixture_value();
-    let mut t2 = v["transitions"][1].clone();
-    t2["id"] = json!("t_manager_decide_dup");
-    v["transitions"].as_array_mut().unwrap().push(t2);
-    // ikisinde de when yok → belirsizlik hatası
-    assert!(has_error(&validate_value(v), "ambiguous_transition"));
-}
-
-#[test]
-fn duplicate_from_action_with_when_is_warning() {
-    let mut v = fixture_value();
-    let mut t2 = v["transitions"][1].clone();
-    t2["id"] = json!("t_manager_decide_guarded");
-    t2["when"] = json!("$ctx.credit_info.amount_requested > 1000");
-    v["transitions"].as_array_mut().unwrap().push(t2);
-    let report = validate_value(v);
-    assert!(
-        !has_error(&report, "ambiguous_transition"),
-        "hatalar: {:#?}",
-        report.errors
-    );
-    assert!(
-        report
-            .warnings
-            .iter()
-            .any(|w| w.code == "ambiguous_transition"),
-        "when'li çakışma uyarı olmalı"
-    );
-}
-
 // ---- §6 context / expression / retry ----
 
 #[test]

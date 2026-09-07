@@ -235,14 +235,15 @@ impl ValidRules {
 /// `wft`i `{targets}` formunda olan aksiyon anahtarları (admin yolu ayrı — bkz.
 /// `is_admin_send_back`).
 ///
-/// v2.3 yönlendirme kuralını aksiyonun kendi kaydına indirecek (`Ç5`, ayrı iş);
-/// o iniş olduğunda bu tarama `wfd.actions` üzerinden yürür ve kural DEĞİŞMEZ —
-/// sorulan soru "bu aksiyonun `wft`i `{targets}` mi" olarak kalır.
+/// `Ç5` indi: yönlendirme kuralı aksiyonun KENDİ kaydında (`wfd.actions.<key>.wft`),
+/// `transitions[]` diye bir dizi yok. Tarama o yüzden map üzerinden yürür; sorulan
+/// soru DEĞİŞMEDİ — "bu aksiyonun `wft`i `{targets}` mi". Anahtar aksiyonun ADIdır,
+/// artık girdinin bir alanı değil (kimlik map anahtarına indi).
 fn send_back_action_keys(wfd: &Wfd) -> BTreeSet<String> {
-    wfd.transitions
+    wfd.actions
         .iter()
-        .filter(|t| matches!(t.wft, Wft::SendBack { .. }))
-        .map(|t| t.action.clone())
+        .filter(|(_, a)| matches!(a.wft, Wft::SendBack { .. }))
+        .map(|(key, _)| key.clone())
         .collect()
 }
 

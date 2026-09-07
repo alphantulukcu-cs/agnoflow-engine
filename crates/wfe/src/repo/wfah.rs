@@ -35,7 +35,8 @@ pub async fn load_all_for_wfes(
         return Ok(Vec::new());
     }
     sqlx::query_as::<_, WfahRow>(
-        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at, from_node, to_node
+        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at,
+                from_node, to_node, branch_entry
          FROM wf.wfah WHERE wfe_id = ANY($1) ORDER BY wfe_id, seq ASC",
     )
     .bind(wfe_ids)
@@ -46,7 +47,8 @@ pub async fn load_all_for_wfes(
 
 pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<WfahRow>, WfeError> {
     sqlx::query_as::<_, WfahRow>(
-        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at, from_node, to_node
+        "SELECT wfah_id, wfe_id, seq, action, actor, input, applied_at,
+                from_node, to_node, branch_entry
          FROM wf.wfah WHERE wfe_id = $1 ORDER BY seq ASC",
     )
     .bind(wfe_id)

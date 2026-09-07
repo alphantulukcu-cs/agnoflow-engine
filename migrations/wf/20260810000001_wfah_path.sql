@@ -15,6 +15,17 @@
 -- Bu ekleme yalnız KAYIT VE EKRAN içindir — `$wfah` izdüşümü ve yayınlanmış
 -- akışların koşul ifadeleri aynı kalır.
 --
+-- >>> DÜZELTME (2026-09-07, WFD v2.3 / Ç2 — WOR-75): yukarıdaki kararın gerekçesi
+-- >>> KISMEN YANLIŞTI ve karar GERİ ALINDI. "golden fixture'da serileşiyor" iddiası
+-- >>> diskte doğrulanamadı: `kredi-basvuru.golden.json` bir WFD BELGESİDİR, WFAH
+-- >>> satırı taşımaz ("wfah" anahtarı sıfır isabet) ve `reference-types.rs`te
+-- >>> `WfahEntry` YOK. Ayrıca adapter seviyesinde türetme bir commit'in TÜM
+-- >>> satırlarına (trigger marker'ları, `_branch_cancelled`, `_join` …) AYNI from/to'yu
+-- >>> yazıyordu; `$valid` satır satır hesaplandığı için bu yanlış cevap üretir.
+-- >>> `WfahEntry` artık `from_node`/`to_node` (+ Ç4: `branch_entry`) taşır ve değeri
+-- >>> satırı ÜRETEN kod yazar. `$wfah` izdüşümü (`project_entry`) DEĞİŞMEDİ.
+-- >>> Ayrıntı: `migrations/wf/20260907000001_wfah_branch_entry.sql`.
+--
 -- İkisi de NULLABLE: eski satırlar NULL kalır (backfill yok — geçmişi motor
 -- olmadan yeniden türetmek mümkün değil), start satırında from_node NULL
 -- (öncesi yok), ForkTo gibi çok-hedefli geçişlerde to_node NULL (hedefler

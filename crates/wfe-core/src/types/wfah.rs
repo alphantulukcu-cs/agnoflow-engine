@@ -10,6 +10,27 @@ pub struct WfahEntry {
     pub actor: Actor,
     pub input: Option<Value>,
     pub applied_at: DateTime<Utc>,
+    /// Ç2 (v2.3): satırın geçişten ÖNCEki node'u. HAREKET üreten satır (asıl aksiyon)
+    /// commit'in from/to'sunu taşır; MARKER satırları `None` taşır.
+    ///
+    /// Ayrım çalışma zamanında marker ADINDAN türetilmez: satırı üreten kod ne
+    /// yazacağını zaten bilir (Ç2, reddedilen Seçenek B = adapter'da ad listesi).
+    /// Alan eklendiği için yeni bir marker üreticisi bu ikiliyi yazmadan DERLENEMEZ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_node: Option<String>,
+    /// Ç2: geçişin hedef node'u. `None` = marker satırı ya da hedefi olmayan geçiş
+    /// (terminal/failed/terminated; çok hedefli `ForkTo`'da hedefler
+    /// `wf.wfe_branch`'te satır satır durur).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_node: Option<String>,
+    /// Ç4: satırı yazan KOLUN kimliği = `BranchState::entry_node`. Kol nereye giderse
+    /// gitsin (kol içi hareket, fork öncesine geri gönderme) etiket DEĞİŞMEZ.
+    ///
+    /// `None` TEK anlam taşır: *"bu satır bir kolda değil"* — fork öncesi satırlar,
+    /// join sonrası satırlar, `_fork`/`_collapse`/`_join` marker'ları ve paralel
+    /// olmayan WFE'lerin tüm satırları. Sentinel (`_main` vb.) KULLANILMAZ.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_entry: Option<String>,
 }
 
 /// Append-only action history. push() returns a new Wfah — never mutates.
@@ -22,6 +43,10 @@ impl Wfah {
     }
 
     /// Returns a new Wfah with the entry appended. seq = last_seq + 1.
+    ///
+    /// Ç2/Ç4 alanları (`from_node`/`to_node`/`branch_entry`) `None` kalır: bu kısayol
+    /// TEST/geçmiş kurma yoludur, hareket üreten satırı KURAN yol değildir. Motorun
+    /// gerçek üreticileri `WfahEntry` literali kurar ve alanları açıkça doldurur.
     pub fn push(&self, action: String, actor: Actor, input: Option<Value>) -> Self {
         let seq = self.0.last().map(|e| e.seq + 1).unwrap_or(1);
         let mut entries = self.0.clone();
@@ -31,6 +56,9 @@ impl Wfah {
             actor,
             input,
             applied_at: Utc::now(),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         });
         Self(entries)
     }

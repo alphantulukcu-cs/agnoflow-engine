@@ -59,7 +59,7 @@ pub async fn load_active_for_wfes(
         return Ok(Vec::new());
     }
     sqlx::query_as::<_, BranchListRow>(
-        "SELECT wfe_id, branch_node, status, claimed_by, claimed_at, entered_at
+        "SELECT wfe_id, branch_node, entry_node, status, claimed_by, claimed_at, entered_at
          FROM wf.wfe_branch
          WHERE wfe_id = ANY($1) AND status = 'active'
          ORDER BY entered_at, branch_node",

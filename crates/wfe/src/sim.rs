@@ -359,6 +359,13 @@ impl SimState {
                     },
                     input: None,
                     applied_at: chrono::Utc::now(),
+                    // Ç2/Ç4: adapter'daki `_join` satırıyla BİREBİR aynı — marker
+                    // satırı hareket taşımaz, join paralel modu kapattığı için satır
+                    // bir kolun içinde değildir. Sim ile motor ayrışırsa `$valid`
+                    // iki yerde farklı hesaplanır.
+                    from_node: None,
+                    to_node: None,
+                    branch_entry: None,
                 });
                 // Join doldu — paralel mod biter; kollar (DB'nin aksine, audit
                 // amacıyla) sim'de basitçe temizlenir. WOR-72: quorum modunda

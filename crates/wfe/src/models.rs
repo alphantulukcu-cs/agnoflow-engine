@@ -66,9 +66,9 @@ pub struct BranchRow {
     /// (`repo::branch::load_all_for_wfes`) ve orada gruplama anahtarıdır.
     pub wfe_id: Uuid,
     pub branch_node: String,
-    /// WOR-73: kolun değişmez kimliği (fork'taki giriş node'u). WOR-73 öncesi
-    /// satırlarda NULL olabilir → çağıran `branch_node`'a düşer.
-    pub entry_node: Option<String>,
+    /// WOR-73: kolun değişmez kimliği (fork'taki giriş node'u).
+    /// Ç4 (v2.3): kolon `NOT NULL` — fallback YOK.
+    pub entry_node: String,
     pub status: String,
     pub claimed_by: Option<serde_json::Value>,
     pub claimed_at: Option<DateTime<Utc>>,
@@ -82,6 +82,9 @@ pub struct BranchRow {
 pub struct BranchListRow {
     pub wfe_id: Uuid,
     pub branch_node: String,
+    /// Ç4: liste sorgusu da kol KİMLİĞİNİ çeker — eskiden hiç SELECT edilmiyor ve
+    /// `BranchState.entry_node` boş string ile kuruluyordu.
+    pub entry_node: String,
     pub status: String,
     pub claimed_by: Option<serde_json::Value>,
     pub claimed_at: Option<DateTime<Utc>>,
@@ -103,4 +106,7 @@ pub struct WfahRow {
     /// K7: geçişin hedef node'u. NULL = terminal/failed/terminated veya
     /// çok-hedefli fork (hedefler `wf.wfe_branch`'te satır satır durur).
     pub to_node: Option<String>,
+    /// Ç4 (v2.3): satırı yazan kolun kimliği (`wfe_branch.entry_node`).
+    /// NULL TEK anlam taşır: "bu satır bir kolda değil".
+    pub branch_entry: Option<String>,
 }

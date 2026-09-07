@@ -151,14 +151,14 @@ fn arrival_matches(w: &Wfes, acting_branch: &str, expected: &[String]) -> bool {
         .branches
         .iter()
         .filter(|b| b.status == BranchStatus::Arrived)
-        .map(|b| b.entry_or_current().to_string())
+        .map(|b| b.entry_node.clone())
         .collect();
     if let Some(acting) = w
         .branches
         .iter()
         .find(|b| b.status == BranchStatus::Active && b.branch_node == acting_branch)
     {
-        actual.push(acting.entry_or_current().to_string());
+        actual.push(acting.entry_node.clone());
     }
     actual.sort();
     actual.dedup();
@@ -423,6 +423,10 @@ impl WfeStore for ParStore {
                     },
                     input: None,
                     applied_at: chrono::Utc::now(),
+                    // Ç2/Ç4: `_join` marker satırı — hareket izi ve kol etiketi yok.
+                    from_node: None,
+                    to_node: None,
+                    branch_entry: None,
                 });
                 apply_next(w, next, !*quorum_collapse);
             }
@@ -781,7 +785,10 @@ async fn collapse_drops_sibling_claims_and_records_them() {
     assert_eq!(cancels.len(), 2, "iki kardeş kol iptal marker'ı");
     for m in cancels {
         let input = m.input.as_ref().unwrap();
-        let expected = match input["node"].as_str().unwrap() {
+        // Ç3: kol KİMLİĞİ `branch_entry`; konumu `at_node` (bu senaryoda kollar tek
+        // adımlı olduğu için ikisi aynı değeri taşır).
+        assert_eq!(input["at_node"], input["branch_entry"]);
+        let expected = match input["branch_entry"].as_str().unwrap() {
             "self__legalApprover" => legal_owner,
             "self__hrApprover" => hr_owner,
             other => panic!("beklenmeyen kol: {other}"),
@@ -902,13 +909,14 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         "yalnız arrived kol superseded marker'ı alır"
     );
     let input = superseded[0].input.as_ref().unwrap();
-    assert_eq!(input["node"], json!("self__legalApprover"));
+    assert_eq!(input["branch_entry"], json!("self__legalApprover"));
+    assert_eq!(input["at_node"], json!("self__legalApprover"));
     assert_eq!(input["reason"], json!("sibling_terminal"));
     assert_eq!(input["approved_by"]["user_id"], json!(legal.user_id));
     assert_eq!(input["approved_by"]["role"], json!("legalApprover"));
     assert!(!input["approved_at"].is_null(), "onay zamanı taşınmalı");
     // WOR-63: geçersizleşmeyi TETİKLEYEN kol/aksiyon/actor
-    assert_eq!(input["trigger_node"], json!("self__financeApprover"));
+    assert_eq!(input["trigger_branch"], json!("self__financeApprover"));
     assert_eq!(input["trigger_action"], json!("reject"));
     assert_eq!(input["trigger_actor"]["user_id"], json!(fin.user_id));
     // hr hâlâ aktifti → cancelled marker'ı; iki marker karışmaz
@@ -920,7 +928,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         .collect();
     assert_eq!(cancels.len(), 1);
     assert_eq!(
-        cancels[0].input.as_ref().unwrap()["node"],
+        cancels[0].input.as_ref().unwrap()["branch_entry"],
         json!("self__hrApprover")
     );
 
@@ -962,7 +970,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
             e.action == "_branch_arrived"
                 && e.input
                     .as_ref()
-                    .map(|i| i["node"] == json!("self__legalApprover"))
+                    .map(|i| i["branch_entry"] == json!("self__legalApprover"))
                     == Some(true)
         })
         .and_then(|e| e.input.as_ref())
@@ -2113,7 +2121,7 @@ async fn or_join_first_arrival_completes_and_cancels_siblings() {
         .entries()
         .iter()
         .filter(|e| e.action == "_branch_cancelled")
-        .filter_map(|e| e.input.as_ref()?.get("node")?.as_str())
+        .filter_map(|e| e.input.as_ref()?.get("branch_entry")?.as_str())
         .collect();
     assert_eq!(cancelled.len(), 2, "iki kardeş kol iptal marker'ı: {cancelled:?}");
     assert!(

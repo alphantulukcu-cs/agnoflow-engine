@@ -2054,7 +2054,7 @@ fn branch_list_view(
 ) -> BranchView {
     BranchView {
         node: node_ref(wfd, &b.branch_node),
-        entry_node: node_ref(wfd, b.entry_or_current()),
+        entry_node: node_ref(wfd, &b.entry_node),
         status: b.status,
         claimed_by: b.claimed_by,
         claimed_at: b.claimed_at,
@@ -2070,9 +2070,10 @@ fn branch_list_view(
 /// `status` metni enum'a eşlenir (aktif dışı zaten sorguda süzülür).
 fn branch_list_row_to_state(r: wf_wfe::models::BranchListRow) -> BranchState {
     BranchState {
-        // WOR-73: liste sorgusu kol kimliğini çekmiyor (havuz görünümü kimliği
-        // kullanmaz) — boş bırakılır, `entry_or_current()` branch_node'a düşer.
-        entry_node: String::new(),
+        // Ç4: liste sorgusu kol KİMLİĞİNİ de çeker. Eskiden boş string konuyor ve
+        // `entry_or_current()` `branch_node`'a düşüyordu — kol hareket etmişse liste
+        // görünümü kimlik olarak KONUMU gösteriyordu.
+        entry_node: r.entry_node,
         branch_node: r.branch_node,
         status: match r.status.as_str() {
             "arrived" => BranchStatus::Arrived,

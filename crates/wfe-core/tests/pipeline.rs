@@ -1861,6 +1861,9 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
             actor: system.clone(),
             input: None,
             applied_at: t0,
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         },
         WfahEntry {
             seq: 2,
@@ -1868,6 +1871,9 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
             actor: system.clone(),
             input: None,
             applied_at: t0 + Duration::days(3),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         },
     ]);
 
@@ -2807,9 +2813,14 @@ async fn branch_approve_arrives_without_occupying_join() {
     // kol transition effect'i staged
     assert!(commit.new_dynctx["finans_onay_zamani"].is_string());
     assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+    // Ç3: kol kimliği (`branch_entry`) + varış anındaki konum (`at_node`).
+    let arrived = commit.wfah_entries[1].input.as_ref().unwrap();
+    assert_eq!(arrived["branch_entry"], json!("self__financeApprover"));
+    assert_eq!(arrived["at_node"], json!("self__financeApprover"));
+    // Ç4: marker satırı da hangi kolda yazıldığını TAŞIR (kolon karşılığı).
     assert_eq!(
-        commit.wfah_entries[1].input.as_ref().unwrap()["node"],
-        json!("self__financeApprover")
+        commit.wfah_entries[1].branch_entry.as_deref(),
+        Some("self__financeApprover")
     );
     // varış WFE'yi taşımaz — aday cache boş kalır (kol havuzu T3'te branch satırından)
     assert!(commit.resolved_c_a.is_empty());
@@ -3097,7 +3108,7 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     );
     let cancel = &commit.wfah_entries[2];
     assert_eq!(
-        cancel.input.as_ref().unwrap()["node"],
+        cancel.input.as_ref().unwrap()["branch_entry"],
         json!("self__financeApprover")
     );
     assert_eq!(
@@ -3107,7 +3118,7 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     assert_eq!(cancel.actor.role, "system");
     let superseded = &commit.wfah_entries[3];
     assert_eq!(
-        superseded.input.as_ref().unwrap()["node"],
+        superseded.input.as_ref().unwrap()["branch_entry"],
         json!("self__hrApprover")
     );
     assert_eq!(
@@ -3187,7 +3198,7 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     );
     let cancel = &commit.wfah_entries[2];
     assert_eq!(
-        cancel.input.as_ref().unwrap()["node"],
+        cancel.input.as_ref().unwrap()["branch_entry"],
         json!("self__legalApprover")
     );
     assert_eq!(cancel.input.as_ref().unwrap()["reason"], json!("collapsed"));
@@ -3258,7 +3269,7 @@ async fn collapse_marker_carries_dropped_claim_owner() {
         .find(|e| e.action == "_branch_cancelled")
         .expect("_branch_cancelled marker");
     let input = cancel.input.as_ref().unwrap();
-    assert_eq!(input["node"], json!("self__legalApprover"));
+    assert_eq!(input["branch_entry"], json!("self__legalApprover"));
     assert_eq!(input["claimed_by"], json!(legal_owner));
     assert_eq!(input["claimed_at"], json!(legal_claimed_at));
 }
@@ -3338,8 +3349,9 @@ async fn collapse_summary_marker_describes_whole_event() {
     for detail in &commit.wfah_entries[2..] {
         let d = detail.input.as_ref().unwrap();
         assert_eq!(d["reason"], json!("collapsed"), "{}", detail.action);
+        // Ç3: detay marker'larında da ad `trigger_branch`, değer kol KİMLİĞİ.
         assert_eq!(
-            d["trigger_node"],
+            d["trigger_branch"],
             json!("self__financeApprover"),
             "{}",
             detail.action
@@ -3864,7 +3876,7 @@ async fn deadline_in_parallel_mode_cancels_all_active_branches() {
     );
     let nodes: Vec<&Value> = commit.wfah_entries[2..]
         .iter()
-        .map(|e| &e.input.as_ref().unwrap()["node"])
+        .map(|e| &e.input.as_ref().unwrap()["branch_entry"])
         .collect();
     assert_eq!(
         nodes,
@@ -5559,4 +5571,251 @@ async fn non_admin_gets_no_global_actions() {
         .await
         .expect_err("admin olmayan iptal edemez");
     assert!(matches!(err, EngineError::Unauthorized), "{err:?}");
+}
+
+// ============================ Ç2/Ç3/Ç4 — satır alanları (v2.3, WOR-75) ============
+//
+// Ç2: akış izi (`from_node`/`to_node`) ve Ç4: kol etiketi (`branch_entry`) artık
+// SATIRIN kendisinde durur. Eskiden adapter bir commit'in TÜM satırlarına aynı
+// from/to'yu yazıyordu; `$valid` satır satır hesaplandığı için bu yanlış cevap
+// üretir. Ç3: kol marker'ları kolun KİMLİĞİNİ (`branch_entry`) ve KONUMUNU
+// (`at_node`) ayrı alanlarda taşır.
+
+/// Kol içinde ilerlemiş (`BranchMoveTo` görmüş) kol: kimliği giriş node'u KALIR,
+/// konumu değişir.
+fn moved_branch(
+    entry: &str,
+    at: &str,
+    status: BranchStatus,
+    claimed_by: Option<Uuid>,
+) -> BranchState {
+    let mut b = branch(at, status, claimed_by);
+    b.entry_node = entry.into();
+    b
+}
+
+/// Ç2: hareket üreten satır commit'in from/to'sunu taşır, aynı commit'teki marker
+/// satırları (trigger kaydı) TAŞIMAZ — ve ayrım marker ADINDAN türetilmez.
+#[tokio::test(start_paused = true)]
+async fn movement_row_carries_the_path_but_markers_do_not() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    // within_limit false → hedef bir NODE (terminal değil), yani to_node dolu.
+    let runner = MockRunner::ok(650, "C", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let a = analyst(Uuid::new_v4());
+    let wfes = wfes_at("self__creditAnalyst", Some(a.user_id), start_input());
+
+    let commit = engine
+        .apply(
+            &golden(),
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 90000}}),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (movement, markers) = commit.wfah_entries.split_first().unwrap();
+    assert_eq!(movement.action, "analyst_approve");
+    assert_eq!(movement.from_node.as_deref(), Some("self__creditAnalyst"));
+    assert_eq!(movement.to_node.as_deref(), Some("self__branchManager"));
+    // Paralel mod DIŞI → satır bir kolda değil.
+    assert!(movement.branch_entry.is_none());
+    assert!(
+        !markers.is_empty(),
+        "golden'ın analyst_approve'u trigger taşır: {:?}",
+        wfah_actions(&commit)
+    );
+    for m in markers {
+        assert!(
+            m.from_node.is_none() && m.to_node.is_none(),
+            "marker satırı akış izi taşımamalı: {}",
+            m.action
+        );
+    }
+}
+
+/// Start satırının `from_node`'u YOKTUR (öncesi yok), `to_node`'u varılan node'dur.
+#[tokio::test(start_paused = true)]
+async fn start_row_carries_only_the_target() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+
+    let new = engine
+        .start(
+            &golden(),
+            &clerk(Uuid::new_v4()),
+            Uuid::nil(),
+            None,
+            &start_input(),
+            Uuid::new_v4(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let row = &new.wfah_entries[0];
+    assert_eq!(row.action, "create_application");
+    assert!(row.from_node.is_none(), "start'ın öncesi yok");
+    assert_eq!(row.to_node.as_deref(), Some("self__creditAnalyst"));
+    assert!(row.branch_entry.is_none());
+}
+
+/// Ç3: kol içinde ilerlemiş bir kol iptal olduğunda marker KİMLİĞİ ve KONUMU AYRI
+/// alanlarda taşır. Tek `node` alanı KONUMU yazıyordu — `$valid` eleme kuralı 1 ve
+/// portalın kol eşleştirmesi kimlik bekler, o yüzden yanlış anahtarı okuyorlardı.
+#[tokio::test]
+async fn branch_markers_separate_identity_from_position() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let wfes = parallel_wfes(
+        vec![
+            // finance kolu giriş node'undan ilerledi: kimlik financeApprover KALIR.
+            moved_branch(
+                "self__financeApprover",
+                "self__financeSenior",
+                BranchStatus::Active,
+                None,
+            ),
+            branch("self__legalApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    // SLA-3 sonlanması: acting kol YOK, tüm aktif kollar iptal edilir.
+    let commit = engine.fire_deadline_timeout(&wfes, Utc::now());
+
+    let moved = commit
+        .wfah_entries
+        .iter()
+        .find(|e| {
+            e.action == "_branch_cancelled"
+                && e.branch_entry.as_deref() == Some("self__financeApprover")
+        })
+        .expect("ilerlemiş kol için _branch_cancelled");
+    let input = moved.input.as_ref().unwrap();
+    assert_eq!(input["branch_entry"], json!("self__financeApprover"));
+    assert_eq!(input["at_node"], json!("self__financeSenior"));
+    assert!(
+        input.get("node").is_none(),
+        "belirsiz `node` alanı KALKTI: {input}"
+    );
+
+    // Manşetin listeleri de KİMLİK taşır (konum değil).
+    let summary = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "_collapse")
+        .and_then(|e| e.input.as_ref())
+        .expect("_collapse özeti");
+    assert_eq!(
+        summary["cancelled"],
+        json!(["self__financeApprover", "self__legalApprover"])
+    );
+
+    // Ç2: bu commit'te hareket üreten satır YOK (WFE terminated) — hepsi marker.
+    for e in &commit.wfah_entries {
+        assert!(
+            e.from_node.is_none() && e.to_node.is_none(),
+            "{} akış izi taşımamalı",
+            e.action
+        );
+    }
+}
+
+/// Ç3 (kanıt #1): `_branch_superseded`in onay bilgisi kol HAREKET ETTİKTEN sonra da
+/// bulunur — geri okuma anahtarı kolun kimliğidir. `branch_node` ile aranırken çok
+/// adımlı kolda `approved_by: null` yazılıyordu.
+#[tokio::test]
+async fn superseded_marker_finds_the_approval_after_the_branch_moved() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let senior = actor_with_role("financeSenior");
+    let mut wfes = parallel_wfes(
+        vec![
+            // Kol ara node'dan join'e vardı; kimliği hâlâ giriş node'u.
+            moved_branch(
+                "self__financeApprover",
+                "self__financeSenior",
+                BranchStatus::Arrived,
+                None,
+            ),
+            branch("self__legalApprover", BranchStatus::Active, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    let approved_at = Utc::now();
+    // Varış marker'ı Ç3 şeklinde: kimlik `branch_entry`, konum `at_node`.
+    let seq = wfes.wfah.entries().last().unwrap().seq + 1;
+    wfes.wfah = Wfah(
+        wfes.wfah
+            .entries()
+            .iter()
+            .cloned()
+            .chain(std::iter::once(WfahEntry {
+                seq,
+                action: "_branch_arrived".into(),
+                actor: senior.clone(),
+                input: Some(json!({
+                    "branch_entry": "self__financeApprover",
+                    "at_node": "self__financeSenior",
+                    "approved_by": senior,
+                    "approved_at": approved_at,
+                    "claimed_at": approved_at,
+                })),
+                applied_at: approved_at,
+                from_node: None,
+                to_node: None,
+                branch_entry: Some("self__financeApprover".into()),
+            }))
+            .collect(),
+    );
+
+    let commit = engine.fire_deadline_timeout(&wfes, Utc::now());
+
+    let superseded = commit
+        .wfah_entries
+        .iter()
+        .find(|e| e.action == "_branch_superseded")
+        .and_then(|e| e.input.as_ref())
+        .expect("arrived kol için _branch_superseded");
+    assert_eq!(superseded["branch_entry"], json!("self__financeApprover"));
+    assert_eq!(superseded["at_node"], json!("self__financeSenior"));
+    assert_eq!(
+        superseded["approved_by"]["user_id"],
+        json!(senior.user_id),
+        "onay bilgisi kol hareketinden sonra da bulunmalı: {superseded}"
+    );
 }

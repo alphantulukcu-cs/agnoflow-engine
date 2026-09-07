@@ -510,11 +510,23 @@ Uygulama: `crates/server/src/notes.rs` (`attachments`'ın kardeşi) + `routes/no
 - **4 tablo**: `wf.wfe_note` / `wf.wfe_note_file` / `wf.wfe_note_read` (Faz 1/2/3) +
   `wf.wfah`'a eklenen `from_node`/`to_node` (Faz 0, K7).
 - `from_node`/`to_node` YALNIZ KAYIT VE EKRAN içindir; `$wfah` izdüşümü (`{seq, action,
-  actor, input, at}`) DEĞİŞMEDİ. `WfahEntry` core tipine alan eklenmedi (golden fixture'ı
-  bozardı) — bilgi `WfeAdapter` seviyesinde türetilir (`commit`'in zaten bildiği
-  `to_node`/`current_node`'dan), `GET /wfe/:id` cevabına `WfeView.path` (`Vec<PathStep>`)
+  actor, input, at}`) DEĞİŞMEDİ. `GET /wfe/:id` cevabına `WfeView.path` (`Vec<PathStep>`)
   ile sunulur; seam `crates/wfe/src/executor.rs`'deki `WfahPathSource` trait'i + boş
   dönen `NoWfahPath` (store'suz testleri etkilemesin diye).
+- **GÜNCEL (2026-09-07, v2.3 / Ç2-Ç4):** K7'nin *"`WfahEntry` core tipine alan
+  eklenmedi, bilgi adapter'da türetilir"* kuralı **GERİ ALINDI.** `WfahEntry` artık
+  `from_node` + `to_node` + `branch_entry` taşır; `insert_wfah_entries` bunları
+  PARAMETRE OLARAK ALMAZ. Hareket üreten satır commit'in from/to'sunu taşır, marker
+  satırları `None` — ayrım satırı ÜRETEN kodda (`pipeline::stamp_movement`), marker
+  ADINDAN türetilmez. Türetim çekirdekte (`CommitOutcome::from_node()/to_node()`)
+  çünkü `sim.rs` de aynı satırları üretmek zorunda. `$wfah` izdüşümü (`project_entry`)
+  hâlâ DEĞİŞMEDİ — ZEN'e açılması ayrı iş. Gerekçe: `docs/spec/decisions.md` →
+  *WFAH satır alanları*; alan tanımları: `docs/spec/terminology.md`.
+- **Kol KİMLİĞİ ≠ kol KONUMU** (Ç3/Ç4): kimlik `wfe_branch.entry_node` (artık
+  `NOT NULL`, `BranchState::entry_or_current()` fallback'i SİLİNDİ), konum
+  `branch_node`. Kol marker'ları ikisini ayrı taşır (`branch_entry` / `at_node`);
+  belirsiz `node` alanı ve `trigger_node` adı KALKTI. `WfahView.node` KONUMU temsil
+  eder.
 - **draft → (dosya) → AKSİYONLA publish** deseni (K5): `POST /wfe/:id/notes` draft yaratır
   (yalnız yazarı görür) → istenirse `PUT .../notes/:note_id/files` ile dosya → yayın
   **yalnız aksiyonla** olur (`POST /wfe/:id/actions` gövdesinde `note_id`,
@@ -633,6 +645,13 @@ yazılmadı. Sözleşme: `docs/spec/schema.json` + `wfe_core::v22::display`.
     alan `Wfes`te olduğu için her yol (store · sim · testler) doldurmak ZORUNDA — parametre
     olsaydı atlayan çağıran kapıyı sessizce kapatırdı. Adapter `build_wfes`te K7
     kolonlarından doldurur, **ekstra sorgu yok**; `SimState` karşılığı `#[serde(default)]`.
+  - **SINIR (2026-09-07, Ç2):** kolonlar artık YALNIZ hareket satırında dolu. Escalation
+    ve claim timeout devir yolları marker satırıdır (from/to `None`), dolayısıyla o
+    yolla girilen node kümeye ancak orada bir aksiyon alındığında (o aksiyonun
+    `from_node`'u) girer. İki sistem taşımasının arka arkaya koştuğu ve arada insan
+    aksiyonu olmayan durumda ara node menüde ÇIKMAZ. Bilinçli: v2.3'ün C ekseninde
+    escalation node değiştirmeyecek, claim timeout yalnız claim'i bırakacak — iki devir
+    yolu da kalkıyor.
   - `Engine::apply` `target: Option<&str>` alır. Zorunlu olduğu yerde yoksa
     `TargetRequired` (400 `action.target_required`), süzülmüş menüde olmayan hedef
     `TargetInvalid` (400 `action.target_invalid`), menüsüz aksiyonda gönderilmişse

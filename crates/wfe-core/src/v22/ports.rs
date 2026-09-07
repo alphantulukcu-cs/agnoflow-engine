@@ -36,12 +36,13 @@ pub struct BranchState {
     pub branch_node: String,
     /// WOR-73: kolun DEĞİŞMEZ kimliği — fork'taki giriş node'u. `branch_node` kol
     /// içinde aksiyon alındıkça değişir (`BranchMoveTo`), dolayısıyla "hangi kol"
-    /// sorusunun cevabı o değildir. Join koşulu (`$branches.<entry_node>`) ve
-    /// varış-kümesi doğrulaması bu alanla çalışır.
+    /// sorusunun cevabı o değildir. Join koşulu (`$branches.<entry_node>`),
+    /// varış-kümesi doğrulaması ve `WfahEntry::branch_entry` bu alanla çalışır.
     ///
-    /// `#[serde(default)]`: WOR-73 öncesi yazılmış sim_state blob'larında alan yok →
-    /// boş string okunur; `entry_or_current()` o durumda `branch_node`'a düşer.
-    #[serde(default)]
+    /// Ç4 (v2.3): alan HER ZAMAN DOLUDUR. `wf.wfe_branch.entry_node` `NOT NULL`'a
+    /// çekildi ve okuyan her yol (adapter, liste sorgusu, sim) kolonu çeker —
+    /// `#[serde(default)]` ve `entry_or_current()` fallback'i SİLİNDİ: boş string
+    /// artık "kimliği bilinmiyor" diye sessizce geçmez (Değişmez #9).
     pub entry_node: String,
     pub status: BranchStatus,
     pub claimed_by: Option<Uuid>,
@@ -113,8 +114,13 @@ pub struct Wfes {
     /// parametre olsaydı doldurmayı atlayan çağıran kapıyı sessizce kapatırdı.
     ///
     /// Kaynak: `wf.wfah.from_node` ∪ `to_node` (K7'de eklenen kolonlar; ekstra sorgu
-    /// GEREKMEZ, adapter zaten o satırları okuyor). Escalation/claim_timeout ile
-    /// taşınan node'lar da DAHİLDİR — WFE orada gerçekten bekledi.
+    /// GEREKMEZ, adapter zaten o satırları okuyor).
+    ///
+    /// SINIR (Ç2, v2.3): kolonlar artık yalnız HAREKET satırında doludur. Escalation /
+    /// claim timeout devir yolları marker satırı yazar (from/to `None`), dolayısıyla o
+    /// yolla girilen node kümeye ancak orada bir aksiyon alındığında girer (o aksiyonun
+    /// `from_node`'u). İki sistem taşıması arka arkaya koşarsa aradaki node menüde
+    /// çıkmaz — v2.3'ün C ekseni iki devir yolunu da kaldırıyor.
     ///
     /// SINIR: iptal olmuş paralel kardeş kolun node'ları da bu listede kalır. Tasarım
     /// zamanı kuralı (editör SB-P/SB-R) o hedefleri zaten yasaklar; runtime kesişimi
@@ -127,18 +133,6 @@ pub struct Wfes {
     /// aktörün birimi. Böylece backfill tamamlanana kadar hiçbir akışın
     /// görünürlüğü DEĞİŞMEZ.
     pub origin_orgu_id: Option<Uuid>,
-}
-
-impl BranchState {
-    /// WOR-73: kol kimliği. WOR-73 öncesi kayıtlarda `entry_node` boştur — o zaman
-    /// `branch_node`'a düşer (kol hiç hareket etmediyse ikisi zaten aynıdır).
-    pub fn entry_or_current(&self) -> &str {
-        if self.entry_node.is_empty() {
-            &self.branch_node
-        } else {
-            &self.entry_node
-        }
-    }
 }
 
 impl Wfes {
@@ -239,6 +233,46 @@ pub enum CommitOutcome {
         from_node: String,
         node: String,
     },
+}
+
+impl CommitOutcome {
+    /// K7/Ç2: bu geçişin HAREKET satırına yazılacak "nereye gidildi".
+    ///
+    /// `ForkTo` birden çok hedefe dağılır (kol satırları `wf.wfe_branch`'te zaten
+    /// satır satır var) → `None`. `JoinComplete` kendi hedefini taşımaz, gerçek
+    /// hedef içteki `next` outcome'undadır → recursive.
+    pub fn to_node(&self) -> Option<&str> {
+        match self {
+            CommitOutcome::MoveTo { node }
+            | CommitOutcome::BranchMoveTo { node, .. }
+            | CommitOutcome::CollapseTo { node, .. } => Some(node),
+            CommitOutcome::JoinComplete { next, .. } => next.to_node(),
+            CommitOutcome::ForkTo { .. }
+            | CommitOutcome::Terminal { .. }
+            | CommitOutcome::Failed { .. }
+            | CommitOutcome::Terminated { .. }
+            | CommitOutcome::BranchArrived { .. } => None,
+        }
+    }
+
+    /// K7/Ç2: hareket satırının "nereden gidildi"si — outcome varyantı zaten
+    /// taşıyorsa (`BranchMoveTo`/`BranchArrived`/`JoinComplete`/`CollapseTo`) ondan.
+    /// `MoveTo`/`ForkTo`/`Terminal`/`Failed`/`Terminated`'da böyle bir alan YOKTUR;
+    /// o yollarda kaynak node'u satırı üreten kod bilir (`wfes.current_node`) ve
+    /// `Engine::stamp_movement`'a verir.
+    pub fn from_node(&self) -> Option<&str> {
+        match self {
+            CommitOutcome::BranchMoveTo { from_node, .. }
+            | CommitOutcome::BranchArrived { from_node, .. }
+            | CommitOutcome::JoinComplete { from_node, .. }
+            | CommitOutcome::CollapseTo { from_node, .. } => Some(from_node),
+            CommitOutcome::MoveTo { .. }
+            | CommitOutcome::ForkTo { .. }
+            | CommitOutcome::Terminal { .. }
+            | CommitOutcome::Failed { .. }
+            | CommitOutcome::Terminated { .. } => None,
+        }
+    }
 }
 
 /// WFC çağrısının yapıldığı yer. Mod ile birlikte "nasıl çağrıldı"yı tamamlar.

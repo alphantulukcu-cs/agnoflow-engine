@@ -520,6 +520,9 @@ fn callee_history(base: DateTime<Utc>) -> Vec<wfe_core::types::wfah::WfahEntry> 
             actor: actor("branchClerk"),
             input: Some(json!({ "musteri_no": "M-1" })),
             applied_at: base + chrono::Duration::minutes(5),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         },
         WfahEntry {
             seq: 2,
@@ -527,6 +530,9 @@ fn callee_history(base: DateTime<Utc>) -> Vec<wfe_core::types::wfah::WfahEntry> 
             actor: uzman,
             input: Some(json!({ "skor": 780 })),
             applied_at: base + chrono::Duration::minutes(40),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         },
     ]
 }
@@ -655,6 +661,9 @@ async fn inlined_actions_are_namespaced_to_avoid_wfah_collisions() {
         actor: actor("branchManager"),
         input: None,
         applied_at: base + chrono::Duration::minutes(5),
+        from_node: None,
+        to_node: None,
+        branch_entry: None,
     }];
 
     let commit = engine
@@ -701,6 +710,9 @@ async fn long_callee_history_is_truncated_with_an_explicit_marker() {
             actor: actor("riskAnalyst"),
             input: None,
             applied_at: base + chrono::Duration::seconds(i as i64),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         })
         .collect();
 

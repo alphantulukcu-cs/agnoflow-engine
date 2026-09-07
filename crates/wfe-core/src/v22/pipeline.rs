@@ -385,6 +385,10 @@ impl<'a> Engine<'a> {
             staged = apply_effects(&staged, effects, &env)?;
         }
 
+        // Ç2: start'ın HAREKET satırı. `from_node` YOK (öncesi yok), `to_node` outcome
+        // çözüldükten sonra `stamp_movement` ile yazılır. Start'ta fork YASAK →
+        // `branch_entry` daima `None` (satır bir kolda değil).
+        let action_row = wfah_entries.len();
         wfah_entries.push(WfahEntry {
             seq,
             // Transition'lar gibi düz action adını yazar (rule.id DEĞİL). M16: start
@@ -394,6 +398,9 @@ impl<'a> Engine<'a> {
             actor: actor.clone(),
             input: Some(input.clone()),
             applied_at: now,
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         });
         seq += 1;
 
@@ -405,6 +412,8 @@ impl<'a> Engine<'a> {
             &mut seq,
             actor,
             wfe_id,
+            None,
+            // Ç4: start'ta paralel mod yok.
             None,
             Some(input),
             &empty_wfah,
@@ -426,6 +435,8 @@ impl<'a> Engine<'a> {
                 WftMode::Start,
             )
             .await?;
+
+        stamp_movement(&mut wfah_entries[action_row], &outcome, None);
 
         // Aksiyon işlendi: `start[].action` kaydı artık defterde (M16 — çapalar bu
         // gerçek adı referans alır). Adaylar bu defterle çözülür.
@@ -616,12 +627,18 @@ impl<'a> Engine<'a> {
             staged = apply_effects(&staged, effects, &env)?;
         }
 
+        // Ç2: bu geçişin HAREKET satırı — from/to outcome çözülünce yazılır
+        // (`stamp_movement`). Tek-kol yol → `branch_entry: None`.
+        let action_row = wfah_entries.len();
         wfah_entries.push(WfahEntry {
             seq,
             action: action.to_string(),
             actor: actor.clone(),
             input: Some(input.clone()),
             applied_at: now,
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         });
         seq += 1;
 
@@ -635,6 +652,7 @@ impl<'a> Engine<'a> {
             actor,
             wfes.wfe_id,
             Some(current_node),
+            None,
             Some(input),
             &wfes.wfah,
             wfes.orgtnt_id,
@@ -655,6 +673,12 @@ impl<'a> Engine<'a> {
                 WftMode::Single,
             )
             .await?;
+
+        stamp_movement(
+            &mut wfah_entries[action_row],
+            &outcome,
+            Some(current_node),
+        );
 
         // Aksiyon işlendi — varılan yeri kim yapabilir?
         let wfah = wfes.wfah.extended(&wfah_entries);
@@ -840,12 +864,18 @@ impl<'a> Engine<'a> {
             staged = apply_effects(&staged, effects, &env)?;
         }
 
+        // Ç2: kolun HAREKET satırı — from/to outcome çözülünce yazılır.
+        // Ç4: satır KOLDA üretiliyor → kolun DEĞİŞMEZ kimliği (`entry_node`) etiketi.
+        let action_row = wfah_entries.len();
         wfah_entries.push(WfahEntry {
             seq,
             action: action.to_string(),
             actor: actor.clone(),
             input: Some(input.clone()),
             applied_at: now,
+            from_node: None,
+            to_node: None,
+            branch_entry: Some(branch.entry_node.clone()),
         });
         seq += 1;
 
@@ -859,6 +889,7 @@ impl<'a> Engine<'a> {
             actor,
             wfes.wfe_id,
             Some(branch_node),
+            Some(branch.entry_node.as_str()),
             Some(input),
             &wfes.wfah,
             wfes.orgtnt_id,
@@ -890,6 +921,8 @@ impl<'a> Engine<'a> {
                 },
             )
             .await?;
+
+        stamp_movement(&mut wfah_entries[action_row], &outcome, Some(branch_node));
 
         // Aksiyon işlendi — varılan yeri kim yapabilir? (kol varışında aday yok)
         let wfah = wfes.wfah.extended(&wfah_entries);
@@ -1412,6 +1445,11 @@ impl<'a> Engine<'a> {
             actor: reassigner.clone(),
             input: Some(input),
             applied_at: now,
+            // Ç2: sahiplik devri node DEĞİŞTİRMEZ — hareket satırı değil.
+            from_node: None,
+            to_node: None,
+            // Ç4: kol devrinde satır O KOLDA üretilir.
+            branch_entry: branch_entry_of(wfes, branch),
         })
     }
 
@@ -1687,6 +1725,11 @@ impl<'a> Engine<'a> {
                 actor: admin.clone(),
                 input: Some(json!({"skipped": true, "after": forecast.deadline.to_rfc3339()})),
                 applied_at: now,
+                // Ç2: sayaç atlaması node DEĞİŞTİRMEZ — marker satırı.
+                from_node: None,
+                to_node: None,
+                // Ç4: kol sayacı atlanıyorsa satır O KOLDA.
+                branch_entry: branch_entry_of(wfes, branch),
             },
             marker,
         }))
@@ -1849,6 +1892,11 @@ impl<'a> Engine<'a> {
                 "global_action": action.as_str(),
             })),
             applied_at: now,
+            // Ç2: global aksiyon akışı TAŞIR — bu commit'in hareket satırı budur;
+            // from/to outcome çözülünce yazılır. Yol paralel modda çalışmaz.
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         }];
         seq += 1;
 
@@ -1874,6 +1922,7 @@ impl<'a> Engine<'a> {
                 WftMode::Single,
             )
             .await?;
+        stamp_movement(&mut wfah_entries[0], &outcome, wfes.current_node.as_deref());
 
         let wfah = wfes.wfah.extended(&wfah_entries);
         let resolved_c_a = self
@@ -1964,6 +2013,11 @@ impl<'a> Engine<'a> {
             actor: admin.clone(),
             input: Some(input),
             applied_at: now,
+            // Ç2: iptal akışı bir node'a TAŞIMAZ (WFE `terminated`) — hareket satırı yok.
+            from_node: None,
+            to_node: None,
+            // Ç4: iptal WFE GENELİDİR, bir kolun içinde değil.
+            branch_entry: None,
         }];
         seq += 1;
 
@@ -2124,6 +2178,12 @@ impl<'a> Engine<'a> {
                 json!({"after": step.after})
             }),
             applied_at: now,
+            // Ç2: escalation MARKER satırıdır — akış izi taşımaz (v2.3/C ekseni:
+            // escalation node değiştirmeyecek; taşıma yolu `R02` ile düşer).
+            from_node: None,
+            to_node: None,
+            // Ç4: kol escalation'ında satır O KOLDA üretilir.
+            branch_entry: branch_entry_of(wfes, branch),
         }];
         seq += 1;
 
@@ -2275,6 +2335,11 @@ impl<'a> Engine<'a> {
             actor: system.clone(),
             input: Some(json!({"deadline": wfes.deadline})),
             applied_at: now,
+            // Ç2: marker satırı — akış bir node'a gitmez, WFE `terminated`.
+            from_node: None,
+            to_node: None,
+            // Ç4: akış süresi WFE GENELİDİR.
+            branch_entry: None,
         }];
         seq += 1;
         let outcome = CommitOutcome::Terminated {
@@ -2423,6 +2488,11 @@ impl<'a> Engine<'a> {
                     actor: system,
                     input: Some(json!({"after": ct.after})),
                     applied_at: now,
+                    // Ç2: yalnız claim düşer, node DEĞİŞMEZ — marker satırı.
+                    from_node: None,
+                    to_node: None,
+                    // Ç4: kolun claim'i düşüyorsa satır O KOLDA.
+                    branch_entry: branch_entry_of(wfes, branch),
                 };
                 Ok(ClaimTimeoutOutcome::Release(ClaimRelease {
                     wfah_entry,
@@ -2469,6 +2539,12 @@ impl<'a> Engine<'a> {
                         json!({"after": ct.after, "wft": target})
                     }),
                     applied_at: now,
+                    // Ç2: claim timeout MARKER satırıdır (v2.3/C ekseni: devir yolu
+                    // `Ç1-EK`/`R02` ile düşer, timeout yalnız claim'i bırakır).
+                    from_node: None,
+                    to_node: None,
+                    // Ç4: kol claim timeout'unda satır O KOLDA üretilir.
+                    branch_entry: branch_entry_of(wfes, branch),
                 }];
                 seq += 1;
                 let all_entries = all_entry_nodes(wfes);
@@ -2579,6 +2655,9 @@ impl<'a> Engine<'a> {
         actor: &Actor,
         wfe_id: Uuid,
         node: Option<&str>,
+        // Ç4: trigger bir KOL bağlamında koştuysa kolun kimliği (`entry_node`) —
+        // satır o kolda üretilmiştir. Tek-kol/start yolunda `None`.
+        branch_entry: Option<&str>,
         action_input: Option<&Value>,
         wfah: &Wfah,
         _orgtnt_id: Uuid,
@@ -2631,6 +2710,11 @@ impl<'a> Engine<'a> {
                         actor: system,
                         input: Some(json!({"result": result})),
                         applied_at: Utc::now(),
+                        // Ç2: trigger MARKER satırıdır — hareketi aynı commit'teki
+                        // aksiyon satırı taşır.
+                        from_node: None,
+                        to_node: None,
+                        branch_entry: branch_entry.map(str::to_string),
                     });
                     *seq += 1;
                 }
@@ -2663,6 +2747,9 @@ impl<'a> Engine<'a> {
                                 "handled": true,
                             })),
                             applied_at: Utc::now(),
+                            from_node: None,
+                            to_node: None,
+                            branch_entry: branch_entry.map(str::to_string),
                         });
                         *seq += 1;
                         continue; // handled — devam (routing YOK)
@@ -2685,6 +2772,9 @@ impl<'a> Engine<'a> {
                             "required": false,
                         })),
                         applied_at: Utc::now(),
+                        from_node: None,
+                        to_node: None,
+                        branch_entry: branch_entry.map(str::to_string),
                     });
                     *seq += 1;
                 }
@@ -2848,6 +2938,12 @@ impl<'a> Engine<'a> {
                     "input": entry.input,
                 })),
                 applied_at: entry.applied_at,
+                // Ç2: ÇAĞRILANIN akış izi çağıranın node'larına ait değildir —
+                // ad-alanına alınmış bir kopyadır, hareket taşımaz.
+                from_node: None,
+                to_node: None,
+                // Ç4: çağrı node'u paralel modda olamaz (validator).
+                branch_entry: None,
             });
             seq += 1;
         }
@@ -2865,6 +2961,9 @@ impl<'a> Engine<'a> {
                     "reason": "call_history_truncated",
                 })),
                 applied_at: callee_wfah[inlined.saturating_sub(1)].applied_at,
+                from_node: None,
+                to_node: None,
+                branch_entry: None,
             });
             seq += 1;
         }
@@ -2879,6 +2978,10 @@ impl<'a> Engine<'a> {
                 "callee_wfe_id": callee_wfe_id,
             })),
             applied_at: now,
+            // Ç2: dönüş MARKER satırıdır.
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
         });
         seq += 1;
 
@@ -3608,6 +3711,29 @@ enum WftMode<'p> {
     },
 }
 
+/// Ç2: commit'in HAREKET satırına (asıl aksiyon) akış izini yazar. Marker satırlarına
+/// DOKUNULMAZ — onları üreten kod `None` ile kurar, ayrım marker ADINDAN türetilmez.
+///
+/// `fallback_from`: outcome kaynağı taşımıyorsa (`MoveTo`/`ForkTo`/`Terminal`/`Failed`/
+/// `Terminated`) satırı üreten yolun bildiği kaynak node — tek-kol yolda
+/// `wfes.current_node`, kol yolunda kolun o anki node'u.
+fn stamp_movement(entry: &mut WfahEntry, outcome: &CommitOutcome, fallback_from: Option<&str>) {
+    entry.from_node = outcome
+        .from_node()
+        .or(fallback_from)
+        .map(str::to_string);
+    entry.to_node = outcome.to_node().map(str::to_string);
+}
+
+/// Ç4: kol node'u (KONUM) → kol kimliği (`entry_node`). Kol bağlamında üretilen
+/// satırların `branch_entry`'si böyle çözülür; paralel-olmayan yolda `None`
+/// ("bu satır bir kolda değil").
+fn branch_entry_of(wfes: &Wfes, branch: Option<&str>) -> Option<String> {
+    branch
+        .and_then(|b| active_branch(wfes, b))
+        .map(|b| b.entry_node.clone())
+}
+
 /// Kol node'una göre AKTİF branch state'i.
 fn active_branch<'w>(wfes: &'w Wfes, node: &str) -> Option<&'w BranchState> {
     wfes.branches
@@ -3628,7 +3754,7 @@ fn active_others(wfes: &Wfes, branch_node: &str) -> usize {
 fn all_entry_nodes(wfes: &Wfes) -> Vec<String> {
     wfes.branches
         .iter()
-        .map(|b| b.entry_or_current().to_string())
+        .map(|b| b.entry_node.clone())
         .collect()
 }
 
@@ -3640,14 +3766,14 @@ fn arrived_entries_with(wfes: &Wfes, acting_branch: &str) -> Vec<String> {
         .branches
         .iter()
         .filter(|b| b.status == BranchStatus::Arrived)
-        .map(|b| b.entry_or_current().to_string())
+        .map(|b| b.entry_node.clone())
         .collect();
     if let Some(acting) = wfes
         .branches
         .iter()
         .find(|b| b.status == BranchStatus::Active && b.branch_node == acting_branch)
     {
-        out.push(acting.entry_or_current().to_string());
+        out.push(acting.entry_node.clone());
     }
     out.sort();
     out.dedup();
@@ -3658,15 +3784,24 @@ fn arrived_entries_with(wfes: &Wfes, acting_branch: &str) -> Vec<String> {
 /// `_join`: o, son-varış doğrulamasıyla aynı transaction'da ADAPTER tarafından
 /// eklenir (dokümante edilmiş istisna).
 /// - `ForkTo` → `_fork` {branches, join, join_threshold} (WOR-72: null = AND)
-/// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {node, approved_by,
-///   approved_at, claimed_at} (WOR-68: claim başlangıcı; hold = approved_at − claimed_at)
+/// - `BranchArrived`/`JoinComplete` → `_branch_arrived` {branch_entry, at_node,
+///   approved_by, approved_at, claimed_at} (WOR-68: claim başlangıcı;
+///   hold = approved_at − claimed_at)
 /// - WOR-72: quorum (OR) join eşiği dolup geride aktif kol kalırsa `JoinComplete`
 ///   de aşağıdaki collapse yoluna girer (`kind`/`reason` = `join_quorum`); eşiğin
 ///   ÜYESİ olan varmış kardeşler `superseded` işaretlenMEZ (onayları sayıldı).
 /// - paralel modda Terminal/Failed/Terminated/CollapseTo → önce `_collapse` özeti,
 ///   sonra acting kol DIŞINDAKİ her AKTİF kol için `_branch_cancelled`
-///   {node, reason, claimed_by, claimed_at, trigger_*}, her ARRIVED kol için
-///   `_branch_superseded` {node, reason, approved_by, approved_at, trigger_*}
+///   {branch_entry, at_node, reason, claimed_by, claimed_at, trigger_*}, her ARRIVED
+///   kol için `_branch_superseded` {branch_entry, at_node, reason, approved_by,
+///   approved_at, trigger_*}
+///
+/// Ç3 (v2.3): kol marker'ları kolu İKİ ayrı alanla taşır — kimlik `branch_entry`
+/// (kolun DEĞİŞMEZ `entry_node`'u), konum `at_node` (kolun o anki `branch_node`'u).
+/// Belirsiz `node` alanı KALKTI; detay marker'larının `trigger_node`'u
+/// `trigger_branch` oldu ve değeri kol kimliğidir (`_collapse` manşetiyle aynı ad).
+/// `_fork` DEĞİŞMEDİ (zaten giriş node'larını taşıyor). Marker ADLARI değişmez
+/// (Değişmez #2).
 ///
 /// WOR-59: iptal edilen kolun claim'i adapter tarafında düşürülür (`claimed_by`
 /// NULL'lanır) — düşen claim'in SAHİBİ ve TUTULMA BAŞLANGICI bu marker'a yazılır,
@@ -3698,13 +3833,20 @@ fn stage_parallel_markers(
 ) {
     let (acting_branch, actor) = (trigger.branch, trigger.actor);
     let system = system_actor();
-    let mut push = |action: &str, input: Value| {
+    // Ç2: kol/collapse marker'ları HAREKET taşımaz — bu commit'in akış izi aynı
+    // commit'teki aksiyon satırındadır.
+    // Ç4: `branch_entry` marker'ın KONUSU olan kolun kimliğidir; WFE-geneli
+    // marker'larda (`_fork` kolları YARATIR, `_collapse` paralel modu KAPATIR) `None`.
+    let mut push = |action: &str, branch_entry: Option<&str>, input: Value| {
         wfah_entries.push(WfahEntry {
             seq: *seq,
             action: action.to_string(),
             actor: system.clone(),
             input: Some(input),
             applied_at: now,
+            from_node: None,
+            to_node: None,
+            branch_entry: branch_entry.map(str::to_string),
         });
         *seq += 1;
     };
@@ -3723,6 +3865,10 @@ fn stage_parallel_markers(
             };
             push(
                 "_fork",
+                // Ç3/Ç4: `_fork` DEĞİŞMEZ — `branches` listesi fork ANINDA yazılıyor ve
+                // o an `branch_node == entry_node`, yani zaten giriş node'larını
+                // taşıyor. Satırın kendisi bir kolun içinde DEĞİLDİR.
+                None,
                 json!({
                     "branches": branches,
                     "join": join,
@@ -3742,15 +3888,22 @@ fn stage_parallel_markers(
             // varışta NULL'ladığı için "onaylayan kolu ne kadar tuttu" (hold süresi =
             // approved_at − claimed_at) sonradan yalnız bu marker'dan hesaplanabilir.
             // Snapshot (`wfes.branches`) commit ÖNCESİ olduğu için claim hâlâ duruyor.
-            let claimed_at = wfes
+            //
+            // Ç3: kolun KİMLİĞİ (`entry_node`) ile KONUMU (varış node'u) ayrı
+            // alanlarda taşınır; belirsiz `node` alanı KALKTI. `branch_approval`
+            // geri okuması kimlik anahtarıyla çalışır — çok adımlı kolda
+            // `branch_node` ile arama "onay geçersizleşti" bilgisini kaybediyordu.
+            let arriving = wfes
                 .branches
                 .iter()
-                .find(|b| b.branch_node.as_str() == from_node.as_str())
-                .and_then(|b| b.claimed_at);
+                .find(|b| b.branch_node.as_str() == from_node.as_str());
+            let claimed_at = arriving.and_then(|b| b.claimed_at);
             push(
                 "_branch_arrived",
+                arriving.map(|b| b.entry_node.as_str()),
                 json!({
-                    "node": from_node,
+                    "branch_entry": arriving.map(|b| b.entry_node.as_str()),
+                    "at_node": from_node,
                     "approved_by": actor,
                     "approved_at": now,
                     "claimed_at": claimed_at,
@@ -3825,8 +3978,10 @@ fn stage_parallel_markers(
             BranchStatus::Cancelled => {}
         }
     }
+    // Ç3: özet listeleri kol KİMLİKLERİNİ taşır (konumları değil) — `$valid` eleme
+    // kuralı 1 ve portalın kol eşleştirmesi kimlikle çalışır.
     fn nodes<'b>(bs: &[&'b BranchState]) -> Vec<&'b str> {
-        bs.iter().map(|b| b.branch_node.as_str()).collect()
+        bs.iter().map(|b| b.entry_node.as_str()).collect()
     }
 
     // WOR-67: collapse'ı TETİKLEYEN (acting) kolun düşen claim'i. Acting kol marker
@@ -3841,8 +3996,12 @@ fn stage_parallel_markers(
     // marker'lar) KALIR — bu özet onların yerine değil, üstüne geçer.
     push(
         "_collapse",
+        // Manşet paralel modun TAMAMINI özetler — bir kolun satırı değildir.
+        None,
         json!({
-            "trigger_branch": acting_branch,
+            // Ç3: tetikleyen kolun KİMLİĞİ; konumu ayrı alanda.
+            "trigger_branch": acting.map(|b| b.entry_node.as_str()),
+            "trigger_at_node": acting_branch,
             "trigger_action": trigger.action,
             "trigger_actor": actor,
             "trigger_claimed_by": acting.and_then(|b| b.claimed_by),
@@ -3858,30 +4017,36 @@ fn stage_parallel_markers(
     for b in cancelled {
         push(
             "_branch_cancelled",
+            Some(b.entry_node.as_str()),
             json!({
-                "node": b.branch_node,
+                // Ç3: kol kimliği + kolun iptal ANINDAKİ konumu.
+                "branch_entry": b.entry_node,
+                "at_node": b.branch_node,
                 "reason": cancel_reason,
                 // WOR-59: cancel ANINDAKİ claim sahibi/başlangıcı — adapter bu
                 // alanları hemen ardından NULL'ladığı için tek kayıt yeri burası.
                 "claimed_by": b.claimed_by,
                 "claimed_at": b.claimed_at,
-                // WOR-63: tetikleyici bağlam (bkz. `Trigger`).
-                "trigger_node": acting_branch,
+                // WOR-63: tetikleyici bağlam (bkz. `Trigger`). Ç3: ad `_collapse`
+                // manşetiyle aynı (`trigger_branch`), değeri kol KİMLİĞİ.
+                "trigger_branch": acting.map(|a| a.entry_node.as_str()),
                 "trigger_action": trigger.action,
                 "trigger_actor": actor,
             }),
         );
     }
     for b in superseded {
-        let (approved_by, approved_at) = branch_approval(&wfes.wfah, &b.branch_node);
+        let (approved_by, approved_at) = branch_approval(&wfes.wfah, &b.entry_node);
         push(
             "_branch_superseded",
+            Some(b.entry_node.as_str()),
             json!({
-                "node": b.branch_node,
+                "branch_entry": b.entry_node,
+                "at_node": b.branch_node,
                 "reason": cancel_reason,
                 "approved_by": approved_by,
                 "approved_at": approved_at,
-                "trigger_node": acting_branch,
+                "trigger_branch": acting.map(|a| a.entry_node.as_str()),
                 "trigger_action": trigger.action,
                 "trigger_actor": actor,
             }),
@@ -3907,7 +4072,11 @@ struct Trigger<'a> {
 ///
 /// WOR-60 ÖNCESİ yazılmış `_branch_arrived` kayıtlarında bu alanlar yoktur →
 /// null döner; eski WFE'ler için marker yine üretilir, alanları boş kalır.
-fn branch_approval(wfah: &Wfah, node: &str) -> (Value, Value) {
+///
+/// Ç3: arama anahtarı kolun KİMLİĞİDİR (`branch_entry` = `entry_node`), o anki
+/// konumu değil — kol varıştan sonra hareket etmiş olabilir ve `branch_node` ile
+/// arama çok adımlı kolda hiçbir şey bulamazdı (`approved_by: null`).
+fn branch_approval(wfah: &Wfah, branch_entry: &str) -> (Value, Value) {
     let field = |input: &Value, key: &str| input.get(key).cloned().unwrap_or(Value::Null);
     wfah.entries()
         .iter()
@@ -3915,7 +4084,7 @@ fn branch_approval(wfah: &Wfah, node: &str) -> (Value, Value) {
         .filter(|e| e.action == "_branch_arrived")
         .find_map(|e| {
             let input = e.input.as_ref()?;
-            (input.get("node")?.as_str()? == node)
+            (input.get("branch_entry")?.as_str()? == branch_entry)
                 .then(|| (field(input, "approved_by"), field(input, "approved_at")))
         })
         .unwrap_or((Value::Null, Value::Null))

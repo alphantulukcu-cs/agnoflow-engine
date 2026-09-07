@@ -466,7 +466,7 @@ impl BranchView {
     ) -> Self {
         BranchView {
             node: Ref::node(wfd, &state.branch_node),
-            entry_node: Ref::node(wfd, state.entry_or_current()),
+            entry_node: Ref::node(wfd, &state.entry_node),
             status: state.status,
             claimed_by: state.claimed_by,
             claimed_at: state.claimed_at,
@@ -790,9 +790,11 @@ fn wfah_label(wfd: &Wfd, p: &ParsedMarker, node: Option<&Ref>, input: Option<&Va
 
 /// `WfahEntry` (motor izdüşümü) → `WfahView` (API görünümü).
 ///
-/// `from_nodes`: `seq` → geçişin KAYNAK node'u eşlemesi (`PathRow`dan). Aksiyon
-/// satırlarının node bilgisi motor tipinde YOKTUR (`WfahEntry` bilerek alan
-/// kazanmadı — golden fixture'ı bozardı), bu yüzden akış izinden ödünç alınır.
+/// `from_nodes`: `seq` → geçişin KAYNAK node'u eşlemesi (`PathRow`dan).
+///
+/// Ç2 (v2.3) ile `WfahEntry` artık `from_node`/`to_node` taşıyor; bu harita
+/// AYNI bilgiyi `wf.wfah` kolonlarından ayrı bir sorguyla getiriyor ve
+/// tekilleştirilmesi ayrı bir iştir (bu kararın kapsamı satır alanlarıdır).
 fn to_wfah_view(
     wfd: &Wfd,
     entry: &WfahEntry,
@@ -800,11 +802,16 @@ fn to_wfah_view(
 ) -> WfahView {
     let parsed = parse_marker(&entry.action);
     // Kol/collapse marker'ları node'u payload'da taşır; aksiyon satırları akış izinde.
+    //
+    // Ç3: kol marker'larında okunan alan `at_node`'dur — kolun O ANKİ konumu.
+    // `WfahView.node` KONUMU temsil eder (kimlik değil): portal "kol iptal edildi
+    // (<node>)" etiketini bununla basar. Kol KİMLİĞİ payload'daki `branch_entry`
+    // ve `BranchView.entry_node` üzerinden okunur.
     let node_key = parsed.node.clone().or_else(|| {
         entry
             .input
             .as_ref()
-            .and_then(|i| i.get("node"))
+            .and_then(|i| i.get("at_node"))
             .and_then(|n| n.as_str())
             .map(str::to_string)
             .or_else(|| from_nodes.get(&entry.seq).cloned())
@@ -1392,6 +1399,16 @@ impl WfeExecutor {
                         "seat": { "orgu_id": seat_orgu_id.to_string(), "role": seat_role },
                     })),
                     applied_at: Utc::now(),
+                    // Ç2: claim node DEĞİŞTİRMEZ — marker satırı.
+                    from_node: None,
+                    to_node: None,
+                    // Ç4: kol claim'inde satır O KOLDA üretilir (kolun kimliği).
+                    branch_entry: node.and_then(|n| {
+                        wfes.branches
+                            .iter()
+                            .find(|b| b.branch_node == n)
+                            .map(|b| b.entry_node.clone())
+                    }),
                 })
             }
             _ => None,

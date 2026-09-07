@@ -176,9 +176,7 @@ async fn upload_wfd(
     // Elle yazılıp POST edilen JSON'un kapısı bu uçtur.
     raw: axum::body::Bytes,
 ) -> Result<Json<Value>, AppError> {
-    let body: UploadBody = serde_json::from_slice(&raw)
-        .map_err(|e| AppError(format!("gövde ayrıştırılamadı: {e}"), StatusCode::BAD_REQUEST))?;
-    wfe_core::dupkeys::assert_no_duplicate_node_ids(&raw).map_err(AppError::from)?;
+    let body: UploadBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let project_id = resolve_project_for_write(&s, &auth, body.orgtnt_id, body.project_id).await?;
     // Lokal DB bağlantıları WFD'ye aittir: doküman başkasının lokalini taşıyamaz.
     if let Some(name) = body.wfd.get("name").and_then(Value::as_str) {
@@ -213,7 +211,8 @@ async fn upload_wfd(
 #[utoipa::path(post, path = "/validate", tag = "wfd",
     request_body = serde_json::Value,
     responses((status = 200, description = "valid/errors/warnings", body = serde_json::Value)))]
-async fn validate_wfd(Json(wfd_json): Json<Value>) -> Result<Json<Value>, AppError> {
+async fn validate_wfd(raw: axum::body::Bytes) -> Result<Json<Value>, AppError> {
+    let wfd_json: Value = crate::wfd_body::parse_wfd_body(&raw)?;
     // Şema ihlalleri AYRI kod (`schema`) ile ve tek tek raporlanır — yayın kapısı (upload/
     // publish) aynı şemayı reddederek durdurur, editör de aynı listeyi burada görür.
     // Parse hatası şemayı gölgelemesin diye şema ÖNCE koşar: serde `"c_r": []`'i sessizce
@@ -277,9 +276,8 @@ struct ValidateExpressionRequest {
 #[utoipa::path(post, path = "/validate-expression", tag = "wfd",
     request_body = ValidateExpressionRequest,
     responses((status = 200, description = "İfade başına hata/uyarı listesi", body = serde_json::Value)))]
-async fn validate_expression(
-    Json(req): Json<ValidateExpressionRequest>,
-) -> Result<Json<Value>, AppError> {
+async fn validate_expression(raw: axum::body::Bytes) -> Result<Json<Value>, AppError> {
+    let req: ValidateExpressionRequest = crate::wfd_body::parse_wfd_body(&raw)?;
     // Kötüye kullanım/kazara dev payload koruması — kurucuda en fazla birkaç ifade olur.
     if req.expressions.len() > MAX_VALIDATED_EXPRESSIONS {
         return Err(AppError(
@@ -503,8 +501,9 @@ struct CreateDraftBody {
 async fn create_draft(
     State(s): State<AppState>,
     auth: AppAuth,
-    Json(b): Json<CreateDraftBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<Value>, AppError> {
+    let b: CreateDraftBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let project_id = resolve_project_for_write(&s, &auth, b.orgtnt_id, b.project_id).await?;
     if let Some(tid) = b.source_template_id {
         // İz güvenilir olsun: şablon var ve aynı tenant'ta olmalı.
@@ -693,8 +692,9 @@ async fn save_draft(
     State(s): State<AppState>,
     auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
-    Json(b): Json<SaveDraftBody>,
+    raw: axum::body::Bytes,
 ) -> Result<StatusCode, AppError> {
+    let b: SaveDraftBody = crate::wfd_body::parse_wfd_body(&raw)?;
     require_design_on_wfd(&s, &auth, id, ver).await?;
     let meta = wf_wfd::repo::get_meta_any(&s.pool, id, ver)
         .await
@@ -1310,8 +1310,9 @@ async fn run_scenarios(
     State(s): State<AppState>,
     auth: AppAuth,
     Path((id, ver)): Path<(Uuid, i32)>,
-    Json(body): Json<RunScenariosBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<RunScenariosResponse>, AppError> {
+    let body: RunScenariosBody = crate::wfd_body::parse_wfd_body(&raw)?;
     run_scenarios_inner(&s, &auth, id, ver, body, None).await
 }
 
@@ -1325,8 +1326,9 @@ async fn run_one_scenario(
     State(s): State<AppState>,
     auth: AppAuth,
     Path((id, ver, sid)): Path<(Uuid, i32, String)>,
-    Json(body): Json<RunScenariosBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<RunScenariosResponse>, AppError> {
+    let body: RunScenariosBody = crate::wfd_body::parse_wfd_body(&raw)?;
     run_scenarios_inner(&s, &auth, id, ver, body, Some(&sid)).await
 }
 

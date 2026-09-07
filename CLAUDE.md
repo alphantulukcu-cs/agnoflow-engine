@@ -38,12 +38,26 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
   K-of-N quorum'un N kolu aynı havuza bakamaz) — bilinçli, GEÇİCİ kısıt. Gerekçe ve feda
   edilenler: `docs/spec/decisions.md` 2026-08-14; kırıcılık + düzeltme reçetesi:
   `docs/spec/migration-notes.md` M18.
-- **Ham JSON'da ÇİFT node anahtarı REDDEDİLİR** (`wfe_core::dupkeys`): `serde_json` çift
-  anahtarı hata saymaz, sessizce SONUNCUYU alır — kimlik tasarımcıya geçtiği için iki
-  adım aynı adı alırsa biri iz bırakmadan kaybolur ve akış çizilenden başka bir şey
-  yapardı. Kapı ancak HAM METİNDE kurulabilir (`Value`ya dönmüş belgede çakışma zaten
-  silinmiştir): `Wfd::from_json`/`from_json_checked` + `POST /wfd` (bu uç bu yüzden
-  `Json<UploadBody>` değil `Bytes` alır).
+- **Ham JSON'da ÇİFT KATALOG anahtarı REDDEDİLİR** (`wfe_core::dupkeys`, E10 ile BEŞ
+  katalog): `serde_json` çift anahtarı hata saymaz, sessizce SONUNCUYU alır — kimlik
+  tasarımcıya geçtiği için iki adım aynı adı alırsa biri iz bırakmadan kaybolur ve akış
+  çizilenden başka bir şey yapardı. Yoklanan kataloglar: **`nodes` · `actions` ·
+  `autoexec` · `calls` · `attachments`** (hepsi kök map). `transitions`/`terminals`/
+  `start` DİZİdir → yapısal olarak bağışık, kapının dışında. Tek çağrıda çakışan HER
+  katalog raporlanır. Fonksiyon adı `assert_no_duplicate_catalog_ids`.
+  **Kapı ancak HAM METİNDE kurulabilir** (`Value`ya dönmüş belgede çakışma zaten
+  silinmiştir) ve `Json<…>` ekstraktörü fonksiyon gövdesi başlamadan ayrıştırdığı için
+  ekstraktörden SONRA hiçbir kontrol işe yaramaz. Bu yüzden **WFD dokümanı taşıyan HER
+  uç `axum::body::Bytes` alır** ve ortak yardımcıdan geçer:
+  `crate::wfd_body::parse_wfd_body` (kapı ÖNCE, ayrıştırma SONRA). Bugün 12 uç: `wfd.rs`
+  (`upload_wfd`, `validate_wfd`, `validate_expression`, `create_draft`, `save_draft`,
+  `run_scenarios`, `run_one_scenario`) · `simulate.rs` (`sim_start`, `sim_apply`,
+  `sim_call_return`, `sim_possible_actions`, `sim_attach`) · `templates.rs`
+  (`create_template`). Yeni bir WFD gövdesi alan uç eklenirse AYNI yardımcıya bağlanır.
+  Kapı belgeyi hem gövdenin kökünde hem bir zarfın `wfd` alanında yoklar — `POST /wfd`
+  dahil uçların çoğu belgeyi `wfd` alanının altında taşır ve yalnız köke bakan bir kapı
+  onlarda hiçbir şey görmez. **Taslak yolunda da SERT RED** (uyarı değil): çift anahtar
+  bir YARIMLIK değil bir KAYIPtır.
 - C_A **TEK KURALDIR**, iki biçim: **çapalı** `{c_orgu, c_r?, c_u?}` → match = `resolved(c_orgu) AND (rol OR c_u)`; **çapasız** `{c_u}` (c_orgu HİÇ yok) → match = `c_u`, kişi tenant genelinde eşleşir. Çapasızda `c_u` zorunlu, **`c_r` YASAK** (şema `oneOf` + validator `c_a_anchorless_role` + matcher rol kanalını hiç sormaz). Verilmeyen alan **false** (wildcard değil); c_u rol-agnostik. Çapasız aday cache girdisi birim taşımaz (`any_orgu: true`), görünürlük predicate'inde ayrı kanal (`ViewerFilters`).
 - Transition: `from` + `action`; aynı (node, action) için array sırasında İLK when-match.
 - wft: `{node}` / `{terminal}` / `{conditions[], default?}`; default yoksa `WFD.NoConditionMatched`.

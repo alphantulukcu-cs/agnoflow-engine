@@ -12,6 +12,7 @@ mod staging;
 mod start_dedupe;
 mod state;
 mod visibility;
+mod wfd_body;
 mod visibility_queue;
 mod visibility_worker;
 mod wfe_attachment;

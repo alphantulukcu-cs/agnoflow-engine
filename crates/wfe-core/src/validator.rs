@@ -3284,19 +3284,35 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
 // ---- §6b: attachments katalogu + node referansları ----
 
 fn check_attachments(wfd: &Wfd, report: &mut ValidationReport) {
-    // Katalog içi: item.id grup içinde tekil olmalı.
+    // Katalog: item.id BÜTÜN belgede tekil olmalı — iki AYRI grupta bile tekrar edemez
+    // (E10/e). `items` bir DİZİ olduğu için `dupkeys` kapısı buraya BAKAMAZ: ayrıştırıcı
+    // iki girdiyi de tutar, tekilliği yalnız validator görebilir. Katman farkı bilinçli.
+    //
+    // Neden belge geneli: item id'si storage anahtarına giriyor
+    // (`attachments/{wfe_id}/{grup}/{item}`) ve iki grupta aynı id, aynı slotu iki farklı
+    // kapının arkasına koyar — hangi kapının o dosyayı istediği belirsizleşir.
+    let mut item_owner: HashMap<&str, &str> = HashMap::new();
     for (group, def) in &wfd.attachments {
-        let mut seen_ids = HashSet::new();
         for item in &def.items {
-            if !seen_ids.insert(item.id.clone()) {
-                report.error(
+            match item_owner.insert(item.id.as_str(), group.as_str()) {
+                None => {}
+                Some(first) if first == group.as_str() => report.error(
                     "attachment_item_dup",
                     format!("attachments[{group}].items"),
                     format!(
-                        "attachment item id '{}' grup içinde birden fazla tanımlı",
+                        "attachment item id '{}' '{group}' grubunda birden fazla tanımlı",
                         item.id
                     ),
-                );
+                ),
+                Some(first) => report.error(
+                    "attachment_item_dup",
+                    format!("attachments[{group}].items"),
+                    format!(
+                        "attachment item id '{}' iki ayrı grupta tanımlı: '{first}' ve \
+                         '{group}' — item id'si belge genelinde tekil olmalıdır",
+                        item.id
+                    ),
+                ),
             }
         }
     }

@@ -23,7 +23,6 @@ uuid               = { version = "1", features = ["v4", "serde"] }
 chrono             = { version = "0.4", features = ["serde"] }
 async-trait        = "0.1"
 opendal            = { version = "0.50", features = ["services-fs", "services-s3"] }
-zen-engine         = "0.55"
 zen-expression     = "0.55"
 # zen AST yürüyüşü (when ifadelerinin tip denetimi) — arena zen-expression ile aynı sürüm.
 bumpalo            = "3"

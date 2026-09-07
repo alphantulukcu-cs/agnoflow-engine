@@ -10,6 +10,9 @@
 //! Kapı ancak HAM METİN üzerinde kurulabilir: `Value`'ya dönüşmüş bir belgede
 //! çakışma zaten silinmiştir. Bu yüzden `Wfd::from_value*` yolları bunu göremez —
 //! çağrı, metne/bayta erişimi olan yerlerde yapılır (`Wfd::from_json*`, upload rotası).
+//!
+//! Belge gövdenin KÖKÜ olmak zorunda değil: uçların çoğu onu bir istek zarfının `wfd`
+//! alanında taşır. Kapı ikisini de yoklar.
 
 use crate::error::EngineError;
 use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
@@ -43,6 +46,23 @@ impl<'de> serde::Deserialize<'de> for KeyList {
 struct Probe {
     #[serde(default)]
     nodes: Option<KeyList>,
+    /// **Zarf şekli.** Uçların çoğu belgeyi kökte değil bir istek gövdesinin `wfd`
+    /// alanında taşır (`UploadBody`, `CreateDraftBody`, `SaveDraftBody`, …). Kapı yalnız
+    /// köke bakarsa o gövdelerde HİÇBİR ŞEY görmez — zarfın kökünde `nodes` yoktur ve
+    /// kapı sessizce `Ok(())` döner.
+    #[serde(default)]
+    wfd: Option<Box<Probe>>,
+}
+
+impl Probe {
+    /// Yoklanacak `nodes` katalogları: kökteki ve varsa `wfd` alanının altındaki.
+    fn node_catalogs(&self) -> Vec<&KeyList> {
+        let mut out: Vec<&KeyList> = self.nodes.iter().collect();
+        if let Some(nested) = &self.wfd {
+            out.extend(nested.node_catalogs());
+        }
+        out
+    }
 }
 
 /// Ham WFD JSON'unda `nodes` katalogunun çift anahtar taşıyıp taşımadığını sorar.
@@ -54,14 +74,15 @@ pub fn assert_no_duplicate_node_ids(json: &[u8]) -> Result<(), EngineError> {
     let Ok(probe) = serde_json::from_slice::<Probe>(json) else {
         return Ok(());
     };
-    let Some(KeyList(keys)) = probe.nodes else {
-        return Ok(());
-    };
-    let mut seen = HashSet::new();
-    let mut dups: Vec<String> = keys
-        .into_iter()
-        .filter(|k| !seen.insert(k.clone()))
-        .collect();
+    let mut dups: Vec<String> = Vec::new();
+    for KeyList(keys) in probe.node_catalogs() {
+        let mut seen = HashSet::new();
+        dups.extend(
+            keys.iter()
+                .filter(|k| !seen.insert(k.as_str()))
+                .cloned(),
+        );
+    }
     if dups.is_empty() {
         return Ok(());
     }
@@ -95,6 +116,17 @@ mod tests {
     fn missing_or_unparsable_input_is_not_our_error() {
         assert!(assert_no_duplicate_node_ids(br#"{"id":"x"}"#).is_ok());
         assert!(assert_no_duplicate_node_ids(b"{bozuk").is_ok());
+    }
+
+    #[test]
+    fn document_nested_under_a_request_envelope_is_gated() {
+        // `POST /wfd`in gövdesi `UploadBody { orgtnt_id, project_id?, wfd }` — belge
+        // KÖKTE değil, `wfd` alanının altında. Kapı zarfın kökünü yoklarsa hiçbir şey
+        // görmez: zarfın kökünde `nodes` YOKTUR.
+        let json = br#"{"orgtnt_id":"a","wfd":{"nodes":{"onay":{},"onay":{}}}}"#;
+        let err = assert_no_duplicate_node_ids(json)
+            .expect_err("zarfın içindeki belge de kapıdan geçmeli");
+        assert!(format!("{err:?}").contains("onay"), "{err:?}");
     }
 
     #[test]

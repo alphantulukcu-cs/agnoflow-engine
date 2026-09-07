@@ -199,6 +199,36 @@ pub fn visited_nodes<'w>(wfd: &'w Wfd, wfes: &'w Wfes) -> BTreeSet<&'w str> {
     out
 }
 
+/// R02: **SLA-2'nin ve sahiplik hesabının TEK node giriş tanımı** — "bu iş bu adıma
+/// ne zaman geldi".
+///
+/// Cevap: WFAH'ın **`to_node != null` olan SON satırının** `applied_at`'i, yani
+/// akışı gerçekten bir node'a TAŞIYAN son satır. Marker satırları (`escalate:`,
+/// `trigger:`, `claim_timeout:` — Ç1-EK sonrası `claim_released:` —, `_branch_*`,
+/// `_collapse`, `_join`, `call:`) `to_node` taşımaz (Ç2) ve tabanı kaydırmaz.
+///
+/// Soru bir ad öneki listesiyle SORULMAZ: eski hâl `!action.starts_with("escalate:")`
+/// filtresiydi ve escalation DIŞINDAKİ her marker türü tabanı ileri atıyordu; yeni bir
+/// marker türü eklendiğinde sessizce kayan bir tasarımdı (R02, reddedilen Seçenek B).
+/// **Koda hiçbir marker adı girmez.**
+///
+/// `to_node != null` satır YOKSA `None` — migration öncesi satırlar için **yedek yol
+/// KURULMAZ** (R02/S2; NULL'ların ne olacağı R01'in işi).
+///
+/// R04'ün `$prev` tanımıyla (son AKSİYON satırı) **AYNI ŞEY DEĞİL**: `_fork` bir aksiyon
+/// satırıdır ama tek bir node'a taşımadığı için `to_node` taşımaz — `$prev` onu görür,
+/// bu taban görmez. İki sinyal bilinçli olarak ayrı.
+///
+/// KOL MODU BURADA YOK (R02/S3): paralel modda kol girişi `BranchState.entered_at`
+/// gerçek DB kolonundan okunur ve bu türetimle **BİRLEŞTİRİLMEZ**. Çağıran hangi modda
+/// olduğunu bilir.
+pub fn node_entered_at(wfah: &Wfah) -> Option<DateTime<Utc>> {
+    wfah.entries()
+        .iter()
+        .rfind(|e| e.to_node.is_some())
+        .map(|e| e.applied_at)
+}
+
 /// Bir geri gönderme menüsünün BU örnekte gerçekten seçilebilir hedefleri: belgedeki
 /// sıra KORUNUR (tasarımcının yazdığı sıra ekranda anlam taşır), yalnız uğranmamış
 /// olanlar düşer.
@@ -1566,9 +1596,9 @@ impl<'a> Engine<'a> {
 
     /// Node'un henüz ateşlenmemiş ilk escalation adımı için giriş anı + vade
     /// bilgisi — dashboard insight'ları (yaklaşan/geciken escalation) ve
-    /// `due_escalation` ortak temeli. Node'a giriş anı son WFAH kaydından
-    /// türetilir; ateşlenen adımlar `escalate:<node>:<idx>` WFAH kayıtlarıyla
-    /// izlenir.
+    /// `due_escalation` ortak temeli. Node'a giriş anı HAREKET TAŞIYAN son WFAH
+    /// kaydından türetilir (`node_entered_at` — R02); ateşlenen adımlar
+    /// `escalate:<node>:<idx>` WFAH kayıtlarıyla izlenir.
     /// `branch`: WOR-31 — paralel modda dwell KOL-bazlıdır; kol node'u verilirse
     /// giriş anı `BranchState.entered_at`'tan okunur (WFAH türetimi değil).
     /// `None` paralel mod dışındaki eski davranıştır (paralel modda `None` ile
@@ -1592,18 +1622,11 @@ impl<'a> Engine<'a> {
                 let Some(node_key) = wfes.current_node.as_deref() else {
                     return Ok(None);
                 };
-                // Node giriş zamanı = current_node'a taşınmadan sonraki son insan/sistem eylemi;
-                // escalation marker'ları HARİÇ tutulur, aksi halde her adım bir öncekinin
-                // marker'ından ölçülür ve N≥1 adımların `after`'ı kayar (spec: hepsi node
-                // girişinden ölçülür).
-                let Some(entered_at) = wfes
-                    .wfah
-                    .entries()
-                    .iter()
-                    .filter(|e| !e.action.starts_with("escalate:"))
-                    .last()
-                    .map(|e| e.applied_at)
-                else {
+                // R02: taban HAREKET taşıyan son satırdır (`to_node != null`) ve tanım
+                // `node_entered_at`te TEK yerde durur — Ç13'ün `waited_for_seconds`'ı da
+                // onu çağırır. Marker satırları `to_node` taşımadığı için tabanı
+                // kaydırmaz; ad öneki filtresi (eski hâl) KALKTI.
+                let Some(entered_at) = node_entered_at(&wfes.wfah) else {
                     return Ok(None);
                 };
                 (node_key, entered_at)
@@ -1617,6 +1640,12 @@ impl<'a> Engine<'a> {
             let skipped_marker = skipped_escalation_marker(node_key, idx);
             // "Bu adım kapandı" iki yoldan olur: otomatik/elle ATEŞLENDİ ya da WF Admin
             // ATLADI. İkisi de aynı defteri kullanır (T‑A5).
+            //
+            // R02: `applied_at >= entered_at` kapısı taban düzeltilince KENDİLİĞİNDEN
+            // doğrulanır — taban artık gerçek node girişi olduğu için o node'da
+            // ateşlenmiş `escalate:<node>:<idx>[:skipped]` satırları koşulu HEP sağlar.
+            // Eski tabanda marker satırı tabanı kendi önüne atıp ateşlenmiş kademeyi
+            // "ateşlenmemiş" gösterebiliyordu; tekrar ateşleme yolu böyle kapandı.
             let settled = wfes.wfah.entries().iter().any(|e| {
                 (e.action == marker || e.action == skipped_marker) && e.applied_at >= entered_at
             });
@@ -1679,10 +1708,11 @@ impl<'a> Engine<'a> {
 
     /// T‑A5: WF Admin'in ATLAMASI. Marker yazar, geçişi UYGULAMAZ.
     ///
-    /// Marker adı `escalate:<node>:<idx>:skipped` — `escalate:` öneki ZORUNLUDUR:
-    /// `next_escalation` node giriş zamanını "son escalation-DIŞI WFAH kaydı"ndan
-    /// hesaplıyor, yani başka bir adla yazılan atlama marker'ı tabanı kendine kaydırır
-    /// ve o node'un TÜM escalation sayaçlarını sessizce sıfırlar.
+    /// Marker adı `escalate:<node>:<idx>:skipped` — `escalate:` öneki ZORUNLUDUR, ama
+    /// artık ESCALATION TABANI için değil: R02'den beri taban `to_node != null`
+    /// satırlardan geliyor ve marker satırları (bu dahil) `to_node` taşımıyor. Önek
+    /// `parse_marker`/`WfahKind` ayrımı ve yayınlanmış `count($wfah, …)` sayımları için
+    /// zorunludur — atlanan adımın `settled` sayılması da bu ada bakar.
     ///
     /// Bekleyen adım yoksa `Ok(None)` — bu bir hata değil, bir cevaptır; HTTP karşılığını
     /// çağıran katman verir.

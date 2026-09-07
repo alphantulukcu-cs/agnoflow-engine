@@ -209,7 +209,21 @@ fn wfes_at_visited(
         user_id: Uuid::nil(),
         role: "system".into(),
     };
-    let wfah = Wfah::empty().push("start".into(), system, None);
+    // R02: start satırı HAREKET satırıdır — gerçek motor `stamp_movement` ile
+    // `to_node`'u yazar (start commit'i, `pipeline.rs`). Kısayol `Wfah::push` alanı
+    // `None` bıraktığı için satır burada elle kurulur: `to_node` olmadan
+    // `node_entered_at` taban bulamaz ve escalation testleri gerçeğe UYMAYAN bir
+    // defter üzerinde koşardı.
+    let wfah = Wfah(vec![WfahEntry {
+        seq: 1,
+        action: "start".into(),
+        actor: system,
+        input: None,
+        applied_at: Utc::now(),
+        from_node: None,
+        to_node: Some(node.into()),
+        branch_entry: None,
+    }]);
     let created_at = wfah.entries()[0].applied_at;
     Wfes {
         wfe_id: Uuid::new_v4(),
@@ -1852,7 +1866,8 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
         user_id: Uuid::nil(),
         role: "system".into(),
     };
-    // Kontrollü WFAH: node girişi T0; adım 0 marker'ı T0+3g (gün sonra ateşlendi).
+    // Kontrollü WFAH: node girişi T0 (HAREKET satırı, `to_node` dolu — R02 tabanı);
+    // adım 0 marker'ı T0+3g (gün sonra ateşlendi) ve `to_node` TAŞIMAZ.
     let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
     wfes.wfah = Wfah(vec![
         WfahEntry {
@@ -1862,7 +1877,7 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
             input: None,
             applied_at: t0,
             from_node: None,
-            to_node: None,
+            to_node: Some("self__creditAnalyst".into()),
             branch_entry: None,
         },
         WfahEntry {
@@ -4691,6 +4706,211 @@ async fn skipping_does_not_shift_the_escalation_base() {
         after.deadline,
         before.entered_at + Duration::days(5),
         "adım 1'in vadesi node girişinden ölçülmeye devam etmeli"
+    );
+}
+
+// ------------------------------------------ R02: escalation tabanı = hareket satırı
+
+/// R02 yardımcısı: HAREKET satırı (`to_node` dolu) + ardından marker satırları
+/// (`to_node` NULL) taşıyan kontrollü bir defter kurar.
+fn wfah_with_markers(
+    node: &str,
+    entered_at: chrono::DateTime<Utc>,
+    markers: &[(&str, chrono::DateTime<Utc>)],
+) -> Wfah {
+    let system = Actor {
+        orgu_id: Uuid::nil(),
+        user_id: Uuid::nil(),
+        role: "system".into(),
+    };
+    let mut entries = vec![WfahEntry {
+        seq: 1,
+        action: "start".into(),
+        actor: system.clone(),
+        input: None,
+        applied_at: entered_at,
+        from_node: None,
+        to_node: Some(node.into()),
+        branch_entry: None,
+    }];
+    for (i, (action, at)) in markers.iter().enumerate() {
+        entries.push(WfahEntry {
+            seq: (i + 2) as u32,
+            action: (*action).into(),
+            actor: system.clone(),
+            input: None,
+            applied_at: *at,
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
+        });
+    }
+    Wfah(entries)
+}
+
+/// R02/S1: HİÇBİR marker türü escalation tabanını kaydırmaz — soru ada değil
+/// `to_node`a bakıyor. Eski önek filtresi (`!starts_with("escalate:")`) bu satırların
+/// HEPSİNİ tabana geçiriyordu; her yeni marker türü sessiz bir kayma demekti.
+#[tokio::test]
+async fn marker_rows_never_shift_the_escalation_base() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden();
+
+    let t0 = Utc::now();
+    // Son eleman BİLEREK tanınmayan bir ad: kapı bir ad listesine değil `to_node`a
+    // dayandığı için yarın eklenecek marker türü de kendiliğinden dışarıda kalır.
+    let markers = [
+        ("trigger:use_scoring", t0 + Duration::hours(1)),
+        ("call:sub/gonder", t0 + Duration::hours(2)),
+        ("_branch_arrived", t0 + Duration::hours(3)),
+        ("_collapse", t0 + Duration::hours(4)),
+        ("_join", t0 + Duration::hours(5)),
+        ("claim_timeout:self__creditAnalyst", t0 + Duration::hours(6)),
+        ("_marker_that_does_not_exist_yet", t0 + Duration::hours(7)),
+    ];
+
+    for n in 1..=markers.len() {
+        let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+        wfes.wfah = wfah_with_markers("self__creditAnalyst", t0, &markers[..n]);
+        let forecast = engine
+            .next_escalation(&wfd, &wfes, t0, None)
+            .unwrap()
+            .expect("adım 0 beklemede olmalı");
+        assert_eq!(
+            forecast.entered_at, t0,
+            "'{}' satırı tabanı kaydırmamalı",
+            markers[n - 1].0
+        );
+        assert_eq!(
+            forecast.deadline,
+            t0 + Duration::days(3),
+            "vade node girişinden (P3D) ölçülmeli — '{}' sonrası da",
+            markers[n - 1].0
+        );
+    }
+}
+
+/// R02, Ç1 gerileme kapısı: `escalate:` satırı tabanı kaydırmaz. Eskiden bunu ÖNEK
+/// sağlıyordu; artık `to_node`un NULL olması sağlıyor ve ada hiç bakılmıyor.
+#[tokio::test]
+async fn an_escalation_marker_row_does_not_shift_the_base() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let mut wfd = golden();
+    wfd.nodes
+        .get_mut("self__creditAnalyst")
+        .unwrap()
+        .escalation
+        .push(EscalationStep {
+            after: "P5D".into(),
+            wfes_effects: None,
+            wft: Some(Wft::Node {
+                node: "self__branchManager".into(),
+            }),
+            terminate: None,
+        });
+
+    let t0 = Utc::now();
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    wfes.wfah = wfah_with_markers(
+        "self__creditAnalyst",
+        t0,
+        &[("escalate:self__creditAnalyst:0", t0 + Duration::days(3))],
+    );
+
+    let forecast = engine
+        .next_escalation(&wfd, &wfes, t0 + Duration::days(3), None)
+        .unwrap()
+        .expect("adım 1 beklemede olmalı");
+    assert_eq!(forecast.step_idx, 1);
+    assert_eq!(forecast.entered_at, t0, "taban node girişinde kalmalı");
+    assert_eq!(
+        forecast.deadline,
+        t0 + Duration::days(5),
+        "adım 1'in vadesi node girişinden ölçülmeli, marker'dan değil"
+    );
+}
+
+/// R02, "bedava gelen düzelme": ateşlenmiş kademe SONRASINDA bir marker satırı gelse
+/// bile kademe HÂLÂ `settled` — TEKRAR ATEŞLEME YOLU KAPALI.
+///
+/// Eski tabanla marker satırı tabanı kendi anına atıyordu; `escalate:…:0` satırı o yeni
+/// tabandan ÖNCE kaldığı için `applied_at >= entered_at` düşüyor, ateşlenmiş kademe
+/// "ateşlenmemiş" sayılıyor ve `due_escalation` onu ikinci kez veriyordu.
+#[tokio::test]
+async fn a_fired_step_stays_settled_after_a_later_marker_row() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden();
+
+    let t0 = Utc::now();
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    wfes.wfah = wfah_with_markers(
+        "self__creditAnalyst",
+        t0,
+        &[
+            // Tek kademe (P3D) ateşlendi…
+            ("escalate:self__creditAnalyst:0", t0 + Duration::days(3)),
+            // …sonra ALAKASIZ bir marker satırı düştü.
+            ("trigger:use_scoring", t0 + Duration::days(4)),
+        ],
+    );
+
+    let now = t0 + Duration::days(10);
+    assert_eq!(
+        engine.next_escalation(&wfd, &wfes, now, None).unwrap(),
+        None,
+        "ateşlenmiş tek kademe sonrası bekleyen adım OLMAMALI"
+    );
+    assert_eq!(
+        engine.due_escalation(&wfd, &wfes, now, None).unwrap(),
+        None,
+        "ateşlenmiş kademe marker satırından sonra TEKRAR due olmamalı"
+    );
+}
+
+/// R02/S2: migration öncesi satırlarda `to_node` NULL'dır ve bu iş onlar için YEDEK YOL
+/// KURMAZ — hareket taşıyan satır yoksa cevap `None`. Eski WFE'lerde escalation susar;
+/// NULL'ların ne olacağı R01'in işi.
+#[tokio::test]
+async fn no_movement_row_means_no_forecast() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden();
+
+    let t0 = Utc::now();
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    // Defterin TAMAMI `to_node` NULL — migration öncesi satırların hâli.
+    let mut wfah = wfah_with_markers("self__creditAnalyst", t0, &[("start_review", t0)]);
+    wfah.0[0].to_node = None;
+    wfes.wfah = wfah;
+
+    assert_eq!(
+        engine
+            .next_escalation(&wfd, &wfes, t0 + Duration::days(30), None)
+            .unwrap(),
+        None,
+        "hareket taşıyan satır yoksa forecast üretilmez (fallback YOK)"
+    );
+    assert_eq!(
+        engine
+            .due_escalation(&wfd, &wfes, t0 + Duration::days(30), None)
+            .unwrap(),
+        None,
+        "taban bulunamayan WFE'de escalation ATEŞLENMEZ"
     );
 }
 

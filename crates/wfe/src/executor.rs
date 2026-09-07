@@ -654,9 +654,10 @@ struct ParsedMarker {
 
 /// Ham WFAH `action` adını sınıflandırır.
 ///
-/// Ayrıştırma önek/desen tabanlıdır çünkü marker adlarının KENDİSİ sözleşmedir
-/// (`escalate:` öneki olmadan yazılan bir atlama marker'ı `next_escalation`'ın
-/// tabanını kaydırır — bkz. CLAUDE.md WF Admin bölümü). Tanınmayan her ad
+/// Ayrıştırma önek/desen tabanlıdır çünkü marker adlarının KENDİSİ sözleşmedir:
+/// `escalate:` öneki bu sınıflandırma ve yayınlanmış `count($wfah, …)` sayımları için
+/// ZORUNLUDUR (bkz. CLAUDE.md WF Admin bölümü). Önek `next_escalation`ın TABANINI
+/// artık BELİRLEMEZ — R02'den beri taban `to_node != null` satırlardan gelir. Tanınmayan her ad
 /// `Action`a düşer: bilinmeyen bir markerı "sistem" diye etiketlemek, ham adı
 /// ekrana basmaktan daha yanıltıcı olurdu.
 fn parse_marker(raw: &str) -> ParsedMarker {

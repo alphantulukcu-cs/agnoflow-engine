@@ -760,9 +760,11 @@ müdahale eder ve yetkisi WFD'den doğar.
 - **Marker sözleşmesi:** elle tetikleme otomatik yolun AYNI marker'ını yazar
   (`escalate:<node>:<idx>`) — yayınlanmış akışlar `count($wfah, ...)` ile karar veriyor,
   ayrı ad sayımı bozar; ayrım AKTÖRDEDİR. `wfes_effects`'teki `$actor` system KALIR.
-  Atlama marker'ı `escalate:<node>:<idx>:skipped` — **`escalate:` öneki ZORUNLU**, yoksa
-  `next_escalation`'ın tabanı (son escalation-DIŞI kayıt) kayar ve o node'un tüm
-  sayaçları sessizce sıfırlanır.
+  Atlama marker'ı `escalate:<node>:<idx>:skipped` — **`escalate:` öneki ZORUNLU**, ama
+  gerekçesi ESCALATION TABANI DEĞİL (R02): taban `to_node != null` olan son satırdır
+  (`pipeline::node_entered_at`) ve marker satırları `to_node` taşımaz. Önek
+  `parse_marker`/`WfahKind` ayrımı, yayınlanmış `count($wfah, ...)` sayımları ve adımın
+  `settled` sayılması için zorunludur.
 - **Atlama `append_marker` ile yazılır** (yeni `WfeStore` metodu, **varsayılan
   implementasyon YOK**): atlama geçiş değil audit satırıdır. Varsayılan no-op, hiçbir şey
   yazmayan bir store'a izin verirdi ve adım tekrar ateşlenirdi.

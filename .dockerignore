@@ -6,5 +6,10 @@ data/
 public/
 *.md
 docs/
+# İSTİSNA: kanonik şema derleme ANINDA gömülüyor (`wfe_core::schema`,
+# include_str!). `docs/` dışlanınca `cargo build` imaj içinde patlar.
+# docs/spec bir submodule (agnoflow-spec, D05) — build context'te DOLU olmalı.
+!docs/spec/
+!docs/spec/**
 .env
 .env.*

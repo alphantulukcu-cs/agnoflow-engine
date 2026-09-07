@@ -8,10 +8,32 @@
 #  - $EFP_RUNNER_TAG değişkeni tanımlı (uygun runner'ı seçer).
 
 stages:
+  - test
   - build
 
 variables:
+  # docs/spec bir submodule (agnoflow-spec, D05). Runner klonu submodule'ü de
+  # çekmezse hem `cargo test` hem `docker build` şema dosyasını bulamaz.
+  GIT_SUBMODULE_STRATEGY: recursive
   IMAGE: image.cs.com.tr/agnoflow/agnoflow-backend
+
+# --- Test kapısı (X01) --------------------------------------------------------
+# Merge request'lerde BLOKLAYICI olarak koşar. Bu kapıdan önce projedeki bütün
+# testler yalnız geliştirici makinesinde koşuyordu; kapı "koşmayı hatırlayan
+# kişide" vardı.
+#
+# NOT (infra): iş `rust:1-bookworm` imajını istiyor — Dockerfile'ın builder
+# aşamasıyla AYNI imaj. Runner docker executor değilse (`image:` yok sayılırsa)
+# $EFP_RUNNER_TAG runner'ına rust toolchain'i kurulmalıdır.
+test:cargo:
+  stage: test
+  image: rust:1-bookworm
+  tags:
+    - $EFP_RUNNER_TAG
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  script:
+    - cargo test --workspace
 
 build-image:
   stage: build

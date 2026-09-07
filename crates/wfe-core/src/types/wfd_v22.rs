@@ -112,7 +112,7 @@ impl Wfd {
     pub fn from_json(s: &str) -> Result<Wfd, EngineError> {
         // Çift node id'si YALNIZ ham metinde görülebilir (bkz. `crate::dupkeys`):
         // `Value`ya dönüşen belgede çakışan anahtar zaten silinmiş olur.
-        crate::dupkeys::assert_no_duplicate_node_ids(s.as_bytes())?;
+        crate::dupkeys::assert_no_duplicate_catalog_ids(s.as_bytes())?;
         let v: Value =
             serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
         Wfd::from_value(v)
@@ -144,7 +144,7 @@ impl Wfd {
 
     /// `from_json` + şema kapısı — bkz. `from_value_checked`.
     pub fn from_json_checked(s: &str) -> Result<Wfd, EngineError> {
-        crate::dupkeys::assert_no_duplicate_node_ids(s.as_bytes())?;
+        crate::dupkeys::assert_no_duplicate_catalog_ids(s.as_bytes())?;
         let v: Value =
             serde_json::from_str(s).map_err(|e| EngineError::InvalidWfd(e.to_string()))?;
         Wfd::from_value_checked(v)

@@ -143,8 +143,9 @@ struct SimStartResponse {
     responses((status = 200, description = "Sim başlangıç durumu + olası aksiyonlar", body = SimStartResponse)))]
 async fn sim_start(
     State(s): State<AppState>,
-    Json(body): Json<SimStartBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<SimStartResponse>, AppError> {
+    let body: SimStartBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
@@ -224,8 +225,9 @@ struct SimApplyResponse {
     responses((status = 200, description = "Aksiyon sonrası sim durumu", body = SimApplyResponse)))]
 async fn sim_apply(
     State(s): State<AppState>,
-    Json(body): Json<SimApplyBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<SimApplyResponse>, AppError> {
+    let body: SimApplyBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
@@ -334,8 +336,9 @@ struct SimCallReturnResponse {
         (status = 409, description = "Bu adımda çözülmeyi bekleyen bir çağrı yok")))]
 async fn sim_call_return(
     State(s): State<AppState>,
-    Json(body): Json<SimCallReturnBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<SimCallReturnResponse>, AppError> {
+    let body: SimCallReturnBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
@@ -402,8 +405,9 @@ struct SimPossibleActionsBody {
     responses((status = 200, description = "Aktörün claim-uygun olduğu olası aksiyonlar", body = serde_json::Value)))]
 async fn sim_possible_actions(
     State(s): State<AppState>,
-    Json(body): Json<SimPossibleActionsBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<Vec<PossibleAction>>, AppError> {
+    let body: SimPossibleActionsBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let wfd = parse_and_validate(body.wfd)?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
@@ -461,8 +465,9 @@ struct SimStateOnlyResponse {
         (status = 422, description = "Bilinmeyen slot / aktif adımda toplanmıyor / format-boyut reddi")))]
 async fn sim_attach(
     State(_s): State<AppState>,
-    Json(body): Json<SimAttachBody>,
+    raw: axum::body::Bytes,
 ) -> Result<Json<SimStateOnlyResponse>, AppError> {
+    let body: SimAttachBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let wfd = parse_and_validate(body.wfd)?;
     let mut sim_state = body.sim_state;
     wf_wfe::sim::step::attach(

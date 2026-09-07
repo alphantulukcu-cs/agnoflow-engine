@@ -157,8 +157,9 @@ struct CreateTemplateBody {
 async fn create_template(
     State(s): State<AppState>,
     auth: AppAuth,
-    Json(b): Json<CreateTemplateBody>,
+    raw: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<WfdTemplate>), AppError> {
+    let b: CreateTemplateBody = crate::wfd_body::parse_wfd_body(&raw)?;
     let name = b.name.trim();
     if name.is_empty() {
         return Err(AppError(

@@ -1082,6 +1082,31 @@ fn attachment_fixture_is_valid() {
 }
 
 #[test]
+fn attachment_item_id_repeated_in_another_group_is_error() {
+    // E10(e): item id'si BÜTÜN belgede tekildir — iki AYRI grupta bile tekrar edemez.
+    // `items` bir DİZİdir, yani `dupkeys` kapısı onu göremez; kural validator katmanında.
+    let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
+    let dup = v["attachments"]["basvuru_belgeleri"]["items"][0].clone();
+    assert_eq!(dup["id"], json!("kimlik"), "fixture beklenen item'ı taşımalı");
+    v["attachments"]["onay_belgeleri"]["items"]
+        .as_array_mut()
+        .unwrap()
+        .push(dup);
+
+    let report = validate_value(v);
+    let err = report
+        .errors
+        .iter()
+        .find(|e| e.code == "attachment_item_dup")
+        .unwrap_or_else(|| panic!("belge geneli tekillik ihlali hata vermeli: {:#?}", report.errors));
+    assert!(
+        err.message.contains("basvuru_belgeleri") && err.message.contains("onay_belgeleri"),
+        "mesaj ÇAKIŞAN İKİ GRUBU söylemeli: {}",
+        err.message
+    );
+}
+
+#[test]
 fn attachment_ref_to_unknown_group_is_error() {
     let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
     v["nodes"]["self__creditAnalyst"]["attachments"] = json!(["olmayan_grup"]);

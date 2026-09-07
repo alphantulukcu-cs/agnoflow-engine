@@ -313,6 +313,8 @@ impl WfeStore for ParStore {
         w.wfah.0.extend(commit.wfah_entries.iter().cloned());
 
         match &commit.outcome {
+            // v2.3 (`E02`): `StayAt` kol durumunu DEĞİŞTİRMEZ (escalation iş taşımaz).
+            CommitOutcome::StayAt { .. } => {}
             CommitOutcome::MoveTo { node } => {
                 w.current_node = Some(node.clone());
                 w.assigned_to = None;

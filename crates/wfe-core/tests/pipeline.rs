@@ -1780,7 +1780,7 @@ async fn claim_timeout_move_resolves_anchored_listable_via_wfah_actor() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
+    let wfd = golden_with_claim_timeout("PT1H");
     let (wfes, human_orgu) =
         wfes_with_human_history("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let now = wfes.claimed_at.unwrap() + Duration::hours(1) + Duration::seconds(1);
@@ -1858,10 +1858,12 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__branchManager".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let t0 = Utc::now();
@@ -1930,7 +1932,9 @@ async fn start_wft_targeting_own_from_node_lands_there() {
     // akış müdür node'una gider; müdür başlatınca memur node'una — burada
     // sadeleştirilmiş biçimde: start.wft kendi from'unu hedefliyor).
     let mut wfd = golden();
-    wfd.start[0].wft = Wft::Node {
+    // v2.3 (`Ç7+Ç8`): start gövdesi aksiyon kaydında.
+    let start_action = wfd.start[0].action.clone();
+    wfd.actions.get_mut(&start_action).expect("start aksiyonu").wft = Wft::Node {
         node: "type_branch__branchClerk".into(),
     };
 
@@ -1976,10 +1980,12 @@ async fn escalation_fires_normally_at_start_node() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__creditAnalyst".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let org = MockOrg {
@@ -2158,7 +2164,9 @@ async fn start_without_deadline_or_timeout_leaves_deadline_null() {
 // ================================================================ SLA-1 claim timeout (2026-07-16)
 
 /// self__creditAnalyst'e claim_timeout ekleyen golden varyantı.
-fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
+/// v2.3 (K13 + K19): `wft` parametresi KALKTI — claim timeout artık yalnız claim'i
+/// bırakır, hedefi yok.
+fn golden_with_claim_timeout(after: &str) -> Wfd {
     let mut wfd = golden();
     wfd.nodes
         .get_mut("self__creditAnalyst")
@@ -2166,8 +2174,6 @@ fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
         .claim_timeout = Some(ClaimTimeout {
         after: after.into(),
         wfes_effects: None,
-        wft: wft.map(String::from),
-        collapses_parallel: false,
     });
     wfd
 }
@@ -2183,7 +2189,7 @@ async fn claim_timeout_due_without_wft_releases_claim() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout("PT2H", None);
+    let wfd = golden_with_claim_timeout("PT2H");
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
@@ -2212,93 +2218,21 @@ async fn claim_timeout_due_without_wft_releases_claim() {
     }
 }
 
-#[tokio::test]
-async fn claim_timeout_due_with_wft_moves_like_escalation() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
-    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let claimed_at = wfes.created_at;
-    wfes.claimed_at = Some(claimed_at);
-    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
+// v2.3: `claim_timeout_due_with_wft_moves_like_escalation` testi SİLİNDİ — konusu (claim timeout'un iş TAŞIMASI) K13 ile öldü
 
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .unwrap()
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(
-                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
-            );
-            assert_eq!(
-                commit.wfah_entries[0].action,
-                "claim_released:self__creditAnalyst"
-            );
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
 
 /// WOR-56/SLA-1 (2026-08-03): `collapses_parallel` işaretli olsa bile WFE paralel
 /// modda DEĞİLSE bayrak yok sayılır — normal `{node}` devri uygulanır. Aksi halde
 /// `resolve_wft` collapse'ı Single modda reddeder ve WFE zaman aşımında kilitlenirdi
 /// (aynı node kol içinden de kol dışından da erişilebilir).
-#[tokio::test]
-async fn claim_timeout_collapse_flag_ignored_outside_parallel() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let mut wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
-    wfd.nodes
-        .get_mut("self__creditAnalyst")
-        .unwrap()
-        .claim_timeout
-        .as_mut()
-        .unwrap()
-        .collapses_parallel = true;
-    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let claimed_at = wfes.created_at;
-    wfes.claimed_at = Some(claimed_at);
-    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
+// v2.3: `claim_timeout_collapse_flag_ignored_outside_parallel` testi SİLİNDİ — `collapses_parallel` bayrağı K19 ile kalktı
 
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .unwrap()
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(
-                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
-                "paralel dışı: collapse DEĞİL düz devir bekleniyordu — {:?}",
-                commit.outcome
-            );
-            // audit'te `collapse` anahtarı yazılmaz (yalnız gerçek collapse'ta).
-            let input = commit.wfah_entries[0].input.as_ref().unwrap();
-            assert!(input.get("collapse").is_none());
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
 
 // ---- 2026-07-28: SLA-1 wfes_effects (opsiyonel DynCtx yazımı) ----
 
 /// `golden_with_claim_timeout` + `wfes_effects` — SLA-1 dolduğunda ctx'e yazar.
-fn golden_with_claim_timeout_effects(after: &str, wft: Option<&str>) -> Wfd {
-    let mut wfd = golden_with_claim_timeout(after, wft);
+fn golden_with_claim_timeout_effects(after: &str) -> Wfd {
+    let mut wfd = golden_with_claim_timeout(after);
     wfd.nodes
         .get_mut("self__creditAnalyst")
         .unwrap()
@@ -2328,7 +2262,7 @@ async fn claim_timeout_release_applies_wfes_effects() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout_effects("PT2H", None);
+    let wfd = golden_with_claim_timeout_effects("PT2H");
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
@@ -2356,40 +2290,8 @@ async fn claim_timeout_release_applies_wfes_effects() {
     }
 }
 
-#[tokio::test]
-async fn claim_timeout_move_applies_wfes_effects_before_wft() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let wfd = golden_with_claim_timeout_effects("PT1H", Some("self__branchManager"));
-    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let claimed_at = wfes.created_at;
-    wfes.claimed_at = Some(claimed_at);
-    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
+// v2.3: `claim_timeout_move_applies_wfes_effects_before_wft` testi SİLİNDİ — devir yok; effects'in release yolunda uygulanması `claim_timeout_release_applies_wfes_effects` ile zaten sınanıyor
 
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .unwrap()
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(
-                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
-            );
-            assert_eq!(
-                commit.new_dynctx["internal_notes"],
-                json!("Claim süresi doldu, iş havuza döndü.")
-            );
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
 
 #[tokio::test]
 async fn claim_timeout_not_due_without_claim() {
@@ -2402,7 +2304,7 @@ async fn claim_timeout_not_due_without_claim() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout("PT1H", None);
+    let wfd = golden_with_claim_timeout("PT1H");
     // hiç claim edilmemiş (claimed_at None) — asla due olmaz
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
     assert!(!engine
@@ -2415,32 +2317,8 @@ async fn claim_timeout_not_due_without_claim() {
 /// `terminate` kaldırıldı: hedefsiz bir escalation adımı artık akışı sonlandırmaz,
 /// hata verir. Akışı zaman aşımıyla bitiren TEK kural SLA-3 (root `timeout`) —
 /// bkz. `deadline_due_fires_terminated_not_error`.
-#[tokio::test]
-async fn escalation_without_wft_errors_instead_of_terminating() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let mut wfd = golden();
-    {
-        let esc = &mut wfd.nodes.get_mut("self__creditAnalyst").unwrap().escalation[0];
-        esc.wft = None;
-        esc.terminate = Some(true); // eski alan; runtime artık dikkate almaz
-    }
-    let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
+// v2.3: `escalation_without_wft_errors_instead_of_terminating` testi SİLİNDİ — `escalation[].wft` YOK ve `grant` ZORUNLU alan — eksikliği serde'de patlar, runtime hatası diye bir durum kalmadı
 
-    let err = engine
-        .fire_escalation(&wfd, &wfes, 0, now, None)
-        .await
-        .expect_err("hedefsiz escalation hata vermeli");
-    assert!(matches!(err, EngineError::InvalidWfd(_)), "err: {err:?}");
-}
 
 /// Hedefi olan adım normal node devri yapar — `Terminated` ASLA üretmez.
 #[tokio::test]
@@ -3678,10 +3556,12 @@ async fn branch_escalation_does_not_touch_sibling_branches() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__coordinator".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
     let wfes = parallel_wfes(
         vec![
@@ -4000,8 +3880,6 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
         .claim_timeout = Some(ClaimTimeout {
         after: "PT2H".into(),
         wfes_effects: None,
-        wft: None,
-        collapses_parallel: false,
     });
 
     let fin = Uuid::new_v4();
@@ -4073,10 +3951,12 @@ async fn branch_escalation_fires_from_branch_entered_at() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__resultCoordinator".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let wfes = parallel_wfes(
@@ -5099,10 +4979,12 @@ async fn skipping_does_not_shift_the_escalation_base() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__branchManager".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let orgu = Uuid::new_v4();

@@ -15,6 +15,16 @@ variables:
   # docs/spec bir submodule (agnoflow-spec, D05). Runner klonu submodule'ü de
   # çekmezse hem `cargo test` hem `docker build` şema dosyasını bulamaz.
   GIT_SUBMODULE_STRATEGY: recursive
+  # `.gitmodules` SSH URL taşıyor (git@gitlab.cs.com.tr:…). Runner ise CI_JOB_TOKEN
+  # ile HTTPS konuşur ve SSH ANAHTARI YOKTUR → submodule klonu
+  # `Permission denied (publickey,password)` ile düşer ve iş `get_sources`ta ölür,
+  # `cargo` hiç koşmaz. Bu değişken submodule URL'ini iş anında HTTPS'e çevirip
+  # job token'ıyla klonlar (GitLab 15.11+).
+  #
+  # `.gitmodules`ta göreli yol (`../../config/agnoflow-spec.git`) ALTERNATİFİ
+  # REDDEDİLDİ: göreli URL klonlanan remote'a göre çözülür ve bu deponun `origin`i
+  # GitHub'dır — GitHub'dan klonlayan geliştiricide submodule kırılırdı.
+  GIT_SUBMODULE_FORCE_HTTPS: "true"
   IMAGE: image.cs.com.tr/agnoflow/agnoflow-backend
 
 # --- Test kapısı (X01) --------------------------------------------------------

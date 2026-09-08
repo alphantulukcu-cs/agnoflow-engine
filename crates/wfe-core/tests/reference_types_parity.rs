@@ -118,17 +118,41 @@ fn find_decl(src: &str, from: usize) -> Option<(String, String, usize)> {
     None
 }
 
+/// Alan adları — GÖRÜNÜRLÜK ÖNEKİNE KÖRDÜR (`E04`/S1-EK).
+///
+/// Önek opsiyoneldir: `pub`, `pub(crate)`, `pub(super)` ve öneksiz alan aynı şekilde
+/// görülür. `pub ` şartı bir alanı `pub(crate)`a çevirmenin onu parite ağından
+/// SESSİZCE düşürmesi demekti — motor ⊆ referans yönünde görülmeyen alan drift
+/// üretmez, test yeşile döner. Ayırt eden şart önek değil, adın ardından gelen `:`.
 fn struct_fields(body: &str) -> BTreeSet<String> {
     body.lines()
         .filter_map(|l| {
             let l = l.trim();
-            let rest = l.strip_prefix("pub ")?;
+            let rest = strip_visibility(l);
             let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
             // `pub fn` / `pub type` alan değildir; alanın ardından `:` gelir.
             let after = rest[name.len()..].trim_start();
             (after.starts_with(':') && !name.is_empty()).then_some(name)
         })
         .collect()
+}
+
+/// Satır başındaki `pub` / `pub(crate)` / `pub(super)` / `pub(in …)` önekini düşürür;
+/// önek yoksa satırı olduğu gibi verir.
+fn strip_visibility(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix("pub") else {
+        return line;
+    };
+    match rest.chars().next() {
+        // `pub(...)` — kapanış parantezine kadar atlanır.
+        Some('(') => rest[1..]
+            .find(')')
+            .map(|i| rest[i + 2..].trim_start())
+            .unwrap_or(line),
+        Some(c) if c.is_whitespace() => rest.trim_start(),
+        // `pub` ile BAŞLAYAN başka bir ad (`public_key: u8`) — önek değildir.
+        _ => line,
+    }
 }
 
 /// Enum varyantları — gövde DEPTH-0 virgülleriyle parçalanır.
@@ -250,4 +274,54 @@ fn reference_model_parses_every_spec_example() {
         seen += 1;
     }
     assert!(seen > 0, "hiç örnek belge bulunamadı — yol yanlış olabilir");
+}
+
+/// `E04`/S1-EK'in AYRILMAZ PARÇASI: alan çıkarıcısı GÖRÜNÜRLÜK ÖNEKİNE KÖR olmalı.
+///
+/// `NodeDef.c_a` `pub` olmaktan çıkıp `pub(crate)` olduğunda (grant'ı atlayan kapıyı
+/// kapatmak için) `pub ` önekine bakan bir çıkarıcı o alanı GÖRMEZ. Parite yönü
+/// "motor ⊆ referans" olduğu için görülmeyen alan bir DRIFT üretmez — test kırmızıya
+/// değil, YEŞİLE döner ve kapı sessizce genişler. Kararın kendisi bu deliği ismen
+/// uyarmıştı; burası o uyarının çivisidir.
+#[test]
+fn struct_fields_sees_every_visibility() {
+    let body = "
+        pub a: u8,
+        pub(crate) b: u8,
+        pub(super) c: u8,
+        d: u8,
+    ";
+    let got = struct_fields(body);
+    assert_eq!(
+        got,
+        ["a", "b", "c", "d"].iter().map(|s| s.to_string()).collect(),
+        "görünürlük öneki alanı parite ağından düşürmemeli"
+    );
+
+    // Çivi GERÇEK kaynağa: `NodeDef.c_a` bugün `pub(crate)`. Yukarıdaki birim testi
+    // çıkarıcının kurgusal bir gövdede doğru davrandığını söyler; asıl iddia ise
+    // motorun KENDİ metninde o alanın ağa girdiğidir.
+    let node_def = main_types(ENGINE_SRC)
+        .remove("NodeDef")
+        .expect("NodeDef motorun modelinde var");
+    assert!(
+        node_def.contains("c_a"),
+        "NodeDef.c_a parite ağında değil — alan `pub(crate)` ve çıkarıcı onu görmüyor: {node_def:?}"
+    );
+}
+
+/// Çıkarıcının gevşemesi ALAN OLMAYAN satırları içeri almamalı — `:` ardılı şartı
+/// (`pub fn` / `pub type` elemesi) önek opsiyonel olunca da geçerlidir.
+#[test]
+fn struct_fields_still_rejects_non_fields() {
+    let body = "
+        pub fn helper(&self) -> u8 { 0 }
+        pub type Alias = u8;
+        #[serde(default)]
+        pub real: u8,
+    ";
+    assert_eq!(
+        struct_fields(body),
+        ["real".to_string()].into_iter().collect()
+    );
 }

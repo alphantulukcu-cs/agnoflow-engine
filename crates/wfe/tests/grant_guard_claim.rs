@@ -54,6 +54,10 @@ fn wfd_json() -> Value {
         "name": "Grant guard'ı ve claim",
         "version": "1.0.0",
         "context": {"type": "object", "properties": {}},
+        "wf_admin": [{
+            "c_a": {"c_orgu": "self", "c_r": ["wf_admin"]},
+            "allowed_global_actions": ["skip_escalation"]
+        }],
         "nodes": {
             "memur": {"c_a": {"c_orgu": "self", "c_r": ["memur"]}},
             "mudur": {
@@ -148,6 +152,10 @@ impl WfdStore for FixtureWfdStore {
 #[derive(Default)]
 struct MemStore {
     wfes: Mutex<HashMap<Uuid, Wfes>>,
+    /// Son commit'in havuz projeksiyonu (`wf.wfe.current_c_a`), rol kırılımıyla.
+    /// `E02`/S2'nin atlama yolu kanıtı buradan okunur: satır yazmak yetmez, havuz
+    /// kolonunun da genişlemesi gerekir.
+    last_pool: Mutex<Vec<String>>,
 }
 
 impl MemStore {
@@ -225,6 +233,8 @@ impl WfeStore for MemStore {
         if commit.end_terminal.is_some() {
             wfes.end_terminal = commit.end_terminal.clone();
         }
+        *self.last_pool.lock().unwrap() =
+            commit.resolved_c_a.iter().map(|c| c.role.clone()).collect();
         // E02/S1-EK: claim'i KOŞULSUZ düşüren store, `StayAt`i olduğu gibi yutar ve
         // guard-false mantığını hiç sınamaz. Soru tek yerde cevaplanır.
         if commit.outcome.clears_claim() {
@@ -302,19 +312,6 @@ impl WfeStore for MemStore {
         wfes.assigned_to = target;
         wfes.claimed_at = target.map(|_| chrono::Utc::now());
         wfes.wfah.0.extend(wfah_entries.iter().cloned());
-        Ok(())
-    }
-
-    async fn append_marker(
-        &self,
-        wfe_id: Uuid,
-        _orgtnt_id: Uuid,
-        entry: &WfahEntry,
-    ) -> Result<(), EngineError> {
-        let mut map = self.wfes.lock().unwrap();
-        if let Some(wfes) = map.get_mut(&wfe_id) {
-            wfes.wfah.0.push(entry.clone());
-        }
         Ok(())
     }
 }
@@ -505,4 +502,69 @@ async fn reassign_accepts_a_target_authorised_only_by_an_open_grant() {
         Some(denetci),
         "devir hedefe oturmalı"
     );
+}
+
+/// `E02`/S2 — **atlama yolu `append_marker`dan `StayAt` commit'ine geçti.**
+///
+/// `escalate:<node>:<idx>:skipped` satırı kademeyi ATEŞLENMİŞ sayar (`E13`: sayaç
+/// kaymaz), dolayısıyla o kademenin grant'ı AÇILIR. Ama `append_marker` YALNIZ WFAH
+/// yazıyordu: havuz kolonu (`current_c_a`) eski hâlinde kalıyor, genişleyen yetki
+/// hiçbir listeye inmiyordu. Satır deftere düşer, kimse görmez.
+///
+/// `append_marker`ın imzası claim düşürmeyi de İFADE EDEMİYORDU (`Ç9`un guard-false
+/// kuralı) — kararın (b) seçeneği: atlama yolu tam commit'e geçer, WFAH yazıp claim'i
+/// ayakta bırakan İKİNCİ yol kalmaz.
+#[tokio::test]
+async fn skipping_a_step_opens_its_grant_in_the_pool_projection() {
+    let wfd = Wfd::from_value(wfd_json()).expect("fixture geçerli olmalı");
+    let sube = Uuid::new_v4();
+    let (memur, admin, denetci) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let org = RoleOrg {
+        roles: HashMap::from([
+            (memur, vec!["memur"]),
+            (admin, vec!["wf_admin"]),
+            (denetci, vec!["denetci"]),
+        ]),
+    };
+    let store = Arc::new(MemStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(org),
+        Arc::new(FixtureWfdStore(wfd)),
+        store.clone(),
+        Arc::new(NoRunner),
+    );
+
+    let started = exec
+        .start(
+            Uuid::new_v4(),
+            1,
+            &actor(memur, sube, "memur"),
+            Some("basvur"),
+            &json!({}),
+            None,
+        )
+        .await
+        .expect("başlatma");
+    let wfe_id = started.wfe_id;
+
+    // WF Admin sıradaki kademeyi ATLAR — vade beklemeden.
+    exec.skip_escalation(wfe_id, &actor(admin, sube, "wf_admin"), None)
+        .await
+        .expect("atlama");
+
+    let w = store.snapshot(wfe_id);
+    let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.contains(&"escalate:mudur:0:skipped"),
+        "ön koşul: atlama satırı yazıldı: {actions:?}"
+    );
+
+    let pool = store.last_pool.lock().unwrap().clone();
+    assert!(
+        pool.iter().any(|r| r == "denetci"),
+        "atlanan kademenin grant'ı havuz kolonuna inmeli — satır yazmak YETMEZ: {pool:?}"
+    );
+    // İş KIPIRDAMADI: atlama bir geçiş değildir.
+    assert_eq!(w.current_node.as_deref(), Some("mudur"));
+    assert_eq!(w.status, WfeStatus::Active);
 }

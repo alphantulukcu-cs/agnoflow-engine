@@ -90,7 +90,14 @@ pub struct EscalationSkip {
     pub node: String,
     /// Yazılan WFAH aksiyon adı — istemciye neye dokunulduğunu söylemek için.
     pub marker: String,
-    pub entry: WfahEntry,
+    /// v2.3 (`E02`/S2): atlama artık TAM COMMIT'tir, tek bir `WfahEntry` değil.
+    ///
+    /// `append_marker` YALNIZ WFAH yazıyordu; atlanan kademenin grant'ı (`:skipped`
+    /// soneki kademeyi ateşlenmiş SAYAR — `E13`) havuz kolonuna hiç inmiyordu ve
+    /// imzası claim düşürmeyi (`Ç9` guard-false) İFADE EDEMİYORDU. Kararın (b)
+    /// seçeneği: yol `StayAt` commit'ine geçer, WFAH yazıp claim'i ayakta bırakan
+    /// İKİNCİ yol kalmaz.
+    pub commit: TransitionCommit,
 }
 
 /// `fire_claim_timeout` sonucu — `wft` verilmişse node taşıması
@@ -1930,23 +1937,67 @@ impl<'a> Engine<'a> {
         let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         // Ç4/E14: kol sayacı atlanıyorsa satır O KOLDA.
         let (branch_entry, branch_round) = branch_label(wfes, branch);
+        let wfah_entries = vec![WfahEntry {
+            seq,
+            action: marker.clone(),
+            actor: admin.clone(),
+            input: Some(json!({"skipped": true, "after": forecast.deadline.to_rfc3339()})),
+            applied_at: now,
+            // Ç2: sayaç atlaması node DEĞİŞTİRMEZ — marker satırı.
+            from_node: None,
+            to_node: None,
+            // Ç4: kol sayacı atlanıyorsa satır O KOLDA.
+            branch_entry,
+            branch_round,
+        }];
+
+        // E02/S1: iş YERİNDE kalır — node/status/claim'e dokunulmaz, yazılan tek şey
+        // marker + genişlemiş havuz kolonudur.
+        let outcome = CommitOutcome::StayAt {
+            node: node_key.clone(),
+        };
+        // Havuz POST-APPEND defterle çözülür: atlanan kademenin grant'ı ancak
+        // `:skipped` satırı deftere girdikten sonra AÇIK sayılır (`open_grants`).
+        let wfah = wfes.wfah.extended(&wfah_entries);
+        let anchored = system_actor_anchored(wfes);
+        let ctx = wfes.dynctx.as_value().clone();
+        let resolved_c_a = self
+            .node_candidates(
+                &node_key,
+                wfd,
+                &ctx,
+                &wfah,
+                wfes.origin_orgu_id.unwrap_or(anchored.orgu_id),
+                wfes.orgtnt_id,
+            )
+            .await?;
+        let claim_recheck = self
+            .stage_claim_recheck(wfd, wfes, &outcome, &wfah_entries, &ctx, branch, now)
+            .await?;
+
         Ok(Some(EscalationSkip {
             step_idx: forecast.step_idx,
             node: node_key,
-            entry: WfahEntry {
-                seq,
-                action: marker.clone(),
-                actor: admin.clone(),
-                input: Some(json!({"skipped": true, "after": forecast.deadline.to_rfc3339()})),
-                applied_at: now,
-                // Ç2: sayaç atlaması node DEĞİŞTİRMEZ — marker satırı.
-                from_node: None,
-                to_node: None,
-                // Ç4: kol sayacı atlanıyorsa satır O KOLDA.
-                branch_entry,
-                branch_round,
-            },
             marker,
+            commit: TransitionCommit {
+                wfe_id: wfes.wfe_id,
+                orgtnt_id: wfes.orgtnt_id,
+                // Atlama ctx'e YAZMAZ: kademe `wfes_effects`i ateşlenmediği için
+                // uygulanmaz. Commit yine mevcut ctx'i taşır (`Değişmez #7`).
+                new_dynctx: ctx,
+                wfah_entries,
+                outcome,
+                resolved_c_a,
+                staged_calls: Vec::new(),
+                claim_recheck,
+                // Görünürlük projeksiyonu `WfeExecutor::fill_view_grants`in işi.
+                view_c_a: Vec::new(),
+                current_view_c_a: Vec::new(),
+                branch_c_a: Vec::new(),
+                branch_view_c_a: Vec::new(),
+                end_view_c_a: Vec::new(),
+                end_terminal: None,
+            },
         }))
     }
 

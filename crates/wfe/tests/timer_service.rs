@@ -25,8 +25,7 @@ use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{AutoexecDef, AutoexecType, JoinRule, Wfd};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::ports::{
-    AutoexecRunner, CommitOutcome, ExecEnv, ExecFailure, NewWfe, TransitionCommit, WfdStore,
-    WfeStore, Wfes,
+    AutoexecRunner, ExecEnv, ExecFailure, NewWfe, TransitionCommit, WfdStore, WfeStore, Wfes,
 };
 use wfe_core::EngineError;
 
@@ -94,14 +93,6 @@ impl MemStore {
     }
 }
 
-fn outcome_parts(outcome: &CommitOutcome) -> (WfeStatus, Option<String>, Option<Value>) {
-    // v2.3 (`E02`/S3): kopyalanmış `match` mantığı KALKTI — tek gerçek kaynak
-    // `CommitOutcome::resolution()`. Beş ayrı kopya vardı ve her yeni varyantta
-    // beşinin de elle güncellenmesi gerekiyordu.
-    let (status, node, end) = outcome.resolution();
-    (status, node.map(str::to_string), end.cloned())
-}
-
 #[async_trait]
 impl WfeStore for MemStore {
     async fn load(&self, wfe_id: Uuid) -> Result<Wfes, EngineError> {
@@ -110,7 +101,9 @@ impl WfeStore for MemStore {
     }
 
     async fn create(&self, new: &NewWfe) -> Result<(), EngineError> {
-        let (status, current_node, end_response) = outcome_parts(&new.outcome);
+        let (status, node, end_response) = new.outcome.resolution();
+        let current_node = node.map(str::to_string);
+        let end_response = end_response.cloned();
         let wfes = Wfes {
             wfe_id: new.wfe_id,
             orgtnt_id: new.orgtnt_id,
@@ -142,7 +135,9 @@ impl WfeStore for MemStore {
         let wfes = map
             .get_mut(&commit.wfe_id)
             .ok_or_else(|| EngineError::WfePort(format!("not found: {}", commit.wfe_id)))?;
-        let (status, current_node, end_response) = outcome_parts(&commit.outcome);
+        let (status, node, end_response) = commit.outcome.resolution();
+        let current_node = node.map(str::to_string);
+        let end_response = end_response.cloned();
         wfes.dynctx = DynCtx(commit.new_dynctx.clone());
         wfes.wfah.0.extend(commit.wfah_entries.iter().cloned());
         wfes.status = status;
@@ -196,20 +191,6 @@ impl WfeStore for MemStore {
         if let Some(ctx) = new_dynctx {
             wfes.dynctx = wfe_core::types::dynctx::DynCtx(ctx.clone());
         }
-        wfes.wfah.0.push(wfah_entry.clone());
-        Ok(())
-    }
-
-    async fn append_marker(
-        &self,
-        wfe_id: Uuid,
-        _orgtnt_id: Uuid,
-        wfah_entry: &WfahEntry,
-    ) -> Result<(), EngineError> {
-        let mut map = self.wfes.lock().unwrap();
-        let wfes = map
-            .get_mut(&wfe_id)
-            .ok_or_else(|| EngineError::WfePort(format!("not found: {wfe_id}")))?;
         wfes.wfah.0.push(wfah_entry.clone());
         Ok(())
     }

@@ -343,11 +343,9 @@ impl WfeStore for ParStore {
             CommitOutcome::Terminal { end_response }
             | CommitOutcome::Failed { end_response }
             | CommitOutcome::Terminated { end_response } => {
-                w.status = match &commit.outcome {
-                    CommitOutcome::Terminal { .. } => WfeStatus::Terminal,
-                    CommitOutcome::Failed { .. } => WfeStatus::Error,
-                    _ => WfeStatus::Terminated,
-                };
+                // E02/S1-EK: JOKER SİLİNDİ. Bu bir DAVRANIŞ değil VERİ sorusu
+                // (`outcome → statü`) ve cevabı `resolution()`ta tek yerde duruyor.
+                w.status = commit.outcome.resolution().0;
                 w.current_node = None;
                 w.end_response = Some(end_response.clone());
                 w.assigned_to = None;
@@ -555,18 +553,6 @@ impl WfeStore for ParStore {
                 w.claimed_at = None;
             }
         }
-        w.wfah.0.push(wfah_entry.clone());
-        Ok(())
-    }
-
-    async fn append_marker(
-        &self,
-        wfe_id: Uuid,
-        _orgtnt_id: Uuid,
-        wfah_entry: &WfahEntry,
-    ) -> Result<(), EngineError> {
-        let mut map = self.wfes.lock().unwrap();
-        let w = map.get_mut(&wfe_id).unwrap();
         w.wfah.0.push(wfah_entry.clone());
         Ok(())
     }

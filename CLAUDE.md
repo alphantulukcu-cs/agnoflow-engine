@@ -362,6 +362,23 @@ Karar kaydı: `docs/spec/decisions.md` "Görünürlük: kural belgede, cevap pro
 - **Projeksiyonu yazan tek yol**: `WfeExecutor::fill_view_grants` (+ start'ta `create`).
   Yeni bir commit yolu eklendiğinde ORAYA bağlanır; adapter kolonları outcome match'inin
   DIŞINDA, aynı transaction'da yazar.
+  **v2.3 (`E02`) TEYİT:** `StayAt` bu kuralı DELMEZ — grant ateşlemesi de mevcut `commit`
+  yolundan geçer, yeni bir `WfeStore` metodu AÇILMAZ.
+- **`CommitOutcome` match'lerinde JOKER YASAK** (`E02`/S1-EK): `_ =>` ve `other =>` kolları
+  yasaktır. "Hangi soru" `ports.rs`teki ALTI metotta jokersiz cevaplanır — `resolution()`
+  · `to_node()` · `from_node()` · `branch_nodes()` · `settles_call()` · `clears_claim()`
+  — çağıranlar metodu çağırır, `match` GÖRMEZ. Ölçüm: enum'a varyant eklendiğinde yalnız
+  7 exhaustive match hata verdi, 11 joker sorunu gizledi; üçü CANLI sessiz hata üretiyordu.
+  ⚠️ **`#[non_exhaustive]` KONULMAZ:** tip `wfe-core`'da, match'lerin çoğu `wfe`
+  crate'inde; attribute dış crate'te `_`'ı ZORUNLU kılar ve tam bu deliği geri açar.
+  Clippy'nin `wildcard_enum_match_arm` lint'ine GÜVENİLMEZ (CI'da clippy adımı yok) —
+  garantiyi **derleyici** verir.
+- **WFAH satırı stage eden HER commit'in sonunda claim yetkisi yeniden değerlendirilir**
+  (`E02`/S2): `TransitionCommit.claim_recheck` ZORUNLU alandır (`Default` YOK). Kapsam
+  "ctx yazan commit" DEĞİL — guard'ın girdileri `$ctx`/`$wfah`/`$node` ve açık grant
+  kümesi de defterden türer, yani ctx'e hiç dokunmayan bir marker commit'i bile
+  `count($wfah, …)`yi çevirebilir. Düşen claim AYNI transaction'da bırakılır +
+  `claim_released:<node>` / `reason: "grant_guard_false"`.
 - **Projeksiyon commit SONRASI durumla çözülür**: ctx `commit.new_dynctx`, WFAH ise
   `wfes.wfah.extended(&commit.wfah_entries)` — `wfes.wfah` bu geçişin kayıtlarını henüz
   içermez. Eskiden ham `wfes.wfah` kullanılıyordu ve `{from:{wfah:"X"}}` çapalı bir
@@ -792,9 +809,14 @@ müdahale eder ve yetkisi WFD'den doğar.
   (`pipeline::node_entered_at`) ve marker satırları `to_node` taşımaz. Önek
   `parse_marker`/`WfahKind` ayrımı, yayınlanmış `count($wfah, ...)` sayımları ve adımın
   `settled` sayılması için zorunludur.
-- **Atlama `append_marker` ile yazılır** (yeni `WfeStore` metodu, **varsayılan
-  implementasyon YOK**): atlama geçiş değil audit satırıdır. Varsayılan no-op, hiçbir şey
-  yazmayan bir store'a izin verirdi ve adım tekrar ateşlenirdi.
+- **Atlama `CommitOutcome::StayAt` commit'i ile yazılır** (v2.3 / `E02`/S2 — KIRICI).
+  `append_marker` `WfeStore` trait'inden **KALKTI**; eski gerekçe (*"atlama geçiş değil
+  audit satırıdır, `commit` de kullanılamazdı — o node/status taşır"*) `StayAt` ile
+  GEÇERSİZLEŞTİ: artık node/status/claim'e dokunmadan yazan bir outcome var.
+  `append_marker` iki şeyi yapamıyordu — (a) atlanan kademenin grant'ı (`:skipped` soneki
+  kademeyi ATEŞLENMİŞ sayar) havuz kolonuna inmiyordu, satır deftere düşüyor ama kimse
+  görmüyordu; (b) imzası `Ç9`un guard-false claim düşürmesini İFADE EDEMİYORDU. WFAH
+  yazıp claim'i ayakta bırakan İKİNCİ yol artık YOK.
 - Adım numarası istemciden ALINMAZ (sıradaki ateşlenmemiş adım işlenir); vade GEREKMEZ.
   Paralel modda kol ipucu (`node`) zorunlu, tek-kol modda yok sayılır.
 - `GET /wfe/:id` yanıtı `next_escalation` taşır — görmediği sayacı yönetmek kör karar

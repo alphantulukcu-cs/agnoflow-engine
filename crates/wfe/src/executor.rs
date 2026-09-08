@@ -1481,8 +1481,15 @@ impl WfeExecutor {
         })
     }
 
-    /// T‑A5: WF Admin sıradaki escalation adımını ATLAR — geçiş uygulanmaz, yalnız
-    /// audit satırı yazılır (`append_marker`).
+    /// T‑A5: WF Admin sıradaki escalation adımını ATLAR — geçiş uygulanmaz, iş
+    /// YERİNDE kalır (`CommitOutcome::StayAt`).
+    ///
+    /// v2.3 (`E02`/S2): eskiden `append_marker` ile TEK satır yazılıyordu. O yol iki
+    /// şeyi yapamıyordu — (a) atlanan kademenin grant'ı (`:skipped` kademeyi
+    /// ateşlenmiş SAYAR, `E13`) havuz kolonuna inmiyordu, (b) imzası `Ç9`un
+    /// guard-false claim düşürmesini ifade edemiyordu. Artık normal commit yolundan
+    /// geçer: projeksiyon `fill_view_grants`ten yazılır ve WFAH yazıp claim'i ayakta
+    /// bırakan İKİNCİ yol kalmaz.
     pub async fn skip_escalation(
         &self,
         wfe_id: Uuid,
@@ -1499,9 +1506,10 @@ impl WfeExecutor {
         else {
             return Ok(EscalationAdminOutcome::NonePending);
         };
-        self.wfe
-            .append_marker(wfe_id, wfes.orgtnt_id, &skip.entry)
+        let mut commit = skip.commit;
+        self.fill_view_grants(&wfd, &wfes, Some(admin.orgu_id), &mut commit)
             .await?;
+        self.wfe.commit(&commit).await?;
         // Atlanan adım artık due değil — süpürücünün en yakın vade hesabı tazelenir.
         self.nudge_timers();
         Ok(EscalationAdminOutcome::Skipped {

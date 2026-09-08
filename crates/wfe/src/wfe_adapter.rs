@@ -14,8 +14,8 @@ use wfe_core::types::{
     wfe::WfeStatus,
 };
 use wfe_core::v22::ports::{
-    BranchState, BranchStatus, CallView, CommitOutcome, NewWfe, PendingCall, TransitionCommit,
-    VisibilityPort, WfeStore, Wfes,
+    BranchState, BranchStatus, CallView, ClaimRecheck, CommitOutcome, NewWfe, PendingCall,
+    TransitionCommit, VisibilityPort, WfeStore, Wfes,
 };
 use wfe_core::{ConflictKind, EngineError};
 
@@ -1053,6 +1053,43 @@ impl WfeStore for WfeAdapter {
             .map_err(db_err)?;
         }
 
+        // E02/S2 — yetki yeniden değerlendirmesi AYNI transaction'da uygulanır.
+        //
+        // `Ç9`un guard'ı bu commit'in yazdığı satırlarla false'a dönmüş olabilir; o
+        // durumda claim BURADA düşer ve `claim_released:` satırı deftere yazılır.
+        // İki iş ayrı transaction'a bölünseydi arada "claim kolonu boş ama deftere
+        // göre hâlâ sahibi var" (ya da tersi) bir pencere kalırdı — tam olarak K11'in
+        // "aynı transaction" hükmünün yasakladığı şey.
+        //
+        // Kol modunda claim `wf.wfe_branch`te, tek-kolda `wf.wfe`de durur; satırın
+        // `branch_entry`si hangisi olduğunu söyler (Ç4).
+        if let ClaimRecheck::Released { entry } = &commit.claim_recheck {
+            insert_wfah_entries(&mut tx, commit.wfe_id, std::slice::from_ref(entry)).await?;
+            match entry.branch_entry.as_deref() {
+                Some(branch_entry) => {
+                    sqlx::query(
+                        "UPDATE wf.wfe_branch SET claimed_by = NULL, claimed_at = NULL
+                         WHERE wfe_id = $1 AND entry_node = $2",
+                    )
+                    .bind(commit.wfe_id)
+                    .bind(branch_entry)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+                }
+                None => {
+                    sqlx::query(
+                        "UPDATE wf.wfe SET assigned_to = NULL, claimed_at = NULL
+                         WHERE wfe_id = $1 AND orgtnt_id = $2",
+                    )
+                    .bind(commit.wfe_id)
+                    .bind(commit.orgtnt_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(db_err)?;
+                }
+            }
+        }
         tx.commit().await.map_err(db_err)
     }
 
@@ -1254,36 +1291,6 @@ impl WfeStore for WfeAdapter {
 
         insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
 
-        tx.commit().await.map_err(db_err)
-    }
-
-    /// Madde 7: yetkili devir. `release_claim` ile aynı desen ama `claimed_by`
-    /// hedefe (veya havuza) ayarlanır. `target = Some`: claimed_by = {user_id},
-    /// claimed_at = now(); `None`: her ikisi NULL (havuz). Uygunluk
-    /// `Engine::reassign`'da doğrulanmıştır — burada yalnızca `status = 'active'`
-    /// kapısı vardır (claim CAS'ının `claimed_by IS NULL` koşulu YOK: override).
-    /// T‑A5: yalnız audit satırı. Tenant kapısı WFE satırından doğrulanır — yol
-    /// parametresi tek başına bir WFE'ye yazma hakkı vermez.
-    async fn append_marker(
-        &self,
-        wfe_id: Uuid,
-        orgtnt_id: Uuid,
-        wfah_entry: &WfahEntry,
-    ) -> Result<(), EngineError> {
-        let mut tx = self.pool.begin().await.map_err(db_err)?;
-        let owned: Option<Uuid> = sqlx::query_scalar(
-            "SELECT wfe_id FROM wf.wfe
-             WHERE wfe_id = $1 AND orgtnt_id = $2 AND status = 'active' FOR UPDATE",
-        )
-        .bind(wfe_id)
-        .bind(orgtnt_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(db_err)?;
-        if owned.is_none() {
-            return Err(EngineError::Conflict(ConflictKind::WfeGone));
-        }
-        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
         tx.commit().await.map_err(db_err)
     }
 

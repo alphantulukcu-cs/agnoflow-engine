@@ -4954,11 +4954,11 @@ async fn skip_escalation_writes_skipped_marker() {
     assert_eq!(skip.step_idx, 0);
     assert_eq!(skip.node, "self__creditAnalyst");
     assert_eq!(skip.marker, "escalate:self__creditAnalyst:0:skipped");
-    assert_eq!(skip.entry.action, skip.marker);
-    assert_eq!(
-        skip.entry.actor.user_id, admin.user_id,
-        "iz admini gösterir"
-    );
+    // v2.3 (E02/S2): atlama TEK satır değil TAM COMMIT üretir — satır o commit'in
+    // içindedir, sorulan şey değişmedi.
+    let entry = &skip.commit.wfah_entries[0];
+    assert_eq!(entry.action, skip.marker);
+    assert_eq!(entry.actor.user_id, admin.user_id, "iz admini gösterir");
 }
 
 /// Atlanan adım bir daha ateşlenmez.
@@ -4986,7 +4986,7 @@ async fn skipped_escalation_step_does_not_refire() {
             .entries()
             .iter()
             .cloned()
-            .chain(std::iter::once(skip.entry))
+            .chain(skip.commit.wfah_entries.iter().cloned())
             .collect(),
     );
 
@@ -5048,7 +5048,7 @@ async fn skipping_does_not_shift_the_escalation_base() {
             .entries()
             .iter()
             .cloned()
-            .chain(std::iter::once(skip.entry))
+            .chain(skip.commit.wfah_entries.iter().cloned())
             .collect(),
     );
 

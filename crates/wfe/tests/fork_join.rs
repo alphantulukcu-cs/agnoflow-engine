@@ -99,6 +99,9 @@ struct ParStore {
     /// bunu `wf.wfe_branch.c_a` kolonuna yazar; testte doğrulanabilmesi için
     /// mock yalnız KAYDEDER (kolon taklidi gereksiz karmaşa olurdu).
     last_branch_c_a: Mutex<Vec<(String, usize)>>,
+    /// Aynı kaydın ROL kırılımı — "liste dolu mu" ile "genişlemiş küme yazıldı mı"
+    /// ayrı sorulardır ve yalnız sayı bakan bir test ikincisini göremez.
+    last_branch_c_a_roles: Mutex<Vec<(String, Vec<String>)>>,
     /// 2026-08-13 node listable: son commit'in kol başına `branch_view_c_a`
     /// kaydı (gerçek adapter `wf.wfe_branch.view_c_a` kolonuna yazar). `c_a`nın
     /// YANINDA ayrı tutulur — ikisinin aynı kol kümesini kapsadığı ancak ayrı
@@ -124,6 +127,14 @@ impl ParStore {
         }
     }
     /// Bir kolun entered_at'ını geçmişe alır (SLA-2 escalation dwell'i buradan ölçülür).
+    /// WFE'nin kendi birimi (`origin_orgu_id`). `fill_view_grants` çapa yoksa
+    /// projeksiyonu HİÇ yazmaz — sistem yollarında (timer) aktör de olmadığı için
+    /// çapayı seed'den sonra kurmak gerekir.
+    fn set_origin_orgu(&self, wfe_id: Uuid, orgu_id: Uuid) {
+        let mut g = self.wfes.lock().unwrap();
+        g.get_mut(&wfe_id).unwrap().origin_orgu_id = Some(orgu_id);
+    }
+
     fn rewind_branch_entered(&self, wfe_id: Uuid, node: &str, at: chrono::DateTime<chrono::Utc>) {
         let mut m = self.wfes.lock().unwrap();
         let w = m.get_mut(&wfe_id).unwrap();
@@ -254,6 +265,16 @@ impl WfeStore for ParStore {
     }
 
     async fn commit(&self, commit: &TransitionCommit) -> Result<(), EngineError> {
+        *self.last_branch_c_a_roles.lock().unwrap() = commit
+            .branch_c_a
+            .iter()
+            .map(|(node, c_a)| {
+                (
+                    node.clone(),
+                    c_a.iter().map(|c| c.role.clone()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
         *self.last_branch_c_a.lock().unwrap() = commit
             .branch_c_a
             .iter()
@@ -322,11 +343,9 @@ impl WfeStore for ParStore {
             CommitOutcome::Terminal { end_response }
             | CommitOutcome::Failed { end_response }
             | CommitOutcome::Terminated { end_response } => {
-                w.status = match &commit.outcome {
-                    CommitOutcome::Terminal { .. } => WfeStatus::Terminal,
-                    CommitOutcome::Failed { .. } => WfeStatus::Error,
-                    _ => WfeStatus::Terminated,
-                };
+                // E02/S1-EK: JOKER SİLİNDİ. Bu bir DAVRANIŞ değil VERİ sorusu
+                // (`outcome → statü`) ve cevabı `resolution()`ta tek yerde duruyor.
+                w.status = commit.outcome.resolution().0;
                 w.current_node = None;
                 w.end_response = Some(end_response.clone());
                 w.assigned_to = None;
@@ -534,18 +553,6 @@ impl WfeStore for ParStore {
                 w.claimed_at = None;
             }
         }
-        w.wfah.0.push(wfah_entry.clone());
-        Ok(())
-    }
-
-    async fn append_marker(
-        &self,
-        wfe_id: Uuid,
-        _orgtnt_id: Uuid,
-        wfah_entry: &WfahEntry,
-    ) -> Result<(), EngineError> {
-        let mut map = self.wfes.lock().unwrap();
-        let w = map.get_mut(&wfe_id).unwrap();
         w.wfah.0.push(wfah_entry.clone());
         Ok(())
     }
@@ -1802,6 +1809,74 @@ async fn tick_timers_branch_escalation_fires_without_moving_anything() {
     }
 }
 
+/// `E02`/S1-EK'in ikinci SESSİZ HATASI — `fill_view_grants`in kol jokeri.
+///
+/// `branch_nodes` yalnız `ForkTo`/`BranchMoveTo` kollarını tanıyor, kalan her outcome
+/// `_ => Vec::new()`e düşüyordu. Kol escalation'ı `StayAt` ürettiği için o kolun
+/// `wfe_branch.c_a`'sı YAZILMIYOR: grant ateşleniyor, marker deftere düşüyor, kol
+/// havuzu ise ESKİ hâlinde kalıyor. Kararın tarifi: *"grant ateşlenir, kol havuzu
+/// genişlemez, 'kimse gelmedi' gibi görünür"* (E04'ün Ayşe tablosu 6/7).
+///
+/// Hata sessizdir çünkü marker yazılır ve hiçbir şey hata vermez — tek belirti,
+/// genişletilmiş havuzdaki kişinin işi kol kanalında GÖRMEMESİDİR.
+#[tokio::test]
+async fn branch_escalation_writes_the_widened_pool_to_the_branch_column() {
+    let wfd = paralel_with_branch_escalation();
+    let store = Arc::new(ParStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(wfd.clone())),
+        store.clone(),
+        Arc::new(MockRunner),
+    );
+    let wfe_id = seed_parallel_state(&store, &wfd, "none", Uuid::new_v4());
+    // Projeksiyon çapası: timer yolunda aktör yoktur, çapa WFE'nin kendi birimidir.
+    // Çapasız kurulumda `fill_view_grants` hiçbir şey yazmaz ve test kuralı DEĞİL
+    // kurulumu ölçerdi.
+    store.set_origin_orgu(wfe_id, Uuid::new_v4());
+    store.rewind_branch_entered(
+        wfe_id,
+        "self__financeApprover",
+        chrono::Utc::now() - chrono::Duration::minutes(11),
+    );
+
+    assert!(
+        exec.tick_timers(wfe_id).await.unwrap(),
+        "ön koşul: kol escalation'ı ateşlenmeli"
+    );
+    let w = store.snapshot(wfe_id);
+    let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
+    assert!(
+        actions.contains(&"escalate:self__financeApprover:0"),
+        "ön koşul: marker yazıldı: {actions:?}"
+    );
+
+    let recorded = store.last_branch_c_a.lock().unwrap().clone();
+    let entry = recorded
+        .iter()
+        .find(|(n, _)| n == "self__financeApprover")
+        .unwrap_or_else(|| panic!("kol escalation'ı kolun c_a kolonunu YAZMADI: {recorded:?}"));
+    assert!(
+        entry.1 > 0,
+        "genişlemiş havuz boş yazılmış — grant kol kanalına inmedi"
+    );
+
+    // ⚠️ Kolonun DOLU olması yetmez: içinde GRANT'ın adayı olmalı. Havuzu düz
+    // `node.c_a` ile yazan bir yol da dolu bir liste üretir (node'un kendi kuralı
+    // çözülür) ve "genişledi" YALANINI söyler — E04'ün genişlettiği küme kolona hiç
+    // inmemiş olur. Kademenin grant'ı `branchManager`, node'un kendi kuralı değil.
+    let roles = store.last_branch_c_a_roles.lock().unwrap().clone();
+    let branch_roles = roles
+        .iter()
+        .find(|(n, _)| n == "self__financeApprover")
+        .map(|(_, r)| r.clone())
+        .unwrap_or_default();
+    assert!(
+        branch_roles.iter().any(|r| r == "branchManager"),
+        "kol havuzu grant'ın adayını taşımalı (E04: c_a ∪ açılmış grantlar): {branch_roles:?}"
+    );
+}
+
 /// Belirli bir kolun mevcut claimant'ını Actor olarak döndürür (approve için).
 fn claim_owner(store: &ParStore, wfe_id: Uuid, node: &str) -> Actor {
     let w = store.snapshot(wfe_id);
@@ -3008,4 +3083,64 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     );
     // `$branch_round` = yaşayan tur.
     assert_eq!(wfe_core::v22::valid::live_round(&w.wfah), Some(2));
+}
+
+/// `E02`/S1-EK'in adıyla saydığı **SESSİZ HATA** — `commit_global_action`ın
+/// `CommitOutcome` jokeri.
+///
+/// Joker ikisini birden yalan söylüyordu: `_ => None` yüzünden API cevabında varılan
+/// node YOK, `!matches!(…MoveTo…)` yüzünden de `terminal = true` — yani "WFE sonlandı".
+/// Ç4-EK bu deliği CANLI hâle getirdi: admin `send_back`i paralel modda artık `MoveTo`
+/// değil `CollapseTo` üretiyor, dolayısıyla joker kolu HER paralel geri göndermede
+/// çalışıyor. WFE ise `self__coordinator`da, statüsü Aktif.
+///
+/// Soru outcome varyantının ADI değil, "iş bir node'da durdu mu" — cevabı
+/// `resolution()` verir (`E03`/S2).
+#[tokio::test]
+async fn admin_send_back_in_parallel_reports_the_node_and_is_not_terminal() {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["wf_admin"] = json!([{
+        "c_a": {"c_orgu": "self", "c_r": ["coordinator"]},
+        "allowed_global_actions": ["send_back"],
+    }]);
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let store = Arc::new(ParStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(wfd.clone())),
+        store.clone(),
+        Arc::new(MockRunner),
+    );
+    let admin = actor("coordinator");
+    let wfe_id = seed_parallel_visited(
+        &store,
+        &wfd,
+        "self__financeApprover",
+        Uuid::new_v4(),
+        vec!["self__coordinator".into()],
+    );
+
+    let out = exec
+        .admin_send_back(wfe_id, &admin, "self__coordinator")
+        .await
+        .expect("admin geri gönderme paralelde açık (Ç4-EK/S5)");
+
+    let w = store.snapshot(wfe_id);
+    assert_eq!(
+        w.current_node.as_deref(),
+        Some("self__coordinator"),
+        "ön koşul: WFE gerçekten hedefe indi"
+    );
+    assert_eq!(w.status, WfeStatus::Active, "ön koşul: WFE sonlanMADI");
+
+    assert!(
+        !out.terminal,
+        "akış bir node'da duruyor — `terminal` YALAN söylüyor"
+    );
+    assert_eq!(out.status, WfeStatus::Active);
+    assert!(
+        out.current_node.is_some(),
+        "varılan node cevapta olmalı, joker onu düşürdü"
+    );
 }

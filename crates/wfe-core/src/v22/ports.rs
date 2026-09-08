@@ -376,6 +376,63 @@ impl CommitOutcome {
         }
     }
 
+    /// Bu outcome hangi KOL satırlarına dokunur — `wfe_branch.c_a` / `view_c_a`
+    /// projeksiyonunun yazılacağı kol kimlikleri (`E02`/S1-EK).
+    ///
+    /// ⚠️ `StayAt` **kendi node'unu döndürür.** Kol escalation'ı `StayAt` üretir ve o
+    /// kolun havuzu grant'la genişler; boş dönmek E04'ün 6/7 satırının sessiz hâliydi
+    /// (marker yazılır, kol havuzu eski kalır, iş kol kanalında görünmez). Tek-kol
+    /// modunda eşleşecek kol satırı YOKTUR, dolayısıyla yazma kendiliğinden no-op olur
+    /// — burada mod sorulmaz, çünkü outcome modu bilmez ve bilmesi de gerekmez.
+    ///
+    /// `ForkTo` tüm kolları doğurur; `BranchMoveTo` tek kolu taşır. Kalan varyantlar
+    /// kol satırlarına dokunmaz: `BranchArrived`/`JoinComplete`/`CollapseTo` kolları
+    /// KAPATIR (havuz yazmak anlamsız), `MoveTo`/`Terminal`/`Failed`/`Terminated` ise
+    /// paralel modun tamamen dışındadır.
+    pub fn branch_nodes(&self) -> Vec<&str> {
+        match self {
+            CommitOutcome::ForkTo { branches, .. } => branches.iter().map(String::as_str).collect(),
+            CommitOutcome::BranchMoveTo { node, .. } => vec![node.as_str()],
+            CommitOutcome::StayAt { node } => vec![node.as_str()],
+            CommitOutcome::BranchArrived { .. }
+            | CommitOutcome::JoinComplete { .. }
+            | CommitOutcome::CollapseTo { .. }
+            | CommitOutcome::MoveTo { .. }
+            | CommitOutcome::Terminal { .. }
+            | CommitOutcome::Failed { .. }
+            | CommitOutcome::Terminated { .. } => Vec::new(),
+        }
+    }
+
+    /// WFC: bu outcome ÇAĞIRANA "alt akış bitti" der mi — `(statü, end_response)`
+    /// (`E02`/S1-EK).
+    ///
+    /// Statü metinleri `mark_callee_finished`ın sözleşmesidir (`completed` | `failed` |
+    /// `terminated`); WFE'nin kendi `WfeStatus`'undan AYRI tutulur çünkü çağıranın
+    /// gördüğü şey alt akışın SONUCUDUR, satırın durumu değil.
+    ///
+    /// ⚠️ `JoinComplete` kendi başına bir sonuç DEĞİLDİR — içteki `next`e devreder.
+    /// Bugün `next` yalnız `MoveTo` ya da `Terminal` olabiliyor, dolayısıyla eski
+    /// joker (`_ => return Ok(())`) doğru cevap veriyordu — ama TESADÜFEN. `next`e
+    /// bir gün `Failed`/`Terminated` konursa joker onu sessizce yutar, çağıran alt
+    /// akışın bittiğini HİÇ öğrenmezdi.
+    ///
+    /// `StayAt` hiçbir kapanış sinyali üretmez: iş node'da duruyor.
+    pub fn settles_call(&self) -> Option<(&'static str, &Value)> {
+        match self {
+            CommitOutcome::Terminal { end_response } => Some(("completed", end_response)),
+            CommitOutcome::Failed { end_response } => Some(("failed", end_response)),
+            CommitOutcome::Terminated { end_response } => Some(("terminated", end_response)),
+            CommitOutcome::JoinComplete { next, .. } => next.settles_call(),
+            CommitOutcome::StayAt { .. }
+            | CommitOutcome::MoveTo { .. }
+            | CommitOutcome::ForkTo { .. }
+            | CommitOutcome::BranchMoveTo { .. }
+            | CommitOutcome::BranchArrived { .. }
+            | CommitOutcome::CollapseTo { .. } => None,
+        }
+    }
+
     /// Bu outcome bir claim'i düşürür mü — node değişimi assignment'ı sıfırlar.
     ///
     /// ⚠️ `StayAt` claim'i **DÜŞÜRMEZ**: iş yerinde kalır, sahibi de. (Guard'ı false'a
@@ -480,6 +537,20 @@ pub struct TransitionCommit {
     /// silinmez), `view_c_a`dan farkı KAPSAM (yalnız bu terminal'de biten WFE).
     /// Yalnız başarılı `Terminal` sonucunda dolar; `WfeExecutor::fill_view_grants` yazar.
     pub end_view_c_a: Vec<ResolvedCandidate>,
+    /// `E02`/S2 — bu commit'in sonunda claim SAHİBİNİN yetkisi ne oldu.
+    ///
+    /// `Ç9`, grant'ın `when`ini "her yetki sorgusunda değerlendirilir" diye tanımladı;
+    /// bunun YAZMA tarafı burada. Kapsam **"ctx yazan commit" DEĞİL, WFAH satırı stage
+    /// eden HER yoldur**: guard'ın girdileri `$ctx`, `$wfah` ve `$node`; açık grant
+    /// kümesi de defterden türer (`E04`/S2). Yani deftere satır eklemek guard sonucunu
+    /// (`count($wfah, …)`) ÇEVİREBİLİR — ctx'e hiç dokunmayan bir marker commit'i bile.
+    ///
+    /// **`Default` YOKTUR** ve olmayacak: `TransitionCommit` kuran her yer bu soruyu
+    /// CEVAPLAMAK zorundadır. Alan bir `Option` ya da `bool` olsaydı `None`/`false`
+    /// yazmak "sormadım" ile "sordum, düşmedi"yi aynı gösterirdi; enum bunları AYIRIR.
+    /// `NotApplicable` bilinçli bir cevaptır — "bu yolda sahip yok ya da soruyu
+    /// hareketin kendisi cevaplıyor" (`clears_claim()`).
+    pub claim_recheck: ClaimRecheck,
     /// VARILAN terminal id'si — yalnız başarılı `Terminal` sonucunda `Some`.
     ///
     /// `CommitOutcome::Terminal` bunu TAŞIMAZ (yalnız `end_response` taşır) ama
@@ -488,6 +559,24 @@ pub struct TransitionCommit {
     /// bunun için "hangi terminal'de bitti" satırda durmak zorunda. Aynı bilgi
     /// `stage_calls`ın kullandığı `CallSite::Terminal`den türer.
     pub end_terminal: Option<String>,
+}
+
+/// `E02`/S2 — claim sahibinin yetkisinin commit sonundaki durumu.
+///
+/// Store bu cevabı UYGULAR: `Released` ise claim AYNI transaction'da düşer ve satır
+/// deftere yazılır. İki iş ayrı transaction'a bölünseydi arada claim'i olmayan ama
+/// deftere göre hâlâ sahibi olan bir pencere kalırdı.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimRecheck {
+    /// Sahip var ve yetkisi post-append defterle HÂLÂ geçerli — dokunulmaz.
+    Kept,
+    /// Sahibin yetkisi düştü: claim bırakılır ve `entry` (`claim_released:<node>` /
+    /// `reason: "grant_guard_false"`) deftere yazılır. İkisi AYNI tx'te.
+    Released { entry: WfahEntry },
+    /// Soru bu yolda sorulmaz. İki hâli vardır ve ikisi de bilinçli cevaptır:
+    /// sahip YOK (claim'siz node), ya da claim'i HAREKETİN KENDİSİ düşürür
+    /// (`CommitOutcome::clears_claim()` — `Ç13` okuma kuralı (b)).
+    NotApplicable,
 }
 
 /// Yeni WFE oluşturma isteği — wfe_id ENGINE tarafından üretilir ve effects
@@ -703,21 +792,6 @@ pub trait WfeStore: Send + Sync {
         branch: Option<&str>,
         new_dynctx: Option<&Value>,
     ) -> Result<(), EngineError>;
-    /// T‑A5: yalnız AUDIT satırı ekler — node, sahiplik ve ctx'e DOKUNMAZ.
-    ///
-    /// WF Admin'in escalation atlaması bunu kullanır: atlama bir geçiş değildir, yalnız
-    /// "bu adım kapandı" defterine düşen bir kayıttır. `release_claim` kullanılamazdı
-    /// (o claim'i de temizler), `commit` de kullanılamazdı (o node/status taşır).
-    ///
-    /// VARSAYILAN İMPLEMENTASYON YOKTUR: no-op bir varsayılan, atlamanın çalıştığını
-    /// sanıp hiçbir şey yazmayan bir store'a izin verirdi — adım bir sonraki turda yine
-    /// ateşlenirdi.
-    async fn append_marker(
-        &self,
-        wfe_id: Uuid,
-        orgtnt_id: Uuid,
-        wfah_entry: &WfahEntry,
-    ) -> Result<(), EngineError>;
 
     /// Madde 7: yetkili devir. `claim`'in CAS'ının aksine zaten sahipli (ya da
     /// havuzdaki) bir satırı override eder — uygunluk `Engine::reassign`'da
@@ -926,5 +1000,110 @@ impl EnvPort for NoEnv {
         environment_id: Option<Uuid>,
     ) -> Result<Option<Uuid>, EngineError> {
         Ok(environment_id)
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    use crate::types::wfe::WfeStatus;
+
+    fn end_response() -> Value {
+        serde_json::json!({"ok": true})
+    }
+
+    /// Her varyant için birer örnek — listeyi ELDE tutmak zorunda kalmayalım diye
+    /// değil, tam tersine: yeni bir varyant eklendiğinde bu dizinin eksik kaldığını
+    /// `resolution()`ın jokersiz `match`i zaten derleyicide gösterir, buradaki
+    /// beklentiler de o varyantın CEVABINI çivileme yeri olur.
+    fn every_variant() -> Vec<CommitOutcome> {
+        vec![
+            CommitOutcome::MoveTo { node: "n".into() },
+            CommitOutcome::StayAt { node: "n".into() },
+            CommitOutcome::Terminal {
+                end_response: end_response(),
+            },
+            CommitOutcome::Failed {
+                end_response: end_response(),
+            },
+            CommitOutcome::Terminated {
+                end_response: end_response(),
+            },
+            CommitOutcome::ForkTo {
+                branches: vec!["a".into(), "b".into()],
+                join: WftTarget::Node { node: "j".into() },
+                join_rule: JoinRule::All,
+            },
+            CommitOutcome::BranchMoveTo {
+                from_node: "a".into(),
+                node: "a2".into(),
+            },
+            CommitOutcome::BranchArrived {
+                from_node: "a".into(),
+                arrived_entries: vec!["a".into()],
+            },
+            CommitOutcome::CollapseTo {
+                from_node: Some("a".into()),
+                node: "n".into(),
+                cause: CollapseCause::Collapse,
+            },
+            CommitOutcome::JoinComplete {
+                from_node: "a".into(),
+                quorum_collapse: false,
+                arrived_entries: vec![],
+                next: Box::new(CommitOutcome::MoveTo { node: "n".into() }),
+            },
+        ]
+    }
+
+    /// `E02`/S1-EK: WFC çağıranına "alt akış bitti" diyen TEK yer. Joker
+    /// (`_ => return Ok(())`) bugün doğru cevap veriyordu ama TESADÜFEN — `next`
+    /// alanına bir gün `Failed`/`Terminated` konursa joker onu sessizce yutardı.
+    #[test]
+    fn settles_call_answers_only_for_terminal_class() {
+        for outcome in every_variant() {
+            let got = outcome.settles_call().map(|(s, _)| s);
+            let expected = match &outcome {
+                CommitOutcome::Terminal { .. } => Some("completed"),
+                CommitOutcome::Failed { .. } => Some("failed"),
+                CommitOutcome::Terminated { .. } => Some("terminated"),
+                // `next: MoveTo` → çağıran BİTMEDİ.
+                CommitOutcome::JoinComplete { .. } => None,
+                _ => None,
+            };
+            assert_eq!(got, expected, "settles_call() — {outcome:?}");
+        }
+    }
+
+    /// Join'in İÇİNDEKİ terminal de çağıranı kapatır: soru dıştaki varyantın adı
+    /// değil, işin gerçekten bitip bitmediğidir.
+    #[test]
+    fn settles_call_looks_through_join_complete() {
+        let join = CommitOutcome::JoinComplete {
+            from_node: "a".into(),
+            quorum_collapse: false,
+            arrived_entries: vec![],
+            next: Box::new(CommitOutcome::Terminal {
+                end_response: end_response(),
+            }),
+        };
+        assert_eq!(join.settles_call().map(|(s, _)| s), Some("completed"));
+    }
+
+    /// `StayAt` hiçbir kapanış sinyali üretmez — iş yerinde duruyor.
+    #[test]
+    fn stay_at_neither_settles_nor_moves_nor_clears_claim() {
+        let stay = CommitOutcome::StayAt { node: "n".into() };
+        assert_eq!(stay.settles_call(), None);
+        assert_eq!(stay.to_node(), None, "Ç2: marker satırı hareket taşımaz");
+        assert_eq!(stay.from_node(), None, "Ç2");
+        assert!(!stay.clears_claim(), "iş yerinde kalır, sahibi de");
+        assert_eq!(
+            stay.branch_nodes(),
+            vec!["n"],
+            "kol havuzu grant'la genişler"
+        );
+        let (status, node, end) = stay.resolution();
+        assert_eq!((status, node, end), (WfeStatus::Active, Some("n"), None));
     }
 }

@@ -15,7 +15,9 @@ use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::{CaGrantRule, GlobalAction, WfAdminRule};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
-use crate::v22::matcher::{authorize_or_delegated_anchored, MatchEnv};
+use crate::v22::matcher::{
+    authorize_or_delegated_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
+};
 use crate::v22::ports::Wfes;
 use crate::v22::valid::ValidRules;
 
@@ -144,27 +146,6 @@ pub async fn require_global_action(
 // (vekâlet dahil), sonra `when` guard'ı. İki ayrı sıra iki ayrı cevap üretirdi.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Bir WFE'nin ŞU ANDA bulunduğu node'a girdiği an.
-///
-/// ⚠️ **Bu hesap `R02`nin tanımıdır ve TEK YERDE durmak ZORUNDADIR.** Üç tüketici
-/// aynı fonksiyonu çağırır: `next_escalation` (kademe vadesi), `waited_for_seconds`
-/// (`Ç13`/`E12`) ve açık grant kümesi (aşağısı). İki yerde iki ayrı taban tanımı
-/// yazılırsa sayaçlar sessizce ayrışır — bir kademe vadesini geçmiş sayılırken grant'ı
-/// henüz açılmamış görünür.
-///
-/// **Bugünkü tanım geçicidir:** escalation marker'larını önek filtresiyle eleyip son
-/// satırı alır. `R02` bunu `to_node != null` olan son satıra çevirecek — o alan
-/// (`WfahEntry.to_node`) henüz YOK (`Ç2`/`Ç3` işi). Gövde değişince ÜÇ tüketici
-/// birlikte doğru cevaba geçer; çağrı yerlerine dokunmak gerekmez. Bu, fonksiyonun
-/// tek yerde olmasının asıl kazancıdır.
-pub fn node_entered_at(wfah: &crate::types::wfah::Wfah) -> Option<chrono::DateTime<chrono::Utc>> {
-    wfah.entries()
-        .iter()
-        .filter(|e| !e.action.starts_with("escalate:"))
-        .last()
-        .map(|e| e.applied_at)
-}
-
 /// Bir node'da AÇILMIŞ escalation grant'ları — defterden TÜRETİLİR.
 ///
 /// **`Wfes`e alan EKLENMEZ.** Kaynak defterdeki `escalate:<node_key>:<idx>` satırları:
@@ -184,7 +165,8 @@ pub fn open_grants<'w>(
     if node.escalation.is_empty() {
         return Vec::new();
     }
-    let entered = node_entered_at(wfah);
+    // R02'nin tabanı TEK yerdedir (`pipeline::node_entered_at`, `to_node != null`).
+    let entered = crate::v22::pipeline::node_entered_at(wfah);
     let mut fired: BTreeSet<usize> = BTreeSet::new();
     for entry in wfah.entries() {
         // `escalate:<node>:<idx>` — `:skipped` soneki de sayılır: WF Admin'in elle
@@ -234,6 +216,28 @@ pub async fn authorize_node(
     actor: &Actor,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
+    Ok(authorize_node_decision(wfd, wfes, node_key, actor, org)
+        .await?
+        .is_authorized())
+}
+
+/// `authorize_node`ın PROVENANS taşıyan hâli — claim marker'ı "doğrudan mı vekaleten
+/// mi" yazmak zorunda (Madde 6 / `Ç13`).
+///
+/// İki soru TEK gövdede cevaplanır: `can_claim` uygunluğu, `claim_decision` de aynı
+/// kararın gerekçesini sorar ve ikisi AYRI gövdeye bakarsa portal "Claim et" düğmesini
+/// gösterip `claim` reddedebilir.
+///
+/// ⚠️ Grant'la gelen yetki bugün `Direct` döner. `Ç13`ün `authority` alanı için doğru
+/// değer `grant` olurdu; o alanın kapalı listesi `E12`nin işi ve bu kayıt onu
+/// GENİŞLETMEZ — CLAUDE.md'nin *"`authority` bugün DAİMA `c_a`"* notu yerinde durur.
+pub async fn authorize_node_decision(
+    wfd: &crate::types::wfd_v22::Wfd,
+    wfes: &Wfes,
+    node_key: &str,
+    actor: &Actor,
+    org: &dyn OrgPort,
+) -> Result<AuthDecision, EngineError> {
     let Some(node) = wfd.nodes.get(node_key) else {
         return Err(EngineError::InvalidWfd(format!(
             "bilinmeyen node '{node_key}'"
@@ -247,15 +251,29 @@ pub async fn authorize_node(
         wfah: &wfes.wfah,
         orgtnt_id: wfes.orgtnt_id,
     };
-    // 1) Node'un kendi havuzu.
-    if authorize_or_delegated_anchored(node.act_c_a(), actor, wfes.origin_orgu_id, env, org).await?
-    {
-        return Ok(true);
+    // 1) Node'un kendi havuzu — vekâlet dahil, provenans KORUNUR.
+    let direct = authorize_with_delegation_anchored(
+        node.act_c_a(),
+        actor,
+        wfes.origin_orgu_id,
+        env,
+        org,
+        chrono::Utc::now(),
+    )
+    .await?;
+    if direct.is_authorized() {
+        return Ok(direct);
     }
     // 2) Açılmış grantlar — `matches_grant_rules` ile AYNI sıra (c_a → when).
     let grants = open_grants(wfd, &wfes.wfah, node_key);
     if grants.is_empty() {
-        return Ok(false);
+        return Ok(AuthDecision::Denied);
     }
-    matches_grant_rules(grants, actor, wfes, &ValidRules::for_version(wfd), org).await
+    let by_grant =
+        matches_grant_rules(grants, actor, wfes, &ValidRules::for_version(wfd), org).await?;
+    Ok(if by_grant {
+        AuthDecision::Direct
+    } else {
+        AuthDecision::Denied
+    })
 }

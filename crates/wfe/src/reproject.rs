@@ -97,7 +97,14 @@ pub async fn reproject_wfe(
         (Some(node), WfeStatus::Active) => (
             Some(
                 engine
-                    .resolve_node_c_a(&wfd, node, ctx, &wfes.wfah, &anchor_actor, wfes.orgtnt_id)
+                    .node_candidates(
+                        node,
+                        &wfd,
+                        ctx,
+                        &wfes.wfah,
+                        anchor_actor.orgu_id,
+                        wfes.orgtnt_id,
+                    )
                     .await?,
             ),
             Some(
@@ -151,12 +158,12 @@ pub async fn reproject_wfe(
         .filter(|b| b.status == BranchStatus::Active)
     {
         let c_a = engine
-            .resolve_node_c_a(
-                &wfd,
+            .node_candidates(
                 &b.branch_node,
+                &wfd,
                 ctx,
                 &wfes.wfah,
-                &anchor_actor,
+                anchor_actor.orgu_id,
                 wfes.orgtnt_id,
             )
             .await?;

@@ -162,7 +162,9 @@ impl SimState {
     /// `start`'ın wft'i Parallel OLAMAZ (validator + engine reddeder — WOR-31
     /// §Kısıtlar), bu yüzden `branches`/`join_target` her zaman boş başlar.
     pub fn from_new_wfe(new: &NewWfe) -> Self {
-        let (status, current_node, end_response) = outcome_parts(&new.outcome);
+        let (status, node, end_response) = new.outcome.resolution();
+        let current_node = node.map(str::to_string);
+        let end_response = end_response.cloned();
         Self {
             wfe_id: new.wfe_id,
             orgtnt_id: new.orgtnt_id,
@@ -247,7 +249,9 @@ impl SimState {
         self.dynctx = commit.new_dynctx.clone();
         self.wfah.extend(commit.wfah_entries.iter().cloned());
         self.apply_branch_outcome(&commit.outcome);
-        let (status, current_node, end_response) = outcome_parts(&commit.outcome);
+        let (status, node, end_response) = commit.outcome.resolution();
+        let current_node = node.map(str::to_string);
+        let end_response = end_response.cloned();
         self.status = status;
         self.current_node = current_node;
         // K-2: uğranan node'lar. Kol node'ları `apply_branch_outcome` sonrası okunur —
@@ -449,15 +453,6 @@ impl SimState {
             .iter_mut()
             .find(|b| b.status == BranchStatus::Active && b.branch_node == node)
     }
-}
-
-fn outcome_parts(
-    outcome: &CommitOutcome,
-) -> (WfeStatus, Option<String>, Option<serde_json::Value>) {
-    // v2.3 (`E02`/S3): `resolution()`a devreder — sim ile gerçek akış AYNI sınıflamayı
-    // kullanmak zorunda, iki kopya bir gün ayrışırdı.
-    let (status, node, end) = outcome.resolution();
-    (status, node.map(str::to_string), end.cloned())
 }
 
 /// Bir adımın motor tarafı — `routes/simulate.rs` ve `scenario::run` ORTAK kullanır.

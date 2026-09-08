@@ -4748,7 +4748,7 @@ mod tests {
         };
         let doc = format!(
             r#"{{
-              "wfd_version": "2.2",
+              "wfd_version": "2.3",
               "id": "grant-test",
               "name": "Grant Test",
               "version": "1.0.0",
@@ -4759,16 +4759,15 @@ mod tests {
               "wf_admin": [
                 {{ "c_a": {{ "c_orgu": "self", "c_r": ["wfAdmin"] }} }}
               ],
-              "start": [
-                {{ "id": "start__adim", "action": "basla", "from": "adim",
-                   "wft": {{ "terminal": "bitti" }} }}
-              ],
+              "start": [ {{ "id": "start__adim", "action": "basla" }} ],
               "nodes": {{ "adim": {{ "c_a": {{ "c_orgu": "self", "c_r": ["memur"] }} }} }},
-              "actions": {{ "basla": {{ "input": {{ "required": [], "optional": [] }} }} }},
+              "actions": {{
+                "basla": {{ "input": {{ "required": [], "optional": [] }},
+                            "from": "adim", "wft": {{ "terminal": "bitti" }} }}
+              }},
               "terminals": [
                 {{ "id": "bitti", "label": "Bitti", "wfe_end_response": {{ "status": "ok" }} }}
-              ],
-              "transitions": []
+              ]
             }}"#
         );
         Wfd::from_json(&doc).expect("fixture geçerli olmalı")
@@ -4915,15 +4914,12 @@ mod tests {
         };
         let doc = format!(
             r#"{{
-              "wfd_version": "2.2",
+              "wfd_version": "2.3",
               "id": "node-grant-test",
               "name": "Node Grant Test",
               "version": "1.0.0",
               "context": {{ "type": "object", "properties": {{}} }},
-              "start": [
-                {{ "id": "start__adim", "action": "basla", "from": "adim",
-                   "wft": {{ "terminal": "bitti" }} }}
-              ],
+              "start": [ {{ "id": "start__adim", "action": "basla" }} ],
               "nodes": {{
                 "adim": {{
                   "c_a": {{ "c_orgu": "self", "c_r": ["memur"] }},
@@ -4933,11 +4929,13 @@ mod tests {
                 }},
                 "sessiz": {{ "c_a": {{ "c_orgu": "self", "c_r": ["memur"] }} }}
               }},
-              "actions": {{ "basla": {{ "input": {{ "required": [], "optional": [] }} }} }},
+              "actions": {{
+                "basla": {{ "input": {{ "required": [], "optional": [] }},
+                            "from": "adim", "wft": {{ "terminal": "bitti" }} }}
+              }},
               "terminals": [
                 {{ "id": "bitti", "label": "Bitti", "wfe_end_response": {{ "status": "ok" }} }}
-              ],
-              "transitions": []
+              ]
             }}"#
         );
         Wfd::from_json(&doc).expect("fixture geçerli olmalı")

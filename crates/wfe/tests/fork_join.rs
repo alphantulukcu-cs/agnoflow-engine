@@ -656,7 +656,7 @@ async fn happy_path_fork_join_finalize() {
             ..a
         };
         let r = exec
-            .apply(wfe_id, &a, "approve", &json!({}), Some(node), None, None)
+            .apply(wfe_id, &a, branch_approve(node), &json!({}), Some(node), None, None)
             .await
             .unwrap();
         assert!(!r.terminal);
@@ -672,7 +672,7 @@ async fn happy_path_fork_join_finalize() {
         ..a
     };
     let r = exec
-        .apply(wfe_id, &a, "approve", &json!({}), Some(node), None, None)
+        .apply(wfe_id, &a, branch_approve(node), &json!({}), Some(node), None, None)
         .await
         .unwrap();
     assert!(!r.terminal, "join node terminal değil");
@@ -934,7 +934,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     assert!(!input["approved_at"].is_null(), "onay zamanı taşınmalı");
     // WOR-63: geçersizleşmeyi TETİKLEYEN kol/aksiyon/actor
     assert_eq!(input["trigger_branch"], json!("self__financeApprover"));
-    assert_eq!(input["trigger_action"], json!("reject"));
+    assert_eq!(input["trigger_action"], json!("finans_ret"));
     assert_eq!(input["trigger_actor"]["user_id"], json!(fin.user_id));
     // hr hâlâ aktifti → cancelled marker'ı; iki marker karışmaz
     let cancels: Vec<&WfahEntry> = w
@@ -960,7 +960,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     assert_eq!(summaries.len(), 1, "collapse başına tek özet");
     let s = summaries[0].input.as_ref().unwrap();
     assert_eq!(s["trigger_branch"], json!("self__financeApprover"));
-    assert_eq!(s["trigger_action"], json!("reject"));
+    assert_eq!(s["trigger_action"], json!("finans_ret"));
     assert_eq!(s["trigger_actor"]["user_id"], json!(fin.user_id));
     assert_eq!(s["kind"], json!("terminal"));
     assert_eq!(s["cancelled"], json!(["self__hrApprover"]));
@@ -1205,12 +1205,21 @@ async fn can_claim_many_matches_can_claim_row_by_row() {
 /// (WOR-56 `{"collapse": {"node": ...}}`) — `CommitOutcome::CollapseTo` üretir.
 /// Fixture'ın kendi `reject`'i terminal hedeflidir; terminal yolu paralel modu
 /// başka bir arm'dan bitirir, biz burada tam olarak CollapseTo'yu test ediyoruz.
+/// v2.3 (`Ç11`): onay aksiyonunun adı kol BAŞINA ayrıdır — bir aksiyonu yalnız bir
+/// node kullanır, dolayısıyla üç kol `approve` adını paylaşamaz.
+fn branch_approve(node: &str) -> &'static str {
+    match node {
+        "self__financeApprover" => "finans_onay",
+        "self__legalApprover" => "hukuk_onay",
+        "self__hrApprover" => "ik_onay",
+        other => panic!("bilinmeyen kol node'u: {other}"),
+    }
+}
+
 fn paralel_with_collapse_to_node() -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") {
-            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
-        }
+    for a in ["finans_ret", "hukuk_ret", "ik_ret"] {
+        v["actions"][a]["wft"] = json!({"collapse": {"node": "self__coordinator"}});
     }
     Wfd::from_value(v).unwrap()
 }
@@ -1701,84 +1710,34 @@ async fn tick_timers_fires_branch_claim_timeout_release() {
         .any(|e| e.action == "claim_released:self__financeApprover"));
 }
 
-/// WOR-56/SLA-1 (2026-08-03): kol node'unda `collapses_parallel` + node hedefli
-/// claim_timeout.
-fn paralel_with_collapsing_branch_claim_timeout() -> Wfd {
-    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    v["nodes"]["self__financeApprover"]["claim_timeout"] = json!({
-        "after": "PT10M",
-        "wft": "self__coordinator",
-        "collapses_parallel": true,
-    });
-    Wfd::from_value(v).unwrap()
-}
-
-/// WOR-56/SLA-1 ANA KABUL: `collapses_parallel` işaretli claim_timeout kol
-/// bağlamında dolunca yalnız kolu taşımaz — PARALELİ SONLANDIRIR: kardeş kollar
-/// iptal, paralel mod kapanır, WFE hedef node'a gider. Aksiyon collapse'ıyla aynı
-/// yol (`CommitOutcome::CollapseTo` + `_collapse` özeti), tetikleyicisi system.
-#[tokio::test]
-async fn tick_timers_branch_claim_timeout_collapses_parallel() {
-    let wfd = paralel_with_collapsing_branch_claim_timeout();
-    let store = Arc::new(ParStore::default());
-    let exec = WfeExecutor::new(
-        Arc::new(MockOrg),
-        Arc::new(FixtureWfdStore(wfd.clone())),
-        store.clone(),
-        Arc::new(MockRunner),
-    );
-    let claimant = Uuid::new_v4();
-    let wfe_id = seed_parallel_state(&store, &wfd, "self__financeApprover", claimant);
-    store.rewind_branch_claim(
-        wfe_id,
-        "self__financeApprover",
-        chrono::Utc::now() - chrono::Duration::minutes(11),
-    );
-
-    assert!(
-        exec.tick_timers(wfe_id).await.unwrap(),
-        "kol claim_timeout ateşlenmeli"
-    );
-
-    let w = store.snapshot(wfe_id);
-    assert_eq!(
-        w.current_node.as_deref(),
-        Some("self__coordinator"),
-        "collapse hedefine gidilmeli"
-    );
-    assert!(w.join_target.is_none(), "paralel mod kapanmalı");
-    assert!(
-        w.branches
-            .iter()
-            .all(|b| b.status != BranchStatus::Active),
-        "kardeş kollar iptal edilmeli: {:?}",
-        w.branches.iter().map(|b| b.status).collect::<Vec<_>>()
-    );
-    let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
-    assert!(
-        actions.contains(&"claim_released:self__financeApprover"),
-        "SLA-1 marker'ı: {actions:?}"
-    );
-    assert!(actions.contains(&"_collapse"), "collapse özeti: {actions:?}");
-}
+// v2.3 (`K13`): `paralel_with_collapsing_branch_claim_timeout` +
+// `tick_timers_branch_claim_timeout_collapses_parallel` SİLİNDİ. `claim_timeout`tan
+// `wft` ve `collapses_parallel` KALKTI — süre dolduğunda yapılan tek şey claim'i
+// bırakmak, dolayısıyla "paraleli sonlandırır" diye bir yol yok. Zamanlayıcının
+// CANLI davranışı `tick_timers_fires_branch_claim_timeout_release` ile kapsanıyor.
 
 /// WOR-56/SLA-2 (2026-08-03): kol node'una node hedefli collapse escalation'ı.
-fn paralel_with_collapsing_branch_escalation() -> Wfd {
+fn paralel_with_branch_escalation() -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    // v2.3 (`Ç9`): kademe hedef taşımaz, `grant` taşır.
     v["nodes"]["self__financeApprover"]["escalation"] = json!([{
         "after": "PT10M",
-        "wft": { "collapse": { "node": "self__coordinator" } }
+        "grant": { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } }
     }]);
     Wfd::from_value(v).unwrap()
 }
 
-/// WOR-56/SLA-2 ANA KABUL: kol bekleme süresi (escalation) dolunca `{collapse:{node}}`
-/// hedefi paraleli SONLANDIRIR — kardeş kollar iptal, paralel mod kapanır, WFE hedefe
-/// gider. SLA-1 collapse'ıyla aynı yol; tek fark sayacın claim değil GİRİŞ anından
-/// (`entered_at`) ölçülmesi.
+/// Kol bekleme süresi (escalation) dolunca zamanlayıcı ATEŞLER ve marker'ı yazar —
+/// sayaç claim değil GİRİŞ anından (`entered_at`) ölçülür.
+///
+/// ⚠️ v2.3 (`Ç1-EK` + `K10`): bu testin beklentileri TERSİNE DÖNDÜ. Eskiden kademe
+/// `{collapse:{node}}` hedefiyle paraleli SONLANDIRIYORDU (kardeşler iptal, mod
+/// kapanır, WFE hedefe gider). Artık kademe iş taşımaz, yalnız yetki havuzunu
+/// genişletir. Ateşleme güvencesi aynen duruyor; taşıma güvencesinin YERİNE
+/// "hiçbir şey KIPIRDAMADI" güvencesi geldi ve aşağıda açıkça ölçülüyor.
 #[tokio::test]
-async fn tick_timers_branch_escalation_collapses_parallel() {
-    let wfd = paralel_with_collapsing_branch_escalation();
+async fn tick_timers_branch_escalation_fires_without_moving_anything() {
+    let wfd = paralel_with_branch_escalation();
     let store = Arc::new(ParStore::default());
     let exec = WfeExecutor::new(
         Arc::new(MockOrg),
@@ -1799,25 +1758,24 @@ async fn tick_timers_branch_escalation_collapses_parallel() {
     );
 
     let w = store.snapshot(wfe_id);
-    assert_eq!(
-        w.current_node.as_deref(),
-        Some("self__coordinator"),
-        "collapse hedefine gidilmeli"
-    );
-    assert!(w.join_target.is_none(), "paralel mod kapanmalı");
-    assert!(
-        w.branches
-            .iter()
-            .all(|b| b.status != BranchStatus::Active),
-        "kardeş kollar iptal edilmeli: {:?}",
-        w.branches.iter().map(|b| b.status).collect::<Vec<_>>()
-    );
+    // Marker YAZILDI — ateşleme güvencesi (bu testin asıl konusu) yerinde.
     let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
     assert!(
         actions.contains(&"escalate:self__financeApprover:0"),
         "SLA-2 marker'ı: {actions:?}"
     );
-    assert!(actions.contains(&"_collapse"), "collapse özeti: {actions:?}");
+    // ...ve HİÇBİR ŞEY KIPIRDAMADI: paralel mod açık, üç kol da aktif, WFE
+    // seviyesinde konum oluşmadı, hiçbir collapse/iptal marker'ı yok.
+    assert!(w.join_target.is_some(), "paralel mod açık kalmalı");
+    assert_eq!(w.current_node, None, "WFE seviyesinde konum oluşmamalı");
+    assert!(
+        w.branches.iter().all(|b| b.status == BranchStatus::Active),
+        "hiçbir kol düşmemeli: {:?}",
+        w.branches.iter().map(|b| b.status).collect::<Vec<_>>()
+    );
+    for m in ["_collapse", "_branch_cancelled", "_branch_superseded"] {
+        assert!(!actions.contains(&m), "{m} yazılmamalı: {actions:?}");
+    }
 }
 
 /// Belirli bir kolun mevcut claimant'ını Actor olarak döndürür (approve için).
@@ -2277,13 +2235,10 @@ async fn concurrent_single_mode_applies_exactly_one_wins() {
 /// (Eşik None verilirse alan yazılmaz → saf OR = 1-of-N.)
 fn paralel_with_quorum(k: Option<u32>) -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["wft"].get("parallel").is_some() {
-            t["wft"]["parallel"]["join_mode"] = json!("or");
-            if let Some(k) = k {
-                t["wft"]["parallel"]["join_threshold"] = json!(k);
-            }
-        }
+    let wft = &mut v["actions"]["start_review"]["wft"];
+    wft["parallel"]["join_mode"] = json!("or");
+    if let Some(k) = k {
+        wft["parallel"]["join_threshold"] = json!(k);
     }
     Wfd::from_value(v).unwrap()
 }
@@ -2479,7 +2434,7 @@ async fn cancelled_branch_cannot_act_after_quorum() {
         (&actors[0], "self__financeApprover"),
         (&actors[1], "self__legalApprover"),
     ] {
-        exec.apply(wfe_id, a, "approve", &json!({}), Some(node), None, None)
+        exec.apply(wfe_id, a, branch_approve(node), &json!({}), Some(node), None, None)
             .await
             .unwrap();
     }
@@ -2554,14 +2509,11 @@ async fn concurrent_arrivals_in_quorum_resolve_to_single_join() {
 /// Fixture'ın fork'unu ZEN join koşuluna çevirir: "(finans VE hukuk) YA DA İK".
 fn paralel_with_join_expr() -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["wft"].get("parallel").is_some() {
-            t["wft"]["parallel"]["join_mode"] = json!("expr");
-            t["wft"]["parallel"]["join_when"] = json!(
-                "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover"
-            );
-        }
-    }
+    let wft = &mut v["actions"]["start_review"]["wft"];
+    wft["parallel"]["join_mode"] = json!("expr");
+    wft["parallel"]["join_when"] = json!(
+        "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover"
+    );
     Wfd::from_value(v).unwrap()
 }
 

@@ -97,11 +97,10 @@ mod tests {
 
     fn wfd() -> Wfd {
         let mut w: Wfd = serde_json::from_value(json!({
-            "wfd_version": "2.2",
+            "wfd_version": "2.3",
             "id": "x", "name": "X", "version": "1.0.0",
             "context": {"type": "object", "properties": {}},
             "nodes": {}, "start": [], "actions": {},
-            "transitions": [],
             "terminals": [
                 {"id": "onaylandi", "label": "Onaylandı", "wfe_end_response": {}},
                 {"id": "reddedildi", "wfe_end_response": {}}

@@ -8,9 +8,13 @@
 //! için `Some([])`, motor için "rol kanalı kapalı". Belge geçersizdi ama çalışıyordu.
 //!
 //! Kapı ARTIK motorda: şema kanonik dosyadan `include_str!` ile derleme anında gömülür,
-//! yani binary ile spec ayrı düşemez. Editör (`agnoflow-frontend/src/schema/wfd.schema.json`)
-//! aynı dosyanın kopyasını ajv ile koşar — kural seti motorun, editör yalnız aynı cevabı
-//! önden verir (ifade doğrulamasındaki `validate-expression` sözleşmesinin aynısı).
+//! yani binary ile spec ayrı düşemez. Editör AYNI dosyayı `agnoflow-spec` submodule'ünden
+//! import edip ajv ile koşar (`D05` sonrası depo içi KOPYA YOK) — kural seti motorun,
+//! editör yalnız aynı cevabı önden verir (ifade doğrulamasındaki `validate-expression`
+//! sözleşmesinin aynısı).
+//!
+//! Şemanın `properties.wfd_version.const` alanı sürüm ÇAPASIDIR: `SUPPORTED_WFD_VERSION`
+//! ile eşitliği `tests/schema_version_gate.rs` zorluyor (`R06`/S2).
 //!
 //! Kapı NEREDE koşar: WFD yazma yollarının hepsi (upload / publish / submit / approve) VE
 //! okuma (fetch) — `wfd::adapter`. Taslak KAYDI (`save_draft`) kapsam DIŞIDIR: yarım

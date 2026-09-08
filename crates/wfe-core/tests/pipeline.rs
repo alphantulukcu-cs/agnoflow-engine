@@ -2282,6 +2282,7 @@ fn golden_with_claim_timeout_effects(after: &str) -> Wfd {
             ),
             ("analyst_approved_at".to_string(), json!("$timestamp")),
         ]),
+        set_when: Vec::new(),
     });
     wfd
 }

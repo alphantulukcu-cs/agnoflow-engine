@@ -630,10 +630,55 @@ pub enum AutoexecType {
     Lambda,
 }
 
+/// Context'e TEK yazma yolu (Değişmez #7). `set` KOŞULSUZ yazar, `set_when[]` koşula
+/// bağlı — ikisinden EN AZ BİRİ zorunludur (şema `anyOf`; yalnız koşullu yazan bir
+/// kayıt `"set": {}` yazmak ZORUNDA değildir, `E09`/S3).
+///
+/// Uygulama sırası: önce `set`, sonra `set_when[]` **dizi sırasıyla**. Koşulu uyan
+/// BÜTÜN girdiler uygulanır (**ilk-match DEĞİL**) ve aynı alana yazan iki girdide
+/// SONRAKİ kazanır (`Ç10`/c).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WfesEffects {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub set: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub set_when: Vec<SetWhenEntry>,
+}
+
+/// `wfes_effects.set_when[]` girdisi — koşula bağlı ctx yazımı (`Ç10`/c, `E09`).
+///
+/// İki alan da ZORUNLUDUR ve boş olamaz (şema: `when` `minLength: 1`, `set`
+/// `minProperties: 1` — `E09`/S5). Anlamsız bir girdi belgeden geçmemeli.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetWhenEntry {
+    /// ZEN koşulu. GİRDİ ctx'ini görür — `set`in ve daha önceki `set_when`
+    /// girdilerinin yazdıkları BURAYA GÖRÜNMEZ (`E09`/B3, zincirleme YOK).
+    pub when: String,
+    pub set: BTreeMap<String, Value>,
+}
+
+impl WfesEffects {
+    /// Bu bloğun yazabileceği TÜM hedefler — koşullu + koşulsuz.
+    ///
+    /// `context_field_never_written` gibi *"bu alanı kimse yazmıyor mu"* soran kurallar
+    /// bunu kullanır: koşullu bir yazar da yazardır (`Ç10` açıkça söyledi).
+    pub fn all_writes(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.set
+            .iter()
+            .chain(self.set_when.iter().flat_map(|e| e.set.iter()))
+    }
+
+    /// Yalnız KOŞULSUZ hedefler.
+    ///
+    /// ⚠️ `all_writes()` ile ayrı durmasının sebebi teknik değil ANLAMSAL:
+    /// `optional_input_nulls_other_writer` uyarısı *"bu alan kesin `null`'lanır"* diyor
+    /// ve **koşullu bir yazar o garantiyi VERMEZ**. Tek yardımcı bu ayrımı ezer ve
+    /// yanlış uyarı üretirdi (`E09`/S2).
+    pub fn unconditional_writes(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.set.iter()
+    }
 }
 
 // ---- WFC — İş Akışı Çağrısı (Workflow Call) ----

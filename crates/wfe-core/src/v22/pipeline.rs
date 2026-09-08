@@ -463,6 +463,8 @@ impl<'a> Engine<'a> {
                 action_input: Some(input),
                 exec_result: None,
                 now,
+                wfah: &empty_wfah,
+                valid_rules: &ValidRules::for_version(wfd),
             };
             staged = apply_effects(&staged, effects, &env)?;
         }
@@ -543,8 +545,15 @@ impl<'a> Engine<'a> {
         // kuralıyla sağlanır (validator): (1) her declared input bir wfes_effects
         // tarafından tüketilmek zorunda, (2) her context alanı en az bir wfes_effects
         // tarafından yazılmak zorunda. Çalışma anında ayrı bir ctx doluluk denetimi yok.
-        let staged_calls =
-            self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfe_id, now)?;
+        let staged_calls = self.stage_calls(
+            wfd,
+            landed.as_ref(),
+            &final_ctx,
+            &empty_wfah,
+            actor,
+            wfe_id,
+            now,
+        )?;
         // Kapı B: start'ta ctx SIFIRDAN kurulur, dolayısıyla tüm alanlar "yazılmış"tır.
         guard_written_ctx(wfd, &json!({}), &final_ctx)?;
 
@@ -704,6 +713,8 @@ impl<'a> Engine<'a> {
                 action_input: Some(input),
                 exec_result: None,
                 now,
+                wfah: &wfes.wfah,
+                valid_rules: &ValidRules::for_version(wfd),
             };
             staged = apply_effects(&staged, effects, &env)?;
         }
@@ -793,8 +804,15 @@ impl<'a> Engine<'a> {
         );
 
         // WFC: varılan site bir çağrı taşıyorsa outbox satırı AYNI tx'te stage edilir.
-        let staged_calls =
-            self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
+        let staged_calls = self.stage_calls(
+            wfd,
+            landed.as_ref(),
+            &final_ctx,
+            &wfes.wfah,
+            actor,
+            wfes.wfe_id,
+            now,
+        )?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         let claim_recheck = self
@@ -954,6 +972,8 @@ impl<'a> Engine<'a> {
                 action_input: Some(input),
                 exec_result: None,
                 now,
+                wfah: &wfes.wfah,
+                valid_rules: &ValidRules::for_version(wfd),
             };
             staged = apply_effects(&staged, effects, &env)?;
         }
@@ -1054,8 +1074,15 @@ impl<'a> Engine<'a> {
         );
 
         // WFC: varılan site bir çağrı taşıyorsa outbox satırı AYNI tx'te stage edilir.
-        let staged_calls =
-            self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
+        let staged_calls = self.stage_calls(
+            wfd,
+            landed.as_ref(),
+            &final_ctx,
+            &wfes.wfah,
+            actor,
+            wfes.wfe_id,
+            now,
+        )?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         let claim_recheck = self
@@ -2237,6 +2264,7 @@ impl<'a> Engine<'a> {
             wfd,
             landed.as_ref(),
             &final_ctx,
+            &wfes.wfah,
             &anchored,
             wfes.wfe_id,
             now,
@@ -2454,6 +2482,8 @@ impl<'a> Engine<'a> {
                 action_input: None,
                 exec_result: None,
                 now,
+                wfah: &wfes.wfah,
+                valid_rules: &ValidRules::for_version(wfd),
             };
             staged = apply_effects(&staged, effects, &env)?;
         }
@@ -2536,6 +2566,7 @@ impl<'a> Engine<'a> {
             wfd,
             landed.as_ref(),
             &final_ctx,
+            &wfes.wfah,
             &anchored,
             wfes.wfe_id,
             now,
@@ -2772,6 +2803,8 @@ impl<'a> Engine<'a> {
                 action_input: None,
                 exec_result: None,
                 now,
+                wfah: &wfes.wfah,
+                valid_rules: &ValidRules::for_version(wfd),
             };
             staged = apply_effects(&staged, effects, &env)?;
         }
@@ -2876,6 +2909,8 @@ impl<'a> Engine<'a> {
                             action_input,
                             exec_result: Some(&result),
                             now: Utc::now(),
+                            wfah: wfah,
+                            valid_rules: &ValidRules::for_version(wfd),
                         };
                         *staged = apply_effects(staged, effects, &env)?;
                     }
@@ -2911,6 +2946,8 @@ impl<'a> Engine<'a> {
                             action_input,
                             exec_result: None,
                             now: Utc::now(),
+                            wfah: wfah,
+                            valid_rules: &ValidRules::for_version(wfd),
                         };
                         *staged = apply_effects(staged, &catch.wfes_effects, &env)?;
                         wfah_entries.push(WfahEntry {
@@ -3081,6 +3118,8 @@ impl<'a> Engine<'a> {
                 exec_result: None,
                 call: Some(&call),
                 now,
+                wfah: &wfes.wfah,
+                valid_rules: &ValidRules::for_version(wfd),
             };
             staged = apply_effects(&staged, effects, &env)?;
         }
@@ -3227,6 +3266,7 @@ impl<'a> Engine<'a> {
             wfd,
             landed.as_ref(),
             &final_ctx,
+            &wfes.wfah,
             &anchored,
             wfes.wfe_id,
             now,
@@ -3273,6 +3313,10 @@ impl<'a> Engine<'a> {
         wfd: &Wfd,
         landed: Option<&CallSite>,
         ctx: &Value,
+        // E09/B4 ile aynı gerekçe: `EffectEnv` defteri taşımak zorunda. Burada
+        // yalnız `resolve_value` koşuyor (çağrı girdisi), ama ortamın YARIM
+        // kurulması "when her yerde aynı şeyi görür" hükmünü delen bir istisna olurdu.
+        wfah: &Wfah,
         actor: &Actor,
         wfe_id: Uuid,
         now: DateTime<Utc>,
@@ -3327,6 +3371,8 @@ impl<'a> Engine<'a> {
             exec_result: None,
             call: None,
             now,
+            wfah: wfah,
+            valid_rules: &ValidRules::for_version(wfd),
         };
         let mut input = Map::new();
         for (key, raw) in &def.input {
@@ -3407,6 +3453,7 @@ impl<'a> Engine<'a> {
                     let (end_response, final_ctx) = self.terminal_outcome(
                         terminal,
                         wfd,
+                        wfah,
                         staged,
                         actor,
                         wfe_id,
@@ -3608,6 +3655,7 @@ impl<'a> Engine<'a> {
                         let (end_response, final_ctx) = self.terminal_outcome(
                             terminal,
                             wfd,
+                            wfah,
                             staged,
                             actor,
                             wfe_id,
@@ -3667,6 +3715,7 @@ impl<'a> Engine<'a> {
                 let (end_response, final_ctx) = self.terminal_outcome(
                     &terminal_id,
                     wfd,
+                    wfah,
                     staged,
                     actor,
                     wfe_id,
@@ -3807,6 +3856,9 @@ impl<'a> Engine<'a> {
         &self,
         terminal_id: &str,
         wfd: &Wfd,
+        // E09/B4: `wfes_effects.set_when[].when` defteri görür; bu fonksiyonun elinde
+        // `Wfes` yok, o yüzden defter PARAMETREdir (üç çağıranı besler).
+        wfah: &Wfah,
         staged: Value,
         actor: &Actor,
         wfe_id: Uuid,
@@ -3831,6 +3883,8 @@ impl<'a> Engine<'a> {
             action_input,
             exec_result: None,
             now,
+            wfah: wfah,
+            valid_rules: &ValidRules::for_version(wfd),
         };
         let final_ctx = match &terminal.wfes_effects {
             Some(effects) => apply_effects(&staged, effects, &env)?,

@@ -217,6 +217,51 @@ pub struct BranchDropPayload<N> {
     pub trigger_actor: Value,
 }
 
+impl CollapsePayload<String> {
+    /// Bkz. `WfahPayload::map_nodes`.
+    pub fn map_nodes<M, N>(self, mut resolve: M) -> CollapsePayload<N>
+    where
+        M: FnMut(&str) -> N,
+    {
+        CollapsePayload {
+            kind: self.kind,
+            reason: self.reason,
+            target: self.target.as_deref().map(&mut resolve),
+            cancelled: self.cancelled.iter().map(|n| resolve(n)).collect(),
+            superseded: self.superseded.iter().map(|n| resolve(n)).collect(),
+            trigger_kind: self.trigger_kind,
+            trigger_branch: self.trigger_branch.as_deref().map(&mut resolve),
+            trigger_at_node: self.trigger_at_node.as_deref().map(&mut resolve),
+            trigger_action: self.trigger_action,
+            trigger_actor: self.trigger_actor,
+            trigger_claimed_by: self.trigger_claimed_by,
+            trigger_claimed_at: self.trigger_claimed_at,
+        }
+    }
+}
+
+impl BranchDropPayload<String> {
+    /// Bkz. `WfahPayload::map_nodes`.
+    pub fn map_nodes<M, N>(self, mut resolve: M) -> BranchDropPayload<N>
+    where
+        M: FnMut(&str) -> N,
+    {
+        BranchDropPayload {
+            branch_entry: resolve(&self.branch_entry),
+            at_node: resolve(&self.at_node),
+            reason: self.reason,
+            claimed_by: self.claimed_by,
+            claimed_at: self.claimed_at,
+            approved_by: self.approved_by,
+            approved_at: self.approved_at,
+            trigger_kind: self.trigger_kind,
+            trigger_branch: self.trigger_branch.as_deref().map(&mut resolve),
+            trigger_action: self.trigger_action,
+            trigger_actor: self.trigger_actor,
+        }
+    }
+}
+
 impl<N: Serialize> WfahPayload<N> {
     /// Satıra yazılacak JSON. `untagged` serileşme sayesinde **bugünkü şekiller
     /// birebir korunur** — hiçbir alan eklenmez.
@@ -229,6 +274,94 @@ impl<N: Serialize> WfahPayload<N> {
 }
 
 impl WfahPayload<String> {
+    /// Düğüm anahtarlarını ÇÖZÜLMÜŞ karşılıklarına çevirir — `N = String` (deftere
+    /// yazılan ham anahtar) → `N = Ref` (API sınırı).
+    ///
+    /// `P04`in *"tek şekil tanımı, iki örnekleme"* hükmünün ikinci yarısı budur:
+    /// dönüşüm MEKANİKtir ve tek yerdedir. İkinci bir şekil tanımı yazmak yerine
+    /// aynı birleşim iki `N` ile örneklenir; yeni bir varyant eklendiğinde derleyici
+    /// BURAYI gösterir.
+    ///
+    /// ⚠️ Anahtar taşımayan varyantlar (`ClaimTaken`/`ClaimReleased`/`Trigger`/…)
+    /// `Value` taşıdıkları için olduğu gibi geçer — onların içindeki anahtarları
+    /// çözmek, sahibi başka modül olan (`v22::ownership`) bir şekli burada İKİNCİ
+    /// kez tanımlamak olurdu.
+    pub fn map_nodes<M, N>(self, mut resolve: M) -> WfahPayload<N>
+    where
+        M: FnMut(&str) -> N,
+    {
+        use WfahPayload as P;
+        match self {
+            P::Deadline { deadline } => P::Deadline { deadline },
+            P::Escalation { after, grant } => P::Escalation { after, grant },
+            P::EscalationSkipped { skipped, after } => P::EscalationSkipped { skipped, after },
+            P::ClaimTaken(v) => P::ClaimTaken(v),
+            P::ClaimReleased(v) => P::ClaimReleased(v),
+            P::Trigger {
+                result,
+                error,
+                message,
+                handled,
+                required,
+            } => P::Trigger {
+                result,
+                error,
+                message,
+                handled,
+                required,
+            },
+            P::CallReturn {
+                status,
+                callee_wfe_id,
+            } => P::CallReturn {
+                status,
+                callee_wfe_id,
+            },
+            P::CallTruncated {
+                callee_wfe_id,
+                omitted,
+                reason,
+            } => P::CallTruncated {
+                callee_wfe_id,
+                omitted,
+                reason,
+            },
+            P::Fork {
+                branches,
+                join,
+                join_mode,
+                join_threshold,
+                join_when,
+            } => P::Fork {
+                branches: branches.iter().map(|b| resolve(b)).collect(),
+                join,
+                join_mode,
+                join_threshold,
+                join_when,
+            },
+            P::BranchArrived {
+                branch_entry,
+                at_node,
+                approved_by,
+                approved_at,
+                claimed_at,
+                claimed_by,
+            } => P::BranchArrived {
+                branch_entry: branch_entry.as_deref().map(&mut resolve),
+                at_node: resolve(&at_node),
+                approved_by,
+                approved_at,
+                claimed_at,
+                claimed_by,
+            },
+            P::Join => P::Join,
+            P::Collapse(c) => P::Collapse(c.map_nodes(&mut resolve)),
+            P::BranchCancelled(b) => P::BranchCancelled(b.map_nodes(&mut resolve)),
+            P::BranchSuperseded(b) => P::BranchSuperseded(b.map_nodes(&mut resolve)),
+            P::Unknown(v) => P::Unknown(v),
+        }
+    }
+
     /// Ham satırdan payload'ı çözer. Ayrım satırın `action` ADINDAN gelen sınıftır —
     /// payload'ın içinde bir etiket ARANMAZ (bkz. modül başlığı).
     ///

@@ -165,10 +165,7 @@ pub fn find_item<'a>(wfd: &'a Wfd, group: &str, item: &str) -> Option<&'a Attach
 /// Eksik zorunlu slotlar (`"grup/item"`) — yalnız `gates: true` slotlar sayılır.
 /// `uploaded(group, item)` çağıranın gerçeğidir: gerçek akışta depo + staging,
 /// simülasyonda `SimState.attachments`.
-pub fn missing_required(
-    slots: &[GateSlot],
-    uploaded: impl Fn(&str, &str) -> bool,
-) -> Vec<String> {
+pub fn missing_required(slots: &[GateSlot], uploaded: impl Fn(&str, &str) -> bool) -> Vec<String> {
     slots
         .iter()
         .filter(|s| s.gates && s.required && !uploaded(&s.group, &s.item))
@@ -219,7 +216,10 @@ mod tests {
         let slots = gate_slots(&wfd, "basvuru", Some("iptal"));
         assert_eq!(slots.len(), 2);
         assert!(slots.iter().all(|s| s.gates));
-        assert_eq!(missing_required(&slots, |_, _| false), vec!["kimlik/kimlik.pdf"]);
+        assert_eq!(
+            missing_required(&slots, |_, _| false),
+            vec!["kimlik/kimlik.pdf"]
+        );
         // Yüklenmişse kapı açılır; `required: false` slot hiç kapı değildir.
         assert!(missing_required(&slots, |g, i| g == "kimlik" && i == "kimlik.pdf").is_empty());
     }

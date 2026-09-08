@@ -165,8 +165,10 @@ mod tests {
     #[test]
     fn send_back_actions_share_a_label_but_not_an_identity() {
         let mut w = wfd();
-        w.actions.insert("Geri_Gonder".into(), act(Some("Geri Gönder")));
-        w.actions.insert("Geri_Gonder_2".into(), act(Some("Geri Gönder")));
+        w.actions
+            .insert("Geri_Gonder".into(), act(Some("Geri Gönder")));
+        w.actions
+            .insert("Geri_Gonder_2".into(), act(Some("Geri Gönder")));
         assert_eq!(action_label(&w, "Geri_Gonder"), "Geri Gönder");
         assert_eq!(action_label(&w, "Geri_Gonder_2"), "Geri Gönder");
         // Label yazılmamışsa anahtarın okunur hâline düşer (özel hal yok).

@@ -33,7 +33,7 @@ use wfe_core::EngineError;
 
 fn wfd_json() -> Value {
     json!({
-        "wfd_version": "2.2",
+        "wfd_version": "2.3",
         "expression_language": "zen@1",
         "id": "wfah-anchor-listable",
         "name": "WFAH çapalı listable",
@@ -49,22 +49,13 @@ fn wfd_json() -> Value {
                 "c_a": {"c_orgu": "*:[type:sube]", "c_r": ["mudur"]}
             }
         },
-        "start": [{
-            "id": "start__memur",
-            "from": "memur",
-            "action": "basvur",
-            "wft": {"node": "mudur"}
-        }],
+        "start": [{ "id": "start__memur", "action": "basvur" }],
         "actions": {
-            "basvur": {"label": "Başvur", "input": {"required": [], "optional": []}},
-            "onayla": {"label": "Onayla", "input": {"required": [], "optional": []}}
+            "basvur": {"label": "Başvur", "input": {"required": [], "optional": []},
+                       "from": "memur", "wft": {"node": "mudur"}},
+            "onayla": {"label": "Onayla", "input": {"required": [], "optional": []},
+                       "from": "mudur", "wft": {"terminal": "bitti"}}
         },
-        "transitions": [{
-            "id": "t_onayla",
-            "from": "mudur",
-            "action": "onayla",
-            "wft": {"terminal": "bitti"}
-        }],
         "terminals": [{"id": "bitti", "wfe_end_response": {"status": "ok"}}],
         // "onayla'yı yapanın biriminin parent'ındaki genel müdür" — kural ancak
         // "onayla" WFAH'a girdikten SONRA bir birim çözebilir.
@@ -355,11 +346,13 @@ async fn wfah_anchored_listable_lands_in_projection_on_the_same_commit() {
         "onayla yapılmadan grant yazılmış"
     );
 
-    assert!(executor
-        .claim(wfe_id, &mudur, None, None)
-        .await
-        .unwrap()
-        .success);
+    assert!(
+        executor
+            .claim(wfe_id, &mudur, None, None)
+            .await
+            .unwrap()
+            .success
+    );
     executor
         .apply(wfe_id, &mudur, "onayla", &json!({}), None, None, None)
         .await

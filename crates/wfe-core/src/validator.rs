@@ -798,9 +798,11 @@ fn check_node_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut Validatio
     }
     // v2.3: "başlatan node" = start aksiyonunun `from`u (`Ç7+Ç8`: `start[].from` silindi,
     // aynı gerçek iki yerde tutulmaz).
-    if wfd.start.iter().any(|s| {
-        crate::types::wfd_v22::start_action(wfd, s).is_some_and(|a| a.from == *node_key)
-    }) {
+    if wfd
+        .start
+        .iter()
+        .any(|s| crate::types::wfd_v22::start_action(wfd, s).is_some_and(|a| a.from == *node_key))
+    {
         report.error(
             "call_node_is_start",
             format!("nodes[{node_key}]"),
@@ -3433,19 +3435,6 @@ fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
 //      düşürebilir. Bu bir DALLANMA kararı değil, "paralel modu kapat + hedefe git"
 //      kararıdır; akışı yine bitirmez (terminal hedef hâlâ yasak). ----
 
-/// `Wft`'in wire formunun kullanıcıya gösterilecek adı — SLA hedef formu hatasında
-/// hangi biçimin kullanıldığını söylemek için.
-fn wft_form_name(wft: &Wft) -> &'static str {
-    match wft {
-        Wft::Node { .. } => "node",
-        Wft::Terminal { .. } => "terminal",
-        Wft::SendBack { .. } => "targets (geri gönderme hedef seçimi)",
-        Wft::Conditional { .. } => "conditions (koşullu dallanma)",
-        Wft::Parallel { .. } => "parallel (fork/join)",
-        Wft::Collapse { .. } => "collapse (kolları düşür)",
-    }
-}
-
 /// SLA bağlamında `$action.input.*`, `$exec.result.*` ve `$call.*` YOKTUR (tetikleyici
 /// system aktörü; ne aksiyon girdisi, ne autoexec sonucu, ne de bir çağrı dönüşü vardır)
 /// — sessizce `null` yazmak yerine WFD reddedilir. `$ctx.*`, `$actor`, `$node`,
@@ -3468,54 +3457,11 @@ fn check_sla_effect_namespaces(effects: &WfesEffects, path: &str, report: &mut V
     }
 }
 
-/// WOR-56 (2026-08-03) — bir PARALEL KOLUN İÇİNDE yer alan node key'lerinin kümesi.
-///
-/// SLA collapse'ı yalnız bu kümedeki node'larda anlamlıdır: paralel akışa bağlı olmayan
-/// bir node'un süresi dolduğunda düşürülecek kardeş kol YOKTUR. Kural authoring-time'da
-/// burada kapatılır (`*_collapse_outside_parallel`).
-///
-/// Yürüyüş `check_parallel`'in branch subgraph BFS'iyle AYNI: fork'un `branches` giriş
-/// node'larından başlanır, transition wft kenarları izlenir, join node'unda durulur;
-/// collapse kenarları (kapsam dışına çıkarlar) ve iç içe parallel izlenmez. SLA kenarları
-/// (escalation / claim_timeout hedefleri) da izlenmez — onlar kolun İÇİNDEN dışarı çıkan
-/// devirlerdir, hedefi kolun parçası yapmaz.
-fn parallel_interior_nodes(wfd: &Wfd) -> HashSet<&str> {
-    let mut interior: HashSet<&str> = HashSet::new();
-    for t in wfd.actions.values() {
-        let Wft::Parallel { parallel: spec } = &t.wft else {
-            continue;
-        };
-        let join_node: Option<&str> = match &spec.join {
-            WftTarget::Node { node } => Some(node.as_str()),
-            WftTarget::Terminal { .. } => None,
-        };
-        let mut queue: VecDeque<&str> = spec.branches.iter().map(|b| b.as_str()).collect();
-        let mut visited: HashSet<&str> = queue.iter().copied().collect();
-        while let Some(node_key) = queue.pop_front() {
-            if Some(node_key) == join_node {
-                continue; // join kolun parçası değildir — ötesine geçilmez.
-            }
-            interior.insert(node_key);
-            for tr in wfd.actions.values() {
-                if tr.from != *node_key {
-                    continue;
-                }
-                if matches!(&tr.wft, Wft::Collapse { .. } | Wft::Parallel { .. }) {
-                    continue;
-                }
-                for (kind, target) in wft_targets(&tr.wft) {
-                    if kind != TargetKind::Node || Some(target) == join_node {
-                        continue;
-                    }
-                    if visited.insert(target) {
-                        queue.push_back(target);
-                    }
-                }
-            }
-        }
-    }
-    interior
-}
+// v2.3 (`Ç9` + `K13`): `wft_form_name` ve `parallel_interior_nodes` SİLİNDİ.
+// İkisi de yalnız C ekseninin ölen kuralları tarafından kullanılıyordu —
+// SLA hedef FORMU hatası (`escalation`/`claim_timeout` artık `wft` taşımıyor) ve
+// `*_collapse_outside_parallel` (collapse'lı SLA yolu kalktı). Çağıranları gidince
+// öksüz kaldılar; derleyici `never used` diye işaret etti.
 
 fn check_sla(wfd: &Wfd, report: &mut ValidationReport) {
     // ⚠️ v2.3 (`E08` Faz 1) — BU FONKSİYONUN KALKANLARININ ÇOĞU ÖLDÜ.

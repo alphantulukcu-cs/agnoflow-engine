@@ -243,8 +243,10 @@ fn node_key_colliding_with_terminal_id_is_error() {
     // terminal id'sini bir node key'i ile çakıştır — global namespace ihlali
     v["terminals"][0]["id"] = json!("self__branchManager");
     // terminal referanslarını da güncelle ki cross-ref hatasına düşmesin
-    v["actions"]["analyst_approve"]["wft"]["conditions"][1]["terminal"] = json!("self__branchManager");
-    v["actions"]["manager_decide"]["wft"]["conditions"][0]["terminal"] = json!("self__branchManager");
+    v["actions"]["analyst_approve"]["wft"]["conditions"][1]["terminal"] =
+        json!("self__branchManager");
+    v["actions"]["manager_decide"]["wft"]["conditions"][0]["terminal"] =
+        json!("self__branchManager");
     assert!(has_error(&validate_value(v), "unique"));
 }
 
@@ -453,7 +455,8 @@ fn expression_issues_matches_wfd_validator_verdicts() {
 #[test]
 fn negative_index_is_error() {
     let mut v = fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] = json!("$wfah[-1].action == \"x\"");
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("$wfah[-1].action == \"x\"");
     let report = validate_value(v);
     assert!(!has_error(&report, "zen_parse"), "sözdizimi geçerli");
     assert!(has_error(&report, "zen_negative_index"));
@@ -477,7 +480,8 @@ fn direct_wfah_indexing_is_warned() {
 #[test]
 fn prev_namespace_produces_no_warning() {
     let mut v = fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] = json!("$prev.action == \"x\"");
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("$prev.action == \"x\"");
     let report = validate_value(v);
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
     assert!(!report
@@ -599,7 +603,8 @@ fn wfd_all_not_in_last_retrier_is_error() {
 #[test]
 fn wft_condition_with_both_node_and_terminal_is_error() {
     let mut v = fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["terminal"] = json!("terminal_approved");
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["terminal"] =
+        json!("terminal_approved");
     assert!(has_error(&validate_value(v), "wft_target"));
 }
 
@@ -717,9 +722,7 @@ fn start_with_named_action_selects_matching_rule() {
 
 // v2.3 (`E08` Faz 1): `escalation_terminate_without_wft_is_still_rejected` SİLİNDİ — assert ettiği kural öldü.
 
-
 // v2.3 (`E08` Faz 1): `escalation_without_wft_is_error` SİLİNDİ — assert ettiği kural öldü.
-
 
 #[test]
 fn claim_timeout_invalid_duration_is_error() {
@@ -746,7 +749,6 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
 
 // v2.3 (`E08` Faz 1): `claim_timeout_collapse_terminal_target_is_error` SİLİNDİ — assert ettiği kural öldü.
 
-
 // v2.3 (`E08` Faz 1): `claim_timeout_collapse_with_node_target_is_valid_in_parallel_wfd` SİLİNDİ — `collapses_parallel` KALKTI (`K13`) — geçerli collapse konfigürasyonu diye bir şey yok.
 
 // v2.3 (`E08` Faz 1): `claim_timeout_collapse_without_any_fork_is_error` SİLİNDİ — `claim_timeout_collapse_outside_parallel` kuralı yok (`K13`).
@@ -757,17 +759,13 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
 
 // v2.3 (`E08` Faz 1): `claim_timeout_terminal_target_is_error` SİLİNDİ — assert ettiği kural öldü.
 
-
 // v2.3 (`E08` Faz 1): `escalation_terminal_target_is_error` SİLİNDİ — assert ettiği kural öldü.
-
 
 // SLA-2 hedefi YALNIZ `{node}` olabilir — conditions/parallel/collapse formları da yasak.
 
 // v2.3 (`E08` Faz 1): `escalation_conditional_target_is_error` SİLİNDİ — assert ettiği kural öldü.
 
-
 // v2.3 (`E08` Faz 1): `escalation_parallel_target_is_error` SİLİNDİ — assert ettiği kural öldü.
-
 
 // ---- 2026-08-03 (WOR-56/SLA-2): node hedefli collapse ARTIK GEÇERLİ ----
 
@@ -775,16 +773,13 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
 
 // v2.3 (`E08` Faz 1): `escalation_collapse_terminal_target_is_error` SİLİNDİ — assert ettiği kural öldü.
 
-
 // v2.3 (`E08` Faz 1): `escalation_collapse_without_any_fork_is_error` SİLİNDİ — `escalation_collapse_outside_parallel` kuralı yok (`Ç9`).
 
 // v2.3 (`E08` Faz 1): `escalation_collapse_on_node_outside_branch_is_error` SİLİNDİ — `escalation_collapse_outside_parallel` kuralı yok (`Ç9`).
 
 // v2.3 (`E08` Faz 1): `escalation_collapse_on_deep_branch_node_is_valid` SİLİNDİ — assert ettiği kural öldü.
 
-
 // v2.3 (`E08` Faz 1): `escalation_node_target_has_no_terminal_error` SİLİNDİ — assert ettiği kural öldü.
-
 
 // ---- 2026-07-28: SLA effects namespace kısıtı (sla_effect_namespace) ----
 
@@ -908,7 +903,11 @@ fn attachment_item_id_repeated_in_another_group_is_error() {
     // `items` bir DİZİdir, yani `dupkeys` kapısı onu göremez; kural validator katmanında.
     let mut v = serde_json::from_str::<Value>(ATTACHMENT_FIXTURE).unwrap();
     let dup = v["attachments"]["basvuru_belgeleri"]["items"][0].clone();
-    assert_eq!(dup["id"], json!("kimlik"), "fixture beklenen item'ı taşımalı");
+    assert_eq!(
+        dup["id"],
+        json!("kimlik"),
+        "fixture beklenen item'ı taşımalı"
+    );
     v["attachments"]["onay_belgeleri"]["items"]
         .as_array_mut()
         .unwrap()
@@ -919,7 +918,12 @@ fn attachment_item_id_repeated_in_another_group_is_error() {
         .errors
         .iter()
         .find(|e| e.code == "attachment_item_dup")
-        .unwrap_or_else(|| panic!("belge geneli tekillik ihlali hata vermeli: {:#?}", report.errors));
+        .unwrap_or_else(|| {
+            panic!(
+                "belge geneli tekillik ihlali hata vermeli: {:#?}",
+                report.errors
+            )
+        });
     assert!(
         err.message.contains("basvuru_belgeleri") && err.message.contains("onay_belgeleri"),
         "mesaj ÇAKIŞAN İKİ GRUBU söylemeli: {}",
@@ -1080,7 +1084,8 @@ fn parallel_branches_not_distinct_is_error() {
 #[test]
 fn parallel_join_equal_to_branch_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["start_review"]["wft"]["parallel"]["join"] = json!({"node": "self__financeApprover"});
+    v["actions"]["start_review"]["wft"]["parallel"]["join"] =
+        json!({"node": "self__financeApprover"});
     assert!(has_error(&validate_value(v), "parallel_join"));
 }
 
@@ -1554,7 +1559,8 @@ fn ancestor_input_ref_covers_dotted_declaration() {
         .as_object_mut()
         .unwrap()
         .remove("credit_info.amount_requested");
-    v["actions"]["analyst_approve"]["wfes_effects"]["set"]["credit_info"] = json!("$action.input.credit_info");
+    v["actions"]["analyst_approve"]["wfes_effects"]["set"]["credit_info"] =
+        json!("$action.input.credit_info");
     let report = validate_value(v);
     assert!(
         !report

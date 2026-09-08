@@ -235,7 +235,7 @@ async fn parallel_branch_step_targets_its_branch_via_node() {
             expect_reject: false,
         },
         ScenarioStep::Action {
-            action: "approve".into(),
+            action: "finans_onay".into(),
             actor: Some(sc_actor("financeApprover")),
             input: json!({}),
             node: Some("self__financeApprover".into()),
@@ -248,8 +248,15 @@ async fn parallel_branch_step_targets_its_branch_via_node() {
     assert_eq!(res.steps_executed, 2);
 }
 
-/// `node` verilmezse paralel modda aynı adım belirsizdir ve senaryo kalır —
-/// koşucunun kol seçimini gerçekten ilettiğinin kanıtı.
+/// `node` verilmezse paralel modda adım YÜRÜMEZ ve senaryo kalır — koşucunun kol
+/// seçimini gerçekten ilettiğinin kanıtı.
+///
+/// ⚠️ v2.3'te adımın DURMA SEBEBİ değişti, güvence değil. Eskiden `approve` adını üç
+/// kol paylaşıyordu ve ipuçsuz çağrı `AmbiguousAction` alıyordu; `Ç11` adları kol
+/// başına ayırınca `finans_onay` kolu tek başına belirliyor. Şimdi duran şey kol
+/// CLAIM'i: `node` olmadan koşucu kolu claim edemiyor, aksiyon da yetki kapısında
+/// düşüyor ("aktör bu adım için yetkili değil"). İddia aynı kaldı çünkü testin
+/// konusu sebep değil, seçimin iletilip iletilmediği.
 #[tokio::test]
 async fn parallel_branch_step_without_node_fails() {
     let wfd = Wfd::from_json(PARALLEL).unwrap();
@@ -265,7 +272,7 @@ async fn parallel_branch_step_without_node_fails() {
             expect_reject: false,
         },
         ScenarioStep::Action {
-            action: "approve".into(),
+            action: "finans_onay".into(),
             actor: Some(sc_actor("financeApprover")),
             input: json!({}),
             node: None,
@@ -455,7 +462,12 @@ async fn scoped_group_only_gates_its_own_action() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         analyst_approve(false),
         // Müdür havuzundayız: `onay_belgeleri` YALNIZ `manager_decide`ı kapar.
         ScenarioStep::Action {
@@ -466,7 +478,12 @@ async fn scoped_group_only_gates_its_own_action() {
             target: None,
             expect_reject: true, // kredi_raporu yüklenmedi
         },
-        attach_step("onay_belgeleri", "kredi_raporu", Some("application/pdf"), 10),
+        attach_step(
+            "onay_belgeleri",
+            "kredi_raporu",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "manager_decide".into(),
             actor: Some(sc_actor("branchManager")),
@@ -498,7 +515,12 @@ async fn expect_reject_on_a_passing_step_fails_the_scenario() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         analyst_approve(true), // belgeler tam → geçecek, oysa ret bekleniyor
     ];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
@@ -527,7 +549,10 @@ async fn attachment_format_rule_is_enforced_in_scenarios() {
     }];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(res.ok, "{:?}", res.failures);
-    assert!(res.attachments.is_empty(), "reddedilen dosya yüklenmiş sayılmaz");
+    assert!(
+        res.attachments.is_empty(),
+        "reddedilen dosya yüklenmiş sayılmaz"
+    );
 }
 
 /// Boyut sınırı (5 MB) aşılırsa yükleme reddedilir.
@@ -587,7 +612,12 @@ async fn note_step_is_recorded_without_touching_the_flow() {
             },
         },
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         analyst_approve(false),
     ];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
@@ -596,7 +626,9 @@ async fn note_step_is_recorded_without_touching_the_flow() {
     assert_eq!(res.steps_executed, 4);
     // Not `$ctx`'e YAZILMAZ — dynctx'te iz yok.
     assert!(
-        !serde_json::to_string(&res.dynctx).unwrap().contains("şubeyi"),
+        !serde_json::to_string(&res.dynctx)
+            .unwrap()
+            .contains("şubeyi"),
         "not context'e sızdı: {}",
         res.dynctx
     );
@@ -651,9 +683,19 @@ async fn active_expectation_catches_an_unexpected_finish() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         analyst_approve(false),
-        attach_step("onay_belgeleri", "kredi_raporu", Some("application/pdf"), 10),
+        attach_step(
+            "onay_belgeleri",
+            "kredi_raporu",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "manager_decide".into(),
             actor: Some(sc_actor("branchManager")),
@@ -687,7 +729,13 @@ fn attach_and_note_steps_parse_from_editor_json() {
     assert!(matches!(steps[0], ScenarioStep::Attach { .. }));
     assert!(matches!(steps[1], ScenarioStep::Note { .. }));
     assert!(
-        matches!(&steps[2], ScenarioStep::Action { expect_reject: true, .. }),
+        matches!(
+            &steps[2],
+            ScenarioStep::Action {
+                expect_reject: true,
+                ..
+            }
+        ),
         "expectReject camelCase okunmalı"
     );
 }
@@ -719,10 +767,15 @@ async fn proved_rules_survive_a_later_failure() {
     let (wfd, doc) = belge();
     let mut s = belge_scenario();
     s.steps = vec![
-        analyst_approve(true),                 // kapı tutar → kanıt
+        analyst_approve(true), // kapı tutar → kanıt
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
-        analyst_approve(false),                // artık geçer
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
+        analyst_approve(false), // artık geçer
         ScenarioStep::Action {
             action: "boyle_bir_aksiyon_yok".into(),
             actor: Some(sc_actor("branchManager")),
@@ -734,7 +787,12 @@ async fn proved_rules_survive_a_later_failure() {
     ];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(!res.ok);
-    assert_eq!(res.rejected_as_expected.len(), 1, "{:?}", res.rejected_as_expected);
+    assert_eq!(
+        res.rejected_as_expected.len(),
+        1,
+        "{:?}",
+        res.rejected_as_expected
+    );
     assert!(res.rejected_as_expected[0].contains("basvuru_belgeleri/kimlik"));
 }
 
@@ -758,7 +816,12 @@ async fn undeclared_input_path_is_rejected() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "analyst_approve".into(),
             actor: Some(sc_actor("creditAnalyst")),
@@ -769,7 +832,11 @@ async fn undeclared_input_path_is_rejected() {
             expect_reject: true,
         },
     ];
-    s.expect = Some(Expect { terminal: None, context_contains: None, active: Some(true) });
+    s.expect = Some(Expect {
+        terminal: None,
+        context_contains: None,
+        active: Some(true),
+    });
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(res.ok, "{:?}", res.failures);
     assert!(
@@ -786,7 +853,12 @@ async fn missing_required_input_is_rejected() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "analyst_approve".into(),
             actor: Some(sc_actor("creditAnalyst")),
@@ -798,7 +870,11 @@ async fn missing_required_input_is_rejected() {
     ];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(res.ok, "{:?}", res.failures);
-    assert!(res.rejected_as_expected[0].contains("zorunlu"), "{:?}", res.rejected_as_expected);
+    assert!(
+        res.rejected_as_expected[0].contains("zorunlu"),
+        "{:?}",
+        res.rejected_as_expected
+    );
 }
 
 /// Zorunlu girdi `null` gönderilirse de reddedilir (eksik ile aynı kapı).
@@ -808,7 +884,12 @@ async fn null_required_input_is_rejected() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "analyst_approve".into(),
             actor: Some(sc_actor("creditAnalyst")),
@@ -820,7 +901,11 @@ async fn null_required_input_is_rejected() {
     ];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(res.ok, "{:?}", res.failures);
-    assert!(res.rejected_as_expected[0].contains("null"), "{:?}", res.rejected_as_expected);
+    assert!(
+        res.rejected_as_expected[0].contains("null"),
+        "{:?}",
+        res.rejected_as_expected
+    );
 }
 
 /// Uydurma aksiyon adı — senaryo bunu YAZABİLİR (editör listeden seçmeye zorlamaz)
@@ -848,7 +933,12 @@ async fn ineligible_actor_is_rejected() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "analyst_approve".into(),
             // Analist havuzunun c_a'sı `creditAnalyst`; bu rol uymaz.
@@ -859,7 +949,11 @@ async fn ineligible_actor_is_rejected() {
             expect_reject: true,
         },
     ];
-    s.expect = Some(Expect { terminal: None, context_contains: None, active: Some(true) });
+    s.expect = Some(Expect {
+        terminal: None,
+        context_contains: None,
+        active: Some(true),
+    });
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(res.ok, "{:?}", res.failures);
 }
@@ -882,7 +976,12 @@ async fn invalid_branch_hint_is_rejected() {
     // Ret YETKİ kapısından gelir: var olmayan bir kolda claim de olamaz, dolayısıyla
     // uygunluk denetimi motorun kol kontrolünden ÖNCE cevap verir. Senaryo için sonuç
     // aynı ("bu adım reddedilir"), mesajın hangi kapıdan geldiği kullanıcıya yazılır.
-    assert_eq!(res.rejected_as_expected.len(), 1, "{:?}", res.rejected_as_expected);
+    assert_eq!(
+        res.rejected_as_expected.len(),
+        1,
+        "{:?}",
+        res.rejected_as_expected
+    );
 }
 
 /// Katalogda OLMAYAN belge slotuna yükleme reddedilir.
@@ -902,7 +1001,11 @@ async fn unknown_attachment_slot_is_rejected() {
     }];
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(res.ok, "{:?}", res.failures);
-    assert!(res.rejected_as_expected[0].contains("olmayan_grup"), "{:?}", res.rejected_as_expected);
+    assert!(
+        res.rejected_as_expected[0].contains("olmayan_grup"),
+        "{:?}",
+        res.rejected_as_expected
+    );
 }
 
 // ── yanlış TİP artık REDDEDİLİR (2026-08-19) ────────────────────────────────
@@ -919,7 +1022,12 @@ async fn wrong_type_action_input_is_rejected() {
     let mut s = belge_scenario();
     s.steps = vec![
         attach_step("basvuru_belgeleri", "kimlik", Some("application/pdf"), 10),
-        attach_step("basvuru_belgeleri", "gelir_belgesi", Some("application/pdf"), 10),
+        attach_step(
+            "basvuru_belgeleri",
+            "gelir_belgesi",
+            Some("application/pdf"),
+            10,
+        ),
         ScenarioStep::Action {
             action: "analyst_approve".into(),
             actor: Some(sc_actor("creditAnalyst")),
@@ -974,7 +1082,11 @@ async fn expect_start_reject_on_a_valid_start_fails_the_scenario() {
     s.expect_start_reject = true; // oysa girdi doğru
     let res = run(&engine(), &wfd, &doc, &s, None).await;
     assert!(!res.ok);
-    assert!(res.failures[0].contains("reddedilmeliydi"), "{:?}", res.failures);
+    assert!(
+        res.failures[0].contains("reddedilmeliydi"),
+        "{:?}",
+        res.failures
+    );
 }
 
 /// Yetkisiz başlatan da aynı bayrakla test edilir (girdi sözleşmesinden bağımsız).

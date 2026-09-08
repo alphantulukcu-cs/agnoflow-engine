@@ -117,8 +117,10 @@ fn callee_fixtures_are_valid() {
 /// (yeni alanların hepsi opsiyonel, geriye dönük uyumluluk).
 #[test]
 fn wfd_without_calls_triggers_no_call_rules() {
-    let golden: Value =
-        serde_json::from_str(include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json")).unwrap();
+    let golden: Value = serde_json::from_str(include_str!(
+        "../../../docs/spec/examples/kredi-basvuru.golden.json"
+    ))
+    .unwrap();
     let report = full(golden);
     assert!(
         !report.errors.iter().any(|e| e.code.starts_with("call_")),
@@ -342,14 +344,14 @@ fn call_node_requires_wft() {
 #[test]
 fn transition_from_a_call_node_is_rejected() {
     let v = mutate(|v| {
-        let t = json!({
-            "id": "t_elle_gec",
+        // v2.3 (`Ç5`): "bu node'dan insan aksiyonu çıkıyor" artık ayrı bir
+        // transition değil, `from`u o node olan bir AKSİYON KAYDI ile söylenir.
+        v["actions"]["elle_gec"] = json!({
+            "input": { "required": ["kullandirim_tutari"], "optional": [] },
             "from": "self__creditAnalyst",
-            "action": "manager_decide",
             "wfes_effects": { "set": { "kullandirim_tutari": "$action.input.kullandirim_tutari" } },
             "wft": { "terminal": "terminal_rejected" }
         });
-        v["transitions"].as_array_mut().unwrap().push(t);
     });
     assert!(has_error(&local(v), "call_node_has_action"));
 }
@@ -357,8 +359,10 @@ fn transition_from_a_call_node_is_rejected() {
 #[test]
 fn escalation_on_a_call_node_is_rejected() {
     let v = mutate(|v| {
+        // v2.3 (`Ç9`): kademe hedef taşımaz, `grant` taşır. Kuralın konusu hedef
+        // değil ALANIN VARLIĞI — WFC node'u escalation taşıyamaz.
         v["nodes"]["self__creditAnalyst"]["escalation"] = json!([
-            { "after": "P1D", "wft": { "node": "self__branchManager" } }
+            { "after": "P1D", "grant": { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } } }
         ]);
     });
     assert!(has_error(&local(v), "call_node_forbidden_field"));
@@ -521,8 +525,9 @@ fn indirect_nesting_cycle_is_rejected() {
         "mode": "wait",
         "wft": { "terminal": "terminal_skor_dusuk" }
     });
-    // Bu node artık WFC node'u — insan transition'ı kaldırılmalı.
-    skor["transitions"] = json!([]);
+    // Bu node artık WFC node'u — ondan çıkan insan AKSİYONU kaldırılmalı
+    // (v2.3/`Ç5`: kenar aksiyon kaydının `from`udur, ayrı bir transition yok).
+    skor["actions"].as_object_mut().unwrap().remove("skor_gir");
 
     let catalog = Catalog(vec![
         Wfd::from_value(skor).unwrap(),

@@ -16,7 +16,7 @@ use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
     AutoexecDef, AutoexecType, COrgu, CaGrantRule, CandidateActor, ClaimTimeout, EscalationStep,
-    GlobalAction, JoinRule, Wfd, WfAdminRule, WfesEffects, Wft, WftTarget,
+    GlobalAction, JoinRule, WfAdminRule, Wfd, WfesEffects, Wft, WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::valid::{self, ValidRules};
@@ -201,12 +201,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
 /// `wfes_at` bunun boş-geçmişli hâlidir — çekirdek `visited_nodes` fonksiyonu
 /// `current_node`u zaten kümeye koyduğu için geri gönderme DIŞINDAKİ testler
 /// etkilenmez.
-fn wfes_at_visited(
-    node: &str,
-    assigned: Option<Uuid>,
-    ctx: Value,
-    visited: Vec<String>,
-) -> Wfes {
+fn wfes_at_visited(node: &str, assigned: Option<Uuid>, ctx: Value, visited: Vec<String>) -> Wfes {
     let system = Actor {
         orgu_id: Uuid::nil(),
         user_id: Uuid::nil(),
@@ -320,7 +315,8 @@ async fn declared_input_alone_does_not_reach_ctx() {
 
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
     // v2.3 (`Ç7`): `start[]` yalnız `{id, action}`; effects start AKSİYONUNDA.
-    v["actions"]["create_application"]["wfes_effects"] = json!({ "set": { "initiated_by": "$actor" } });
+    v["actions"]["create_application"]["wfes_effects"] =
+        json!({ "set": { "initiated_by": "$actor" } });
     let wfd = Wfd::from_value(v).unwrap();
 
     let new = engine
@@ -1263,7 +1259,10 @@ fn golden_with_send_back() -> Wfd {
         json!({ "targets": [{"node": "self__creditAnalyst", "label": "Başa Gönder"}] }),
     );
     v["actions"]["send_back"] = base;
-    v["actions"].as_object_mut().unwrap().remove("manager_decide");
+    v["actions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decide");
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -1546,14 +1545,20 @@ async fn the_start_node_counts_as_visited() {
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
     let start_action = v["start"][0]["action"].as_str().unwrap().to_string();
     // v2.3 (`Ç7`): başlatan node `start[]`te değil, start aksiyonunun `from`unda.
-    let start_node = v["actions"][&start_action]["from"].as_str().unwrap().to_string();
+    let start_node = v["actions"][&start_action]["from"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let mut base = v["actions"]["manager_decide"].clone();
     base.as_object_mut().unwrap().insert(
         "wft".into(),
         json!({ "targets": [{"node": start_node, "label": "Başa Gönder"}] }),
     );
     v["actions"]["send_back"] = base;
-    v["actions"].as_object_mut().unwrap().remove("manager_decide");
+    v["actions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decide");
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -1621,7 +1626,10 @@ async fn the_menu_keeps_document_order_and_drops_only_the_unvisited() {
         }),
     );
     v["actions"]["send_back"] = base;
-    v["actions"].as_object_mut().unwrap().remove("manager_decide");
+    v["actions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decide");
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -1633,7 +1641,10 @@ async fn the_menu_keeps_document_order_and_drops_only_the_unvisited() {
         start_input(),
         vec!["self__creditAnalyst".into()],
     );
-    let actions = engine.possible_actions(&wfd, &wfes, &m, None).await.unwrap();
+    let actions = engine
+        .possible_actions(&wfd, &wfes, &m, None)
+        .await
+        .unwrap();
     let targets = actions
         .iter()
         .find(|a| a.action == "send_back")
@@ -1759,7 +1770,6 @@ async fn escalation_resolves_anchored_listable_via_wfah_actor() {
 // claim'i bırakmak; devir hedefi olmadığı için çözülecek bir `listable`/`c_a` da
 // yok, dolayısıyla çapa sorusu bu yolda artık sorulmuyor. Havuz node'un kendi
 // `c_a`sıdır ve değişmez.
-
 
 #[tokio::test]
 async fn fired_escalation_step_does_not_refire() {
@@ -1893,7 +1903,10 @@ async fn start_wft_targeting_own_from_node_lands_there() {
     let mut wfd = golden();
     // v2.3 (`Ç7+Ç8`): start gövdesi aksiyon kaydında.
     let start_action = wfd.start[0].action.clone();
-    wfd.actions.get_mut(&start_action).expect("start aksiyonu").wft = Wft::Node {
+    wfd.actions
+        .get_mut(&start_action)
+        .expect("start aksiyonu")
+        .wft = Wft::Node {
         node: "type_branch__branchClerk".into(),
     };
 
@@ -2181,13 +2194,11 @@ async fn claim_timeout_due_without_wft_releases_claim() {
 
 // v2.3: `claim_timeout_due_with_wft_moves_like_escalation` testi SİLİNDİ — konusu (claim timeout'un iş TAŞIMASI) K13 ile öldü
 
-
 /// WOR-56/SLA-1 (2026-08-03): `collapses_parallel` işaretli olsa bile WFE paralel
 /// modda DEĞİLSE bayrak yok sayılır — normal `{node}` devri uygulanır. Aksi halde
 /// `resolve_wft` collapse'ı Single modda reddeder ve WFE zaman aşımında kilitlenirdi
 /// (aynı node kol içinden de kol dışından da erişilebilir).
 // v2.3: `claim_timeout_collapse_flag_ignored_outside_parallel` testi SİLİNDİ — `collapses_parallel` bayrağı K19 ile kalktı
-
 
 // ---- 2026-07-28: SLA-1 wfes_effects (opsiyonel DynCtx yazımı) ----
 
@@ -2253,7 +2264,6 @@ async fn claim_timeout_release_applies_wfes_effects() {
 
 // v2.3: `claim_timeout_move_applies_wfes_effects_before_wft` testi SİLİNDİ — devir yok; effects'in release yolunda uygulanması `claim_timeout_release_applies_wfes_effects` ile zaten sınanıyor
 
-
 #[tokio::test]
 async fn claim_timeout_not_due_without_claim() {
     let org = MockOrg {
@@ -2279,7 +2289,6 @@ async fn claim_timeout_not_due_without_claim() {
 /// hata verir. Akışı zaman aşımıyla bitiren TEK kural SLA-3 (root `timeout`) —
 /// bkz. `deadline_due_fires_terminated_not_error`.
 // v2.3: `escalation_without_wft_errors_instead_of_terminating` testi SİLİNDİ — `escalation[].wft` YOK ve `grant` ZORUNLU alan — eksikliği serde'de patlar, runtime hatası diye bir durum kalmadı
-
 
 /// Hedefi olan adım normal node devri yapar — `Terminated` ASLA üretmez.
 #[tokio::test]
@@ -2673,7 +2682,10 @@ async fn branch_approve_arrives_without_occupying_join() {
     );
     // kol transition effect'i staged
     assert!(commit.new_dynctx["finans_onay_zamani"].is_string());
-    assert_eq!(wfah_actions(&commit), vec!["finans_onay", "_branch_arrived"]);
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["finans_onay", "_branch_arrived"]
+    );
     // Ç3: kol kimliği (`branch_entry`) + varış anındaki konum (`at_node`).
     let arrived = commit.wfah_entries[1].input.as_ref().unwrap();
     assert_eq!(arrived["branch_entry"], json!("self__financeApprover"));
@@ -2855,7 +2867,8 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     // join hedefi terminal olan varyant: kol wft'leri de aynı terminale çözülür,
     // son varışta JoinComplete{next: Terminal} üretilmeli.
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    v["actions"]["start_review"]["wft"]["parallel"]["join"] = json!({"terminal": "terminal_approved"});
+    v["actions"]["start_review"]["wft"]["parallel"]["join"] =
+        json!({"terminal": "terminal_approved"});
     for a in ["finans_onay", "hukuk_onay", "ik_onay"] {
         v["actions"][a]["wft"] = json!({"terminal": "terminal_approved"});
     }
@@ -3458,7 +3471,12 @@ async fn collapse_summary_marker_describes_whole_event() {
             "{}",
             detail.action
         );
-        assert_eq!(d["trigger_action"], json!("finans_ret"), "{}", detail.action);
+        assert_eq!(
+            d["trigger_action"],
+            json!("finans_ret"),
+            "{}",
+            detail.action
+        );
         assert_eq!(
             d["trigger_actor"]["user_id"],
             json!(fin.user_id),
@@ -3943,7 +3961,10 @@ async fn branch_escalation_fires_from_branch_entered_at() {
         "{:?}",
         commit.outcome
     );
-    assert_eq!(wfah_actions(&commit), vec!["escalate:self__financeApprover:0"]);
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["escalate:self__financeApprover:0"]
+    );
 }
 
 #[tokio::test]
@@ -5682,7 +5703,11 @@ async fn empty_allowed_global_actions_grants_nothing() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     assert!(
         engine
@@ -5788,7 +5813,11 @@ async fn escalation_intervention_requires_its_own_power() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let err = engine
         .skip_escalation(&wfd, &wfes, &admin, None, Utc::now())
@@ -5817,7 +5846,11 @@ async fn multiple_rules_union_their_powers() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let powers = engine
         .admin_global_actions(&wfd, &wfes, &admin)
@@ -5883,7 +5916,11 @@ async fn admin_send_back_rejects_unvisited_node() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let err = engine
         .admin_send_back(&wfd, &wfes, &admin, "self__branchManager", Utc::now())
@@ -5904,7 +5941,11 @@ async fn admin_send_back_rejects_current_node() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let err = engine
         .admin_send_back(&wfd, &wfes, &admin, "self__creditAnalyst", Utc::now())
@@ -5926,7 +5967,11 @@ async fn admin_send_to_start_rewinds_same_wfe() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let commit = engine
         .admin_send_to_start(&wfd, &wfes, &admin, None, Utc::now())
@@ -5982,7 +6027,11 @@ async fn admin_cancel_terminates_with_reason() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let commit = engine
         .admin_cancel(&wfd, &wfes, &admin, Some("müşteri vazgeçti"), Utc::now())
@@ -6020,7 +6069,11 @@ async fn global_actions_rejected_on_terminal_wfe() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let mut wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let mut wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
     wfes.status = WfeStatus::Terminated;
 
     for err in [

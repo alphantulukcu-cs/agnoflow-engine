@@ -753,11 +753,7 @@ impl<'a> Engine<'a> {
             )
             .await?;
 
-        stamp_movement(
-            &mut wfah_entries[action_row],
-            &outcome,
-            Some(current_node),
-        );
+        stamp_movement(&mut wfah_entries[action_row], &outcome, Some(current_node));
 
         // Aksiyon işlendi — varılan yeri kim yapabilir?
         let wfah = wfes.wfah.extended(&wfah_entries);
@@ -2133,8 +2129,14 @@ impl<'a> Engine<'a> {
             now,
         );
 
-        let staged_calls =
-            self.stage_calls(wfd, landed.as_ref(), &final_ctx, &anchored, wfes.wfe_id, now)?;
+        let staged_calls = self.stage_calls(
+            wfd,
+            landed.as_ref(),
+            &final_ctx,
+            &anchored,
+            wfes.wfe_id,
+            now,
+        )?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
         Ok(TransitionCommit {
@@ -3900,10 +3902,7 @@ enum WftMode<'p> {
 /// `Terminated`) satırı üreten yolun bildiği kaynak node — tek-kol yolda
 /// `wfes.current_node`, kol yolunda kolun o anki node'u.
 fn stamp_movement(entry: &mut WfahEntry, outcome: &CommitOutcome, fallback_from: Option<&str>) {
-    entry.from_node = outcome
-        .from_node()
-        .or(fallback_from)
-        .map(str::to_string);
+    entry.from_node = outcome.from_node().or(fallback_from).map(str::to_string);
     entry.to_node = outcome.to_node().map(str::to_string);
 }
 
@@ -3943,10 +3942,7 @@ fn active_branch<'w>(wfes: &'w Wfes, node: &str) -> Option<&'w BranchState> {
 /// WOR-73: fork'un TÜM kollarının giriş node'ları (kol kimlikleri, `branches`
 /// sırasında). `$branches` namespace'i hiç varmamış kollar için de alan taşısın diye.
 fn all_entry_nodes(wfes: &Wfes) -> Vec<String> {
-    wfes.branches
-        .iter()
-        .map(|b| b.entry_node.clone())
-        .collect()
+    wfes.branches.iter().map(|b| b.entry_node.clone()).collect()
 }
 
 /// WOR-73: join'e varmış kol kimlikleri + `acting` kolun kendisi (varış ANINDA

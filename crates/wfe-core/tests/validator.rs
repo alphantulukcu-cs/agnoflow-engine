@@ -63,22 +63,20 @@ fn golden_fixture_is_valid() {
 // değil: rezerve `send_back`. Aşağıdaki kurallar o menünün tasarım-zamanı
 // denetimidir.
 
-/// `t_manager_decide`ı bir geri gönderme aksiyonuna (`Geri_Gonder`) + verilen hedef
-/// listesine çevirir. `from` iki node taşır (`self__branchManager`,
-/// `parent__creditDeptManager`) — `send_back_target_self` kuralı için de elverişli.
+/// `manager_decide`ı bir geri gönderme aksiyonuna çevirir: `wft`ini verilen hedef
+/// menüsüne döndürür.
+///
+/// v2.3 (`Ç5`): aksiyon kaydı ve yönlendirme AYNI yerdedir, dolayısıyla ayrı bir
+/// `Geri_Gonder` katalog girdisi + ona işaret eden bir transition üretmeye gerek
+/// yok — `wft`i değiştirmek yeter. Aksiyonu geri gönderme yapan şey zaten ADI DEĞİL
+/// `wft`inin bu FORMU olmasıdır (bkz. `a_target_menu_needs_no_reserved_action_name`).
+///
+/// `manager_decide.from` = `self__branchManager`; `send_back_target_self` kuralı için
+/// elverişli.
 fn with_send_back(targets: Value) -> Value {
     let mut v = fixture_value();
-    // Aksiyon katalog girdisi taban aksiyondan kopyalanır (girdi bildirimi aynı
-    // kalsın, WOR-70 `unused_action_input` testleri kirlenmesin).
-    let mut base = v["actions"]["manager_decide"].clone();
-    if let Some(o) = base.as_object_mut() {
-        // Gösterim metni: iki ayrı kimlik AYNI label'ı taşır (editör deseni).
-        o.insert("label".into(), json!("Geri Gönder"));
-    }
-    v["actions"]["Geri_Gonder"] = base;
-    v["actions"]["manager_decide"]["action"] = json!("Geri_Gonder");
     v["actions"]["manager_decide"]["wft"] = json!({ "targets": targets });
-    // Bu transition `terminal_rejected`a giden TEK yoldu; wft'si hedef menüsüne
+    // Bu aksiyon `terminal_rejected`a giden TEK yoldu; wft'si hedef menüsüne
     // dönünce o terminal yetim kalır ve `unreachable` konuyla ilgisiz bir hata
     // olarak testleri kirletir. Belgeyi tutarlı bırakmak için terminali de
     // düşürüyoruz — hedefler node'dur, terminal hedeflenemez.
@@ -154,10 +152,12 @@ fn send_back_target_pointing_at_its_own_from_node_is_error() {
 }
 
 /// Start kuralında hedefi seçecek bir aktör yoktur — kapı yayında, runtime'da değil.
+/// v2.3 (`Ç7`): kural KALIR, yalnız menü artık start AKSİYONUNUN `wft`inde aranır.
 #[test]
-fn send_back_menu_outside_a_transition_is_error() {
+fn send_back_menu_on_the_start_action_is_error() {
     let mut v = fixture_value();
-    v["start"][0]["wft"] = json!({ "targets": [{"node": "self__branchManager"}] });
+    v["actions"]["create_application"]["wft"] =
+        json!({ "targets": [{"node": "self__branchManager"}] });
     let report = validate_value(v);
     assert!(
         has_error(&report, "send_back_wft_placement"),
@@ -188,17 +188,13 @@ fn a_target_menu_needs_no_reserved_action_name() {
 fn two_send_back_actions_can_coexist_with_separate_identities() {
     let mut v = with_send_back(json!([{"node": "self__creditAnalyst"}]));
     // İkinci geri gönderme: başka node'dan, başka kimlik, kendi menüsü.
+    // v2.3 (`Ç5`): kimlik + yönlendirme TEK kayıtta; ayrı bir transition yok.
     v["actions"]["Geri_Gonder_2"] = json!({
         "label": "Geri Gönder",
-        "input": { "required": [], "optional": [] }
-    });
-    let tx = json!({
-        "id": "t_send_back_2",
-        "from": ["self__creditAnalyst"],
-        "action": "Geri_Gonder_2",
+        "input": { "required": [], "optional": [] },
+        "from": "self__creditAnalyst",
         "wft": { "targets": [{"node": "type_branch__branchClerk", "label": "Başa Gönder"}] }
     });
-    v["transitions"].as_array_mut().unwrap().push(tx);
     let report = validate_value(v);
     assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
 }
@@ -212,12 +208,7 @@ fn unknown_from_node_is_error() {
     assert!(has_error(&validate_value(v), "cross_ref"));
 }
 
-#[test]
-fn unknown_action_is_error() {
-    let mut v = fixture_value();
-    v["actions"]["analyst_approve"]["action"] = json!("ghost_action");
-    assert!(has_error(&validate_value(v), "cross_ref"));
-}
+// v2.3 (`E08` Faz 1): `unknown_action_is_error` SİLİNDİ — transition→aksiyon referansı KALKTI (`Ç5`); kalan aksiyon referansları `start_action_unknown_is_error` ve `attachment_scoped_ref_to_unknown_action_is_error` ile denetleniyor.
 
 #[test]
 fn unknown_trigger_use_is_error() {
@@ -240,21 +231,11 @@ fn unknown_wft_terminal_in_default_is_error() {
     assert!(has_error(&validate_value(v), "cross_ref"));
 }
 
-#[test]
-fn unknown_escalation_target_is_error() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] = json!({"node": "self__ghost"});
-    assert!(has_error(&validate_value(v), "cross_ref"));
-}
+// v2.3 (`E08` Faz 1): `unknown_escalation_target_is_error` SİLİNDİ — escalation artık node REFERANSI taşımıyor (`Ç9`: `wft` → `grant`), denetlenecek hedef yok.
 
 // ---- §1 uniqueness ----
 
-#[test]
-fn duplicate_transition_id_is_error() {
-    let mut v = fixture_value();
-    v["actions"]["manager_decide"]["id"] = json!("t_analyst_approve");
-    assert!(has_error(&validate_value(v), "unique"));
-}
+// v2.3 (`E08` Faz 1): `duplicate_transition_id_is_error` SİLİNDİ — `transitions[]` ve dolayısıyla transition kimlikleri KALKTI (`Ç5`).
 
 #[test]
 fn node_key_colliding_with_terminal_id_is_error() {
@@ -320,15 +301,18 @@ fn duplicate_terminal_id_is_error() {
 #[test]
 fn node_key_need_not_match_slug_of_its_c_a() {
     let mut v = fixture_value();
-    let node = v["nodes"]["parent__creditDeptManager"].clone();
+    let node = v["nodes"]["self__branchManager"].clone();
     v["nodes"]
         .as_object_mut()
         .unwrap()
-        .remove("parent__creditDeptManager");
+        .remove("self__branchManager");
     // Tasarımcının verdiği, c_a ile HİÇ ilgisi olmayan bir kimlik.
     v["nodes"]["nihai_onay"] = node;
-    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] = json!({"node": "nihai_onay"});
-    v["actions"]["manager_decide"]["from"] = json!(["self__branchManager", "nihai_onay"]);
+    // v2.3 (`Ç5`): node'a giren/çıkan kenarlar aksiyon kayıtlarında. Girişi analistin
+    // `wft`i, çıkışı `manager_decide.from` verir; `from` artık TEKİL string (`K3`).
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["node"] = json!("nihai_onay");
+    v["actions"]["analyst_approve"]["wft"]["default"] = json!({"node": "nihai_onay"});
+    v["actions"]["manager_decide"]["from"] = json!("nihai_onay");
     let report = validate_value(v);
     assert!(
         report.errors.is_empty(),
@@ -345,13 +329,15 @@ fn two_nodes_sharing_the_same_c_a_is_an_error() {
     // Kimliği yine tasarımcı verir; geri gelen tek şey TEKİLLİK kısıtıdır.
     let mut v = fixture_value();
     let ca = v["nodes"]["self__branchManager"]["c_a"].clone();
-    v["nodes"]
-        .as_object_mut()
-        .unwrap()
-        .remove("parent__creditDeptManager");
     v["nodes"]["ikinci_inceleme"] = json!({"label": "İkinci İnceleme", "c_a": ca});
-    v["nodes"]["self__branchManager"]["escalation"][0]["wft"] = json!({"node": "ikinci_inceleme"});
-    v["actions"]["manager_decide"]["from"] = json!(["self__branchManager", "ikinci_inceleme"]);
+    // İkinci node erişilebilir ve çıkışlı olsun — hata listesi konuyla ilgisiz
+    // `unreachable`/`no_exit` kalemleriyle dolmasın, kural saf ölçülsün.
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["node"] = json!("ikinci_inceleme");
+    v["actions"]["ikinci_karar"] = json!({
+        "input": { "required": [], "optional": [] },
+        "from": "ikinci_inceleme",
+        "wft": { "terminal": "terminal_approved" }
+    });
     let report = validate_value(v);
     assert!(
         report.errors.iter().any(|e| e.code == "duplicate_c_a"),
@@ -393,8 +379,10 @@ fn escalation_edges_count_for_reachability() {
 #[test]
 fn node_without_exit_is_error() {
     let mut v = fixture_value();
-    // parent__creditDeptManager'ı t_manager_decide.from'dan çıkar → çıkışsız kalır
-    v["actions"]["manager_decide"]["from"] = json!("self__branchManager");
+    // `self__branchManager`ın TEK çıkışı `manager_decide`tı; o aksiyonun `from`unu
+    // başka node'a taşı → node erişilebilir kalır (analistin `wft`i oraya gidiyor)
+    // ama hiçbir aksiyon oradan çıkmaz.
+    v["actions"]["manager_decide"]["from"] = json!("self__creditAnalyst");
     let report = validate_value(v);
     assert!(
         has_error(&report, "no_exit"),
@@ -630,18 +618,20 @@ fn wft_condition_with_neither_target_is_error() {
 
 #[test]
 fn start_from_unknown_node_is_error() {
-    // V1
+    // V1 — v2.3 (`Ç7`): `start[]` yalnız `{id, action}` taşır, başlatan node start
+    // AKSİYONUNUN `from`udur. Kural aynı kural: bilinmeyen node `cross_ref` verir.
     let mut v = fixture_value();
-    v["start"][0]["from"] = json!("type_branch__ghost");
+    v["actions"]["create_application"]["from"] = json!("type_branch__ghost");
     assert!(has_error(&validate_value(v), "cross_ref"));
 }
 
 #[test]
 fn start_node_as_wft_target_is_allowed() {
-    // eski V2: bir escalation start node'unu hedeflerse artık geçerli konfigürasyon
+    // eski V2: bir hedef start node'unu gösterirse artık geçerli konfigürasyon.
+    // v2.3 (`Ç1-EK`): escalation iş taşımaz, `wft`i yoktur — hedefi veren yer normal
+    // bir aksiyonun `wft`i. Kuralın konusu değişmedi: start node yeniden girilebilir.
     let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
-        json!({"node": "type_branch__branchClerk"});
+    v["actions"]["analyst_approve"]["wft"]["default"] = json!({"node": "type_branch__branchClerk"});
     let report = validate_value(v);
     assert!(
         !has_error(&report, "start_target"),
@@ -654,8 +644,9 @@ fn start_node_as_wft_target_is_allowed() {
 fn start_node_with_escalation_is_allowed() {
     // eski V3: start node artık escalation taşıyabilir (mid-flow'da normal node gibi)
     let mut v = fixture_value();
+    // v2.3 (`Ç9`): kademe iş devretmez, yetki havuzunu genişletir → `{after, grant}`.
     v["nodes"]["type_branch__branchClerk"]["escalation"] = json!([
-        {"after": "P1D", "wft": {"node": "self__creditAnalyst"}}
+        {"after": "P1D", "grant": {"c_a": {"c_orgu": "self", "c_r": ["creditAnalyst"]}}}
     ]);
     let report = validate_value(v);
     assert!(
@@ -692,8 +683,12 @@ fn start_action_named_start_is_allowed() {
 fn golden_start_is_symmetric_from_action() {
     // V1/V4 pozitif: golden fixture yeni şekilde temiz geçer (M16: gerçek action adı)
     let v = fixture_value();
-    assert_eq!(v["start"][0]["from"], json!("type_branch__branchClerk"));
     assert_eq!(v["start"][0]["action"], json!("create_application"));
+    // v2.3 (`Ç7`): başlatan node `start[]`te DEĞİL, start aksiyonunun `from`unda.
+    assert_eq!(
+        v["actions"]["create_application"]["from"],
+        json!("type_branch__branchClerk")
+    );
     assert!(
         v["actions"].get("create_application").is_some(),
         "start aksiyonu actions{{}} içinde tanımlı olmalı"
@@ -718,15 +713,7 @@ fn start_with_named_action_selects_matching_rule() {
 // 2026-07-28: SLA-1/SLA-2 akışı BİTİREMEZ — `terminate` kaldırıldı, `wft` zorunlu;
 // zaman aşımıyla akışı bitiren tek kural root `timeout` (SLA-3).
 
-#[test]
-fn escalation_terminate_is_rejected_as_removed() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["escalation"][0]["terminate"] = json!(true);
-    assert!(has_error(
-        &validate_value(v),
-        "escalation_terminate_removed"
-    ));
-}
+// v2.3 (`E08` Faz 1): `escalation_terminate_is_rejected_as_removed` SİLİNDİ — `escalation_terminate_removed` kuralı yok; `terminate` alanı `deny_unknown_fields` ile parse'ta düşüyor.
 
 // v2.3 (`E08` Faz 1): `escalation_terminate_without_wft_is_still_rejected` SİLİNDİ — assert ettiği kural öldü.
 
@@ -741,22 +728,9 @@ fn claim_timeout_invalid_duration_is_error() {
     assert!(has_error(&validate_value(v), "duration_format"));
 }
 
-#[test]
-fn claim_timeout_unknown_wft_target_is_error() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
-        json!({"after": "PT2H", "wft": "self__ghost"});
-    assert!(has_error(&validate_value(v), "cross_ref"));
-}
+// v2.3 (`E08` Faz 1): `claim_timeout_unknown_wft_target_is_error` SİLİNDİ — `claim_timeout.wft` alanı KALKTI (`K13`) — o referans yeri yok.
 
-#[test]
-fn claim_timeout_valid_node_target_passes() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
-        json!({"after": "PT2H", "wft": "self__branchManager"});
-    let report = validate_value(v);
-    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
-}
+// v2.3 (`E08` Faz 1): `claim_timeout_valid_node_target_passes` SİLİNDİ — `claim_timeout.wft` alanı KALKTI (`K13`) — geçerli hedef diye bir şey yok.
 
 #[test]
 fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
@@ -768,60 +742,16 @@ fn claim_timeout_without_wft_returns_to_same_pool_and_is_valid() {
 
 // ---- 2026-08-03 (WOR-56/SLA-1): claim_timeout.collapses_parallel ----
 
-#[test]
-fn claim_timeout_collapse_without_wft_is_error() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
-        json!({"after": "PT2H", "collapses_parallel": true});
-    assert!(has_error(
-        &validate_value(v),
-        "claim_timeout_collapse_requires_wft"
-    ));
-}
+// v2.3 (`E08` Faz 1): `claim_timeout_collapse_without_wft_is_error` SİLİNDİ — `claim_timeout_collapse_requires_wft` kuralı yok; `collapses_parallel` KALKTI (`K13`).
 
 // v2.3 (`E08` Faz 1): `claim_timeout_collapse_terminal_target_is_error` SİLİNDİ — assert ettiği kural öldü.
 
 
-/// Fork'u olan dokümanda node hedefli collapse temiz geçer (hata + uyarı yok).
-#[test]
-fn claim_timeout_collapse_with_node_target_is_valid_in_parallel_wfd() {
-    let mut v = parallel_fixture_value();
-    v["nodes"]["self__financeApprover"]["claim_timeout"] =
-        json!({"after": "PT2H", "wft": "self__coordinator", "collapses_parallel": true});
-    let report = validate_value(v);
-    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
-    assert!(
-        report.warnings.is_empty(),
-        "uyarılar: {:#?}",
-        report.warnings
-    );
-}
+// v2.3 (`E08` Faz 1): `claim_timeout_collapse_with_node_target_is_valid_in_parallel_wfd` SİLİNDİ — `collapses_parallel` KALKTI (`K13`) — geçerli collapse konfigürasyonu diye bir şey yok.
 
-/// 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da: dokümanda hiç fork
-/// yoksa hiçbir node kol içinde değildir → HATA (eskiden uyarıydı).
-#[test]
-fn claim_timeout_collapse_without_any_fork_is_error() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["claim_timeout"] =
-        json!({"after": "PT2H", "wft": "self__branchManager", "collapses_parallel": true});
-    assert!(has_error(
-        &validate_value(v),
-        "claim_timeout_collapse_outside_parallel"
-    ));
-}
+// v2.3 (`E08` Faz 1): `claim_timeout_collapse_without_any_fork_is_error` SİLİNDİ — `claim_timeout_collapse_outside_parallel` kuralı yok (`K13`).
 
-/// Fork VAR ama node kolun DIŞINDA (join sonrası koordinatör) → HATA. Paralel akışa
-/// bağlı olmayan bir node'un süresi dolduğunda düşürülecek kardeş kol yoktur.
-#[test]
-fn claim_timeout_collapse_on_node_outside_branch_is_error() {
-    let mut v = parallel_fixture_value();
-    v["nodes"]["self__coordinator"]["claim_timeout"] =
-        json!({"after": "PT2H", "wft": "self__financeApprover", "collapses_parallel": true});
-    assert!(has_error(
-        &validate_value(v),
-        "claim_timeout_collapse_outside_parallel"
-    ));
-}
+// v2.3 (`E08` Faz 1): `claim_timeout_collapse_on_node_outside_branch_is_error` SİLİNDİ — `claim_timeout_collapse_outside_parallel` kuralı yok (`K13`).
 
 // ---- 2026-07-28: SLA hedefleri terminal OLAMAZ (sla_terminal_target) ----
 
@@ -841,53 +771,14 @@ fn claim_timeout_collapse_on_node_outside_branch_is_error() {
 
 // ---- 2026-08-03 (WOR-56/SLA-2): node hedefli collapse ARTIK GEÇERLİ ----
 
-/// Fork'u olan dokümanda SLA-2 `{collapse:{node}}` temiz geçer: "kimse süresinde
-/// bakmadıysa paraleli kapat, işi şu gruba götür" bir dallanma kararı değildir.
-#[test]
-fn escalation_collapse_node_target_is_valid_in_parallel_wfd() {
-    let mut v = parallel_fixture_value();
-    v["nodes"]["self__financeApprover"]["escalation"] = json!([{
-        "after": "P1D",
-        "wft": { "collapse": { "node": "self__coordinator" } }
-    }]);
-    let report = validate_value(v);
-    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
-    assert!(
-        report.warnings.is_empty(),
-        "uyarılar: {:#?}",
-        report.warnings
-    );
-}
+// v2.3 (`E08` Faz 1): `escalation_collapse_node_target_is_valid_in_parallel_wfd` SİLİNDİ — `escalation.wft` KALKTI (`Ç9`) — collapse hedefi taşıyamaz.
 
 // v2.3 (`E08` Faz 1): `escalation_collapse_terminal_target_is_error` SİLİNDİ — assert ettiği kural öldü.
 
 
-/// 2026-08-03 — collapse YALNIZ paralel kolun içindeki node'da: dokümanda hiç fork
-/// yoksa HATA (eskiden uyarıydı).
-#[test]
-fn escalation_collapse_without_any_fork_is_error() {
-    let mut v = fixture_value();
-    v["nodes"]["self__creditAnalyst"]["escalation"][0]["wft"] =
-        json!({ "collapse": { "node": "self__branchManager" } });
-    assert!(has_error(
-        &validate_value(v),
-        "escalation_collapse_outside_parallel"
-    ));
-}
+// v2.3 (`E08` Faz 1): `escalation_collapse_without_any_fork_is_error` SİLİNDİ — `escalation_collapse_outside_parallel` kuralı yok (`Ç9`).
 
-/// Fork VAR ama kaynak node kolun DIŞINDA → HATA.
-#[test]
-fn escalation_collapse_on_node_outside_branch_is_error() {
-    let mut v = parallel_fixture_value();
-    v["nodes"]["self__coordinator"]["escalation"] = json!([{
-        "after": "P1D",
-        "wft": { "collapse": { "node": "self__financeApprover" } }
-    }]);
-    assert!(has_error(
-        &validate_value(v),
-        "escalation_collapse_outside_parallel"
-    ));
-}
+// v2.3 (`E08` Faz 1): `escalation_collapse_on_node_outside_branch_is_error` SİLİNDİ — `escalation_collapse_outside_parallel` kuralı yok (`Ç9`).
 
 // v2.3 (`E08` Faz 1): `escalation_collapse_on_deep_branch_node_is_valid` SİLİNDİ — assert ettiği kural öldü.
 
@@ -1156,8 +1047,10 @@ fn attachment_duplicate_item_id_is_error() {
 
 #[test]
 fn parallel_in_start_wft_is_error() {
+    // v2.3 (`Ç7`): yasak KALKMADI, yalnız okunan anahtar `start[].wft` yerine
+    // start AKSİYONUNUN `wft`i oldu (`validator::parallel_start`).
     let mut v = parallel_fixture_value();
-    v["start"][0]["wft"] = json!({
+    v["actions"]["submit_request"]["wft"] = json!({
         "parallel": {
             "branches": ["self__financeApprover", "self__legalApprover"],
             "join": {"node": "self__resultCoordinator"}
@@ -1169,14 +1062,14 @@ fn parallel_in_start_wft_is_error() {
 #[test]
 fn parallel_branches_below_two_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["branches"] = json!(["self__financeApprover"]);
+    v["actions"]["start_review"]["wft"]["parallel"]["branches"] = json!(["self__financeApprover"]);
     assert!(has_error(&validate_value(v), "parallel_branches"));
 }
 
 #[test]
 fn parallel_branches_not_distinct_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["branches"] = json!([
+    v["actions"]["start_review"]["wft"]["parallel"]["branches"] = json!([
         "self__financeApprover",
         "self__financeApprover",
         "self__hrApprover"
@@ -1187,7 +1080,7 @@ fn parallel_branches_not_distinct_is_error() {
 #[test]
 fn parallel_join_equal_to_branch_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join"] = json!({"node": "self__financeApprover"});
+    v["actions"]["start_review"]["wft"]["parallel"]["join"] = json!({"node": "self__financeApprover"});
     assert!(has_error(&validate_value(v), "parallel_join"));
 }
 
@@ -1196,8 +1089,8 @@ fn parallel_join_equal_to_branch_is_error() {
 #[test]
 fn quorum_or_join_is_valid() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("or");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_threshold"] = json!(2);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_threshold"] = json!(2);
     let report = validate_value(v);
     assert!(
         report.errors.is_empty(),
@@ -1209,7 +1102,7 @@ fn quorum_or_join_is_valid() {
 #[test]
 fn quorum_or_join_without_threshold_is_valid() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("or");
     let report = validate_value(v);
     assert!(
         report.errors.is_empty(),
@@ -1221,7 +1114,7 @@ fn quorum_or_join_without_threshold_is_valid() {
 #[test]
 fn join_threshold_without_or_mode_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_threshold"] = json!(2);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_threshold"] = json!(2);
     assert!(has_error(&validate_value(v), "parallel_join_threshold"));
 }
 
@@ -1230,16 +1123,16 @@ fn join_threshold_without_or_mode_is_error() {
 #[test]
 fn join_threshold_equal_to_branch_count_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("or");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_threshold"] = json!(3);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_threshold"] = json!(3);
     assert!(has_error(&validate_value(v), "parallel_join_threshold"));
 }
 
 #[test]
 fn join_threshold_zero_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("or");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_threshold"] = json!(0);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("or");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_threshold"] = json!(0);
     assert!(has_error(&validate_value(v), "parallel_join_threshold"));
 }
 
@@ -1251,8 +1144,8 @@ const JOIN_EXPR: &str =
 #[test]
 fn expr_join_with_valid_when_is_valid() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("expr");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
     let report = validate_value(v);
     assert!(
         report.errors.is_empty(),
@@ -1264,31 +1157,31 @@ fn expr_join_with_valid_when_is_valid() {
 #[test]
 fn expr_join_without_when_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
     assert!(has_error(&validate_value(v), "parallel_join_when"));
 }
 
 #[test]
 fn join_when_without_expr_mode_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
     assert!(has_error(&validate_value(v), "parallel_join_when"));
 }
 
 #[test]
 fn expr_join_with_threshold_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("expr");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_threshold"] = json!(2);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] = json!(JOIN_EXPR);
+    v["actions"]["start_review"]["wft"]["parallel"]["join_threshold"] = json!(2);
     assert!(has_error(&validate_value(v), "parallel_join_threshold"));
 }
 
 #[test]
 fn expr_join_with_unparsable_when_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("expr");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_when"] = json!("$branches.a and and");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] = json!("$branches.a and and");
     assert!(has_error(&validate_value(v), "parallel_join_when"));
 }
 
@@ -1297,8 +1190,8 @@ fn expr_join_with_unparsable_when_is_error() {
 #[test]
 fn expr_join_referencing_unknown_branch_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("expr");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_when"] =
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] =
         json!("$branches.self__financeApprover or $branches.self__yokBoyleKol");
     assert!(has_error(
         &validate_value(v),
@@ -1310,8 +1203,8 @@ fn expr_join_referencing_unknown_branch_is_error() {
 #[test]
 fn expr_join_with_arrived_count_is_valid() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_mode"] = json!("expr");
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join_when"] = json!("len($arrived) >= 2");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] = json!("len($arrived) >= 2");
     assert!(validate_value(v).errors.is_empty());
 }
 
@@ -1319,7 +1212,7 @@ fn expr_join_with_arrived_count_is_valid() {
 fn parallel_unknown_branch_node_is_error() {
     // branch/join hedeflerinin var olması generic cross_ref (wft_targets) ile denetlenir.
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["branches"] =
+    v["actions"]["start_review"]["wft"]["parallel"]["branches"] =
         json!(["self__ghost", "self__legalApprover", "self__hrApprover"]);
     assert!(has_error(&validate_value(v), "cross_ref"));
 }
@@ -1327,16 +1220,16 @@ fn parallel_unknown_branch_node_is_error() {
 #[test]
 fn parallel_unknown_join_target_is_error() {
     let mut v = parallel_fixture_value();
-    v["actions"]["analyst_approve"]["wft"]["parallel"]["join"] = json!({"node": "self__ghost"});
+    v["actions"]["start_review"]["wft"]["parallel"]["join"] = json!({"node": "self__ghost"});
     assert!(has_error(&validate_value(v), "cross_ref"));
 }
 
 #[test]
 fn parallel_nested_fork_is_error() {
     let mut v = parallel_fixture_value();
-    // finans kolunun approve transition'ını, join yerine ikinci bir fork'a çözülecek şekilde
+    // finans kolunun onay aksiyonunu, join yerine ikinci bir fork'a çözülecek şekilde
     // değiştir — branch subgraph içinde nested Parallel yasak.
-    v["actions"]["manager_decide"]["wft"] = json!({
+    v["actions"]["finans_onay"]["wft"] = json!({
         "parallel": {
             "branches": ["self__legalApprover", "self__hrApprover"],
             "join": {"node": "self__resultCoordinator"}
@@ -1348,9 +1241,9 @@ fn parallel_nested_fork_is_error() {
 #[test]
 fn parallel_overlapping_branch_subgraphs_is_error() {
     let mut v = parallel_fixture_value();
-    // finans kolunun approve'unu hukuk kolunun node'una yönlendir — iki branch subgraph'ı
+    // finans kolunun onayını hukuk kolunun node'una yönlendir — iki branch subgraph'ı
     // artık aynı node'u paylaşıyor (join hariç ayrık olmalı kuralını çiğner).
-    v["actions"]["manager_decide"]["wft"] = json!({"node": "self__legalApprover"});
+    v["actions"]["finans_onay"]["wft"] = json!({"node": "self__legalApprover"});
     assert!(has_error(&validate_value(v), "parallel_disjoint"));
 }
 
@@ -1360,10 +1253,10 @@ fn parallel_branch_dead_end_is_error() {
     // finans kolunun approve transition'ını sil — o kol artık join'e de terminal'e de
     // ulaşamıyor (yalnız reject kalıyor, o da başka bir hatayla karışmasın diye node'u
     // kendine döndürüyoruz: gerçek dead-end üretmek için approve transition'ı kaldırıyoruz).
-    v["transitions"].as_array_mut().unwrap().remove(1); // t_finance_approve
-                                                        // reject de kaldırılırsa no_exit hatasına düşer; onu sadece terminal'e değil
-                                                        // kendi node'una yönlendirerek dead-end'i saf tutuyoruz.
-    v["actions"]["manager_decide"]["wft"] = json!({"node": "self__financeApprover"});
+    v["actions"].as_object_mut().unwrap().remove("finans_onay");
+    // reject de kaldırılırsa `no_exit` hatasına düşer; onu terminal yerine kendi
+    // node'una yönlendirerek dead-end'i saf tutuyoruz.
+    v["actions"]["finans_ret"]["wft"] = json!({"node": "self__financeApprover"});
     let report = validate_value(v);
     assert!(
         has_error(&report, "parallel_dead_end"),
@@ -1748,17 +1641,12 @@ fn required_sourced_input_does_not_trigger_the_warning() {
 #[test]
 fn first_match_siblings_do_not_warn_about_each_other() {
     let mut v = fixture_value();
-    let tx = v["transitions"].as_array_mut().unwrap();
-    // Golden'daki müdür transition'ını kopyalayıp `when`siz bir kardeş ekle.
-    let manager = tx
-        .iter()
-        .find(|t| t["action"] == "manager_decide")
-        .expect("golden'da manager_decide var")
-        .clone();
-    let mut sibling = manager.clone();
-    sibling["id"] = json!("t_manager_decide_sibling");
+    // v2.3 (`Ç5`): kardeşlik transition'lar arasında değil AKSİYONLAR arasında —
+    // aynı node'dan (`from`) çıkan, aynı opsiyonel alana yazan iki kayıt. Müdür
+    // aksiyonunu kopyalayıp `when`siz bir kardeş kimlik ekle.
+    let mut sibling = v["actions"]["manager_decide"].clone();
     sibling.as_object_mut().unwrap().remove("when");
-    tx.push(sibling);
+    v["actions"]["manager_decide_sibling"] = sibling;
 
     let report = validate_value(v);
     for w in report
@@ -1779,7 +1667,14 @@ fn first_match_siblings_do_not_warn_about_each_other() {
             w.path,
             w.message
         );
-        // 2. Aynı etiket iki kez listelenmez (ilk-match kardeşleri aynı etiketi taşır).
+        // 2. Aynı etiket iki kez listelenmez.
+        //
+        // ⚠️ v2.3 (`Ç5`): bu ikinci assert artık YAPISI GEREĞİ patlayamaz. v2.2'de iki
+        // transition AYNI aksiyonu paylaşabiliyordu ve etiket aksiyon adından
+        // türediği için liste aynı metni iki kez taşıyabiliyordu; kimlik ile
+        // yönlendirme tek kayda inince iki kardeş zorunlu olarak iki AYRI ad taşıyor.
+        // Assert yine de duruyor: etiket üretimi ileride node/rol tabanlı bir şeye
+        // dönerse çakışma geri gelebilir ve bedeli bir satır.
         let labels: Vec<&str> = others
             .split(" da yazıyor")
             .next()
@@ -1821,12 +1716,8 @@ fn different_writers_still_warn() {
 #[test]
 fn unconditional_branch_before_others_is_rejected() {
     let mut v = fixture_value();
-    let tx = v["transitions"].as_array_mut().unwrap();
-    let t = tx
-        .iter_mut()
-        .find(|t| t["action"] == "manager_decide")
-        .unwrap();
-    t["wft"] = json!({
+    // v2.3 (`Ç5`): koşul listesi transition'da değil, aksiyon kaydının kendisinde.
+    v["actions"]["manager_decide"]["wft"] = json!({
         "conditions": [
             { "when": "true", "terminal": "terminal_approved" },
             { "when": "$action.input.manager_decision == 'reject'", "terminal": "terminal_rejected" }
@@ -1845,12 +1736,8 @@ fn unconditional_branch_before_others_is_rejected() {
 #[test]
 fn trailing_unconditional_branch_is_allowed() {
     let mut v = fixture_value();
-    let tx = v["transitions"].as_array_mut().unwrap();
-    let t = tx
-        .iter_mut()
-        .find(|t| t["action"] == "manager_decide")
-        .unwrap();
-    t["wft"] = json!({
+    // v2.3 (`Ç5`): koşul listesi transition'da değil, aksiyon kaydının kendisinde.
+    v["actions"]["manager_decide"]["wft"] = json!({
         "conditions": [
             { "when": "$action.input.manager_decision == 'approve'", "terminal": "terminal_approved" },
             { "when": "true", "terminal": "terminal_rejected" }
@@ -1863,12 +1750,8 @@ fn trailing_unconditional_branch_is_allowed() {
 #[test]
 fn trailing_unconditional_branch_with_default_is_rejected() {
     let mut v = fixture_value();
-    let tx = v["transitions"].as_array_mut().unwrap();
-    let t = tx
-        .iter_mut()
-        .find(|t| t["action"] == "manager_decide")
-        .unwrap();
-    t["wft"] = json!({
+    // v2.3 (`Ç5`): koşul listesi transition'da değil, aksiyon kaydının kendisinde.
+    v["actions"]["manager_decide"]["wft"] = json!({
         "conditions": [
             { "when": "$action.input.manager_decision == 'approve'", "terminal": "terminal_approved" },
             { "when": "true", "terminal": "terminal_rejected" }
@@ -2415,9 +2298,11 @@ fn sla_effects_reject_call_namespace() {
         .next()
         .unwrap()
         .clone();
+    // v2.3 (`Ç9`): kademe `wft` taşımaz, `grant` taşır. Testin konusu kademe HEDEFİ
+    // değil `wfes_effects`in namespace kapısı — o kapı yerinde.
     v["nodes"][&node]["escalation"] = json!([{
         "after": "PT1H",
-        "wft": { "terminal": "terminal_rejected" },
+        "grant": { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } },
         "wfes_effects": { "set": { "internal_notes": "$call.status" } }
     }]);
     assert!(has_error(&validate_value(v), "sla_effect_namespace"));
@@ -2558,9 +2443,11 @@ fn cyclic_named_types_do_not_hang() {
 }
 
 #[test]
-fn transition_c_a_anchor_is_checked() {
+fn action_extra_c_a_anchor_is_checked() {
+    // v2.3 (`Ç6`): `transitions[].c_a` → `actions.<x>.extra_c_a`. Ad değişti, çapa
+    // kuralı aynı kural.
     let mut v = fixture_value();
-    v["actions"]["analyst_approve"]["c_a"] = json!({
+    v["actions"]["analyst_approve"]["extra_c_a"] = json!({
         "c_orgu": { "from": "$ctx.applicant", "traverse": "self" },
         "c_r": ["creditAnalyst"],
     });

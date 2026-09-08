@@ -20,6 +20,7 @@ use wfe_core::types::wfd_v22::{
 };
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::valid::{self, ValidRules};
+use wfe_core::v22::wfah_kind::parse_marker;
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CollapseCause, CommitOutcome, ExecEnv, ExecFailure,
@@ -4206,19 +4207,48 @@ async fn reassign_by_authorized_manager_to_eligible_target() {
     let target = analyst(orgu); // node c_a'ya uygun yeni sahip
     let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
 
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &wfes, &mgr, Some(&target), None, Utc::now())
         .await
         .expect("yetkili amir uygun hedefe devredebilmeli");
 
-    assert_eq!(entry.action, "reassign");
+    // Ç13/E12/S4: kişiden kişiye devir İKİ satır — önce eski sahibin bırakması,
+    // sonra yeni sahibin alması. Ardışık `seq`, aynı transaction.
+    assert_eq!(entries.len(), 2, "kişiden kişiye devir İKİ satır yazar");
+    assert_eq!(entries[1].seq, entries[0].seq + 1, "seq ardışık olmalı");
+    for e in &entries {
+        assert_eq!(e.actor.user_id, mgr.user_id, "satır aktörü amir olmalı");
+        assert!(e.from_node.is_none() && e.to_node.is_none(), "marker satırı");
+    }
+
+    let released = &entries[0];
+    assert_eq!(released.action, "claim_released:self__creditAnalyst");
+    let input = released.input.as_ref().unwrap();
+    assert_eq!(input["reason"], json!("taken_by_other"));
     assert_eq!(
-        entry.actor.user_id, mgr.user_id,
-        "marker aktörü amir olmalı"
+        input["owner"],
+        json!(owner.user_id.to_string()),
+        "bırakma satırının öznesi ESKİ sahiptir"
     );
-    let input = entry.input.as_ref().unwrap();
-    assert_eq!(input["from"], json!(owner.user_id.to_string()));
-    assert_eq!(input["to"], json!(target.user_id.to_string()));
+    assert!(input.get("authority").is_none(), "authority yalnız claim_taken'da");
+
+    let taken = &entries[1];
+    assert_eq!(taken.action, "claim_taken:self__creditAnalyst");
+    let input = taken.input.as_ref().unwrap();
+    assert_eq!(input["via"], json!("assigned"));
+    assert_eq!(input["authority"], json!("c_a"));
+    assert_eq!(
+        input["owner"],
+        json!(target.user_id.to_string()),
+        "alma satırının öznesi YENİ sahiptir"
+    );
+    assert_eq!(
+        input["waited_for_seconds"],
+        json!(0),
+        "yetkili devirde bekleme YOKTUR (E12/S2)"
+    );
+    // Eski `{from, to}` şekli KALKTI — bir satır = bir sahiplik öznesi.
+    assert!(input.get("from").is_none() && input.get("to").is_none());
 }
 
 #[tokio::test]
@@ -4239,15 +4269,139 @@ async fn reassign_to_pool_writes_unclaim_marker() {
     let mgr = manager(orgu);
     let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
 
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &wfes, &mgr, None, None, Utc::now())
         .await
         .expect("amir havuza bırakabilmeli");
 
-    assert_eq!(entry.action, "unclaim");
-    let input = entry.input.as_ref().unwrap();
-    assert_eq!(input["from"], json!(owner.user_id.to_string()));
-    assert_eq!(input["to"], Value::Null, "havuza bırakmada hedef null");
+    // E12/S4: havuza bırakmada alan yoktur → TEK satır.
+    assert_eq!(entries.len(), 1, "havuza bırakma TEK satır yazar");
+    assert_eq!(entries[0].action, "claim_released:self__creditAnalyst");
+    let input = entries[0].input.as_ref().unwrap();
+    assert_eq!(input["reason"], json!("taken_by_other"));
+    assert_eq!(input["owner"], json!(owner.user_id.to_string()));
+}
+
+/// Sahip işi KENDİ bırakırsa sebep `self`tir — "yetkili başkası aldı" ile aynı
+/// satıra düşerse denetimde iki farklı olay ayırt edilemez.
+#[tokio::test]
+async fn owner_releasing_their_own_claim_is_reason_self() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let mut wfd = golden_with_reassign();
+    // Sahibin kendi bırakabilmesi için devir kuralı onun rolünü de kapsamalı.
+    wfd.nodes.get_mut("self__creditAnalyst").unwrap().reassign = Some(CandidateActor {
+        c_orgu: Some(COrgu::Selector("self".into())),
+        c_r: Some(vec!["creditAnalyst".into()]),
+        c_u: None,
+    });
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+
+    let entries = engine
+        .reassign(&wfd, &wfes, &owner, None, None, Utc::now())
+        .await
+        .expect("sahip kendi bırakabilmeli");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].input.as_ref().unwrap()["reason"],
+        json!("self")
+    );
+}
+
+/// E12/S2: havuzdan atamada bekleme GERÇEKTİR ve tabanı `node/kol girişi` ile
+/// `son bırakma anı`ndan YENİ olanıdır — al-bırak-al döngüsünde ikinci sahibin
+/// beklemesi birincinin tutma süresini kapsamaz.
+#[tokio::test]
+async fn assign_from_pool_waits_from_the_last_release_not_node_entry() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_admin_actions(&[GlobalAction::AssignFromPool]);
+
+    let orgu = Uuid::new_v4();
+    let admin = manager(orgu);
+    let target = analyst(orgu);
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let entered_at = wfes.wfah.entries()[0].applied_at;
+    // Node girişinden 1 saat sonra bir bırakma satırı düşmüş olsun.
+    wfes.wfah.0.push(WfahEntry {
+        seq: 2,
+        action: "claim_released:self__creditAnalyst".into(),
+        actor: analyst(orgu),
+        input: Some(json!({"reason": "self"})),
+        applied_at: entered_at + Duration::hours(1),
+        from_node: None,
+        to_node: None,
+        branch_entry: None,
+        branch_round: None,
+    });
+
+    let now = entered_at + Duration::hours(3);
+    let entries = engine
+        .reassign(&wfd, &wfes, &admin, Some(&target), None, now)
+        .await
+        .expect("havuzdan atama");
+    assert_eq!(
+        entries[0].input.as_ref().unwrap()["waited_for_seconds"],
+        json!(2 * 3600),
+        "taban SON BIRAKMA anıdır (3sa − 1sa), node girişi değil"
+    );
+}
+
+/// Değişmez #2'nin bu karardaki hâli: eski sahiplik adları motordan KALKTI.
+/// `parse_marker` onları hâlâ `Action`a düşürür (eski satırlar dönüştürülmüyor),
+/// ama motor bir daha ÜRETMEZ — `Action` sınıfı bu kadar daraldı.
+#[tokio::test]
+async fn engine_no_longer_emits_the_old_ownership_action_names() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden_with_wf_admin(None);
+
+    let orgu = Uuid::new_v4();
+    let owner = analyst(orgu);
+    let admin = manager(orgu);
+    let target = analyst(orgu);
+    let claimed = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
+    let pooled = wfes_at("self__creditAnalyst", None, start_input());
+
+    let mut produced: Vec<String> = Vec::new();
+    for (wfes, target) in [
+        (&claimed, Some(&target)),
+        (&claimed, None),
+        (&pooled, Some(&target)),
+    ] {
+        let entries = engine
+            .reassign(&wfd, wfes, &admin, target, None, Utc::now())
+            .await
+            .expect("wf_admin her üç yolu da alabilir");
+        produced.extend(entries.iter().map(|e| e.action.clone()));
+    }
+    for action in &produced {
+        assert!(
+            action.starts_with("claim_taken:") || action.starts_with("claim_released:"),
+            "eski ad üretildi: {action}"
+        );
+        assert!(
+            !parse_marker(action).kind.is_action(),
+            "sahiplik satırı `Action`a düşmemeli: {action}"
+        );
+    }
+    assert_eq!(produced.len(), 4, "2 + 1 + 1 satır: {produced:?}");
 }
 
 #[tokio::test]
@@ -4713,16 +4867,19 @@ async fn wf_admin_can_reassign_on_node_without_reassign_rule() {
     let target = analyst(orgu);
     let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
 
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &wfes, &admin, Some(&target), None, Utc::now())
         .await
         .expect("wf_admin devredebilmeli");
-    assert_eq!(entry.action, "reassign");
-    assert_eq!(entry.actor.user_id, admin.user_id);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].action, "claim_released:self__creditAnalyst");
+    assert_eq!(entries[1].action, "claim_taken:self__creditAnalyst");
+    assert_eq!(entries[1].actor.user_id, admin.user_id);
 }
 
-/// Marker hangi yoldan geldiğini söyler: denetimde "node amiri mi, akış admini mi"
-/// ayrımı gerekir.
+/// Satır hangi yoldan geldiğini söyler: denetimde "node amiri mi, akış admini mi"
+/// ayrımı gerekir. Ç13: ayrım artık `via`/`reason` KAPALI LİSTESİNDEDİR — eski
+/// `via: "wf_admin"` serbest metniyle karışmasın.
 #[tokio::test]
 async fn wf_admin_reassign_marker_records_via() {
     let org = MockOrg {
@@ -4737,16 +4894,19 @@ async fn wf_admin_reassign_marker_records_via() {
     let admin = manager(orgu);
     let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
 
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
         .await
         .expect("havuza bırakabilmeli");
-    assert_eq!(entry.input.as_ref().unwrap()["via"], json!("wf_admin"));
+    let input = entries[0].input.as_ref().unwrap();
+    assert_eq!(input["reason"], json!("admin"));
+    assert_eq!(input["global_action"], json!("reclaim_to_pool"));
 }
 
-/// Node'un kendi kuralıyla gelen devir `via` TAŞIMAZ — eski kayıtların şekli korunur.
+/// Node'un kendi kuralıyla gelen devir WF Admin yolundan AYIRT EDİLİR: `reason`
+/// farklıdır ve `global_action` YAZILMAZ (o alan yalnız admin kapısının izidir).
 #[tokio::test]
-async fn node_reassign_path_does_not_record_via() {
+async fn node_reassign_path_is_not_an_admin_release() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -4759,14 +4919,15 @@ async fn node_reassign_path_does_not_record_via() {
     let mgr = manager(orgu);
     let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
 
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &wfes, &mgr, None, None, Utc::now())
         .await
         .expect("node amiri devredebilmeli");
+    let input = entries[0].input.as_ref().unwrap();
+    assert_eq!(input["reason"], json!("taken_by_other"));
     assert!(
-        entry.input.as_ref().unwrap().get("via").is_none(),
-        "node.reassign yolunda via alanı olmamalı: {:?}",
-        entry.input
+        input.get("global_action").is_none(),
+        "node.reassign yolu global aksiyon kapısından geçmez: {input:?}"
     );
 }
 
@@ -5716,13 +5877,14 @@ async fn reclaim_to_pool_does_not_grant_assign() {
     let target = analyst(orgu);
     let wfes = wfes_at("self__creditAnalyst", Some(owner.user_id), start_input());
 
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &wfes, &admin, None, None, Utc::now())
         .await
         .expect("havuza alma yetkisi var");
-    assert_eq!(entry.action, "unclaim");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].action, "claim_released:self__creditAnalyst");
     assert_eq!(
-        entry.input.as_ref().unwrap()["global_action"],
+        entries[0].input.as_ref().unwrap()["global_action"],
         json!("reclaim_to_pool")
     );
 
@@ -5749,14 +5911,17 @@ async fn assign_from_pool_and_reassign_are_separate_powers() {
     let target = analyst(orgu);
     // Sahipsiz (havuzda) iş → assign_from_pool
     let unclaimed = wfes_at("self__creditAnalyst", None, start_input());
-    let entry = engine
+    let entries = engine
         .reassign(&wfd, &unclaimed, &admin, Some(&target), None, Utc::now())
         .await
         .expect("havuzdan atama yetkisi var");
-    assert_eq!(
-        entry.input.as_ref().unwrap()["global_action"],
-        json!("assign_from_pool")
-    );
+    // E12/S4: kaybeden sahip yok → TEK satır, yalnız alma.
+    assert_eq!(entries.len(), 1, "havuzdan atama TEK satır yazar");
+    assert_eq!(entries[0].action, "claim_taken:self__creditAnalyst");
+    let input = entries[0].input.as_ref().unwrap();
+    assert_eq!(input["global_action"], json!("assign_from_pool"));
+    assert_eq!(input["via"], json!("admin_assigned"));
+    assert_eq!(input["owner"], json!(target.user_id.to_string()));
 
     // Sahipli iş → `reassign` yetkisi gerekir, listede YOK
     let claimed = wfes_at(

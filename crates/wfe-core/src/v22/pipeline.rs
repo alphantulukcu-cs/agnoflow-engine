@@ -32,6 +32,9 @@ use crate::v22::effects::{apply_effects, get_path, resolve_value, EffectEnv};
 use crate::v22::env::RunEnv;
 use crate::v22::eval::{evaluate_bool, CallOutcome, EvalEnv, JoinEnv};
 use crate::v22::grants::{matches_grant_rules, require_global_action, wf_admin_global_actions};
+use crate::v22::ownership::{
+    seconds_between, wait_base, ClaimAuthority, ClaimReleased, ClaimTaken, OwnershipBranch,
+};
 use crate::v22::matcher::{
     authorize, authorize_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
 };
@@ -1369,14 +1372,16 @@ impl<'a> Engine<'a> {
     // -------------------------------------------------------------- reassign
 
     /// Madde 7: yetkili claim devri — SAF. İki `authorize` koşar ve persist
-    /// edilecek WFAH marker'ını döner (asıl yazım `WfeStore::reassign`):
+    /// edilecek sahiplik satır(lar)ını döner (asıl yazım `WfeStore::reassign`):
     /// 1. Aktif node (paralel modda `branch` kolu) çözülür; `reassign` kuralı
     ///    yoksa devir bu node'da kapalıdır → `Unauthorized`.
     /// 2. `reassigner` node.reassign kuralına uymalı → aksi `Unauthorized`.
     /// 3. `target = Some` ise hedef node.c_a'ya uygun olmalı → aksi
     ///    `TargetNotEligible`; `target = None` (havuza bırakma) bu adımı atlar.
-    /// Marker: `action` = "reassign" (hedefli) / "unclaim" (havuz), `actor` =
-    /// reassigner, `input` = `{from, to}` (önceki/yeni owner uuid veya null).
+    ///
+    /// Ç13/E12: satırlar sahiplik ailesindendir (`claim_released:` / `claim_taken:`);
+    /// `reassign` ve `unclaim` WFAH aksiyon adları KALKTI. Dönen satırlar AYNI
+    /// transaction'da, döndükleri SIRAYLA yazılır — ardışık `seq` bunu gerektirir.
     pub async fn reassign(
         &self,
         wfd: &Wfd,
@@ -1385,22 +1390,25 @@ impl<'a> Engine<'a> {
         target: Option<&Actor>,
         branch: Option<&str>,
         now: DateTime<Utc>,
-    ) -> Result<WfahEntry, EngineError> {
+    ) -> Result<Vec<WfahEntry>, EngineError> {
         if is_terminal_class(&wfes.status) {
             return Err(EngineError::WfeTerminal);
         }
         if self.deadline_due(wfes, now) {
             return Err(EngineError::WfeExpired);
         }
-        // Aktif node + o an geçerli owner (paralel modda kol-bazlı).
-        let (node_key, from_owner) = match branch {
+        // Aktif node + o an geçerli owner (paralel modda kol-bazlı). Sahiplik
+        // satırlarının iki türetilmiş süresi de buradan beslenir: `claimed_at`
+        // tutma süresinin, node/kol girişi ise bekleme tabanının başlangıcıdır.
+        let (node_key, from_owner, claimed_at, entered_at) = match branch {
             Some(b) => {
                 let Some(bs) = active_branch(wfes, b) else {
                     return Err(EngineError::InvalidWfd(format!(
                         "reassign için aktif kol yok: '{b}'"
                     )));
                 };
-                (b, bs.claimed_by)
+                // R02/S3: kol girişi gerçek kolondan okunur, defterden TÜRETİLMEZ.
+                (b, bs.claimed_by, bs.claimed_at, Some(bs.entered_at))
             }
             None => {
                 let Some(nk) = wfes.current_node.as_deref() else {
@@ -1408,7 +1416,7 @@ impl<'a> Engine<'a> {
                         "reassign için current_node yok".into(),
                     ));
                 };
-                (nk, wfes.assigned_to)
+                (nk, wfes.assigned_to, wfes.claimed_at, node_entered_at(&wfes.wfah))
             }
         };
         let node = wfd
@@ -1470,46 +1478,92 @@ impl<'a> Engine<'a> {
             }
         }
 
-        let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
-        let action = if target.is_some() {
-            "reassign"
-        } else {
-            "unclaim"
-        };
-        // Denetim izi hangi yoldan gelindiğini söyler: `via` YALNIZ akış yöneticisi
-        // yolunda yazılır, node.reassign yolundaki eski kayıtların şekli korunur.
-        let mut input = json!({
-            "from": from_owner.map(|u| u.to_string()),
-            "to": target.map(|t| t.user_id.to_string()),
-        });
-        if by_wf_admin {
-            input["via"] = json!("wf_admin");
-            // Denetim izi hangi GLOBAL AKSIYONun kapısından geçildiğini de söyler:
-            // `action` alanı (`reassign`/`unclaim`) wire adıdır ve üç yetkiyi
-            // ayırmaz — "admin havuzdan mı atadı, kişiden mi aldı" sorusu WFAH'tan
-            // cevaplanabilmeli.
-            input["global_action"] = json!(match (target.is_some(), from_owner.is_some()) {
-                (false, _) => GlobalAction::ReclaimToPool,
-                (true, false) => GlobalAction::AssignFromPool,
-                (true, true) => GlobalAction::Reassign,
-            }
-            .as_str());
-        }
         // Ç4/E14: kol devrinde satır O KOLDA üretilir — kimlik + tur tek yerden.
         let (branch_entry, branch_round) = branch_label(wfes, branch);
-        Ok(WfahEntry {
-            seq,
-            action: action.to_string(),
-            actor: reassigner.clone(),
-            input: Some(input),
-            applied_at: now,
-            // Ç2: sahiplik devri node DEĞİŞTİRMEZ — hareket satırı değil.
-            from_node: None,
-            to_node: None,
-            // Ç4: kol devrinde satır O KOLDA üretilir.
-            branch_entry,
-            branch_round,
-        })
+        // E12/S5: paralel modda kol alanları ZORUNLUDUR ve YAZMA ANINDA dolar —
+        // E14 kol satırlarını tur kapanınca sildiği için sonradan türetilemezler.
+        let ownership_branch = branch.map(|b| OwnershipBranch {
+            entry: branch_entry.as_deref().unwrap_or(b),
+            at_node: b,
+        });
+        // Ç13: üç global aksiyonu marker ADI değil bu alan ayırır. Eski `reassign`/
+        // `unclaim` adları yetkiyi ayırmıyordu; "yokluğu anlam taşır" antipattern'i
+        // (yol adının OLMAMASI = node kuralı) bu alanla kapandı.
+        let global_action = match (target.is_some(), from_owner.is_some()) {
+            (false, _) => GlobalAction::ReclaimToPool,
+            (true, false) => GlobalAction::AssignFromPool,
+            (true, true) => GlobalAction::Reassign,
+        };
+        // E12/S2: yetkili devirde bekleme YOKTUR — iş zaten birinin üzerindeydi.
+        // Havuzdan atamada gerçek bekleme yazılır (kural İKİ cümledir).
+        let waited_for_seconds = if from_owner.is_some() {
+            Some(0)
+        } else {
+            entered_at.map(|e| {
+                seconds_between(
+                    wait_base(&wfes.wfah, node_key, branch_entry.as_deref(), e),
+                    now,
+                )
+            })
+        };
+
+        // Ç13/E12/S4: satır SAYISI `from_owner`ın varlığına bağlıdır.
+        //   · kişiden kişiye devir → İKİ satır (önce bırakma, sonra alma), ardışık seq
+        //   · havuzdan kişiye atama → TEK `claim_taken:` (kaybeden sahip YOK)
+        //   · havuza bırakma        → TEK `claim_released:`
+        // "Bir satır = bir sahiplik öznesi" değişmezi bunun sebebidir: tek satırlık
+        // `{from, to}` okuyucuyu her yerde iki şekle hazır durmaya zorlar ve iki
+        // türetilmiş süre kendi öznelerinden ayrı düşerdi.
+        let mut rows: Vec<(String, Value)> = Vec::with_capacity(2);
+        if let Some(owner) = from_owner {
+            let released = if by_wf_admin {
+                ClaimReleased::by_admin(node_key, owner, global_action)
+            } else if owner == reassigner.user_id {
+                ClaimReleased::by_self(node_key, owner)
+            } else {
+                ClaimReleased::taken_by_other(node_key, owner)
+            }
+            .held(claimed_at.map(|c| seconds_between(c, now)))
+            .in_branch(ownership_branch);
+            rows.push((released.marker(), released.input()));
+        }
+        if let Some(t) = target {
+            // `authority`: hedefin uygunluğu (3. adım) bugün YALNIZ `node.c_a`ya
+            // bakıyor — açık grant'lar claim yoluna `E04` (`authorize_node`) ile
+            // girecek ve değer ORADAN gelecek. `c_a` zaten öncelikli taraftır
+            // (E12/S1), yani E04 indiğinde bu satırın anlamı değişmez, yalnız
+            // grant'la gelen hedefler `grant` yazmaya başlar.
+            let taken = if by_wf_admin {
+                ClaimTaken::admin_assigned(node_key, t.user_id, ClaimAuthority::Ca, global_action)
+            } else {
+                ClaimTaken::assigned(node_key, t.user_id, ClaimAuthority::Ca)
+            }
+            .waited(waited_for_seconds)
+            .in_branch(ownership_branch);
+            rows.push((taken.marker(), taken.input()));
+        }
+
+        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        Ok(rows
+            .into_iter()
+            .map(|(action, input)| {
+                let entry = WfahEntry {
+                    seq,
+                    action,
+                    actor: reassigner.clone(),
+                    input: Some(input),
+                    applied_at: now,
+                    // Ç2: sahiplik devri node DEĞİŞTİRMEZ — hareket satırı değil.
+                    from_node: None,
+                    to_node: None,
+                    // Ç4: kol devrinde satır O KOLDA üretilir.
+                    branch_entry: branch_entry.clone(),
+                    branch_round,
+                };
+                seq += 1;
+                entry
+            })
+            .collect())
     }
 
     // ------------------------------------------------------ possible actions
@@ -2552,6 +2606,8 @@ impl<'a> Engine<'a> {
         })?;
         let system = system_actor();
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        // Ç4/E14: kolun claim'i düşüyorsa satır O KOLDA — iki dal da aynı etiketi taşır.
+        let (branch_entry, branch_round) = branch_label(wfes, branch);
         // Ç1-EK: marker adı `claim_timeout:` DEĞİL `claim_released:`. İki olay tek
         // olaydır (bir claim düşer, iş havuza döner); farkları SEBEPTİR ve sebep
         // payload'daki `reason` alanında taşınır. `claim_timeout:` adı SLA-1 dışı
@@ -2559,9 +2615,32 @@ impl<'a> Engine<'a> {
         //
         // WFD tarafındaki ayar bloğunun adı (`nodes.<k>.claim_timeout`) DEĞİŞMEZ: o blok
         // bir ZAMANLAYICI tarif eder, bırakmayı değil.
+        //
+        // E12: satır sahiplik ailesinin ORTAK şeklini taşır — `owner` (sahipliğin
+        // öznesi; `actor` sistemdir, düşüren o), `held_for_seconds` ve paralel modda
+        // kol alanları. `owner` YOKSA düşecek bir sahiplik de yoktur.
+        let (owner, claimed_at) = match branch {
+            Some(b) => match active_branch(wfes, b) {
+                Some(bs) => (bs.claimed_by, bs.claimed_at),
+                None => (None, None),
+            },
+            None => (wfes.assigned_to, wfes.claimed_at),
+        };
+        let released_input = |after: &str| -> Value {
+            match owner {
+                Some(o) => ClaimReleased::timeout(node_key, o, after)
+                    .held(claimed_at.map(|c| seconds_between(c, now)))
+                    .in_branch(branch.map(|b| OwnershipBranch {
+                        entry: branch_entry.as_deref().unwrap_or(b),
+                        at_node: b,
+                    }))
+                    .input(),
+                // Sahipsiz node'da SLA-1 ateşlenmez (`claim_timeout_due` `claimed_at`
+                // ister); yine de düşerse `owner` UYDURULMAZ.
+                None => json!({ "reason": "timeout", "after": after }),
+            }
+        };
         let marker = format!("claim_released:{node_key}");
-        // Ç4/E14: kolun claim'i düşüyorsa satır O KOLDA — iki dal da aynı etiketi taşır.
-        let (branch_entry, branch_round) = branch_label(wfes, branch);
 
         // SLA-1 effects (2026-07-28): varsa DynCtx'e uygulanır; yoksa staged ctx
         // aynen kalır ve Release yolu ctx satırı YAZMAZ (`new_dynctx: None`).
@@ -2587,10 +2666,9 @@ impl<'a> Engine<'a> {
                     seq,
                     action: marker,
                     actor: system,
-                    // Ç1-EK payload'ı: `reason` kapalı listedir; `after` YALNIZ
-                    // `reason: "timeout"` satırlarında yazılır. Kalan alanlar
-                    // (`claimed_by`/`claimed_at`/`held_for_seconds`) `E12`nin işi.
-                    input: Some(json!({"reason": "timeout", "after": ct.after})),
+                    // Ç1-EK/E12 payload'ı: `reason` kapalı listedir (Rust enum);
+                    // `after` YALNIZ `reason: "timeout"` satırlarında yazılır.
+                    input: Some(released_input(&ct.after)),
                     applied_at: now,
                     // Ç2: yalnız claim düşer, node DEĞİŞMEZ — marker satırı.
                     from_node: None,
@@ -2636,12 +2714,17 @@ impl<'a> Engine<'a> {
                     seq,
                     action: marker.clone(),
                     actor: system.clone(),
-                    // `collapse` anahtarı YALNIZ collapse'ta yazılır — eski audit
-                    // kayıtlarının/golden fixture'ların şekli birebir korunur.
-                    input: Some(if collapse {
-                        json!({"after": ct.after, "wft": target, "collapse": true})
-                    } else {
-                        json!({"after": ct.after, "wft": target})
+                    // E12: devir yolu da `claim_released:` yazar, dolayısıyla ORTAK
+                    // şekle uyar. `wft` (ve collapse'ta `collapse`) ailenin dışındaki
+                    // audit alanlarıdır: hedefi yalnız bu satır taşır. `collapse`
+                    // anahtarı YALNIZ collapse'ta yazılır.
+                    input: Some({
+                        let mut input = released_input(&ct.after);
+                        input["wft"] = json!(target);
+                        if collapse {
+                            input["collapse"] = json!(true);
+                        }
+                        input
                     }),
                     applied_at: now,
                     // Ç2: claim timeout MARKER satırıdır (v2.3/C ekseni: devir yolu
@@ -4157,6 +4240,11 @@ fn stage_parallel_markers(
                     "approved_by": actor,
                     "approved_at": now,
                     "claimed_at": claimed_at,
+                    // Ç13: "claim üç yoldan düşer" okuma kuralının (c) ayağı. Kol
+                    // kapanış marker'ı örtük bir bırakmadır ve KİMİN sahipliğinin
+                    // düştüğünü yalnız bu alan söyler — `approved_by` eylemi alanı
+                    // gösterir, sahibi DEĞİL (vekaleten alınmış kolda ikisi ayrışır).
+                    "claimed_by": arriving.and_then(|b| b.claimed_by),
                 }),
             );
         }

@@ -20,6 +20,7 @@ use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{AutoexecDef, JoinRule, Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
+use wfe_core::v22::wfah_kind::parse_marker;
 use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, NewWfe,
     TransitionCommit, WfdStore, WfeStore, Wfes,
@@ -465,7 +466,7 @@ impl WfeStore for ParStore {
         _orgtnt_id: Uuid,
         user_id: Uuid,
         branch: Option<&str>,
-        marker: Option<&WfahEntry>,
+        marker: &WfahEntry,
     ) -> Result<bool, EngineError> {
         let mut map = self.wfes.lock().unwrap();
         let Some(w) = map.get_mut(&wfe_id) else {
@@ -500,9 +501,7 @@ impl WfeStore for ParStore {
             }
         };
         if won {
-            if let Some(entry) = marker {
-                w.wfah.0.push(entry.clone());
-            }
+            w.wfah.0.push(marker.clone());
         }
         Ok(won)
     }
@@ -555,7 +554,7 @@ impl WfeStore for ParStore {
         wfe_id: Uuid,
         _orgtnt_id: Uuid,
         target: Option<Uuid>,
-        wfah_entry: &WfahEntry,
+        wfah_entries: &[WfahEntry],
         branch: Option<&str>,
     ) -> Result<(), EngineError> {
         let mut map = self.wfes.lock().unwrap();
@@ -574,7 +573,7 @@ impl WfeStore for ParStore {
                 w.claimed_at = target.map(|_| chrono::Utc::now());
             }
         }
-        w.wfah.0.push(wfah_entry.clone());
+        w.wfah.0.extend_from_slice(wfah_entries);
         Ok(())
     }
 }
@@ -1830,6 +1829,152 @@ fn claim_owner(store: &ParStore, wfe_id: Uuid, node: &str) -> Actor {
     }
 }
 
+// ---- Ç13/E12: sahiplik marker ailesi -------------------------------------------
+
+/// Marker adını `claim_taken:<node>` / `claim_released:<node>` olarak taşıyan
+/// satırları sırayla döndürür (payload'larıyla).
+fn ownership_rows(store: &ParStore, wfe_id: Uuid) -> Vec<(String, Value)> {
+    store
+        .snapshot(wfe_id)
+        .wfah
+        .entries()
+        .iter()
+        .filter(|e| parse_marker(&e.action).kind.is_ownership())
+        .map(|e| (e.action.clone(), e.input.clone().unwrap_or(Value::Null)))
+        .collect()
+}
+
+/// Ç13'ün ANA KABULÜ: doğrudan claim artık deftere yazar. Eski hâlde yalnız
+/// vekaleten claim satır bırakıyordu (`_ => None`) ve "kim, ne zaman, hangi node'da
+/// aldı" sorusu yalnız üzerine yazılan DURUM alanlarından okunabiliyordu.
+#[tokio::test]
+async fn direct_claim_writes_a_claim_taken_row() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let requester = actor("requester");
+    let started = exec
+        .start(
+            Uuid::new_v4(),
+            1,
+            &requester,
+            None,
+            &json!({"request": {"title": "t", "amount": 1}}),
+            None,
+        )
+        .await
+        .unwrap();
+    let wfe_id = started.wfe_id;
+
+    let coord = actor("coordinator");
+    assert!(exec.claim(wfe_id, &coord, None, None).await.unwrap().success);
+
+    let rows = ownership_rows(&store, wfe_id);
+    assert_eq!(rows.len(), 1, "doğrudan claim TEK satır yazar: {rows:?}");
+    let (action, input) = &rows[0];
+    // Node anahtarı ADIN İÇİNDEDİR — `parse_marker` söker, `WfahView.node` dolar.
+    assert_eq!(action, "claim_taken:self__coordinator");
+    assert_eq!(parse_marker(action).node.as_deref(), Some("self__coordinator"));
+    assert_eq!(input["via"], json!("self"));
+    assert_eq!(input["authority"], json!("c_a"));
+    assert_eq!(input["owner"], json!(coord.user_id.to_string()));
+    assert!(
+        input["waited_for_seconds"].is_i64(),
+        "bekleme tam sayı saniyedir: {input:?}"
+    );
+    // Tekil modda kol alanları YAZILMAZ.
+    assert!(input.get("branch_entry").is_none() && input.get("at_node").is_none());
+}
+
+/// Sahiplik satırı AKSİYON DEĞİLDİR (Ç13): `$prev`/`$first` onu görmez ve satır
+/// hareket taşımaz.
+#[tokio::test]
+async fn ownership_rows_are_not_actions_and_carry_no_movement() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    claim_all_branches(&exec, &store, wfe_id).await;
+
+    for e in store.snapshot(wfe_id).wfah.entries() {
+        let kind = parse_marker(&e.action).kind;
+        if kind.is_ownership() {
+            assert!(!kind.is_action(), "sahiplik satırı aksiyon sayılmamalı");
+            assert!(
+                e.from_node.is_none() && e.to_node.is_none(),
+                "sahiplik satırı hareket taşımaz: {e:?}"
+            );
+        }
+    }
+}
+
+/// E12/S5: paralel modda kol alanları ZORUNLUDUR — E14 kol satırlarını tur kapanınca
+/// sildiği için sonradan türetilemezler.
+#[tokio::test]
+async fn branch_claim_rows_carry_identity_and_position() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    claim_all_branches(&exec, &store, wfe_id).await;
+
+    let rows = ownership_rows(&store, wfe_id);
+    // coordinator claim'i (fork öncesi) + üç kol claim'i.
+    assert_eq!(rows.len(), 4, "{rows:?}");
+    for (action, input) in rows.iter().skip(1) {
+        let node = parse_marker(action).node.expect("node adın içinde");
+        assert_eq!(
+            input["at_node"],
+            json!(node),
+            "Ç3: `at_node` kolun O ANKİ konumudur"
+        );
+        assert_eq!(
+            input["branch_entry"], json!(node),
+            "fork ANINDA kimlik = giriş node'u"
+        );
+        assert_eq!(input["via"], json!("self"));
+    }
+}
+
+/// Ç13'ün okuma kuralının (c) ayağı: kol onaya varınca claim örtük olarak düşer ve
+/// AYRI bir bırakma satırı YAZILMAZ — kimin sahipliğinin düştüğünü `_branch_arrived`
+/// payload'ındaki `claimed_by` söyler.
+#[tokio::test]
+async fn branch_arrived_records_who_held_the_claim() {
+    let store = Arc::new(ParStore::default());
+    let exec = executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let owners = claim_all_branches(&exec, &store, wfe_id).await;
+
+    let finance = &owners[0];
+    exec.apply(
+        wfe_id,
+        finance,
+        "approve",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let arrived = store
+        .snapshot(wfe_id)
+        .wfah
+        .entries()
+        .iter()
+        .find(|e| e.action == "_branch_arrived")
+        .expect("varış marker'ı")
+        .input
+        .clone()
+        .unwrap();
+    assert_eq!(arrived["claimed_by"], json!(finance.user_id.to_string()));
+    // Örtük bırakmaya satır YAZILMAZ (Ç13).
+    let released: Vec<_> = ownership_rows(&store, wfe_id)
+        .into_iter()
+        .filter(|(a, _)| a.starts_with("claim_released:"))
+        .collect();
+    assert!(released.is_empty(), "örtük bırakma satır yazmaz: {released:?}");
+}
+
 // ---- WOR-65: revizyon token'ı + stale-write reddi -----------------------------
 
 /// Revizyon token'ı = son WFAH `seq`'i (`Wfes::rev()`). Her transition en az bir
@@ -1859,10 +2004,11 @@ async fn rev_is_monotonic_across_transitions() {
 
     let coord = actor("coordinator");
     exec.claim(wfe_id, &coord, None, None).await.unwrap();
-    assert_eq!(
-        store.snapshot(wfe_id).rev(),
-        after_start,
-        "claim WFAH'a yazmaz → revizyon ARTMAZ (bilinçli kapsam istisnası)"
+    let after_claim = store.snapshot(wfe_id).rev();
+    assert!(
+        after_claim > after_start,
+        "Ç13: claim artık `claim_taken:` satırı yazar → revizyon ARTAR ({after_start} → {after_claim}). \
+         Eski 'claim WFAH'a yazmaz' istisnası KALKTI."
     );
 
     exec.apply(wfe_id, &coord, "start_review", &json!({}), None, None, None)
@@ -1870,8 +2016,8 @@ async fn rev_is_monotonic_across_transitions() {
         .unwrap();
     let after_fork = store.snapshot(wfe_id).rev();
     assert!(
-        after_fork > after_start,
-        "transition revizyonu artırmalı: {after_start} → {after_fork}"
+        after_fork > after_claim,
+        "transition revizyonu artırmalı: {after_claim} → {after_fork}"
     );
 }
 

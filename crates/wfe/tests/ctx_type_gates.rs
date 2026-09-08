@@ -218,7 +218,7 @@ impl WfeStore for MemStore {
         _orgtnt_id: Uuid,
         user_id: Uuid,
         _branch: Option<&str>,
-        _marker: Option<&WfahEntry>,
+        _marker: &WfahEntry,
     ) -> Result<bool, EngineError> {
         let mut map = self.wfes.lock().unwrap();
         let Some(wfes) = map.get_mut(&wfe_id) else {
@@ -272,7 +272,7 @@ impl WfeStore for MemStore {
         wfe_id: Uuid,
         _orgtnt_id: Uuid,
         target: Option<Uuid>,
-        wfah_entry: &WfahEntry,
+        wfah_entries: &[WfahEntry],
         _branch: Option<&str>,
     ) -> Result<(), EngineError> {
         let mut map = self.wfes.lock().unwrap();
@@ -281,7 +281,7 @@ impl WfeStore for MemStore {
             .ok_or_else(|| EngineError::WfePort(format!("not found: {wfe_id}")))?;
         wfes.assigned_to = target;
         wfes.claimed_at = target.map(|_| chrono::Utc::now());
-        wfes.wfah.0.push(wfah_entry.clone());
+        wfes.wfah.0.extend_from_slice(wfah_entries);
         Ok(())
     }
 }

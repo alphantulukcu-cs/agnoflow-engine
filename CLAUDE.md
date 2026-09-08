@@ -67,6 +67,17 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
 - **`$wfah` satır izdüşümü 11 alan** (v2.3/E05): `{seq, action, actor, input, at, kind, from_node, to_node, branch_entry, branch_round, is_send_back}`. **`$valid`** aynı satırların ELENMİŞ alt kümesidir (saklanmaz, her okumada `v22::valid::derive_valid` ile türetilir; eleme kuralları belge sürümüne bağlı — `ValidRules::for_version`) ve üstüne İKİ hesaplanan alan taşır: `first_by_actor_at_node` / `first_by_orgu_at_node`. O iki alan ham `$wfah`ta kullanılırsa `zen_wfah_field_unknown` HATASI verilir; tip denetimi `#` kökünü SARAN dizi fonksiyonunun İLK argümanına göre çözer (`expr_types::Checker::ptr`). `$valid`de `seq` BOŞLUKLUDUR.
 - **`$prev`/`$first` = son/ilk AKSİYON satırı** (R04): marker satırları (fork, escalation, sahiplik, trigger, çağrı kapanışı, kol olayları) elenir; ölçüt SINIFTIR (`WfahKind::Action`), ad listesi DEĞİL. Ham `$wfah` dizisi SÜZÜLMEZ. Boş geçmişte kabuk döner (patlamaz). `$wfah`/`$valid`i DOĞRUDAN indeksleme (`wfah_index_unguarded` uyarısı; negatif indeks `zen_negative_index` hatası) — `$wfah[len($wfah)-1]` ile `$prev` AYNI SATIRI VERMEZ.
 - **Satır sınıflandırması `wfe-core`'da** (`v22::wfah_kind`): `WfahKind` (15 varyant, `snake_case` serileşmesi `#.kind` DEĞER KÜMESİDİR ve sözleşmedir) + `parse_marker`. `wfe` adapteri re-export eder; `WfahEntry`'ye sınıf ALANI EKLENMEZ (sınıf ADDAN türetilir).
+- **Sahipliği değiştiren HER olay deftere yazar** (Ç13/E12, `v22::ownership`): iki marker
+  (`claim_taken:<node_key>` / `claim_released:<node_key>`), node anahtarı ADIN İÇİNDE.
+  Payload'ın üç kapalı listesi motorda **Rust enum**dur — `via` (4) · `authority` (2,
+  yalnız `claim_taken:`te, `c_a` KAZANIR) · `reason` (5); yeni bir sahiplenme/bırakma
+  kapısı varyant eklemeden DERLENMEZ ve koşullu alanlar (`delegation`/`global_action`/
+  `after`) yapıcıdan gelir. `owner` HER satırda (sahipliğin ÖZNESİ; `actor` eylemi
+  YAPANdır). Kişiden kişiye devir İKİ satır (aynı tx, ardışık `seq`), havuz yolları TEK,
+  `TargetNotEligible` HİÇ. Örtük bırakmalara satır YAZILMAZ — okuma kuralı
+  (`claim üç yoldan düşer`) `docs/spec/terminology.md` → SAHİPLİK OLAYLARI.
+  ⚠️ `authority` bugün DAİMA `c_a`: açık grant'lar claim yoluna `E04` (`authorize_node`)
+  ile girecek, değer o zaman oradan gelecek.
 - **Dizi fonksiyonları İKİ argümanlı** (WOR-84): `count($wfah, #.action == "x") >= n` ✅ — `count(filter(...))` parse HATASI, `every` diye fonksiyon YOK karşılığı `all`. Tam liste: `count some all none one filter map flatMap`.
 - **`#.input.*` sıralama karşılaştırması aksiyon kapısı İSTER**: `null` ile `>` `<` zen'de `Compare: Unsupported type` (runtime, parse yakalamaz). Kapı `and` ile ve karşılaştırmadan **ÖNCE** olmalı; `or` kapı değildir; dış `and`'deki kapı iç gruba geçer. `$prev`/`$first` de bağışık değil. Sözleşme testi: `tests/editor_zen_contract.rs`.
 - **İfade TİP denetimi motordadır** (`wfe-core/src/expr_types.rs`, AST tabanlı): obje karşılaştırması (`zen_object_compare` — **obje==obje dahil**, VM eşleştirmez), metinde sıralama (`zen_ordering_not_number`), iki taraf tip uyuşmazlığı (`zen_type_mismatch`), izdüşüm dışı `$wfah` alanı (`zen_wfah_field_unknown`), kapısız `#.input.*` sıralaması (`zen_input_needs_action_gate`), liste öğesi tip uyuşmazlığı (`zen_list_type_mismatch` — `In` opcode'u öğe öğe `Equal` yapar, `#.seq in ["a"]` hep-false), metin operatörünün metin olmayan tarafı (`zen_text_op_not_string` — `contains`/`startsWith`/`endsWith`/`matches`), `#.at` sabitinin biçimi (`zen_timestamp_format` — `at` düz METİNDİR, `yyyyMMddHHmmss`/14 rakam UTC; karşılaştırmaları STRING temellidir, `d()` yok. Eşitlik/`in` tam damga ister, `startsWith` anlamlı önek sınırı (4/6/8/10/12/14), `contains`/`endsWith` yalnız rakam, `matches` muaf. Sıralama `zen_ordering_not_number`a düşer). `#.input.<yol>`un tipi girdiyi context'e yazan `wfes_effects` üzerinden çıkarılır — editör de aynı çıkarımı yapar (`whenFields.collectActionInputCtxMap`). **Elle yazılan JSON ile editörün ürettiği JSON aynı kapıdan geçer**; kural seti motorun, editör yalnız aynı cevabı önden verir.
@@ -675,8 +686,10 @@ yazılmadı. Sözleşme: `docs/spec/schema.json` + `wfe_core::v22::display`.
   İstemci bir daha `call:<key>/`, `escalate:<node>:<idx>[:skipped]`, `_branch_*`
   metinlerini AYRIŞTIRMAZ — o iş motora taşındı (portalda `classifyWfahAction` silindi).
   **Motorun İÇİNDEKİ marker adları DEĞİŞMEZ** — yayınlanmış akışlar
-  `count($wfah, #.action == "...")` ile sayıyor. Tek istisna Ç1-EK: `claim_timeout:` →
-  `claim_released:` (production öncesi, geriye uyum eşlemesi YAZILMADI). `$wfah`
+  `count($wfah, #.action == "...")` ile sayıyor. İstisna SAHİPLİK ailesidir (Ç1-EK/Ç13,
+  production öncesi, geriye uyum eşlemesi YAZILMADI): `claim_timeout:` →
+  `claim_released:`, yeni `claim_taken:`, kalkan adlar `reassign` / `unclaim` /
+  `claim:delegated`. `$wfah`
   izdüşümü v2.3/E05 ile **11 alana** çıktı (yukarıdaki ZEN maddesine bkz.).
   `input` payload'u AYNEN taşınır; ekranda anlam taşıyan alanlar (collapse `reason`)
   etikete ÇEKİLİR ki istemci payload içindeki ham anahtarları basmak zorunda kalmasın.

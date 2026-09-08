@@ -1118,15 +1118,15 @@ impl WfeStore for WfeAdapter {
         orgtnt_id: Uuid,
         user_id: Uuid,
         branch: Option<&str>,
-        marker: Option<&WfahEntry>,
+        marker: &WfahEntry,
     ) -> Result<bool, EngineError> {
         // CAS: yalnızca unassigned aktif VE deadline'ı geçmemiş WFE claim edilebilir —
         // eşzamanlı claim'lerden yalnızca biri satırı günceller (V1 stateless claim'in
         // kalıcı çözümü). `deadline` kontrolü DB seviyesinde tekrarlanır (2026-07-16 fix):
         // Engine::can_claim aynı kontrolü zaten yapar ama sweeper'ın henüz `terminated`'a
         // taşımadığı bir satırda check-then-write arasında güvenlik ağı sağlar.
-        // Madde 6: tx içinde — CAS kazanılır VE `marker` verilirse (vekaleten claim)
-        // audit WFAH kaydı AYNI transaction'da yazılır.
+        // Ç13/E12: tx içinde — CAS kazanılırsa `claim_taken:` satırı AYNI
+        // transaction'da yazılır. Kaybeden yarışçı satır YAZMAZ: sahiplik doğmadı.
         let claimed_by = json!({ "user_id": user_id.to_string() });
         let mut tx = self.pool.begin().await.map_err(db_err)?;
         let result = match branch {
@@ -1163,9 +1163,7 @@ impl WfeStore for WfeAdapter {
         };
         let won = result.rows_affected() == 1;
         if won {
-            if let Some(entry) = marker {
-                insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(entry)).await?;
-            }
+            insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(marker)).await?;
         }
         tx.commit().await.map_err(db_err)?;
         Ok(won)
@@ -1264,7 +1262,7 @@ impl WfeStore for WfeAdapter {
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         target: Option<Uuid>,
-        wfah_entry: &WfahEntry,
+        wfah_entries: &[WfahEntry],
         branch: Option<&str>,
     ) -> Result<(), EngineError> {
         let claimed_by = target.map(|user_id| json!({ "user_id": user_id.to_string() }));
@@ -1306,7 +1304,8 @@ impl WfeStore for WfeAdapter {
             }
         }
 
-        insert_wfah_entries(&mut tx, wfe_id, std::slice::from_ref(wfah_entry)).await?;
+        // E12/S4: bırakma + alma TEK çağrıda, ardışık `seq` ile.
+        insert_wfah_entries(&mut tx, wfe_id, wfah_entries).await?;
 
         tx.commit().await.map_err(db_err)
     }

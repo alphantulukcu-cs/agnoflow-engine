@@ -580,15 +580,17 @@ pub trait WfeStore: Send + Sync {
     /// `branch`: WOR-31 — paralel modda kol node'u verilir; CAS o kolun
     /// `wf.wfe_branch` satırında yapılır (status='active' AND claimed_by IS NULL);
     /// `None` paralel-olmayan wfe-seviyesi claim (mevcut davranış).
-    /// `marker`: Madde 6 — vekaleten claim'de CAS kazanılırsa AYNI transaction'da
-    /// yazılacak WFAH audit kaydı (`claim:delegated`). Doğrudan claim'de `None`.
+    /// `marker`: Ç13/E12 — CAS kazanılırsa AYNI transaction'da yazılacak
+    /// `claim_taken:` satırı. **ZORUNLUDUR**: sahiplik doğuran her kapı deftere
+    /// yazar; `Option` olduğu sürece doğrudan claim satır yazmadan geçebiliyordu
+    /// (`executor.rs`'in eski `_ => None` kolu). CAS kaybedilirse satır YAZILMAZ.
     async fn claim(
         &self,
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         user_id: Uuid,
         branch: Option<&str>,
-        marker: Option<&WfahEntry>,
+        marker: &WfahEntry,
     ) -> Result<bool, EngineError>;
     /// SLA-1 claim timeout (wft'siz kol): node DEĞİŞMEDEN claimed_by/claimed_at
     /// temizlenir + WFAH marker eklenir — `commit()`'ten ayrı çünkü node/status
@@ -624,14 +626,19 @@ pub trait WfeStore: Send + Sync {
     /// havuzdaki) bir satırı override eder — uygunluk `Engine::reassign`'da
     /// (reassign c_a + hedef node c_a) doğrulanmıştır. `target = Some` belirli
     /// kullanıcıya devir (claimed_at = now()), `None` havuza bırakma (claimed_by/
-    /// claimed_at NULL). WFAH marker + assignment TEK transaction'da yazılır.
+    /// claimed_at NULL). WFAH satırları + assignment TEK transaction'da yazılır.
     /// `branch`: WOR-31 — paralel modda yalnız o kolun sahipliği değişir.
+    ///
+    /// E12/S4: `wfah_entries` 1 ya da 2 satırdır (kişiden kişiye devirde bırakma +
+    /// alma). Dilim olması sözleşmenin parçası: iki satır AYNI transaction'da,
+    /// verildikleri sırayla yazılır — ayrı çağrılara bölünürse defterde sahipsiz
+    /// ya da çift sahipli bir an oluşur.
     async fn reassign(
         &self,
         wfe_id: Uuid,
         orgtnt_id: Uuid,
         target: Option<Uuid>,
-        wfah_entry: &WfahEntry,
+        wfah_entries: &[WfahEntry],
         branch: Option<&str>,
     ) -> Result<(), EngineError>;
 

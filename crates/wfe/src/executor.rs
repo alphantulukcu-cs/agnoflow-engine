@@ -12,7 +12,12 @@ use wfe_core::types::wfd_v22::{CallMode, JoinRule, StartAs, Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::display;
 use wfe_core::v22::matcher::{AuthDecision, MatchEnv};
-use wfe_core::v22::pipeline::{ActionChoice, ClaimCheck, ClaimTimeoutOutcome, Engine};
+use wfe_core::v22::ownership::{
+    seconds_between, wait_base, ClaimAuthority, ClaimDelegation, ClaimTaken, OwnershipBranch,
+};
+use wfe_core::v22::pipeline::{
+    node_entered_at, ActionChoice, ClaimCheck, ClaimTimeoutOutcome, Engine,
+};
 use wfe_core::v22::ports::{
     AutoexecRunner, BranchState, BranchStatus, CallView, CommitOutcome, EnvPort, NoEnv,
     PendingCall, VisibilityPort, WfdStore, WfeStore, Wfes,
@@ -1306,13 +1311,54 @@ impl WfeExecutor {
                 reason: None,
             });
         }
-        // Madde 6: claim DOĞRUDAN mı VEKALETEN mi uygun? Vekaletense CAS kazanılınca
-        // aynı transaction'da `claim:delegated` audit marker'ı yazılır.
+        // Madde 6: claim DOĞRUDAN mı VEKALETEN mi uygun? Ayrım satırın `via`sıdır.
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
         // Kapı C: claim bir EYLEMDİR (işi üstlenmek) — bozuk ctx'te reddedilir. Kişi
         // üstlenip ilk aksiyonda 422 almasın; "bu kayıt bozuk" cevabı burada verilir.
         guard_stored_ctx(&wfd, &wfes)?;
-        let marker = match self
+        // Ç13: sahiplik doğuran HER kapı deftere yazar. Eski hâlde doğrudan claim
+        // hiçbir şey yazmıyordu (`_ => None`) ve "kim, ne zaman, hangi kolda aldı"
+        // sorusu cevapsızdı; `claimed_by`/`claimed_at` DURUM alanlarıdır, üzerine
+        // yazılınca geçmiş geri getirilemez.
+        // Marker'ın node anahtarı ADIN İÇİNDEDİR (Ç13) — paralel modda kolun
+        // node'u, tekil modda `current_node`.
+        let node_key = node
+            .map(str::to_string)
+            .or_else(|| wfes.current_node.clone())
+            .ok_or_else(|| EngineError::InvalidWfd("claim için node çözülemedi".into()))?;
+        let branch_entry = node.and_then(|n| {
+            wfes.branches
+                .iter()
+                .find(|b| b.branch_node == n)
+                .map(|b| b.entry_node.clone())
+        });
+        let ownership_branch = node.map(|n| OwnershipBranch {
+            entry: branch_entry.as_deref().unwrap_or(n),
+            at_node: n,
+        });
+        let now = Utc::now();
+        // E12/S2: bekleme tabanı R02'nin ORTAK tanımından gelir — tekil modda
+        // `node_entered_at`, paralel modda kolun gerçek `entered_at` kolonu. İkinci
+        // bir taban tanımı YAZILMAZ.
+        let entered_at = match node {
+            Some(n) => wfes
+                .branches
+                .iter()
+                .find(|b| b.branch_node == n)
+                .map(|b| b.entered_at),
+            None => node_entered_at(&wfes.wfah),
+        };
+        let waited_for_seconds = entered_at.map(|e| {
+            seconds_between(
+                wait_base(&wfes.wfah, &node_key, branch_entry.as_deref(), e),
+                now,
+            )
+        });
+        // `authority`: claim yetkisi bugün YALNIZ `node.c_a`dan gelir; açık grant'lar
+        // claim yoluna `E04` (`authorize_node`) ile girecek ve değer ORADAN gelecek.
+        // `c_a` öncelikli taraf olduğu için (E12/S1) bu satırların anlamı E04 sonrası
+        // DEĞİŞMEZ — yalnız grant'la gelen claim'ler `grant` yazmaya başlar.
+        let taken = match self
             .engine()
             .claim_decision(&wfd, &wfes, actor, node)
             .await?
@@ -1322,41 +1368,42 @@ impl WfeExecutor {
                 delegator_user_id,
                 seat_orgu_id,
                 seat_role,
-            } => {
-                let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
-                let branch_entry = node.and_then(|n| {
-                    wfes.branches
-                        .iter()
-                        .find(|b| b.branch_node == n)
-                        .map(|b| b.entry_node.clone())
-                });
-                Some(WfahEntry {
-                    seq,
-                    action: "claim:delegated".into(),
-                    actor: actor.clone(),
-                    input: Some(serde_json::json!({
-                        "delegation_id": delegation_id.to_string(),
-                        "delegator": delegator_user_id.to_string(),
-                        "seat": { "orgu_id": seat_orgu_id.to_string(), "role": seat_role },
-                    })),
-                    applied_at: Utc::now(),
-                    // Ç2: claim node DEĞİŞTİRMEZ — marker satırı.
-                    from_node: None,
-                    to_node: None,
-                    // Ç4: kol claim'inde satır O KOLDA üretilir (kolun kimliği).
-                    branch_entry: branch_entry.clone(),
-                    // E14: kimlik ile tur BİRLİKTE yazılır (S3 değişmezi).
-                    branch_round: wfe_core::v22::valid::round_of_opt(
-                        &wfes.wfah,
-                        branch_entry.as_deref(),
-                    ),
-                })
+            } => ClaimTaken::delegated(
+                &node_key,
+                actor.user_id,
+                ClaimAuthority::Ca,
+                ClaimDelegation {
+                    delegation_id,
+                    delegator: delegator_user_id,
+                    seat_orgu_id,
+                    seat_role,
+                },
+            ),
+            // `can_claim` uygunluğu yukarıda kapıladı; `Denied` buraya düşmez ama
+            // düşerse CAS zaten yazmaz ve satır `via: "self"` olur.
+            AuthDecision::Direct | AuthDecision::Denied => {
+                ClaimTaken::by_self(&node_key, actor.user_id, ClaimAuthority::Ca)
             }
-            _ => None,
+        }
+        .waited(waited_for_seconds)
+        .in_branch(ownership_branch);
+        let marker = WfahEntry {
+            seq: wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1),
+            action: taken.marker(),
+            actor: actor.clone(),
+            input: Some(taken.input()),
+            applied_at: now,
+            // Ç2: claim node DEĞİŞTİRMEZ — marker satırı.
+            from_node: None,
+            to_node: None,
+            // Ç4: kol claim'inde satır O KOLDA üretilir (kolun kimliği).
+            branch_entry: branch_entry.clone(),
+            // E14: kimlik ile tur BİRLİKTE yazılır (S3 değişmezi).
+            branch_round: wfe_core::v22::valid::round_of_opt(&wfes.wfah, branch_entry.as_deref()),
         };
         let won = self
             .wfe
-            .claim(wfe_id, wfes.orgtnt_id, actor.user_id, node, marker.as_ref())
+            .claim(wfe_id, wfes.orgtnt_id, actor.user_id, node, &marker)
             .await?;
         if won {
             self.nudge_timers(); // claim_timeout sayacı şimdi başladı (SLA-1)
@@ -1384,7 +1431,8 @@ impl WfeExecutor {
     ) -> Result<ReassignOutcome, EngineError> {
         let wfes = self.wfe.load(wfe_id).await?;
         let wfd = self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?;
-        let entry = self
+        // E12/S4: 1 ya da 2 satır — kişiden kişiye devirde önce bırakma, sonra alma.
+        let entries = self
             .engine()
             .reassign(&wfd, &wfes, reassigner, target, node, Utc::now())
             .await?;
@@ -1393,7 +1441,7 @@ impl WfeExecutor {
                 wfe_id,
                 wfes.orgtnt_id,
                 target.map(|a| a.user_id),
-                &entry,
+                &entries,
                 node,
             )
             .await?;

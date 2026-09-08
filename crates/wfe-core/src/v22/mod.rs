@@ -12,6 +12,7 @@ pub mod env;
 pub mod eval;
 pub mod grants;
 pub mod matcher;
+pub mod ownership;
 pub mod pipeline;
 pub mod ports;
 pub mod resolver;

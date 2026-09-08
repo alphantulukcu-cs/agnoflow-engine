@@ -4,7 +4,7 @@ use opendal::Operator;
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
-use wfe_core::types::wfd_v22::Wfd;
+use wfe_core::types::wfd_v22::{Wfd, SUPPORTED_WFD_VERSION};
 use wfe_core::v22::ports::WfdStore;
 use wfe_core::validator;
 use wfe_core::EngineError;
@@ -193,12 +193,14 @@ impl WfdAdapter {
         let key = storage::s3_key(orgtnt_id, wfd_id, version);
 
         let skeleton = serde_json::json!({
-            "wfd_version": "2.2",
+            "wfd_version": SUPPORTED_WFD_VERSION,
             "id": Self::slug(name),
             "name": name,
             "description": description.unwrap_or(""),
-            "nodes": [],
-            "transitions": [],
+            // `nodes` bir HARİTADIR (`schema.json`/`nodes.type == "object"`,
+            // `Wfd::nodes: BTreeMap`). Buradaki `[]` v2.2'den kalan yanlış tipti;
+            // taslak yolu belgeyi parse etmediği için sessizce durmuştu.
+            "nodes": {},
         });
         let doc = wfd_json.unwrap_or(&skeleton);
         // WFC: doküman kimliği draft'ta da saklanır (yayınlanınca çağrılabilir olsun).

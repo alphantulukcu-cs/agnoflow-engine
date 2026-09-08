@@ -1,7 +1,7 @@
 # CLAUDE.md — agnoflow-engine
 
-Bu repo **WFD v2.2** (Named Nodes, Single-Rule C_A) modelini çalıştıran çok-tenant'lı
-workflow engine'dir. Spec ile kod çelişirse SPEC kazanır: kanonik dosyalar
+Bu repo **WFD v2.3** (Named Nodes, Single-Rule C_A, düz aksiyon gövdesi) modelini
+çalıştıran çok-tenant'lı workflow engine'dir. Spec ile kod çelişirse SPEC kazanır: kanonik dosyalar
 `docs/spec/` altındadır. **`docs/spec/` bir GIT SUBMODULE'dür** — kanonik kaynak
 `agnoflow-spec` deposudur (D05, 2026-09-04); bu repoda düzenlenmez, submodule içinde
 commit'lenir ve buradan SHA bump edilir. Klondan sonra `git submodule update --init`
@@ -18,7 +18,7 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
 |---|---|
 | `wfe-core` | Saf engine. `types/wfd_v22` (model + `canonical()` tekillik formu; **slug ÜRETİMİ 2026-08-14'te SİLİNDİ** — kimlik tasarımcının, slug önerisi editörün işi), `validator` (cross-ref/`duplicate_c_a`/graf/expression), `v22/` runtime: `eval` (ZEN namespace'leri), `resolver` (c_orgu), `matcher` (§3 authorize), `visibility` (§4 AYRI matcher), `effects` ($-string), `pipeline` (§7 atomik transition + trigger retry/catch/timeout + escalation), `ports` (WfdStore/WfeStore/AutoexecRunner). I/O YOK. |
 | `org` | ORGT/ORGU/ORGTNT/UR repo + ORGTRVLANG parser/executor (ltree SQL). |
-| `wfd` | WFD depolama: meta PostgreSQL, JSON OpenDAL. Upload/fetch'te v2.2 kapısı + validator; (wfd_id,version) immutable cache. |
+| `wfd` | WFD depolama: meta PostgreSQL, JSON OpenDAL. Upload/fetch'te sürüm kapısı + validator; (wfd_id,version) immutable cache. |
 | `wfe` | Adapter'lar: `WfeAdapter` (WfeStore — create/commit TEK transaction, claim CAS), `OrgAdapter`, `LiveAutoexecRunner` (rest/sql/calc), `WfeExecutor` (orkestrasyon + `tick_timers`), `sim` (store'suz simülasyon durumu). |
 | `server` | Axum API: `/wfd` (upload/validate/list/get), `/wfe` (start/apply/claim/query/possible-actions/list), `/wfe/simulate`, `/autoexec/test`, `/portal` (JWT: login, pool, wfd, wfe), `/org` (X-Admin-Key). 60s timer sweeper. |
 
@@ -84,7 +84,15 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
 - **Editör ifade doğrulaması `POST /wfd/validate-expression`** ile motora sorulur — `validator::expression_issues` (WFD validator'ının kullandığı fonksiyonun aynısı). Yeni bir ifade-yüzeyi kuralı eklenirken O fonksiyona yazılır, iki tüketici birlikte güncellenir. **İstek gövdesinde `wfd` de gider** (editör `serializeWfdPreview` ile yollar): belge varsa TİP kuralları da koşar ve yanıt `typed: true` döner; yoksa/parse edilemezse yalnız yüzey kuralları koşar (`typed: false`) — kurucu yarım taslakta da çalışmalı.
 - **Tanınmayan `$` referansı yayını ENGELLER** (`unknown_dollar_ref`): motor çözemediği `$`-string'i HATA saymaz, alana düz METİN yazar (`effects::resolve_dollar_string` son satırı) → `$actor.role` / `$call.state` gibi yazım hataları yayında iz bırakmadan sessiz bozukluk üretiyordu. Gramerin tek kaynağı `v22/dollar.rs`; denetlenen yerler çözücülerin olduğu yerlerdir (`wfes_effects.set`, `calls[].input`, `terminals[].wfe_end_response`, `autoexec[].config` — obje/dizi içleri dahil). Yeni bir namespace eklenirse `dollar::EXACT`/`PREFIXES` de genişletilir.
 - `terminal_when` DEPRECATED (WOR-84): motor okumaz, validator uyarır, yeniden serileştirmede düşer. Terminal `wft: {terminal}` ile verilir.
-- `wfd_version: "2.2"` zorunlu; eski format hem upload hem fetch'te reddedilir.
+- **Sürüm kapısı TEK DEĞERLİ bir EŞİTLİKTİR** (`SUPPORTED_WFD_VERSION == "2.3"`,
+  `types/wfd_v22.rs`): `wfd_version` zorunlu, `"2.3"` DIŞINDAKİ her değer hem upload hem
+  fetch'te `UnsupportedWfdVersion` ile reddedilir — **`"2.2"` dahil**. Aralık/liste/"en az"
+  mantığı, iki sürümü birden okuyan motor ve okuma anında çeviren katman R07'de
+  REDDEDİLDİ (Değişmez #9: ürün production'da değil, geriye uyum kodu saf borç).
+  2.2 belgeleri `is_active=false` ile **ARŞİVLENDİ**, silinmedi
+  (`migrations/wf/20260908000002_v2_3_archive_and_seed.sql`); kaynak metin storage'da
+  durur, motor onları okumaz. Prod sonrası sürüm başına okuma (`wfd_v23` modülü) bir
+  YÖN notudur, hüküm değil.
 - **`docs/spec/reference-types.rs` DERLENİR ve motorla PARİTESİ test edilir** (2026-08-18,
   `crates/wfe-core/tests/reference_types_parity.rs`): dosya `#[path]` ile modül olarak
   alınır (tip rotunu derleyici yakalar), tip/alan kümeleri `types/wfd_v22.rs` ile

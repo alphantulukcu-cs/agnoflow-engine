@@ -1,13 +1,14 @@
-//! WOR-23 kabul testleri — golden fixture v2.2 parse + anahtar biçimi + canonical c_a
+//! WOR-23 kabul testleri — golden fixture v2.3 parse + anahtar biçimi + canonical c_a
 //! tekilliği + versiyon kapısı.
 //! Spec: docs/spec/migration-notes.md, runtime-semantics.md §2.
 
 use wfe_core::types::wfd_v22::{COrgu, CandidateActor, Wfd};
+use wfe_core::EngineError;
 
 const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 
 fn golden() -> Wfd {
-    Wfd::from_json(FIXTURE).expect("golden fixture v2.2 parse etmeli")
+    Wfd::from_json(FIXTURE).expect("golden fixture v2.3 parse etmeli")
 }
 
 #[test]
@@ -73,6 +74,19 @@ fn unknown_wfd_version_is_rejected() {
     assert!(
         err.to_string().contains("3.0"),
         "hata bilinmeyen versiyonu söylemeli: {err}"
+    );
+}
+
+/// `R07`/S1: kapı TEK DEĞERLİ bir eşitliktir. Arşivlenen `"2.2"` belgeleri de
+/// tanınmayan sürüm sayılır — geriye uyum okuyucusu YOKTUR (Değişmez #9).
+#[test]
+fn archived_2_2_version_is_rejected() {
+    let mut v: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    v["wfd_version"] = serde_json::json!("2.2");
+    let err = Wfd::from_value(v).unwrap_err();
+    assert!(
+        matches!(&err, EngineError::UnsupportedWfdVersion(s) if s == "2.2"),
+        "2.2 UnsupportedWfdVersion(\"2.2\") ile reddedilmeli: {err}"
     );
 }
 

@@ -713,7 +713,7 @@ async fn branch_reject_terminates_and_cancels_siblings() {
         .apply(
             wfe_id,
             &fin,
-            "reject",
+            "finans_ret",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -772,7 +772,7 @@ async fn collapse_drops_sibling_claims_and_records_them() {
         .apply(
             wfe_id,
             &fin,
-            "reject",
+            "finans_ret",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -870,7 +870,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
         .apply(
             wfe_id,
             &legal,
-            "approve",
+            "hukuk_onay",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -897,7 +897,7 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     exec.apply(
         wfe_id,
         &fin,
-        "reject",
+        "finans_ret",
         &json!({}),
         Some("self__financeApprover"),
         None,
@@ -1024,7 +1024,7 @@ async fn apply_retries_on_conflict_then_succeeds() {
         .apply(
             wfe_id,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -1058,7 +1058,7 @@ async fn apply_gives_up_after_three_conflicts() {
         .apply(
             wfe_id,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -1275,7 +1275,7 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
     let collapse = exec.apply(
         wfe_id,
         &fin,
-        "reject",
+        "finans_ret",
         &input,
         Some("self__financeApprover"),
         None,
@@ -1284,7 +1284,7 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
     let sibling = exec.apply(
         wfe_id,
         &legal,
-        "approve",
+        "hukuk_onay",
         &input,
         Some("self__legalApprover"),
         None,
@@ -1348,7 +1348,7 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
     let sibling = exec.apply(
         wfe_id,
         &legal,
-        "approve",
+        "hukuk_onay",
         &input,
         Some("self__legalApprover"),
         None,
@@ -1357,7 +1357,7 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
     let collapse = exec.apply(
         wfe_id,
         &fin,
-        "reject",
+        "finans_ret",
         &input,
         Some("self__financeApprover"),
         None,
@@ -1398,7 +1398,7 @@ async fn two_concurrent_collapses_exactly_one_wins() {
     let a = exec.apply(
         wfe_id,
         &fin,
-        "reject",
+        "finans_ret",
         &input,
         Some("self__financeApprover"),
         None,
@@ -1407,7 +1407,7 @@ async fn two_concurrent_collapses_exactly_one_wins() {
     let b = exec.apply(
         wfe_id,
         &legal,
-        "reject",
+        "hukuk_ret",
         &input,
         Some("self__legalApprover"),
         None,
@@ -1443,7 +1443,7 @@ async fn collapsed_conflict_is_not_retried() {
     let collapse = exec.apply(
         wfe_id,
         &fin,
-        "reject",
+        "finans_ret",
         &input,
         Some("self__financeApprover"),
         None,
@@ -1452,7 +1452,7 @@ async fn collapsed_conflict_is_not_retried() {
     let sibling = exec.apply(
         wfe_id,
         &legal,
-        "approve",
+        "hukuk_onay",
         &input,
         Some("self__legalApprover"),
         None,
@@ -2037,7 +2037,7 @@ async fn omitted_and_fresh_rev_both_apply_normally() {
     exec.apply(
         wfe_id,
         &actors[0],
-        "approve",
+        "finans_onay",
         &json!({}),
         Some("self__financeApprover"),
         None,
@@ -2050,7 +2050,7 @@ async fn omitted_and_fresh_rev_both_apply_normally() {
     exec.apply(
         wfe_id,
         &actors[1],
-        "approve",
+        "hukuk_onay",
         &json!({}),
         Some("self__legalApprover"),
         None,
@@ -2075,7 +2075,7 @@ async fn stale_rev_apply_is_rejected_without_side_effects() {
     exec.apply(
         wfe_id,
         &actors[0],
-        "approve",
+        "finans_onay",
         &json!({}),
         Some("self__financeApprover"),
         None,
@@ -2091,7 +2091,7 @@ async fn stale_rev_apply_is_rejected_without_side_effects() {
         .apply(
             wfe_id,
             &actors[1],
-            "approve",
+            "hukuk_onay",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -2139,7 +2139,7 @@ async fn stale_rev_after_collapse_is_distinguishable() {
     exec.apply(
         wfe_id,
         &actors[0],
-        "reject",
+        "finans_ret",
         &json!({}),
         Some("self__financeApprover"),
         None,
@@ -2156,7 +2156,7 @@ async fn stale_rev_after_collapse_is_distinguishable() {
         .apply(
             wfe_id,
             &actors[1],
-            "approve",
+            "hukuk_onay",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -2184,7 +2184,7 @@ async fn stale_rev_claim_is_rejected_but_untokened_claim_is_untouched() {
     exec.apply(
         wfe_id,
         &actors[0],
-        "reject",
+        "finans_ret",
         &json!({}),
         Some("self__financeApprover"),
         None,
@@ -2350,7 +2350,7 @@ async fn or_join_first_arrival_completes_and_cancels_siblings() {
         .apply(
             wfe_id,
             &actors[0],
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -2416,7 +2416,7 @@ async fn quorum_2_of_3_completes_on_second_arrival() {
         .apply(
             wfe_id,
             &actors[0],
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -2434,7 +2434,7 @@ async fn quorum_2_of_3_completes_on_second_arrival() {
         .apply(
             wfe_id,
             &actors[1],
-            "approve",
+            "hukuk_onay",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -2488,7 +2488,7 @@ async fn cancelled_branch_cannot_act_after_quorum() {
         .apply(
             wfe_id,
             &actors[2],
-            "approve",
+            "ik_onay",
             &json!({}),
             Some("self__hrApprover"),
             None,
@@ -2517,7 +2517,7 @@ async fn concurrent_arrivals_in_quorum_resolve_to_single_join() {
     let a = exec.apply(
         wfe_id,
         &actors[0],
-        "approve",
+        "finans_onay",
         &input,
         Some("self__financeApprover"),
         None,
@@ -2526,7 +2526,7 @@ async fn concurrent_arrivals_in_quorum_resolve_to_single_join() {
     let b = exec.apply(
         wfe_id,
         &actors[1],
-        "approve",
+        "hukuk_onay",
         &input,
         Some("self__legalApprover"),
         None,
@@ -2590,7 +2590,7 @@ async fn expr_join_hr_alone_completes_and_cancels_siblings() {
     exec.apply(
         wfe_id,
         &actors[2],
-        "approve",
+        "ik_onay",
         &json!({}),
         Some("self__hrApprover"),
         None,
@@ -2623,7 +2623,7 @@ async fn expr_join_finance_alone_waits_then_legal_completes() {
         .apply(
             wfe_id,
             &actors[0],
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -2637,7 +2637,7 @@ async fn expr_join_finance_alone_waits_then_legal_completes() {
     exec.apply(
         wfe_id,
         &actors[1],
-        "approve",
+        "hukuk_onay",
         &json!({}),
         Some("self__legalApprover"),
         None,

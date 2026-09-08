@@ -858,9 +858,15 @@ impl<'a> Engine<'a> {
                 continue;
             }
             // v2.3: tek-kol yolundaki ile AYNI mantık — aday tek bir aksiyon kaydıdır,
-            // ilk-match döngüsü yok (`Ç10`). Kolun BELİRSİZLİĞİ (`AmbiguousAction`)
-            // aşağıda AYNEN kalır: o, aynı aksiyonu birden çok AKTİF KOLUN taşıması
-            // durumudur ve aksiyon kaydının tekilliğiyle ilgisi yoktur.
+            // ilk-match döngüsü yok (`Ç10`).
+            //
+            // ⚠️ Bunun `AmbiguousAction`a maliyeti var ve ÖLÇÜLDÜ: `actions.get(action)`
+            // TEK kayıt döndürür ve `from` tekil string olduğundan (`K3`) filtre yalnız
+            // `branch_node == t.from` olan kolu geçirir. İki aktif kol aynı node'da
+            // duramayacağı için (`parallel_disjoint`) `matched` en fazla BİR eleman alır
+            // → aşağıdaki `_` kolu GEÇERLİ bir belgeyle tetiklenemez. Kol savunma olarak
+            // duruyor (kural tasarım zamanında, bu kod çalışma zamanında), ama artık
+            // "aynı aksiyonu birden çok kol taşıyor" senaryosunun karşılığı DEĞİLDİR.
             let Some(t) = wfd.actions.get(action).filter(|t| t.from == b.branch_node) else {
                 continue;
             };

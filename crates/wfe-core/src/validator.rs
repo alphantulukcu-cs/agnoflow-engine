@@ -12,8 +12,11 @@ use crate::v22::dollar::{self, DollarForm};
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::env;
 use crate::v22::wfah_kind::{parse_marker, WfahKind};
+use bumpalo::Bump;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use zen_expression::lexer::Lexer;
+use zen_expression::parser::{Node, Parser};
 
 #[derive(Debug, Clone)]
 pub struct ValidationIssue {
@@ -2443,6 +2446,122 @@ fn indexes_wfah_directly(expr: &str) -> Option<&'static str> {
     None
 }
 
+/// `A02`/S3 — ham `$wfah`ın LİSTE argümanı olduğunda not düşülen KAPALI fonksiyon
+/// listesi. `flatMap` bilerek YOKTUR (kararın listesi bu ondur); listeyi büyütmek
+/// KARAR ister.
+const RAW_LIST_FNS: &[&str] = &[
+    "count", "some", "all", "none", "one", "filter", "map", "sum", "avg", "len",
+];
+
+/// `A02`/S4 — muafiyet alanı. Yordam bu alana değiyorsa not ÇIKMAZ: `E14`/S3 tur
+/// sorgusunu ham defter üzerinde yazmayı EMREDİYOR (`$valid` yalnız YAŞAYAN turu
+/// taşır, orada tur sorusu anlamsızdır). Muafiyet niyet okumak değildir — alanın
+/// ifadede geçmesi tasarımcının tur ayrımını bildiğinin OLGUSAL kanıtıdır.
+/// Liste TEK elemanlıdır; büyütmek KARAR ister.
+const RAW_LIST_EXEMPT_FIELD: &str = "branch_round";
+
+/// Bu düğüm ham `$wfah` kökünün KENDİSİ mi (indekslenmemiş, alanı alınmamış hâli).
+fn is_raw_wfah(node: &Node<'_>) -> bool {
+    match node {
+        Node::Parenthesized(inner) => is_raw_wfah(inner),
+        Node::Identifier(name) => *name == "$wfah",
+        _ => false,
+    }
+}
+
+/// Bir düğümün DOĞRUDAN çocukları. `zen_expression`ın kendi `Node::walk`ı yerine
+/// burada duruyor çünkü `A02` bir dalı ATLAMAK zorunda (`$wfah[...]`) ve `walk`
+/// budama sunmuyor.
+fn child_nodes<'a>(node: &'a Node<'a>) -> Vec<&'a Node<'a>> {
+    match node {
+        Node::TemplateString(parts) | Node::Array(parts) => parts.to_vec(),
+        Node::Object(pairs) => pairs.iter().flat_map(|(k, v)| [*k, *v]).collect(),
+        Node::Assignments { list, output } => list
+            .iter()
+            .flat_map(|(k, v)| [*k, *v])
+            .chain(output.iter().copied())
+            .collect(),
+        Node::Closure { body, .. } => vec![*body],
+        Node::Parenthesized(inner) => vec![*inner],
+        Node::Member { node, property } => vec![*node, *property],
+        Node::Slice { node, from, to } => std::iter::once(*node)
+            .chain(from.iter().copied())
+            .chain(to.iter().copied())
+            .collect(),
+        Node::Interval { left, right, .. } => vec![*left, *right],
+        Node::Conditional {
+            condition,
+            on_true,
+            on_false,
+        } => vec![*condition, *on_true, *on_false],
+        Node::Unary { node, .. } => vec![*node],
+        Node::Binary { left, right, .. } => vec![*left, *right],
+        Node::FunctionCall { arguments, .. } => arguments.to_vec(),
+        Node::MethodCall { this, arguments, .. } => std::iter::once(*this)
+            .chain(arguments.iter().copied())
+            .collect(),
+        Node::Error { node, .. } => node.iter().copied().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Yordam (`#.` yaprakları) `branch_round` alanına değiyor mu — `A02`/S4 muafiyeti.
+/// Yalnız `#` kökü sayılır: `$prev.branch_round` farklı bir sorudur (uçlar ham
+/// listeye bakar, `R04`).
+fn touches_branch_round(node: &Node<'_>) -> bool {
+    if let Node::Member {
+        node: base,
+        property: Node::String(name),
+    } = node
+    {
+        if *name == RAW_LIST_EXEMPT_FIELD && matches!(base, Node::Pointer | Node::Identifier("#")) {
+            return true;
+        }
+    }
+    child_nodes(node).into_iter().any(touches_branch_round)
+}
+
+/// `A02` — ham `$wfah` bir niceleme/toplama fonksiyonunun LİSTE argümanı mı.
+///
+/// `$wfah[...]` DALI ATLANIR: orayı `wfah_index_unguarded` zaten konuşuyor ve
+/// `$wfah[len($wfah) - 1]` iki not almaz — indeksin içindeki `len($wfah)` bir
+/// eşik sayımı değil, indeks aritmetiğidir.
+fn scans_raw_wfah_list(node: &Node<'_>) -> bool {
+    match node {
+        Node::Member { node: base, .. } | Node::Slice { node: base, .. } if is_raw_wfah(base) => {
+            false
+        }
+        Node::FunctionCall { kind, arguments } => {
+            let fname = kind.to_string();
+            let hit = RAW_LIST_FNS.contains(&fname.as_str())
+                && arguments.first().is_some_and(|a| is_raw_wfah(a))
+                && !arguments[1..].iter().any(|a| touches_branch_round(a));
+            hit || arguments.iter().any(|a| scans_raw_wfah_list(a))
+        }
+        other => child_nodes(other).into_iter().any(scans_raw_wfah_list),
+    }
+}
+
+/// `A02` — ifadenin AST'si üzerinden ham liste taraması. Metin taraması BİLEREK
+/// yazılmadı: boşluk, satır sonu ve iç içe `filter(...)` sarmalı metin aramasını
+/// kırar, kapsam kararı zaten "fonksiyonun liste argümanı" olduğu için ağaç ister.
+fn scans_raw_wfah_list_expr(expr: &str) -> bool {
+    let bump = Bump::new();
+    let source = bump.alloc_str(expr);
+    let mut lexer = Lexer::new();
+    let Ok(tokens) = lexer.tokenize(source) else {
+        return false;
+    };
+    let Ok(parser) = Parser::try_new(tokens, &bump) else {
+        return false;
+    };
+    let result = parser.standard().parse();
+    if result.error().is_err() {
+        return false;
+    }
+    scans_raw_wfah_list(result.root)
+}
+
 /// TEK bir ZEN ifadesinin yüzey kontrolleri — `(kod, hata_mı, mesaj)` üçlüleri.
 ///
 /// Neden ayrı ve **public**: editörün koşul kurucusu aynı verdiği almak zorundadır.
@@ -2493,6 +2612,21 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
             );
         }
         out.push(("wfah_index_unguarded", false, msg));
+    }
+    // `A02` — ham `$wfah` üzerindeki niceleme/toplamalara OLGU notu. Yayını
+    // ENGELLEMEZ (`wfah_index_unguarded` emsali birebir). Çerçeve OLGUDUR: metin
+    // "bunu mu demek istediniz" DEMEZ, ifadenin ŞU ANDA ne yaptığını söyler ve
+    // alternatifini gösterir — motor niyet okumaz, olgu bildirir. İfade başına TEK
+    // not düşer (`$wfah` kaç kez geçerse geçsin).
+    if scans_raw_wfah_list_expr(expr) {
+        out.push((
+            "wfah_raw_list",
+            false,
+            "$wfah TÜM GEÇMİŞ üzerinde koşuyor: iptal olmuş kolun satırları, geri gönderme \
+             penceresindeki satırlar, sahiplik satırları ve önceki turların satırları da \
+             hesaba girer. Yalnız geçerli satırlar için $valid kullan."
+                .to_string(),
+        ));
     }
     out
 }

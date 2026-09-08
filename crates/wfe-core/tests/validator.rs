@@ -425,10 +425,11 @@ fn invalid_zen_expression_is_error() {
 /// Kurucunun serbest ZEN kutusu buradan cevap alır — WFD validator'ıyla aynı liste.
 #[test]
 fn expression_issues_matches_wfd_validator_verdicts() {
-    // Geçerli formlar temiz.
+    // Geçerli formlar temiz. `A02`den beri ham `$wfah` üzerindeki sayımlar `$valid`e
+    // işaret eden bir NOT alır — bu yüzden temiz örnekler elenmiş liste üzerinden.
     for ok in [
-        r#"count($wfah, #.action == "x") >= 1"#,
-        r#"all($wfah, #.actor.role != "x")"#,
+        r#"count($valid, #.action == "x") >= 1"#,
+        r#"all($valid, #.actor.role != "x")"#,
         r#"$prev.action == "x""#,
         "$ctx.tutar > 1000",
     ] {
@@ -459,6 +460,126 @@ fn expression_issues_matches_wfd_validator_verdicts() {
     assert!(
         !unguarded.iter().any(|(_, e, _)| *e),
         "korumasız indeksleme tek başına HATA değil: {unguarded:?}"
+    );
+}
+
+// ---- `A02`: `wfah_raw_list` — ham `$wfah` üzerindeki niceleme/toplamalara OLGU notu
+//      ---------------------------------------------------------------------------
+
+fn raw_list_notes(expr: &str) -> Vec<(&'static str, bool, String)> {
+    expression_issues(expr)
+        .into_iter()
+        .filter(|(c, _, _)| *c == "wfah_raw_list")
+        .collect()
+}
+
+/// KAPSAM: on fonksiyonun HEPSİ not alır — `some` MUAF DEĞİLDİR ("hiç var mı"
+/// sorusunun da ham listeye baktığı bir OLGUdur).
+#[test]
+fn raw_wfah_list_note_covers_all_ten_functions() {
+    for expr in [
+        r#"count($wfah, #.action == "x") >= 1"#,
+        r#"some($wfah, #.action == "x")"#,
+        r#"all($wfah, #.action == "x")"#,
+        r#"none($wfah, #.action == "x")"#,
+        r#"one($wfah, #.action == "x")"#,
+        r#"len(filter($wfah, #.action == "x")) >= 1"#,
+        r#"len(map($wfah, #.seq)) >= 1"#,
+        "sum($wfah) > 0",
+        "avg($wfah) > 0",
+        "len($wfah) > 0",
+    ] {
+        let notes = raw_list_notes(expr);
+        assert_eq!(notes.len(), 1, "not bekleniyordu: {expr} → {notes:?}");
+        assert!(!notes[0].1, "not yayını ENGELLEMEZ: {expr}");
+        assert!(
+            notes[0].2.contains("$valid"),
+            "not alternatifi göstermeli: {expr}"
+        );
+    }
+}
+
+/// TEK YÖNLÜ: `$valid` üzerinde ters yön uyarısı YAZILMADI (Seçenek E reddedildi).
+#[test]
+fn valid_list_gets_no_note() {
+    for expr in [
+        r#"count($valid, #.action == "x") >= 1"#,
+        r#"some($valid, #.action == "x")"#,
+        "len($valid) > 0",
+    ] {
+        assert!(raw_list_notes(expr).is_empty(), "not OLMAMALI: {expr}");
+    }
+}
+
+/// `$prev` / `$first` KAPSAM DIŞI: `R04` onları bilinçle ham uçlara bağladı, farklı soru.
+#[test]
+fn prev_and_first_get_no_note() {
+    for expr in [
+        r#"$prev.action == "x""#,
+        r#"$first.actor.user_id == "ali""#,
+        r#"$prev.action == "x" and $first.action == "y""#,
+    ] {
+        assert!(raw_list_notes(expr).is_empty(), "not OLMAMALI: {expr}");
+    }
+}
+
+/// `A02`/S4 MUAFİYET: yordam `#.branch_round`a değiyorsa not ÇIKMAZ — `E14`/S3 tur
+/// sorgusunu HAM defter üzerinde yazmayı emrediyor. Birebir o ifade temiz geçmeli.
+#[test]
+fn branch_round_predicate_is_exempt() {
+    let e14 = r#"some($wfah, #.branch_entry == "hukuk" and #.branch_round == $branch_round - 1)"#;
+    assert!(raw_list_notes(e14).is_empty(), "E14/S3 ifadesi temiz: {e14:?}");
+    // Muafiyet YORDAMA bağlıdır: aynı ifadede alan geçmiyorsa not düşer.
+    assert_eq!(
+        raw_list_notes(r#"some($wfah, #.branch_entry == "hukuk")"#).len(),
+        1
+    );
+    // Muafiyet ÇAĞRI başınadır: muaf olmayan ikinci sayım notu getirir.
+    assert_eq!(
+        raw_list_notes(
+            r#"some($wfah, #.branch_round == 1) and count($wfah, #.action == "x") >= 2"#
+        )
+        .len(),
+        1
+    );
+}
+
+/// ÇİFT NOT YOK: `$wfah[...]` dalı atlanır — indeksin İÇİNDEKİ `len($wfah)` bir eşik
+/// sayımı değil, indeks aritmetiğidir. Orada `wfah_index_unguarded` zaten konuşuyor.
+#[test]
+fn direct_indexing_gets_only_the_index_warning() {
+    let issues = expression_issues(r#"$wfah[len($wfah) - 1].action == "x""#);
+    assert!(issues.iter().any(|(c, _, _)| *c == "wfah_index_unguarded"));
+    assert!(
+        !issues.iter().any(|(c, _, _)| *c == "wfah_raw_list"),
+        "aynı ifadede iki not çıkmaz: {issues:?}"
+    );
+}
+
+/// İFADE BAŞINA TEK NOT: `$wfah` kaç kez geçerse geçsin, iç içe sarmalda da bir kez.
+#[test]
+fn nested_and_repeated_raw_wfah_notes_once() {
+    for expr in [
+        r#"sum(map(filter($wfah, #.action == "x"), #.seq)) > 0"#,
+        r#"count($wfah, #.action == "x") >= 1 and count($wfah, #.action == "y") >= 1"#,
+        r#"len(filter($wfah, #.action == "x")) >= 1"#,
+    ] {
+        assert_eq!(raw_list_notes(expr).len(), 1, "TEK not: {expr}");
+    }
+}
+
+/// Not `is_error = false` — `is_valid()` bozulmaz, yayın durmaz.
+#[test]
+fn raw_wfah_list_note_does_not_block_publish() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("count($wfah, #.action == \"manager_decide\") > 0");
+    let report = validate_value(v);
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+    assert!(
+        report.warnings.iter().any(|w| w.code == "wfah_raw_list"),
+        "uyarılar: {:#?}",
+        report.warnings
     );
 }
 

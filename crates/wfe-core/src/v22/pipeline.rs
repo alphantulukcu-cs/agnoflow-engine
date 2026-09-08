@@ -20,7 +20,7 @@ use crate::error::EngineError;
 use crate::ports::OrgPort;
 use crate::types::actor::{Actor, CandidateActor as ResolvedCandidate};
 use crate::types::wfah::{Wfah, WfahEntry};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use crate::types::wfd_v22::{
     ActionDef, AutoexecDef, CaGrantRule, CallMode, CandidateActor, CuItem, EscalationStep,
     GlobalAction, JoinRule, SendBackTarget, StartAs, Transition, TriggerInvocation, WfAdminRule,
@@ -36,8 +36,8 @@ use crate::v22::matcher::{
     authorize, authorize_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
 };
 use crate::v22::ports::{
-    AutoexecRunner, BranchState, BranchStatus, CallSite, CommitOutcome, ExecEnv, ExecFailure,
-    NewWfe, StagedCall, TransitionCommit, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CallSite, CollapseCause, CommitOutcome, ExecEnv,
+    ExecFailure, NewWfe, StagedCall, TransitionCommit, Wfes,
 };
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use crate::v22::valid;
@@ -466,6 +466,8 @@ impl<'a> Engine<'a> {
                 Some(input),
                 None,
                 WftMode::Start,
+                // Start'ta geri gönderme menüsü YASAKTIR (`send_back_wft_placement`).
+                false,
             )
             .await?;
 
@@ -705,6 +707,8 @@ impl<'a> Engine<'a> {
                 Some(input),
                 None,
                 WftMode::Single,
+                // Tekil modda fork alt-grafı diye bir şey yok — test hiç sorulmaz.
+                false,
             )
             .await?;
 
@@ -733,6 +737,9 @@ impl<'a> Engine<'a> {
         stage_parallel_markers(
             wfes,
             &Trigger {
+                // Tekil mod: bu yol yalnız `_fork` yazabilir (paralel mod BİTMEZ),
+                // `_fork` de tetikleyici alanı taşımaz — `kind` hiç serileşmez.
+                kind: TriggerKind::System,
                 branch: None,
                 action: Some(action),
                 actor,
@@ -954,6 +961,10 @@ impl<'a> Engine<'a> {
                     all_entries: &all_entries,
                     arrived_entries: &arrived_entries,
                 },
+                // Ç4-EK/S4: menüden hedef seçildiyse bu bir GERİ GÖNDERMEDİR.
+                // `select_wft` menüyü `Wft::Node`'a indirdiği için ölçüt
+                // transition'ın YAZILI wft'sidir, çözülmüş hâli değil.
+                matches!(transition.wft, Wft::SendBack { .. }),
             )
             .await?;
 
@@ -978,6 +989,7 @@ impl<'a> Engine<'a> {
         stage_parallel_markers(
             wfes,
             &Trigger {
+                kind: TriggerKind::Branch,
                 branch: Some(branch_node),
                 action: Some(action),
                 actor,
@@ -1892,18 +1904,10 @@ impl<'a> Engine<'a> {
             return Err(EngineError::WfeExpired);
         }
         require_global_action(&wfd.wf_admin, admin, action, wfes, &ValidRules::for_version(wfd), self.org).await?;
-        // PARALEL MOD SINIRI: kolları toplayıp tek bir node'a inmek `collapse`
-        // semantiğidir ve kol bağlamı ister (`WftMode::Branch` bir `from_node`
-        // bekler) — adminin ise kolu yoktur. Hangi kolun "geri gönderen" sayılacağı
-        // toplantıda konuşulmadı; keyfî bir kol seçip kardeşleri sessizce iptal etmek
-        // yerine AÇIKÇA reddedilir (`cancel` paralel modda ÇALIŞIR, orada tüm kollar
-        // zaten iptal edilir).
-        if wfes.join_target.is_some() {
-            return Err(EngineError::InvalidInput(format!(
-                "paralel modda '{}' desteklenmiyor: akış şu an birden çok kolda",
-                action.as_str()
-            )));
-        }
+        // Ç4-EK/S5: paralel mod SINIRI KALKTI. Eski kapı ("hangi kolun geri gönderen
+        // sayılacağı belli değil") artık cevaplı: acting kol SEÇİLMEZ — rastgele bir
+        // kolu acting saymak yerine tetikleyici `trigger_kind: "admin"` ile AÇIKÇA
+        // yazılır ve TÜM kollar iptal/superseded olur (dışlanan kol yok).
         if !wfd.nodes.contains_key(target_node) {
             return Err(EngineError::TargetInvalid(target_node.to_string()));
         }
@@ -1973,8 +1977,23 @@ impl<'a> Engine<'a> {
                 None,
                 None,
                 WftMode::Single,
+                // Admin yolu paralel modda `WftMode::Single` ile çözülür (adminin kolu
+                // yoktur) — kol testi burada değil, aşağıdaki collapse dönüşümündedir.
+                false,
             )
             .await?;
+        // Ç4-EK/S4+S5: paralel modda "kolları toplayıp tek bir node'a inmek" bir
+        // COLLAPSE'tır. `MoveTo` bırakılsaydı adapter paralel modu kapatmaz, kol
+        // satırları ayakta kalır ve join beklemeye devam ederdi. Adminin kolu
+        // olmadığı için `from_node` YOKTUR (`None` = "kol yok").
+        let outcome = match (outcome, wfes.join_target.is_some()) {
+            (CommitOutcome::MoveTo { node }, true) => CommitOutcome::CollapseTo {
+                from_node: None,
+                node,
+                cause: CollapseCause::SentBack,
+            },
+            (other, _) => other,
+        };
         stamp_movement(&mut wfah_entries[0], &outcome, wfes.current_node.as_deref());
 
         let wfah = wfes.wfah.extended(&wfah_entries);
@@ -1993,6 +2012,9 @@ impl<'a> Engine<'a> {
         stage_parallel_markers(
             wfes,
             &Trigger {
+                // Ç4-EK/S5: acting kol YOK; tetikleyici admin olarak yazılır ve
+                // `trigger_actor` gerçek admindir (aşağıdaki `actor`).
+                kind: TriggerKind::Admin,
                 branch: None,
                 action: Some(&marker),
                 actor: admin,
@@ -2085,6 +2107,7 @@ impl<'a> Engine<'a> {
         stage_parallel_markers(
             wfes,
             &Trigger {
+                kind: TriggerKind::Admin,
                 branch: None,
                 action: Some(&marker),
                 actor: admin,
@@ -2309,6 +2332,9 @@ impl<'a> Engine<'a> {
                 None,
                 None,
                 mode,
+                // SLA-2 bir geri gönderme DEĞİLDİR (hedefi tasarım anında sabittir);
+                // paraleli kapatmak isteyen escalation `{collapse:{node}}` yazar.
+                false,
             )
             .await?;
 
@@ -2327,9 +2353,16 @@ impl<'a> Engine<'a> {
             )
             .await?;
 
+        // Ç4-EK/S5: kol escalation'ı bir KOLU tetikleyicidir (aktörü sistem olsa da);
+        // WFE-geneli escalation'da kol yoktur.
+        let trigger_kind = match branch {
+            Some(_) => TriggerKind::Branch,
+            None => TriggerKind::System,
+        };
         stage_parallel_markers(
             wfes,
             &Trigger {
+                kind: trigger_kind,
                 branch,
                 action: Some(&trigger_action),
                 actor: &system,
@@ -2407,6 +2440,7 @@ impl<'a> Engine<'a> {
         stage_parallel_markers(
             wfes,
             &Trigger {
+                kind: TriggerKind::System,
                 branch: None,
                 action: Some("timeout:deadline"),
                 actor: &system,
@@ -2653,6 +2687,8 @@ impl<'a> Engine<'a> {
                         None,
                         None,
                         mode,
+                        // SLA-1 de geri gönderme değildir (bkz. `fire_escalation`).
+                        false,
                     )
                     .await?;
                 // Timeout marker'ı işlendi — varılan yeri kim yapabilir?
@@ -2669,9 +2705,15 @@ impl<'a> Engine<'a> {
                         wfes.orgtnt_id,
                     )
                     .await?;
+                // Ç4-EK/S5: bkz. `fire_escalation` — aynı ayrım.
+                let trigger_kind = match branch {
+                    Some(_) => TriggerKind::Branch,
+                    None => TriggerKind::System,
+                };
                 stage_parallel_markers(
                     wfes,
                     &Trigger {
+                        kind: trigger_kind,
                         branch,
                         action: Some(&marker),
                         actor: &system,
@@ -3096,6 +3138,8 @@ impl<'a> Engine<'a> {
                 None,
                 Some(&call),
                 WftMode::Single,
+                // WFC dönüşü ileri bir harekettir.
+                false,
             )
             .await?;
 
@@ -3117,6 +3161,7 @@ impl<'a> Engine<'a> {
         stage_parallel_markers(
             wfes,
             &Trigger {
+                kind: TriggerKind::System,
                 branch: None,
                 action: Some(&marker),
                 actor: &system,
@@ -3280,6 +3325,12 @@ impl<'a> Engine<'a> {
         // `$call.*` görünür olsun. Diğer yollarda `None`.
         call: Option<&CallOutcome>,
         mode: WftMode<'_>,
+        // Ç4-EK/S4: bu çözüm bir GERİ GÖNDERME mi (`Wft::SendBack` menüsünden
+        // seçilmiş hedef ya da admin `send_back`/`send_to_start`). `select_wft`
+        // menüyü `Wft::Node`'a indirdiği için buradan görülemez; kol bağlamında
+        // fork alt-grafı testini YALNIZ bu yol tetikler — escalation / claim
+        // timeout / WFC dönüşü davranış değiştirmez.
+        send_back: bool,
     ) -> Result<(CommitOutcome, Value, Option<CallSite>), EngineError> {
         // WOR-56: collapse — yalnız kol bağlamında. Kardeşleri düşürüp WFE'yi
         // hedefe götürür. Terminal hedef = mevcut Terminal yolu (paralel modda
@@ -3313,8 +3364,9 @@ impl<'a> Engine<'a> {
                 }
                 WftTarget::Node { node } => Ok((
                     CommitOutcome::CollapseTo {
-                        from_node,
+                        from_node: Some(from_node),
                         node: node.clone(),
+                        cause: CollapseCause::Collapse,
                     },
                     staged,
                     Some(CallSite::Node(node.clone())),
@@ -3519,6 +3571,23 @@ impl<'a> Engine<'a> {
                 };
             }
             if let Target::Node(node_key) = &target {
+                // Ç4-EK/S4: fork alt-grafının DIŞINA geri gönderme bir COLLAPSE'tır.
+                // `BranchMoveTo` üretmek kolu fork dışına oturtur ve paralel modu
+                // AÇIK bırakırdı — join o kolu sonsuza kadar bekler, WFE ÖLÜ
+                // KİLİTLENİR. Kardeşleri düşürüp paralel modu bitirmek tek doğru
+                // cevaptır; hedef zaten uğranmış bir node'dur (K-2 süzgeci).
+                if send_back && !fork_subgraph(wfd, all_entries, join).contains(node_key.as_str())
+                {
+                    return Ok((
+                        CommitOutcome::CollapseTo {
+                            from_node: Some(from_node.to_string()),
+                            node: node_key.clone(),
+                            cause: CollapseCause::SentBack,
+                        },
+                        staged,
+                        Some(CallSite::Node(node_key.clone())),
+                    ));
+                }
                 // Normal kol hareketi — paralel mod sürer; kol claim'i +
                 // entered_at adapter'da sıfırlanır (T3).
                 return Ok((
@@ -3774,6 +3843,79 @@ impl<'a> Engine<'a> {
 enum Target {
     Node(String),
     Terminal(String),
+}
+
+/// Ç4-EK/S4 — **fork alt-grafı**: kol giriş node'larından İLERİ yürüyüşle ulaşılan
+/// node kümesi. Join node'unda DURULUR (join fork'un dışıdır; oraya varış zaten
+/// `BranchArrived`/`JoinComplete` yolundan geçer).
+///
+/// Hangi kenarın izlendiği bu testin TAMAMIDIR — bkz. `subgraph_edges`.
+///
+/// Validator'ın `check_parallel` / `parallel_interior_nodes` yürüyüşü send-back
+/// kenarını İZLER; oradaki soru *erişilebilirlik ve ayrıklık*, buradaki soru
+/// *"kol bu hareketle fork'un dışına çıkıyor mu"*. İki yürüyüş bilerek AYRIDIR.
+///
+/// Escalation/claim-timeout hedefleri de İZLENMEZ: bu test yalnız geri gönderme
+/// yolunda sorulur (`resolve_wft`in `send_back` parametresi), SLA yolları bu
+/// kararın kapsamı dışındadır.
+fn fork_subgraph(wfd: &Wfd, entries: &[String], join: &WftTarget) -> BTreeSet<String> {
+    let join_node = match join {
+        WftTarget::Node { node } => Some(node.as_str()),
+        WftTarget::Terminal { .. } => None,
+    };
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for e in entries {
+        if seen.insert(e.clone()) {
+            queue.push_back(e.clone());
+        }
+    }
+    while let Some(node_key) = queue.pop_front() {
+        if Some(node_key.as_str()) == join_node {
+            continue;
+        }
+        for t in &wfd.transitions {
+            if !t.from.contains(&node_key) {
+                continue;
+            }
+            for target in subgraph_edges(&t.wft) {
+                if seen.insert(target.to_string()) {
+                    queue.push_back(target.to_string());
+                }
+            }
+        }
+    }
+    seen
+}
+
+/// `fork_subgraph` yürüyüşünün İZLEDİĞİ node kenarları.
+///
+/// Terminal hedefleri yoktur (akış bir node'a gitmez, alt-graf node kümesidir).
+/// Üç form BOŞ döner ve bu, alt-graf tanımının kendisidir:
+/// `SendBack` (alt-graftan ÇIKAN kenar — izlenirse test daima "içeride" der),
+/// `Collapse` (WOR-56: zaten kapsam dışına çıkar),
+/// `Parallel` (nested fork validator tarafından yasak).
+fn subgraph_edges(wft: &Wft) -> Vec<&str> {
+    match wft {
+        Wft::Node { node } => vec![node.as_str()],
+        Wft::Conditional {
+            conditions,
+            default,
+        } => {
+            let mut out: Vec<&str> = conditions
+                .iter()
+                .filter_map(|c| c.node.as_deref())
+                .collect();
+            if let Some(WftTarget::Node { node }) = default {
+                out.push(node.as_str());
+            }
+            out
+        }
+        Wft::Terminal { .. }
+        | Wft::SendBack { .. }
+        | Wft::Collapse { .. }
+        | Wft::Parallel { .. } => Vec::new(),
+    }
 }
 
 /// WOR-31 — `resolve_wft`'in çalıştığı bağlam.
@@ -4037,7 +4179,19 @@ fn stage_parallel_markers(
             ("terminated", "terminated", Value::Null)
         }
         // Node hedefli collapse (WOR-56). Terminal hedefli collapse yukarıya düşer.
-        CommitOutcome::CollapseTo { node, .. } => ("collapsed", "collapse_to", json!(node)),
+        CommitOutcome::CollapseTo {
+            node,
+            cause: CollapseCause::Collapse,
+            ..
+        } => ("collapsed", "collapse_to", json!(node)),
+        // Ç4-EK/S4: fork alt-grafının dışına geri gönderme. Tasarımcının `collapse`
+        // wft'iyle AYNI mekanizma ama AYRI olay — audit ikisini karıştıramaz, ve
+        // `$valid` eleme kuralı 2'nin collapse dalı tam olarak bu `reason`ı arar.
+        CommitOutcome::CollapseTo {
+            node,
+            cause: CollapseCause::SentBack,
+            ..
+        } => ("sent_back", "sent_back", json!(node)),
         // WOR-72: quorum (OR) join eşiği doldu ve geride aktif kol kaldı — iptal
         // semantiği collapse ile AYNI, nedeni farklı: kimse "reddetmedi", join
         // yeterli onayı topladı. `target` join node'u (terminal hedefte null).
@@ -4107,6 +4261,10 @@ fn stage_parallel_markers(
         // Manşet paralel modun TAMAMINI özetler — bir kolun satırı değildir.
         None,
         json!({
+            // Ç4-EK/S5: tetikleyicinin cinsi AÇIKÇA yazılır — aşağıdaki
+            // `trigger_branch`/`trigger_at_node` `null` ise hiçbir tüketici
+            // "kol yok mu, bilinmiyor mu" diye tahmin etmek zorunda kalmaz.
+            "trigger_kind": trigger.kind.as_str(),
             // Ç3: tetikleyen kolun KİMLİĞİ; konumu ayrı alanda.
             "trigger_branch": acting.map(|b| b.entry_node.as_str()),
             "trigger_at_node": acting_branch,
@@ -4137,6 +4295,8 @@ fn stage_parallel_markers(
                 "claimed_at": b.claimed_at,
                 // WOR-63: tetikleyici bağlam (bkz. `Trigger`). Ç3: ad `_collapse`
                 // manşetiyle aynı (`trigger_branch`), değeri kol KİMLİĞİ.
+                // Ç4-EK/S5: `trigger_kind` de manşetle aynı ad ve aynı değer.
+                "trigger_kind": trigger.kind.as_str(),
                 "trigger_branch": acting.map(|a| a.entry_node.as_str()),
                 "trigger_action": trigger.action,
                 "trigger_actor": actor,
@@ -4154,6 +4314,7 @@ fn stage_parallel_markers(
                 "reason": cancel_reason,
                 "approved_by": approved_by,
                 "approved_at": approved_at,
+                "trigger_kind": trigger.kind.as_str(),
                 "trigger_branch": acting.map(|a| a.entry_node.as_str()),
                 "trigger_action": trigger.action,
                 "trigger_actor": actor,
@@ -4167,10 +4328,42 @@ fn stage_parallel_markers(
 /// escalation / claim timeout) `actor` system aktörüdür ve `action` ilgili sistem
 /// marker'ının adıdır (`timeout:deadline`, `escalate:<node>:<idx>` gibi).
 struct Trigger<'a> {
+    /// Ç4-EK/S5: tetikleyicinin CİNSİ. `branch` alanının `None` olması iki ayrı
+    /// şey anlatıyordu ("kol yok" / "bu yolda kol kavramı yok"); bir alan iki
+    /// anlam taşımaz (Ç3'ün `branch_entry`/`at_node` ayrımıyla aynı ilke).
+    kind: TriggerKind,
     /// Aksiyonu uygulayan kol node'u; paralel-olmayan veya WFE-geneli yollarda None.
     branch: Option<&'a str>,
     action: Option<&'a str>,
     actor: &'a Actor,
+}
+
+/// Ç4-EK/S5 — collapse marker'larındaki `trigger_kind` alanının KAPALI listesi.
+/// Değer kümesinin tek kaynağı burasıdır; okuyucu `null` görürse satır bu karardan
+/// ÖNCE yazılmıştır (backfill YOK — Değişmez #9, R01 kapsamı).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerKind {
+    /// Bir KOL tetikledi: `trigger_branch`/`trigger_at_node` DOLUDUR.
+    Branch,
+    /// WF Admin global aksiyonu (`admin:send_back` / `admin:send_to_start` /
+    /// `admin:cancel`) tetikledi. Adminin kolu yoktur → `trigger_branch` `null`
+    /// ve bu "bilinmiyor" DEĞİL, "kol yok" demektir. Rastgele bir kol acting
+    /// SAYILMAZ; `trigger_actor` gerçek admindir.
+    Admin,
+    /// Motorun kendi yolları: SLA-3 deadline, escalation, claim timeout, WFC
+    /// dönüşü. `trigger_actor` sistem aktörüdür; kol bağlamı varsa `Branch`
+    /// kullanılır (kol escalation'ı bir KOLU tetikleyicidir).
+    System,
+}
+
+impl TriggerKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            TriggerKind::Branch => "branch",
+            TriggerKind::Admin => "admin",
+            TriggerKind::System => "system",
+        }
+    }
 }
 
 /// WOR-60: bir kolun onay bilgisini (`approved_by`/`approved_at`) kendi

@@ -19,9 +19,11 @@ use wfe_core::types::wfd_v22::{
     GlobalAction, JoinRule, Wfd, WfAdminRule, WfesEffects, Wft, WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
+use wfe_core::v22::valid::{self, ValidRules};
 use wfe_core::v22::pipeline::{ClaimCheck, ClaimTimeoutOutcome, Engine};
 use wfe_core::v22::ports::{
-    AutoexecRunner, BranchState, BranchStatus, CommitOutcome, ExecEnv, ExecFailure, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CollapseCause, CommitOutcome, ExecEnv, ExecFailure,
+    Wfes,
 };
 
 const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
@@ -3196,10 +3198,17 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
         .await
         .unwrap();
 
-    let CommitOutcome::CollapseTo { from_node, node } = &commit.outcome else {
+    let CommitOutcome::CollapseTo {
+        from_node,
+        node,
+        cause,
+    } = &commit.outcome
+    else {
         panic!("CollapseTo bekleniyordu: {:?}", commit.outcome);
     };
-    assert_eq!(from_node, "self__financeApprover");
+    // Tasarımcının `collapse` wft'i — geri gönderme DEĞİL (Ç4-EK/S4).
+    assert_eq!(*cause, CollapseCause::Collapse);
+    assert_eq!(from_node.as_deref(), Some("self__financeApprover"));
     assert_eq!(node, "self__coordinator");
     // hedef node'un adayları promotion için resolve edilir
     assert!(commit.resolved_c_a.iter().any(|c| c.role == "coordinator"));
@@ -3224,6 +3233,260 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     // WOR-59: claim'siz kolda alanlar açıkça null (alan HER ZAMAN var)
     assert!(cancel.input.as_ref().unwrap()["claimed_by"].is_null());
     assert!(cancel.input.as_ref().unwrap()["claimed_at"].is_null());
+}
+
+// ---- Ç4-EK/S4+S5: geri gönderme kol sınırı ------------------------------------
+
+/// Bir kola geri gönderme MENÜSÜ takar; hedefleri `targets` listesinden gelir.
+fn parallel_with_send_back(from: &str, targets: &[&str]) -> Wfd {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("reject") && t["from"] == json!(from) {
+            t["wft"] = json!({
+                "targets": targets.iter().map(|n| json!({"node": n})).collect::<Vec<_>>()
+            });
+        }
+    }
+    Wfd::from_value(v).unwrap()
+}
+
+/// Ç4-EK/S4 — **ölü kilit senaryosu KAPANDI.** Kol içinden fork ÖNCESİ bir node'a
+/// geri gönderme `BranchMoveTo` üretiyordu: kol fork'un dışına oturuyor, paralel mod
+/// AÇIK kalıyor, join o kolu sonsuza kadar bekliyordu. Artık `CollapseTo`dur.
+#[tokio::test]
+async fn send_back_before_the_fork_collapses_instead_of_deadlocking() {
+    // `self__coordinator` fork'un KENDİSİDİR (fork alt-grafının dışı).
+    let wfd = parallel_with_send_back("self__financeApprover", &["self__coordinator"]);
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let fin = actor_with_role("financeApprover");
+    let mut wfes = parallel_wfes(
+        vec![
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(fin.user_id),
+            ),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    // K-2: geri gönderme hedefi UĞRANMIŞ olmalı — fork oradan yapıldı.
+    wfes.visited_nodes = vec!["self__coordinator".into()];
+
+    let commit = engine
+        .apply(
+            &wfd,
+            &wfes,
+            &fin,
+            "reject",
+            &json!({}),
+            Some("self__financeApprover"),
+            Some("self__coordinator"),
+        )
+        .await
+        .expect("fork öncesine geri gönderme geçerli bir harekettir");
+
+    let CommitOutcome::CollapseTo {
+        from_node,
+        node,
+        cause,
+    } = &commit.outcome
+    else {
+        panic!("CollapseTo bekleniyordu, BranchMoveTo DEĞİL: {:?}", commit.outcome);
+    };
+    assert_eq!(*cause, CollapseCause::SentBack);
+    assert_eq!(from_node.as_deref(), Some("self__financeApprover"));
+    assert_eq!(node, "self__coordinator");
+
+    // Kardeşler: aktif olan iptal, varmış olanın onayı geçersiz.
+    assert_eq!(
+        wfah_actions(&commit),
+        vec![
+            "reject",
+            "_collapse",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
+    );
+    let headline = commit.wfah_entries[1].input.clone().unwrap();
+    assert_eq!(headline["kind"], json!("sent_back"));
+    assert_eq!(headline["reason"], json!("sent_back"));
+    assert_eq!(headline["target"], json!("self__coordinator"));
+    assert_eq!(headline["trigger_kind"], json!("branch"));
+    assert_eq!(headline["trigger_branch"], json!("self__financeApprover"));
+    assert_eq!(headline["cancelled"], json!(["self__legalApprover"]));
+    assert_eq!(headline["superseded"], json!(["self__hrApprover"]));
+    for detail in &commit.wfah_entries[2..] {
+        let input = detail.input.as_ref().unwrap();
+        assert_eq!(input["reason"], json!("sent_back"));
+        assert_eq!(input["trigger_kind"], json!("branch"));
+    }
+    // Ç4-EK: hareket satırı `to_node` taşır — `$valid` eleme kuralı 2 pencereyi
+    // bu alandan kurar.
+    assert_eq!(
+        commit.wfah_entries[0].to_node.as_deref(),
+        Some("self__coordinator")
+    );
+
+    // Yazıcı ↔ okuyucu el sıkışması: kural 2'nin COLLAPSE dalı tam olarak bu
+    // `_collapse` satırını arar ve pencere TÜM kolları (kolsuz satırlar dahil)
+    // kapsar. Dal, kol içi geri göndermede tetiklenmez.
+    let after = wfes.wfah.extended(&commit.wfah_entries);
+    let rules = ValidRules::for_version(&wfd);
+    assert_eq!(
+        valid::invalid_reason(&after, &rules, &after.entries()[0]),
+        Some(valid::InvalidReason::SentBackWindow),
+        "geri gönderme penceresindeki satır elenmeli"
+    );
+}
+
+/// Kural İKİ DALLIDIR: hedef fork alt-grafının İÇİNDEyse collapse YOKTUR — kol
+/// hareket eder, paralel mod sürer.
+#[tokio::test]
+async fn send_back_inside_the_fork_subgraph_stays_a_branch_move() {
+    // `self__financeApprover` kardeş kolun giriş node'u → alt-grafın İÇİ.
+    let wfd = parallel_with_send_back("self__legalApprover", &["self__financeApprover"]);
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let legal = actor_with_role("legalApprover");
+    let wfes = parallel_wfes(
+        vec![
+            branch("self__financeApprover", BranchStatus::Active, None),
+            branch(
+                "self__legalApprover",
+                BranchStatus::Active,
+                Some(legal.user_id),
+            ),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+
+    let commit = engine
+        .apply(
+            &wfd,
+            &wfes,
+            &legal,
+            "reject",
+            &json!({}),
+            Some("self__legalApprover"),
+            Some("self__financeApprover"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        commit.outcome,
+        CommitOutcome::BranchMoveTo {
+            from_node: "self__legalApprover".into(),
+            node: "self__financeApprover".into(),
+        }
+    );
+    // Paralel mod sürüyor → hiçbir collapse marker'ı yok.
+    assert_eq!(wfah_actions(&commit), vec!["reject"]);
+}
+
+/// Ç4-EK/S5 — admin `send_back` paralel modda AÇIK. Acting kol SEÇİLMEZ: tetikleyici
+/// `trigger_kind: "admin"` ile yazılır, TÜM kollar düşer, `trigger_actor` gerçek admin.
+#[tokio::test]
+async fn admin_send_back_in_parallel_collapses_with_admin_trigger() {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    v["wf_admin"] = json!([{
+        "c_a": {"c_orgu": "self", "c_r": ["coordinator"]},
+        "allowed_global_actions": ["send_back"],
+    }]);
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let admin = actor_with_role("coordinator");
+    let claim_owner = Uuid::new_v4();
+    let mut wfes = parallel_wfes(
+        vec![
+            branch(
+                "self__financeApprover",
+                BranchStatus::Active,
+                Some(claim_owner),
+            ),
+            branch("self__legalApprover", BranchStatus::Active, None),
+            branch("self__hrApprover", BranchStatus::Arrived, None),
+        ],
+        join_node(),
+        parallel_ctx(),
+    );
+    wfes.origin_orgu_id = Some(admin.orgu_id);
+    wfes.visited_nodes = vec!["self__coordinator".into()];
+
+    let commit = engine
+        .admin_send_back(&wfd, &wfes, &admin, "self__coordinator", Utc::now())
+        .await
+        .expect("Ç4-EK/S5: paralel mod kapısı KALKTI");
+
+    let CommitOutcome::CollapseTo {
+        from_node,
+        node,
+        cause,
+    } = &commit.outcome
+    else {
+        panic!("CollapseTo bekleniyordu: {:?}", commit.outcome);
+    };
+    assert_eq!(*cause, CollapseCause::SentBack);
+    // Adminin kolu YOK — "bilinmiyor" değil, "yok".
+    assert_eq!(*from_node, None);
+    assert_eq!(node, "self__coordinator");
+
+    // Acting kol olmadığı için TÜM kollar düşer (dışlanan kol yok).
+    assert_eq!(
+        wfah_actions(&commit),
+        vec![
+            "admin:send_back",
+            "_collapse",
+            "_branch_cancelled",
+            "_branch_cancelled",
+            "_branch_superseded"
+        ]
+    );
+    let headline = commit.wfah_entries[1].input.clone().unwrap();
+    assert_eq!(headline["trigger_kind"], json!("admin"));
+    assert!(
+        headline["trigger_branch"].is_null(),
+        "rastgele bir kol acting SAYILMAZ"
+    );
+    assert!(headline["trigger_at_node"].is_null());
+    assert_eq!(headline["trigger_action"], json!("admin:send_back"));
+    assert_eq!(headline["reason"], json!("sent_back"));
+    assert_eq!(
+        headline["cancelled"],
+        json!(["self__financeApprover", "self__legalApprover"])
+    );
+    assert_eq!(headline["superseded"], json!(["self__hrApprover"]));
+    // Trigger AKTÖRÜ gerçek admindir — `system` DEĞİL.
+    assert_eq!(headline["trigger_actor"]["user_id"], json!(admin.user_id));
+    assert_eq!(commit.wfah_entries[0].actor.user_id, admin.user_id);
 }
 
 #[tokio::test]

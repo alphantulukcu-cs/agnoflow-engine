@@ -229,10 +229,33 @@ pub enum CommitOutcome {
     /// `FOR UPDATE` alıp kilit altında hâlâ paralel modda olduğunu doğrular;
     /// bir kardeş önce davrandıysa bu collapse `Conflict(ConflictKind::Collapsed)`
     /// ile kaybeder. Kural: ilk kilidi alan kazanır.
+    ///
+    /// Ç4-EK/S4: ikinci bir üreteci daha var — fork alt-grafının DIŞINA geri
+    /// gönderme. Mekanizma aynı, OLAY farklı; ayrım `cause` alanındadır.
     CollapseTo {
-        from_node: String,
+        /// Collapse'ı yapan kolun o anki node'u. Admin yolunda `None`: adminin
+        /// kolu yoktur ve paralel modda WFE'nin tek bir `current_node`'u da yoktur
+        /// — "bilinmiyor" değil, "yok" (Ç4-EK/S5, `trigger_kind` ile aynı ilke).
+        from_node: Option<String>,
         node: String,
+        cause: CollapseCause,
     },
+}
+
+/// Ç4-EK/S4 — bir `CollapseTo`nun KAYNAĞI. Kol marker'larının `reason`/`kind`
+/// değerleri buradan ayrışır: tasarımcının `collapse` wft'i ile fork alt-grafının
+/// dışına geri gönderme AYNI mekanizmayı kullanır ama AYRI olaylardır ve audit
+/// ikisini karıştıramaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollapseCause {
+    /// `Wft::Collapse` — tasarımcı "paraleli kapat ve şu node'a git" dedi
+    /// (WOR-56). `reason`/`kind` = `collapsed` / `collapse_to`.
+    Collapse,
+    /// Geri gönderme fork alt-grafının DIŞINA çıktı (WFD içi `{targets}` menüsü ya
+    /// da admin `send_back`/`send_to_start`). Paralel mod BİTMEK ZORUNDADIR: kol
+    /// fork'un dışında dururken join onu sonsuza kadar beklerdi (Ç4-EK/S4).
+    /// `reason`/`kind` = `sent_back`.
+    SentBack,
 }
 
 impl CommitOutcome {
@@ -264,8 +287,10 @@ impl CommitOutcome {
         match self {
             CommitOutcome::BranchMoveTo { from_node, .. }
             | CommitOutcome::BranchArrived { from_node, .. }
-            | CommitOutcome::JoinComplete { from_node, .. }
-            | CommitOutcome::CollapseTo { from_node, .. } => Some(from_node),
+            | CommitOutcome::JoinComplete { from_node, .. } => Some(from_node),
+            // Ç4-EK/S5: admin yolunda kaynak node YOKTUR — satırın `from_node`'u
+            // `stamp_movement`'ın fallback'ine düşer (paralel modda o da NULL).
+            CommitOutcome::CollapseTo { from_node, .. } => from_node.as_deref(),
             CommitOutcome::MoveTo { .. }
             | CommitOutcome::ForkTo { .. }
             | CommitOutcome::Terminal { .. }

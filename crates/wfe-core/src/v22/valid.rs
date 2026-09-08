@@ -284,8 +284,7 @@ fn eliminated_by_branch_marker(wfah: &Wfah, row: &WfahEntry) -> Option<InvalidRe
 /// * hedef **fork öncesinde** → geri gönderme bir COLLAPSE'tır ve pencere TÜM
 ///   kolları kapsar. Ayrımın ölçütü DEFTERDEDİR: aynı commit'in marker bloğunda
 ///   `reason: "sent_back"` taşıyan bir `_collapse` satırı var mı. Bu satırı
-///   `Ç4-EK` yazacak; o iş inmeden dal sessizce hiç tetiklenmez (kural VERİ olarak
-///   alınır, `E05`).
+///   `pipeline::stage_parallel_markers` yazar (`Ç4-EK`/S4).
 fn eliminated_by_send_back(
     wfah: &Wfah,
     rules: &ValidRules,

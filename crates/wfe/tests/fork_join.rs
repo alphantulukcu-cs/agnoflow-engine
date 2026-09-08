@@ -1490,6 +1490,18 @@ fn paralel_with_branch_claim_timeout() -> Wfd {
 }
 
 fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claimant: Uuid) -> Uuid {
+    seed_parallel_visited(store, wfd, claimed_branch, claimant, vec![])
+}
+
+/// `seed_parallel_state` + uğranmış node listesi: geri gönderme hedefinin K-2
+/// süzgecinden geçebilmesi için gerekir (Ç4-EK).
+fn seed_parallel_visited(
+    store: &ParStore,
+    wfd: &Wfd,
+    claimed_branch: &str,
+    claimant: Uuid,
+    visited: Vec<String>,
+) -> Uuid {
     let _ = wfd;
     let wfe_id = Uuid::new_v4();
     let now = chrono::Utc::now();
@@ -1520,7 +1532,7 @@ fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claima
         wfd_id: Uuid::new_v4(),
         wfd_version: 1,
         dynctx: DynCtx(json!({})),
-        visited_nodes: vec![],
+        visited_nodes: visited,
         wfah: Wfah(vec![]),
         status: WfeStatus::Active,
         current_node: None,
@@ -1538,6 +1550,88 @@ fn seed_parallel_state(store: &ParStore, wfd: &Wfd, claimed_branch: &str, claima
         origin_orgu_id: None,
     });
     wfe_id
+}
+
+// ---- Ç4-EK/S4: fork öncesine geri gönderme ORKESTRASYONU -----------------------
+
+/// Finance koluna fork ÖNCESİNE (`self__coordinator`) geri gönderme menüsü takar.
+fn paralel_with_send_back_before_fork() -> Wfd {
+    let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
+            t["wft"] = json!({"targets": [{"node": "self__coordinator"}]});
+        }
+    }
+    Wfd::from_value(v).unwrap()
+}
+
+/// **Ölü kilit senaryosu — Ç4-EK/S4'ün ANA KABULÜ.**
+///
+/// Eski davranış `BranchMoveTo` üretiyordu: kol `self__coordinator`'a (fork'un
+/// DIŞINA) oturuyor, `join_target` DOLU kalıyor, kol satırları ayakta duruyordu.
+/// AND-join hiçbir zaman dolamayacağı için WFE sonsuza kadar paralel modda
+/// takılıyordu. Bu test tam olarak o durumun oluşMADIĞINI gösterir.
+#[tokio::test]
+async fn send_back_before_fork_ends_parallel_mode_instead_of_deadlocking() {
+    let wfd = paralel_with_send_back_before_fork();
+    let store = Arc::new(ParStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(MockOrg),
+        Arc::new(FixtureWfdStore(wfd.clone())),
+        store.clone(),
+        Arc::new(MockRunner),
+    );
+    let fin = actor("financeApprover");
+    let wfe_id = seed_parallel_visited(
+        &store,
+        &wfd,
+        "self__financeApprover",
+        fin.user_id,
+        vec!["self__coordinator".into()],
+    );
+
+    exec.apply(
+        wfe_id,
+        &fin,
+        "reject",
+        &json!({}),
+        Some("self__financeApprover"),
+        Some("self__coordinator"),
+        None,
+    )
+    .await
+    .expect("fork öncesine geri gönderme uygulanmalı");
+
+    let w = store.snapshot(wfe_id);
+    assert!(
+        w.join_target.is_none(),
+        "paralel mod BİTMELİ — açık kalırsa join kolları sonsuza kadar bekler"
+    );
+    assert_eq!(
+        w.current_node.as_deref(),
+        Some("self__coordinator"),
+        "WFE geri gönderme hedefine inmeli"
+    );
+    assert!(
+        w.assigned_to.is_none(),
+        "hedefe UNASSIGNED inilir (Ç4-EK/S4)"
+    );
+    assert!(
+        w.branches.iter().all(|b| b.status != BranchStatus::Active),
+        "hiçbir kol aktif kalmamalı: {:?}",
+        w.branches.iter().map(|b| b.status).collect::<Vec<_>>()
+    );
+    let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
+    assert!(actions.contains(&"_collapse"), "collapse özeti: {actions:?}");
+    let headline = w
+        .wfah
+        .entries()
+        .iter()
+        .find(|e| e.action == "_collapse")
+        .and_then(|e| e.input.clone())
+        .unwrap();
+    assert_eq!(headline["reason"], json!("sent_back"));
+    assert_eq!(headline["trigger_kind"], json!("branch"));
 }
 
 /// next_timer_due paralel modda AKTİF KOLLAR üzerinden döner: claim_timeout'lu

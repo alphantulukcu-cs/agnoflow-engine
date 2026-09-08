@@ -1007,8 +1007,12 @@ impl WfeStore for WfeAdapter {
                 None => serde_json::json!([]),
             };
             sqlx::query(
+                // Ç4-EK/S6 (E14 ile korunan hüküm): YAŞAYAN kola yazılır. Canlı tur
+                // içinde bir kol anlık olarak `cancelled` olabilir (collapse
+                // transaction'ı satırları silene kadar) — filtresiz güncelleme o
+                // satıra aday yazardı.
                 "UPDATE wf.wfe_branch SET c_a = $1, view_c_a = $4, updated_at = now()
-                 WHERE wfe_id = $2 AND branch_node = $3",
+                 WHERE wfe_id = $2 AND branch_node = $3 AND status = 'active'",
             )
             .bind(&c_a_json)
             .bind(commit.wfe_id)

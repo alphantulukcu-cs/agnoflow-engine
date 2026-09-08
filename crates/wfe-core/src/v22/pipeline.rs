@@ -44,6 +44,7 @@ use crate::v22::ports::{
 };
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use crate::v22::valid;
+use crate::v22::wfah_payload::{BranchDropPayload, CollapsePayload, GrantPayload, WfahPayload};
 use crate::v22::valid::ValidRules;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
@@ -1968,7 +1969,13 @@ impl<'a> Engine<'a> {
             seq,
             action: marker.clone(),
             actor: admin.clone(),
-            input: Some(json!({"skipped": true, "after": forecast.deadline.to_rfc3339()})),
+            input: Some(
+                WfahPayload::<String>::EscalationSkipped {
+                    skipped: true,
+                    after: forecast.deadline.to_rfc3339(),
+                }
+                .to_value(),
+            ),
             applied_at: now,
             // Ç2: sayaç atlaması node DEĞİŞTİRMEZ — marker satırı.
             from_node: None,
@@ -2496,16 +2503,25 @@ impl<'a> Engine<'a> {
         // v2.3 (`Ç9` + `E02`): marker payload'u `{after, grant}` olur — `when` metni
         // deftere AYNEN yazılır (`E13` hükmü: guard'ın ne olduğu audit izinde durur).
         // `collapse` anahtarı ÖLDÜ: escalation collapse edemez, `wft` taşımıyor.
-        let mut grant_payload = json!({"c_a": step.grant.c_a});
-        if let Some(when) = &step.grant.when {
-            grant_payload["when"] = json!(when);
-        }
+        //
+        // P04: şekil artık `WfahPayload`ta TİPLİ — alan adı değişimi DERLEME HATASI
+        // verir, on literalde arama değil.
+        let grant_payload = GrantPayload {
+            c_a: json!(step.grant.c_a),
+            when: step.grant.when.clone(),
+        };
         let wfah_entries = vec![WfahEntry {
             seq,
             action: trigger_action.clone(),
             // Elle tetiklemede iz admini gösterir; otomatik yolda system aktörü.
             actor: by.cloned().unwrap_or_else(|| system.clone()),
-            input: Some(json!({"after": step.after, "grant": grant_payload})),
+            input: Some(
+                WfahPayload::<String>::Escalation {
+                    after: step.after.clone(),
+                    grant: grant_payload,
+                }
+                .to_value(),
+            ),
             applied_at: now,
             // Ç2: escalation MARKER satırıdır — akış izi taşımaz (v2.3/C ekseni:
             // escalation node değiştirmeyecek; taşıma yolu `R02` ile düşer).
@@ -2620,7 +2636,12 @@ impl<'a> Engine<'a> {
             seq,
             action: "timeout:deadline".into(),
             actor: system.clone(),
-            input: Some(json!({"deadline": wfes.deadline})),
+            input: Some(
+                WfahPayload::<String>::Deadline {
+                    deadline: Some(json!(wfes.deadline)),
+                }
+                .to_value(),
+            ),
             applied_at: now,
             // Ç2: marker satırı — akış bir node'a gitmez, WFE `terminated`.
             from_node: None,
@@ -2918,7 +2939,16 @@ impl<'a> Engine<'a> {
                         seq: *seq,
                         action: format!("trigger:{}", trig.use_),
                         actor: system,
-                        input: Some(json!({"result": result})),
+                        input: Some(
+                            WfahPayload::<String>::Trigger {
+                                result: Some(json!(result)),
+                                error: None,
+                                message: None,
+                                handled: None,
+                                required: None,
+                            }
+                            .to_value(),
+                        ),
                         applied_at: Utc::now(),
                         // Ç2: trigger MARKER satırıdır — hareketi aynı commit'teki
                         // aksiyon satırı taşır.
@@ -2954,11 +2984,16 @@ impl<'a> Engine<'a> {
                             seq: *seq,
                             action: format!("trigger:{}", trig.use_),
                             actor: system,
-                            input: Some(json!({
-                                "error": failure.error,
-                                "message": failure.message,
-                                "handled": true,
-                            })),
+                            input: Some(
+                                WfahPayload::<String>::Trigger {
+                                    result: None,
+                                    error: Some(failure.error.clone()),
+                                    message: Some(failure.message.clone()),
+                                    handled: Some(true),
+                                    required: None,
+                                }
+                                .to_value(),
+                            ),
                             applied_at: Utc::now(),
                             from_node: None,
                             to_node: None,
@@ -2979,12 +3014,16 @@ impl<'a> Engine<'a> {
                         seq: *seq,
                         action: format!("trigger:{}", trig.use_),
                         actor: system,
-                        input: Some(json!({
-                            "error": failure.error,
-                            "message": failure.message,
-                            "handled": false,
-                            "required": false,
-                        })),
+                        input: Some(
+                            WfahPayload::<String>::Trigger {
+                                result: None,
+                                error: Some(failure.error.clone()),
+                                message: Some(failure.message.clone()),
+                                handled: Some(false),
+                                required: Some(false),
+                            }
+                            .to_value(),
+                        ),
                         applied_at: Utc::now(),
                         from_node: None,
                         to_node: None,
@@ -3175,11 +3214,14 @@ impl<'a> Engine<'a> {
                 seq,
                 action: format!("{marker}/…"),
                 actor: system.clone(),
-                input: Some(json!({
-                    "callee_wfe_id": callee_wfe_id,
-                    "omitted": callee_wfah.len() - inlined,
-                    "reason": "call_history_truncated",
-                })),
+                input: Some(
+                    WfahPayload::<String>::CallTruncated {
+                        callee_wfe_id: callee_wfe_id.map(|u| u.to_string()),
+                        omitted: callee_wfah.len() - inlined,
+                        reason: "call_history_truncated".into(),
+                    }
+                    .to_value(),
+                ),
                 applied_at: callee_wfah[inlined.saturating_sub(1)].applied_at,
                 from_node: None,
                 to_node: None,
@@ -3194,10 +3236,13 @@ impl<'a> Engine<'a> {
             seq,
             action: marker.clone(),
             actor: system.clone(),
-            input: Some(json!({
-                "status": call_status,
-                "callee_wfe_id": callee_wfe_id,
-            })),
+            input: Some(
+                WfahPayload::<String>::CallReturn {
+                    status: Some(call_status.to_string()),
+                    callee_wfe_id: callee_wfe_id.map(|u| u.to_string()),
+                }
+                .to_value(),
+            ),
             applied_at: now,
             // Ç2: dönüş MARKER satırıdır.
             from_node: None,
@@ -4304,13 +4349,14 @@ fn stage_parallel_markers(
                 // o an `branch_node == entry_node`, yani zaten giriş node'larını
                 // taşıyor. Satırın kendisi bir kolun içinde DEĞİLDİR.
                 None,
-                json!({
-                    "branches": branches,
-                    "join": join,
-                    "join_mode": join_rule.kind(),
-                    "join_threshold": threshold,
-                    "join_when": when,
-                }),
+                WfahPayload::Fork {
+                    branches: branches.to_vec(),
+                    join: json!(join),
+                    join_mode: join_rule.kind().to_string(),
+                    join_threshold: threshold.as_u64().map(|n| n as u32),
+                    join_when: when.as_str().map(str::to_string),
+                }
+                .to_value(),
             );
         }
         CommitOutcome::BranchArrived { from_node, .. }
@@ -4336,18 +4382,19 @@ fn stage_parallel_markers(
             push(
                 "_branch_arrived",
                 arriving.map(|b| b.entry_node.as_str()),
-                json!({
-                    "branch_entry": arriving.map(|b| b.entry_node.as_str()),
-                    "at_node": from_node,
-                    "approved_by": actor,
-                    "approved_at": now,
-                    "claimed_at": claimed_at,
+                WfahPayload::BranchArrived {
+                    branch_entry: arriving.map(|b| b.entry_node.clone()),
+                    at_node: from_node.to_string(),
+                    approved_by: json!(actor),
+                    approved_at: Some(json!(now)),
+                    claimed_at: Some(json!(claimed_at)),
                     // Ç13: "claim üç yoldan düşer" okuma kuralının (c) ayağı. Kol
                     // kapanış marker'ı örtük bir bırakmadır ve KİMİN sahipliğinin
                     // düştüğünü yalnız bu alan söyler — `approved_by` eylemi alanı
                     // gösterir, sahibi DEĞİL (vekaleten alınmış kolda ikisi ayrışır).
-                    "claimed_by": arriving.and_then(|b| b.claimed_by),
-                }),
+                    claimed_by: arriving.and_then(|b| b.claimed_by).map(|u| u.to_string()),
+                }
+                .to_value(),
             );
         }
         _ => {}
@@ -4450,47 +4497,51 @@ fn stage_parallel_markers(
         "_collapse",
         // Manşet paralel modun TAMAMINI özetler — bir kolun satırı değildir.
         None,
-        json!({
-            // Ç4-EK/S5: tetikleyicinin cinsi AÇIKÇA yazılır — aşağıdaki
-            // `trigger_branch`/`trigger_at_node` `null` ise hiçbir tüketici
-            // "kol yok mu, bilinmiyor mu" diye tahmin etmek zorunda kalmaz.
-            "trigger_kind": trigger.kind.as_str(),
+        WfahPayload::Collapse(CollapsePayload {
+            // Ç4-EK/S5: tetikleyicinin cinsi AÇIKÇA yazılır — `trigger_branch`/
+            // `trigger_at_node` `null` ise hiçbir tüketici "kol yok mu, bilinmiyor mu"
+            // diye tahmin etmek zorunda kalmaz.
+            trigger_kind: trigger.kind.as_str().to_string(),
             // Ç3: tetikleyen kolun KİMLİĞİ; konumu ayrı alanda.
-            "trigger_branch": acting.map(|b| b.entry_node.as_str()),
-            "trigger_at_node": acting_branch,
-            "trigger_action": trigger.action,
-            "trigger_actor": actor,
-            "trigger_claimed_by": acting.and_then(|b| b.claimed_by),
-            "trigger_claimed_at": acting.and_then(|b| b.claimed_at),
-            "kind": collapse_kind,
-            "reason": cancel_reason,
-            "target": target,
-            "cancelled": nodes(&cancelled),
-            "superseded": nodes(&superseded),
-        }),
+            trigger_branch: acting.map(|b| b.entry_node.clone()),
+            trigger_at_node: acting_branch.map(str::to_string),
+            trigger_action: trigger.action.map(str::to_string),
+            trigger_actor: json!(actor),
+            trigger_claimed_by: acting.and_then(|b| b.claimed_by).map(|u| u.to_string()),
+            trigger_claimed_at: Some(json!(acting.and_then(|b| b.claimed_at))),
+            kind: collapse_kind.to_string(),
+            reason: cancel_reason.to_string(),
+            target: target.as_str().map(str::to_string),
+            cancelled: nodes(&cancelled).into_iter().map(str::to_string).collect(),
+            superseded: nodes(&superseded).into_iter().map(str::to_string).collect(),
+        })
+        .to_value(),
     );
 
     for b in cancelled {
         push(
             "_branch_cancelled",
             Some(b.entry_node.as_str()),
-            json!({
+            WfahPayload::BranchCancelled(BranchDropPayload {
                 // Ç3: kol kimliği + kolun iptal ANINDAKİ konumu.
-                "branch_entry": b.entry_node,
-                "at_node": b.branch_node,
-                "reason": cancel_reason,
+                branch_entry: b.entry_node.clone(),
+                at_node: b.branch_node.clone(),
+                reason: cancel_reason.to_string(),
                 // WOR-59: cancel ANINDAKİ claim sahibi/başlangıcı — adapter bu
                 // alanları hemen ardından NULL'ladığı için tek kayıt yeri burası.
-                "claimed_by": b.claimed_by,
-                "claimed_at": b.claimed_at,
-                // WOR-63: tetikleyici bağlam (bkz. `Trigger`). Ç3: ad `_collapse`
-                // manşetiyle aynı (`trigger_branch`), değeri kol KİMLİĞİ.
-                // Ç4-EK/S5: `trigger_kind` de manşetle aynı ad ve aynı değer.
-                "trigger_kind": trigger.kind.as_str(),
-                "trigger_branch": acting.map(|a| a.entry_node.as_str()),
-                "trigger_action": trigger.action,
-                "trigger_actor": actor,
-            }),
+                claimed_by: b.claimed_by.map(|u| u.to_string()),
+                claimed_at: Some(json!(b.claimed_at)),
+                approved_by: None,
+                approved_at: None,
+                // WOR-63: tetikleyici bağlam. Ç3: ad `_collapse` manşetiyle aynı
+                // (`trigger_branch`), değeri kol KİMLİĞİ. Ç4-EK/S5: `trigger_kind` de
+                // manşetle aynı ad ve aynı değer.
+                trigger_kind: trigger.kind.as_str().to_string(),
+                trigger_branch: acting.map(|a| a.entry_node.clone()),
+                trigger_action: trigger.action.map(str::to_string),
+                trigger_actor: json!(actor),
+            })
+            .to_value(),
         );
     }
     for b in superseded {
@@ -4498,17 +4549,22 @@ fn stage_parallel_markers(
         push(
             "_branch_superseded",
             Some(b.entry_node.as_str()),
-            json!({
-                "branch_entry": b.entry_node,
-                "at_node": b.branch_node,
-                "reason": cancel_reason,
-                "approved_by": approved_by,
-                "approved_at": approved_at,
-                "trigger_kind": trigger.kind.as_str(),
-                "trigger_branch": acting.map(|a| a.entry_node.as_str()),
-                "trigger_action": trigger.action,
-                "trigger_actor": actor,
-            }),
+            WfahPayload::BranchSuperseded(BranchDropPayload {
+                branch_entry: b.entry_node.clone(),
+                at_node: b.branch_node.clone(),
+                reason: cancel_reason.to_string(),
+                claimed_by: None,
+                claimed_at: None,
+                // Geçersizleşen ONAYIN sahibi ve anı — o onay artık sayılmıyor ve
+                // kimin onayının düştüğü YALNIZ buradan okunabilir.
+                approved_by: Some(json!(approved_by)),
+                approved_at: Some(json!(approved_at)),
+                trigger_kind: trigger.kind.as_str().to_string(),
+                trigger_branch: acting.map(|a| a.entry_node.clone()),
+                trigger_action: trigger.action.map(str::to_string),
+                trigger_actor: json!(actor),
+            })
+            .to_value(),
         );
     }
 }

@@ -353,25 +353,13 @@ impl SimState {
                 // (`wfe_adapter.rs`) aynı tx'te ekler; sim'de adapter yok, o
                 // yüzden burada birebir taklit edilir (seq = son staged + 1).
                 let seq = self.wfah.last().map(|e| e.seq + 1).unwrap_or(1);
-                self.wfah.push(WfahEntry {
+                // P04: "adapter'la BİREBİR aynı" artık bir DİLEK değil, YAPISAL —
+                // iki üretici de aynı yapıcıyı çağırıyor. Ayrışma bir alan eklemesi
+                // kadar yakındı ve ayrışsaydı `$valid` iki yerde farklı hesaplanırdı.
+                self.wfah.push(wfe_core::v22::wfah_payload::join_row(
                     seq,
-                    action: "_join".into(),
-                    actor: Actor {
-                        orgu_id: Uuid::nil(),
-                        user_id: Uuid::nil(),
-                        role: "system".into(),
-                    },
-                    input: None,
-                    applied_at: chrono::Utc::now(),
-                    // Ç2/Ç4: adapter'daki `_join` satırıyla BİREBİR aynı — marker
-                    // satırı hareket taşımaz, join paralel modu kapattığı için satır
-                    // bir kolun içinde değildir. Sim ile motor ayrışırsa `$valid`
-                    // iki yerde farklı hesaplanır.
-                    from_node: None,
-                    to_node: None,
-                    branch_entry: None,
-                    branch_round: None,
-                });
+                    chrono::Utc::now(),
+                ));
                 // Join doldu — paralel mod biter, kol satırları düşer. E14/S2 ile
                 // adapter da AYNI şeyi yapar (eskiden quorum modunda satırları
                 // `cancelled` bırakıyordu): iki yol ayrışmaz. Kalan aktif kollar

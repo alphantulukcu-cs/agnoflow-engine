@@ -19,3 +19,4 @@ pub mod resolver;
 pub mod valid;
 pub mod visibility;
 pub mod wfah_kind;
+pub mod wfah_payload;

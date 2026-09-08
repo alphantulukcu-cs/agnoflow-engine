@@ -855,24 +855,11 @@ impl WfeStore for WfeAdapter {
                 // `_join` sistem marker'ı (dokümante istisna: adapter ekler) —
                 // seq = son staged wfah seq + 1.
                 let join_seq = commit.wfah_entries.last().map(|e| e.seq + 1).unwrap_or(1);
-                let join_entry = WfahEntry {
-                    seq: join_seq,
-                    action: "_join".into(),
-                    actor: Actor {
-                        orgu_id: Uuid::nil(),
-                        user_id: Uuid::nil(),
-                        role: "system".into(),
-                    },
-                    input: None,
-                    applied_at: chrono::Utc::now(),
-                    // Ç2: `_join` MARKER satırıdır — hareketi bu commit'in aksiyon
-                    // satırı taşır (`JoinComplete` → kol node'undan join hedefine).
-                    from_node: None,
-                    to_node: None,
-                    // Ç4/E14: join paralel modu KAPATIR; satır bir kolun içinde değildir.
-                    branch_entry: None,
-                    branch_round: None,
-                };
+                // P04: satırın şekli TEK yerdedir — `sim` de aynı yapıcıyı çağırır.
+                // İki kopya, `sim.rs`in kendi yorumunun uyardığı ayrışmayı bir alan
+                // eklemesi kadar yakın tutuyordu.
+                let join_entry =
+                    wfe_core::v22::wfah_payload::join_row(join_seq, chrono::Utc::now());
                 insert_wfah_entries(&mut tx, commit.wfe_id, std::slice::from_ref(&join_entry))
                     .await?;
 

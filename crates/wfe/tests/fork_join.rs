@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+use wf_wfe::executor::{WfahKind, WfahPayload};
 use wf_wfe::WfeExecutor;
 use wfe_core::ports::OrgPort;
 use wfe_core::types::actor::{Actor, OrgUnit};
@@ -3143,4 +3144,57 @@ async fn admin_send_back_in_parallel_reports_the_node_and_is_not_terminal() {
         out.current_node.is_some(),
         "varılan node cevapta olmalı, joker onu düşürdü"
     );
+}
+
+/// `P04` — **`WfahView.input` DÜŞTÜ, yerine tipli `detail` geldi.**
+///
+/// Ham `input` payload'ın İKİNCİ yoluydu: istemci ya tipli alanı okur ya ham JSON'u
+/// eşeler, ve ikisi ayrışabilirdi. Karar tek şekil diyor — "tek şekil, iki yol yok".
+///
+/// `detail`in `N = Ref` örneklemesi düğüm anahtarlarını ÇÖZÜLMÜŞ verir: istemci
+/// `at_node`u ekrana basmak için ikinci bir çözüm tablosu tutmaz.
+#[tokio::test]
+async fn wfah_view_carries_the_typed_payload_with_resolved_nodes() {
+    let store = Arc::new(ParStore::default());
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+
+    // Finans reddeder → collapse: manşet + düşen kol satırları yazılır.
+    exec.apply(
+        wfe_id,
+        &actors[0],
+        "finans_ret",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Görünüm sorgusu WFE'nin ÇAPASINA göre yetkilendirilir; kol claim'inin sahibi
+    // rastgele bir birimle kurulmuş test aktörüdür (bkz. `claim_owner`), o yüzden
+    // görünümü akışı başlatan birimin aktörüyle okuyoruz.
+    let view = exec
+        .query(wfe_id, &actor("coordinator"))
+        .await
+        .expect("görünüm");
+    let cancelled = view
+        .wfah
+        .iter()
+        .find(|r| r.kind == WfahKind::BranchCancelled)
+        .expect("iptal edilen kol satırı");
+
+    let WfahPayload::BranchCancelled(drop) = &cancelled.detail else {
+        panic!("tipli payload bekleniyordu: {:?}", cancelled.detail);
+    };
+    // Ç3: kimlik ile konum AYRI alanlardır ve ikisi de ÇÖZÜLMÜŞ gelir.
+    assert_eq!(drop.branch_entry.id, "self__legalApprover");
+    assert!(
+        !drop.branch_entry.label.is_empty(),
+        "Ref etiketi boş dönmemeli — istemci ikinci bir çözüm tablosu tutmaz"
+    );
+    assert_eq!(drop.at_node.id, "self__legalApprover");
+    assert_eq!(drop.reason, "collapsed");
 }

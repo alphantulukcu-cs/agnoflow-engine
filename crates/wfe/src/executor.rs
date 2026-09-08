@@ -26,7 +26,12 @@ use wfe_core::v22::visibility::{can_view, filter_dynctx};
 /// `R04`: ad→sınıf kuralı `wfe-core`'a indi (`v22::wfah_kind`) — çekirdeğin iki
 /// tüketicisi (`project_entry`, `$valid` elemesi) adapter'ı göremez. Adapter tipi
 /// RE-EXPORT eder: `WfahView` ve API görünümü DEĞİŞMEDİ.
-pub use wfe_core::v22::wfah_kind::{parse_marker, ParsedMarker, WfahKind};
+pub use wfe_core::v22::wfah_kind::{parse_marker, ParsedMarker, WfahGroup, WfahKind};
+// P04: payload ŞEKLİNİN tek sahibi çekirdektir; adapter yalnız `N = Ref` örneklemesini
+// yeniden ihraç eder — istemci yolu (`wf_wfe::executor::WfahPayload`) tek kalır.
+pub use wfe_core::v22::wfah_payload::{
+    BranchDropPayload, CollapsePayload, GrantPayload, WfahPayload,
+};
 use wfe_core::{ConflictKind, EngineError, OrgPort};
 
 /// SLA-1 (2026-07-16): `claimed_at + node.claim_timeout.after`; claim yoksa,
@@ -595,6 +600,12 @@ impl WfahPathSource for NoWfahPath {
 pub struct WfahView {
     pub seq: u32,
     pub kind: WfahKind,
+    /// `P04`: satırın ROZET GRUBU — `kind`in saf fonksiyonu, motorda hesaplanır.
+    ///
+    /// Portalda `wfahBadgeGroup` diye elle yazılıyordu ve aynı 15 `kind`in İKİNCİ
+    /// sınıflandırmasıydı: yeni bir varyant eklendiğinde hiçbir derleyici orayı
+    /// göstermiyordu. İstemcide kalan tek şey `kind` → ikon/renk seçimi.
+    pub group: WfahGroup,
     /// Satırın hazır başlığı (Türkçe). İstemci kendi metnini yazmak isterse `kind`'a bakar.
     pub label: String,
     /// `kind: action`ta dolu; sistem satırlarında yok (ham marker adı SIZMAZ).
@@ -608,9 +619,15 @@ pub struct WfahView {
     /// Motorun kendi yazdığı satır mı? Ayrım AKTÖRDEDİR (WF Admin'in elle
     /// tetiklediği escalation aynı marker'ı yazar ama gerçek bir aktörle).
     pub system: bool,
-    /// Marker payload'u AYNEN — istemci ayrıntıya inmek isterse buradan okur.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub input: Option<Value>,
+    /// `P04`: satırın TİPLİ payload'ı, düğüm anahtarları ÇÖZÜLMÜŞ (`N = Ref`).
+    ///
+    /// Ham `input` alanı DÜŞTÜ: payload'ın iki yolu vardı (tipli alanları okumak ya da
+    /// JSON'u elle eşelemek) ve ikisi ayrışabilirdi. Karar tek şekil diyor — şeklin
+    /// TEK sahibi `wfe_core::v22::wfah_payload::WfahPayload`.
+    ///
+    /// Tanınmayan satır `Unknown`a düşer; okuma TOPLAM fonksiyondur, hiçbir satır
+    /// görünümü patlatmaz.
+    pub detail: WfahPayload<Ref>,
     pub at: DateTime<Utc>,
     /// Satır bir alt akıştan geldiyse çağrı anahtarı (`call:` öneki SÖKÜLMÜŞ hâli).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -753,6 +770,8 @@ fn to_wfah_view(
     WfahView {
         seq: entry.seq,
         kind: parsed.kind,
+        // P04: grup `kind`ten TÜRETİLİR — burada ikinci bir eşleme yazılmaz.
+        group: parsed.kind.group(),
         label: wfah_label(wfd, &parsed, node.as_ref(), entry.input.as_ref()),
         action: match parsed.kind {
             WfahKind::Action => parsed.action.as_deref().map(|a| Ref::action(wfd, a)),
@@ -763,7 +782,10 @@ fn to_wfah_view(
         // pipeline `system_actor`); WF Admin'in elle tetiklediğinde gerçek aktör yazılır.
         system: entry.actor.user_id.is_nil(),
         actor: entry.actor.clone(),
-        input: entry.input.clone(),
+        // P04: ham satırdan TİPLİ payload; düğüm anahtarları burada, API sınırında
+        // çözülür. `from_row`un ayrımı satırın `action` ADINDAN gelen sınıftır.
+        detail: WfahPayload::from_row(parsed.kind, entry.input.as_ref())
+            .map_nodes(|key| Ref::node(wfd, key)),
         at: entry.applied_at,
         from_call: parsed.from_call,
         step: parsed.step,

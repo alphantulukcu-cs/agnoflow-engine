@@ -60,7 +60,68 @@ pub enum WfahKind {
     BranchSuperseded,
 }
 
+/// Bir WFAH satırının ROZET GRUBU — `WfahKind`in SAF fonksiyonu (`P04`).
+///
+/// # Neden motorda
+///
+/// Bu, aynı 15 `kind`in **ikinci sınıflandırmasıdır**. Portalda `wfahBadgeGroup` diye
+/// elle yazılıyordu; `E07`nin kapalı listesini istemcide aynalamak demekti ve yeni bir
+/// varyant eklendiğinde hiçbir derleyici orayı göstermiyordu. `api-contract-v2` §2d'nin
+/// motora taşıdığı işin unutulmuş parçasıydı.
+///
+/// İstemcide kalan tek şey `kind` → **ikon/renk** seçimidir; sınıflandırmanın tamamı
+/// burada. Portal metin de ÜRETMEZ — etiketler motordan gelir.
+///
+/// `serde` serileşmesi `WfahView.group` olarak wire'a çıkar ve SÖZLEŞMEDİR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WfahGroup {
+    /// Süre olayları: akış deadline'ı ve escalation kademeleri.
+    Sla,
+    /// `Ç13`: sahiplik DOĞDU ya da DÜŞTÜ. Ayrı bir grup olmasının gerekçesi Ç13'ün
+    /// gerekçesiyle aynı — *"yeni bir olay SINIFI gerçekten var"*.
+    ///
+    /// ⚠️ `claim_released` `Sla`da KALAMAZDI: `E12` ile artık `self` / `admin` /
+    /// `taken_by_other` sebeplerini de taşıyor, yani SLA olayı OLMAYAN satırlar
+    /// SLA rozetiyle görünürdü.
+    Ownership,
+    /// Kolların açılması, varması, birleşmesi.
+    Parallel,
+    /// Paralel modu KAPATAN olaylar — `collapse` ve iki kol düşme biçimi.
+    ///
+    /// Varyant adı `CollapseGroup`, çünkü `Collapse` adı `WfahKind`de zaten var ve
+    /// iki enum aynı modülde `use ...::*` ile birlikte kullanılıyor. Wire değeri
+    /// `"collapse"` — okuyucu için fark YOK.
+    #[serde(rename = "collapse")]
+    CollapseGroup,
+    /// Alt akış çağrısının kapanışı / kırpılması.
+    Call,
+    /// Rozet TAŞIMAYAN satırlar: insan aksiyonu ve otomatik işlem.
+    ///
+    /// Adın sonundaki alt çizgi `Option::None` ile karışmasın diye; wire değeri
+    /// `"none"`.
+    #[serde(rename = "none")]
+    None_,
+}
+
 impl WfahKind {
+    /// Bu satırın rozet grubu (`P04`). Jokersiz `match`: yeni bir `WfahKind` varyantı
+    /// eklendiğinde derleyici BURAYI gösterir ve grup sorusu bir kez cevaplanır.
+    pub fn group(self) -> WfahGroup {
+        match self {
+            WfahKind::Deadline | WfahKind::Escalation | WfahKind::EscalationSkipped => {
+                WfahGroup::Sla
+            }
+            WfahKind::ClaimTaken | WfahKind::ClaimReleased => WfahGroup::Ownership,
+            WfahKind::Fork | WfahKind::BranchArrived | WfahKind::Join => WfahGroup::Parallel,
+            WfahKind::Collapse | WfahKind::BranchCancelled | WfahKind::BranchSuperseded => {
+                WfahGroup::CollapseGroup
+            }
+            WfahKind::CallReturn | WfahKind::CallTruncated => WfahGroup::Call,
+            WfahKind::Action | WfahKind::Trigger => WfahGroup::None_,
+        }
+    }
+
     /// Bu satır bir AKSİYON satırı mı — `$prev`/`$first` elemesinin ölçütü (`R04`/S1).
     ///
     /// Aksiyon = WFD'nin `actions` kaydındaki bir adımın gerçekleştirilmesi (Ç13).
@@ -202,6 +263,58 @@ mod tests {
         assert_eq!(all.len(), 15, "kapalı liste 15 varyanttır (E07/S1)");
         for (kind, name) in all {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
+        }
+    }
+
+    /// `P04` — **rozet grubu motora taşındı.** `WfahGroup`, `WfahKind`in SAF
+    /// fonksiyonudur ve altı değer taşır. Portaldaki `wfahBadgeGroup` aynı 15 `kind`in
+    /// İKİNCİ sınıflandırmasıydı; ikinci bir liste tutmak, `E07`nin kapalı listesini
+    /// istemcide elle aynalamak demekti.
+    #[test]
+    fn every_kind_maps_to_exactly_one_group() {
+        use WfahGroup::*;
+        use WfahKind::*;
+        let beklenen = [
+            (Deadline, Sla),
+            (Escalation, Sla),
+            (EscalationSkipped, Sla),
+            // ⚠️ `claim_released` `sla` grubunda KALAMAZ: `E12` ile artık `self` /
+            // `admin` / `taken_by_other` sebeplerini de taşıyor, yani SLA olayı
+            // OLMAYAN satırlar o grupta görünürdü.
+            (ClaimTaken, Ownership),
+            (ClaimReleased, Ownership),
+            (Fork, Parallel),
+            (BranchArrived, Parallel),
+            (Join, Parallel),
+            (Collapse, CollapseGroup),
+            (BranchCancelled, CollapseGroup),
+            (BranchSuperseded, CollapseGroup),
+            (CallReturn, Call),
+            (CallTruncated, Call),
+            (Action, None_),
+            (Trigger, None_),
+        ];
+        assert_eq!(beklenen.len(), 15, "kapalı liste 15 varyanttır (E07/S1)");
+        for (kind, group) in beklenen {
+            assert_eq!(kind.group(), group, "{kind:?} yanlış gruba düştü");
+        }
+    }
+
+    /// Grup serileşmesi de SÖZLEŞMEDİR — `WfahView.group` olarak wire'a çıkıyor ve
+    /// portal ona göre rozet seçiyor.
+    #[test]
+    fn group_names_are_the_wire_value_set() {
+        let all = [
+            (WfahGroup::Sla, "sla"),
+            (WfahGroup::Ownership, "ownership"),
+            (WfahGroup::Parallel, "parallel"),
+            (WfahGroup::CollapseGroup, "collapse"),
+            (WfahGroup::Call, "call"),
+            (WfahGroup::None_, "none"),
+        ];
+        assert_eq!(all.len(), 6);
+        for (g, name) in all {
+            assert_eq!(serde_json::to_value(g).unwrap(), serde_json::json!(name));
         }
     }
 

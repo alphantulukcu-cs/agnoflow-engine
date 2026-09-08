@@ -99,6 +99,9 @@ struct ParStore {
     /// bunu `wf.wfe_branch.c_a` kolonuna yazar; testte doğrulanabilmesi için
     /// mock yalnız KAYDEDER (kolon taklidi gereksiz karmaşa olurdu).
     last_branch_c_a: Mutex<Vec<(String, usize)>>,
+    /// Aynı kaydın ROL kırılımı — "liste dolu mu" ile "genişlemiş küme yazıldı mı"
+    /// ayrı sorulardır ve yalnız sayı bakan bir test ikincisini göremez.
+    last_branch_c_a_roles: Mutex<Vec<(String, Vec<String>)>>,
     /// 2026-08-13 node listable: son commit'in kol başına `branch_view_c_a`
     /// kaydı (gerçek adapter `wf.wfe_branch.view_c_a` kolonuna yazar). `c_a`nın
     /// YANINDA ayrı tutulur — ikisinin aynı kol kümesini kapsadığı ancak ayrı
@@ -262,6 +265,16 @@ impl WfeStore for ParStore {
     }
 
     async fn commit(&self, commit: &TransitionCommit) -> Result<(), EngineError> {
+        *self.last_branch_c_a_roles.lock().unwrap() = commit
+            .branch_c_a
+            .iter()
+            .map(|(node, c_a)| {
+                (
+                    node.clone(),
+                    c_a.iter().map(|c| c.role.clone()).collect::<Vec<_>>(),
+                )
+            })
+            .collect();
         *self.last_branch_c_a.lock().unwrap() = commit
             .branch_c_a
             .iter()
@@ -1860,6 +1873,21 @@ async fn branch_escalation_writes_the_widened_pool_to_the_branch_column() {
     assert!(
         entry.1 > 0,
         "genişlemiş havuz boş yazılmış — grant kol kanalına inmedi"
+    );
+
+    // ⚠️ Kolonun DOLU olması yetmez: içinde GRANT'ın adayı olmalı. Havuzu düz
+    // `node.c_a` ile yazan bir yol da dolu bir liste üretir (node'un kendi kuralı
+    // çözülür) ve "genişledi" YALANINI söyler — E04'ün genişlettiği küme kolona hiç
+    // inmemiş olur. Kademenin grant'ı `branchManager`, node'un kendi kuralı değil.
+    let roles = store.last_branch_c_a_roles.lock().unwrap().clone();
+    let branch_roles = roles
+        .iter()
+        .find(|(n, _)| n == "self__financeApprover")
+        .map(|(_, r)| r.clone())
+        .unwrap_or_default();
+    assert!(
+        branch_roles.iter().any(|r| r == "branchManager"),
+        "kol havuzu grant'ın adayını taşımalı (E04: c_a ∪ açılmış grantlar): {branch_roles:?}"
     );
 }
 

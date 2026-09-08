@@ -1264,29 +1264,6 @@ impl<'a> Engine<'a> {
         })
     }
 
-    /// Query-time: bir node'un c_a'sını çözülmüş aday listesine (orgu × rol / orgu ×
-    /// user) çevirir — GET /wfe/:id kol görünümünün "bu kolu kim claim edebilir"
-    /// bilgisi (tek-kol `current_c_a`'nın kol karşılığı). YALNIZ `node.c_a`; listable
-    /// union DAHİL DEĞİL — bu claim adaylığıdır, view değil. `viewer` yalnızca anchor'sız
-    /// formlarda (Selector `self`) default anchor'dır; anchor-tabanlı c_orgu formlarında
-    /// (wfah/ctx) sonucu ETKİLEMEZ. Persist edilmez — her sorguda taze çözülür.
-    pub async fn resolve_node_c_a(
-        &self,
-        wfd: &Wfd,
-        node_key: &str,
-        ctx: &Value,
-        wfah: &Wfah,
-        viewer: &Actor,
-        orgtnt_id: Uuid,
-    ) -> Result<Vec<ResolvedCandidate>, EngineError> {
-        let node = wfd
-            .nodes
-            .get(node_key)
-            .ok_or_else(|| EngineError::InvalidWfd(format!("bilinmeyen node '{node_key}'")))?;
-        self.resolve_candidates(&node.c_a, ctx, wfah, viewer.orgu_id, orgtnt_id)
-            .await
-    }
-
     /// Görünürlük projeksiyonu (2026-08-13): `wfd.listable[] ∪ wfd.wf_admin[]`
     /// kurallarının ÇÖZÜLMÜŞ aday listesi — `wf.wfe.view_c_a` kolonuna yazılır.
     ///
@@ -3694,12 +3671,30 @@ impl<'a> Engine<'a> {
             }
             return Ok(resolved);
         }
+        // E03/a: JOKER KAPANDI. Eski gövde `landed` üzerinde jokerliydi ve `landed`
+        // bir `Option<&CallSite>` olduğu için `E02`/S1-EK'in `CommitOutcome` joker
+        // yasağı bu satırı KAPSAMIYORDU: `StayAt` eklendiğinde derleyici burayı
+        // işaret ETMEZ, `resolved_c_a` sessizce boş kalırdı.
+        //
+        // Node artık `resolution()`dan okunur — soru "hangi outcome" değil, **işin
+        // DURDUĞU node**. ⚠️ `to_node()` KULLANILAMAZ: `Ç2` gereği `StayAt`te `None`dır
+        // (marker satırı hareket taşımaz) ve tam da kapatılmak istenen deliği açardı.
         match landed {
             Some(CallSite::Node(node_key)) => {
                 self.node_candidates(node_key, wfd, ctx, wfah, anchor_orgu, orgtnt_id)
                     .await
             }
-            _ => Ok(vec![]),
+            // Ardıl akış terminalden doğar: iş BİTTİ, node havuzu yok.
+            Some(CallSite::Terminal(_)) => Ok(vec![]),
+            // Hareket bir çağrı sitesine inmedi — işin durduğu node varsa onun havuzu
+            // (`StayAt`), yoksa boş (kol varışı, join dolmadı, terminal sınıfı).
+            None => match outcome.resolution().1 {
+                Some(node_key) => {
+                    self.node_candidates(node_key, wfd, ctx, wfah, anchor_orgu, orgtnt_id)
+                        .await
+                }
+                None => Ok(vec![]),
+            },
         }
     }
 
@@ -3714,7 +3709,7 @@ impl<'a> Engine<'a> {
     /// gereken grant kayboluyordu. Görünürlük grant'ları artık AYRI ve KALICI bir
     /// kolonda: `view_c_a` (bkz. `Engine::view_grants`). Bu kolon adının söylediği
     /// şeydir: yalnız node'un adayları.
-    async fn node_candidates(
+    pub async fn node_candidates(
         &self,
         node_key: &str,
         wfd: &Wfd,

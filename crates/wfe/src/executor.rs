@@ -1740,19 +1740,11 @@ impl WfeExecutor {
             // Kol c_a'sı node c_a'sıdır; çapası node yolundakiyle AYNI kalır
             // (geçişi yapan aktör) — bu kolon havuz eşleşmesi içindir, kalıcı
             // görünürlük grant'ı DEĞİLDİR.
+            // E03/b + E04: havuz = `node.c_a ∪ açılmış grantlar`. Düz `node.c_a`
+            // çözen bir yol DOLU ama DAR bir liste yazar ve "genişledi" yalanını
+            // söyler — grant kol kanalına hiç inmez.
             let c_a = engine
-                .resolve_node_c_a(
-                    wfd,
-                    &node_key,
-                    ctx,
-                    &wfah,
-                    &Actor {
-                        orgu_id: origin,
-                        user_id: Uuid::nil(),
-                        role: String::new(),
-                    },
-                    wfes.orgtnt_id,
-                )
+                .node_candidates(&node_key, wfd, ctx, &wfah, origin, wfes.orgtnt_id)
                 .await?;
             // Kolun node listable'ı — `c_a` ile AYNI kol kümesi, AYNI anda.
             // `$node` guard'ı burada `None`'dır: paralel modda wfe-seviyesi
@@ -1855,12 +1847,12 @@ impl WfeExecutor {
             let active = b.status == BranchStatus::Active;
             let c_a = if active {
                 engine
-                    .resolve_node_c_a(
-                        &wfd,
+                    .node_candidates(
                         &b.branch_node,
+                        &wfd,
                         ctx,
                         &wfes.wfah,
-                        viewer,
+                        viewer.orgu_id,
                         wfes.orgtnt_id,
                     )
                     .await?

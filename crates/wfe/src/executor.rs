@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 use wfe_core::types::actor::{Actor, CandidateActor};
-use wfe_core::types::wfah::WfahEntry;
+use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{CallMode, JoinRule, StartAs, Wfd, WftTarget};
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::display;
@@ -32,6 +32,10 @@ pub use wfe_core::v22::wfah_kind::{parse_marker, ParsedMarker, WfahGroup, WfahKi
 pub use wfe_core::v22::wfah_payload::{
     BranchDropPayload, CollapsePayload, GrantPayload, WfahPayload,
 };
+/// `A04`: eleme SEBEBİ de `wfe-core`ın (`v22::valid`) tipidir ve API görünümüne
+/// AYNEN çıkar — adapter ikinci bir enum tanımlamaz (`WfahKind` ile aynı desen).
+pub use wfe_core::v22::valid::InvalidReason;
+use wfe_core::v22::valid::{self, ValidRules};
 use wfe_core::{ConflictKind, EngineError, OrgPort};
 
 /// SLA-1 (2026-07-16): `claimed_at + node.claim_timeout.after`; claim yoksa,
@@ -635,6 +639,17 @@ pub struct WfahView {
     /// Escalation adım numarası (0 tabanlı) — yalnız escalation satırlarında.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<usize>,
+    /// `A04`: satır `$valid`den ELENDİYSE **neden** elendiği. Alan YOKSA satır
+    /// GEÇERLİDİR — ayrı bir `valid: bool` YAZILMAZ: iki alan aynı gerçeğin
+    /// ayrışabilen iki temsili olurdu. İstemci *"kaç geçerli onay var"* sorusunu
+    /// `wfah.filter(h => !h.invalid_reason)` ile doğrudan cevaplar; defter taraması,
+    /// marker eşlemesi, ZEN ayrıştırması YAPMAZ.
+    ///
+    /// Kaynak `wfe-core`ın `$valid` türetimidir (`valid::invalid_reason`) — burada
+    /// İKİNCİ bir uygulama yoktur: ayrışırsa ZEN "elendi" derken ekran "geçerli" der.
+    /// Hesap yalnız `GET /wfe/:id`de koşar (liste uçları `wfah[]` taşımıyor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<InvalidReason>,
 }
 
 /// Collapse/iptal marker'larının `reason` alanını okunur metne çevirir. Kod kapalı
@@ -745,8 +760,14 @@ fn wfah_label(wfd: &Wfd, p: &ParsedMarker, node: Option<&Ref>, input: Option<&Va
 /// Ç2 (v2.3) ile `WfahEntry` artık `from_node`/`to_node` taşıyor; bu harita
 /// AYNI bilgiyi `wf.wfah` kolonlarından ayrı bir sorguyla getiriyor ve
 /// tekilleştirilmesi ayrı bir iştir (bu kararın kapsamı satır alanlarıdır).
+///
+/// `A04`: `wfah`/`rules` satır BAŞINA değil DEFTERİN TAMAMI üzerinden gerekir —
+/// eleme kuralı 1 ve 2 BAŞKA satırlara bakar (iptal marker'ı, geri gönderme
+/// penceresi). Bu yüzden dönüşüm artık defteri de alır.
 fn to_wfah_view(
     wfd: &Wfd,
+    wfah: &Wfah,
+    rules: &ValidRules,
     entry: &WfahEntry,
     from_nodes: &std::collections::HashMap<u32, String>,
 ) -> WfahView {
@@ -789,6 +810,9 @@ fn to_wfah_view(
         at: entry.applied_at,
         from_call: parsed.from_call,
         step: parsed.step,
+        // `A04`/S2: TEK KOD. `$valid` listesi de (`valid::derive_valid`) aynı
+        // gövdeden türer, dolayısıyla iki yüzey ayrışamaz.
+        invalid_reason: valid::invalid_reason(wfah, rules, entry),
     }
 }
 
@@ -1936,11 +1960,14 @@ impl WfeExecutor {
                 at: r.at,
             })
             .collect();
+        // `A04`/S3: eleme hesabı YALNIZ burada koşar — liste uçları (`PoolTask`,
+        // `WfeRow`) `wfah[]` döndürmüyor, orada hesap YOK (emsal `BranchView.c_a`).
+        let valid_rules = ValidRules::for_version(&wfd);
         let wfah: Vec<WfahView> = wfes
             .wfah
             .entries()
             .iter()
-            .map(|e| to_wfah_view(&wfd, e, &from_nodes))
+            .map(|e| to_wfah_view(&wfd, &wfes.wfah, &valid_rules, e, &from_nodes))
             .collect();
         // Sıradaki escalation adımı (vade gerekmez) — WF Admin'in göreceği sayaç.
         let next_escalation =
@@ -2519,5 +2546,194 @@ mod branch_hint_tests {
         let w = wfes(None, Some("onay"));
         assert!(require_branch_hint(&w, None).is_ok());
         assert!(require_branch_hint(&w, Some("onay")).is_ok());
+    }
+}
+
+/// `A04` KAPILARI — `WfahView.invalid_reason`.
+///
+/// Dönüşümün girdisi DEFTERİN TAMAMIDIR, o yüzden kapılar elle kurulmuş TEK bir
+/// defter üzerinde koşar: beş sebep de aynı defterde görünür ve `$valid` kümesiyle
+/// karşılaştırma anlamlı olur (aynı defter, aynı kural seti).
+#[cfg(test)]
+mod invalid_reason_tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    /// Geri gönderme aksiyonu (`wft: {targets}`) TAŞIYAN minimal belge — kural
+    /// setinin belgeden okuduğu tek şey bu kümedir (`ValidRules::for_version`).
+    fn wfd() -> Wfd {
+        Wfd::from_value(json!({
+            "wfd_version": "2.3",
+            "id": "a04-kapisi",
+            "name": "A04 kapısı",
+            "version": "1.0.0",
+            "context": {"type": "object", "properties": {}},
+            "nodes": {
+                "self__memur":  {"c_a": {"c_orgu": "self", "c_r": ["memur"]}},
+                "self__hukuk":  {"c_a": {"c_orgu": "self", "c_r": ["hukuk"]}},
+                "self__finans": {"c_a": {"c_orgu": "self", "c_r": ["finans"]}},
+                "self__teknik": {"c_a": {"c_orgu": "self", "c_r": ["teknik"]}},
+                "self__mudur":  {"c_a": {"c_orgu": "self", "c_r": ["mudur"]}}
+            },
+            "start": [{"id": "s1", "action": "basvur"}],
+            "actions": {
+                "basvur":       {"input": {"required": [], "optional": []},
+                                 "from": "self__memur", "wft": {"node": "self__mudur"}},
+                "hukuk_onay":   {"input": {"required": [], "optional": []},
+                                 "from": "self__hukuk", "wft": {"node": "self__mudur"}},
+                "finans_onay":  {"input": {"required": [], "optional": []},
+                                 "from": "self__finans", "wft": {"node": "self__mudur"}},
+                "teknik_onay":  {"input": {"required": [], "optional": []},
+                                 "from": "self__teknik", "wft": {"node": "self__mudur"}},
+                "geri_gonder":  {"input": {"required": [], "optional": []},
+                                 "from": "self__mudur",
+                                 "wft": {"targets": [{"node": "self__memur"}]}}
+            },
+            "terminals": [{"id": "bitti", "wfe_end_response": {}}]
+        }))
+        .unwrap()
+    }
+
+    fn row(seq: u32, action: &str, branch: Option<&str>) -> WfahEntry {
+        WfahEntry {
+            seq,
+            action: action.into(),
+            actor: Actor {
+                orgu_id: Uuid::nil(),
+                user_id: Uuid::nil(),
+                role: "system".into(),
+            },
+            input: None,
+            applied_at: chrono::DateTime::UNIX_EPOCH,
+            from_node: None,
+            to_node: None,
+            branch_entry: branch.map(str::to_string),
+            branch_round: branch.map(|_| 1),
+        }
+    }
+
+    /// İKİ TURLUK defter: birinci tur geri gönderme ile kapandı, ikinci turda bir kol
+    /// iptal edildi, bir kolun onayı geçersizleşti ve bir sahiplik satırı yazıldı.
+    fn ledger() -> Wfah {
+        let branches = json!({"branches": ["self__hukuk", "self__finans", "self__teknik"]});
+        Wfah(vec![
+            row(1, "basvur", None),
+            WfahEntry {
+                input: Some(branches.clone()),
+                ..row(2, "_fork", None)
+            },
+            row(3, "hukuk_onay", Some("self__hukuk")),
+            row(4, "finans_onay", Some("self__finans")),
+            row(5, "_join", None),
+            // Geri gönderme: penceresi (0, 6) — kendisi KALIR, öncesi elenir.
+            WfahEntry {
+                to_node: Some("self__memur".into()),
+                ..row(6, "geri_gonder", None)
+            },
+            WfahEntry {
+                input: Some(branches),
+                ..row(7, "_fork", None)
+            },
+            row(8, "hukuk_onay", Some("self__hukuk")),
+            row(9, "finans_onay", Some("self__finans")),
+            row(10, "claim_taken:self__hukuk", Some("self__hukuk")),
+            row(11, "teknik_onay", Some("self__teknik")),
+            WfahEntry {
+                input: Some(json!({"at_node": "self__finans", "reason": "collapsed"})),
+                ..row(12, "_branch_superseded", Some("self__finans"))
+            },
+            WfahEntry {
+                input: Some(json!({"at_node": "self__teknik", "reason": "collapsed"})),
+                ..row(13, "_branch_cancelled", Some("self__teknik"))
+            },
+        ])
+    }
+
+    fn views(wfd: &Wfd, wfah: &Wfah) -> Vec<WfahView> {
+        let rules = ValidRules::for_version(wfd);
+        let from_nodes: HashMap<u32, String> = HashMap::new();
+        wfah.entries()
+            .iter()
+            .map(|e| to_wfah_view(wfd, wfah, &rules, e, &from_nodes))
+            .collect()
+    }
+
+    /// **KAPI (a)** — aynı defterde `$valid` kümesi ile `invalid_reason == None`
+    /// kümesi BİREBİR. Ayrışırsa ZEN "elendi" derken ekran "geçerli" der.
+    #[test]
+    fn valid_set_equals_rows_without_a_reason() {
+        let wfd = wfd();
+        let wfah = ledger();
+        let from_view: Vec<u32> = views(&wfd, &wfah)
+            .iter()
+            .filter(|v| v.invalid_reason.is_none())
+            .map(|v| v.seq)
+            .collect();
+        let from_core: Vec<u32> = valid::derive_valid(&wfah, &ValidRules::for_version(&wfd))
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert_eq!(from_view, from_core);
+        assert_eq!(from_core, vec![6, 7, 8, 12, 13], "beklenen geçerli küme");
+    }
+
+    /// **KAPI (b)** — BEŞ sebebin her biri için bir satır. Sıra `valid.rs`in kural
+    /// sırasıdır: 3 ve 4 hem `old_round` hem `sent_back_window` penceresine düşer,
+    /// alan İLK eşleşen sebebi taşır (`A04`, FEDA EDİLENLER; sıra kalemi `S28`).
+    #[test]
+    fn every_reason_appears_with_its_row() {
+        let reasons: Vec<(u32, Option<InvalidReason>)> = views(&wfd(), &ledger())
+            .iter()
+            .map(|v| (v.seq, v.invalid_reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![
+                (1, Some(InvalidReason::SentBackWindow)),
+                (2, Some(InvalidReason::SentBackWindow)),
+                (3, Some(InvalidReason::OldRound)),
+                (4, Some(InvalidReason::OldRound)),
+                (5, Some(InvalidReason::SentBackWindow)),
+                (6, None),
+                (7, None),
+                (8, None),
+                (9, Some(InvalidReason::BranchSuperseded)),
+                (10, Some(InvalidReason::Ownership)),
+                (11, Some(InvalidReason::BranchCancelled)),
+                (12, None),
+                (13, None),
+            ]
+        );
+    }
+
+    /// **KAPI (c)** — GEÇERLİ satırın wire şekli DEĞİŞMEDİ: alan hiç gönderilmez.
+    /// Elenen satırda değer `snake_case` koddur (metin DEĞİL — cümle istemcide kurulur).
+    #[test]
+    fn the_field_is_absent_on_a_valid_row() {
+        let wire: Vec<Value> = views(&wfd(), &ledger())
+            .iter()
+            .map(|v| serde_json::to_value(v).unwrap())
+            .collect();
+        assert!(
+            wire[5].get("invalid_reason").is_none(),
+            "geçerli satırda alan YOK: {}",
+            wire[5]
+        );
+        assert_eq!(wire[8]["invalid_reason"], json!("branch_superseded"));
+        assert_eq!(wire[9]["invalid_reason"], json!("ownership"));
+    }
+
+    /// **KAPI (d)** — `old_round`: ikinci turda BİRİNCİ turun onayı elenmiş, ikinci
+    /// turunki geçerli. İki satırın aksiyonu ve kolu AYNI; ayıran tek şey tur.
+    #[test]
+    fn the_previous_rounds_approval_is_eliminated() {
+        let views = views(&wfd(), &ledger());
+        let hukuk: Vec<(u32, Option<InvalidReason>)> = views
+            .iter()
+            .filter(|v| v.action.as_ref().map(|a| a.id.as_str()) == Some("hukuk_onay"))
+            .map(|v| (v.seq, v.invalid_reason))
+            .collect();
+        assert_eq!(hukuk, vec![(3, Some(InvalidReason::OldRound)), (8, None)]);
     }
 }

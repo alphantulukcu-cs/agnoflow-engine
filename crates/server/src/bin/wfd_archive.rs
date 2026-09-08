@@ -37,8 +37,9 @@
 //! Blob DB'den SONRA yazılır (`wfe_reset`in tersi, bilerek): orada silme vardı ve
 //! anahtarını kaybetmemek için blob önce gidiyordu; burada yazma var ve satırı olmayan
 //! bir blob yetim kalır. Blob yazılamazsa satır zaten aktiftir ve fetch "bulunamadı"
-//! verir — betik yeniden koşulabilir, arşivleme `WHERE is_active` sayesinde ikinci
-//! koşumda hiçbir satıra dokunmaz ve `ON CONFLICT DO NOTHING` seed'i tekrarlamaz.
+//! verir — betik yeniden koşulabilir. Arşivleme seed satırını KAPSAM DIŞI bırakır
+//! (`wfd_id <> golden`), yoksa ikinci koşum yeni golden'ı da kapatır ve `ON CONFLICT
+//! DO NOTHING` onu geri AÇMAZDI: katalog boş kalırdı.
 //!
 //! ⚠️ `is_active = true` yazarak geri almak belgeyi yeniden koşum yoluna sokar ve sürüm
 //! kapısı onu YİNE reddeder: bayrak bir TUZAK DÜĞMESİDİR, geri alma R07 ile
@@ -90,11 +91,17 @@ async fn main() {
 
     let pool = connect(&db).await;
 
+    let orgtnt_id: Uuid = GOLDEN_ORGTNT_ID.parse().expect("orgtnt uuid");
+    let wfd_id: Uuid = GOLDEN_WFD_ID.parse().expect("wfd uuid");
+    let key = wf_wfd::storage::s3_key(orgtnt_id, wfd_id, GOLDEN_VERSION);
+
     // 1) Arşivlenecek satırlar — kuru koşumun asıl çıktısı.
     println!("--- Arşivlenecek satırlar (is_active = true olanlar) ---");
     let meta_by_status = sqlx::query(
-        "SELECT status, count(*) AS n FROM wf.wfd_meta WHERE is_active GROUP BY status ORDER BY status",
+        "SELECT status, count(*) AS n FROM wf.wfd_meta
+          WHERE is_active AND wfd_id <> $1 GROUP BY status ORDER BY status",
     )
+    .bind(wfd_id)
     .fetch_all(&pool)
     .await
     .expect("wfd_meta sayımı");
@@ -115,10 +122,6 @@ async fn main() {
 
     // 2) Seed'in ön koşulları. Proje satırı yoksa göçün `INSERT … SELECT`i hiçbir şey
     //    yazmaz — bunu apply'dan ÖNCE görmek gerekir, sonra sessizce eksik kalır.
-    let orgtnt_id: Uuid = GOLDEN_ORGTNT_ID.parse().expect("orgtnt uuid");
-    let wfd_id: Uuid = GOLDEN_WFD_ID.parse().expect("wfd uuid");
-    let key = wf_wfd::storage::s3_key(orgtnt_id, wfd_id, GOLDEN_VERSION);
-
     let project_id: Option<Uuid> = sqlx::query_scalar(
         "SELECT project_id FROM wf.project WHERE orgtnt_id = $1 AND name = $2",
     )
@@ -159,9 +162,14 @@ async fn main() {
     // 3) Arşivleme + seed satırı TEK transaction: yarım arşivlenmiş katalog, motorun
     //    okuyamadığı belgelerin bir kısmını aktif bırakırdı.
     let mut tx = pool.begin().await.expect("tx");
+    // Seed satırı arşivlemenin DIŞINDA: betik iki kez koşarsa (blob hatası sonrası
+    // yeniden koşum gibi) `WHERE is_active` yeni golden'ı da kapatır ve `ON CONFLICT
+    // DO NOTHING` onu geri AÇMAZ — katalog boş kalırdı.
     let archived_meta = sqlx::query(
-        "UPDATE wf.wfd_meta SET is_active = false, updated_at = now() WHERE is_active",
+        "UPDATE wf.wfd_meta SET is_active = false, updated_at = now()
+          WHERE is_active AND wfd_id <> $1",
     )
+    .bind(wfd_id)
     .execute(&mut *tx)
     .await
     .expect("wfd_meta arşivleme")

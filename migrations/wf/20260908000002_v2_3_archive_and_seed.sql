@@ -45,9 +45,13 @@
 -- (kullanıcı hükmü, R07/S2 tablo satır 2).
 -- ----------------------------------------------------------------
 
+-- Seed satırı kapsam DIŞI: göç yeniden uygulanırsa (elle koşum, ortam kurtarma)
+-- koşulsuz arşivleme aşağıda yazılan golden'ı da kapatır ve `ON CONFLICT DO NOTHING`
+-- onu geri AÇMAZ — katalog boş kalırdı.
 UPDATE wf.wfd_meta
 SET is_active = false, updated_at = now()
-WHERE is_active;
+WHERE is_active
+  AND wfd_id <> '9fe82344-b477-4af9-bc73-0afed2c56c4f';
 
 UPDATE wf.wfd_template
 SET is_active = false, updated_at = now()

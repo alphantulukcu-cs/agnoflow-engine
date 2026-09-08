@@ -38,6 +38,8 @@
 //! Aksiyon satırları (ve `admin:*` global aksiyon satırları, ki onlar da `WfahKind`
 //! tarafında `Action`a düşüyor) ham `input`larını korur.
 
+use crate::types::actor::Actor;
+use crate::types::wfah::WfahEntry;
 use crate::v22::wfah_kind::WfahKind;
 use serde::Serialize;
 use serde_json::Value;
@@ -215,6 +217,39 @@ pub struct BranchDropPayload<N> {
     pub trigger_branch: Option<N>,
     pub trigger_action: Option<String>,
     pub trigger_actor: Value,
+}
+
+/// `_join` satırı — **çekirdeğin YAZMADIĞI tek marker'ın TEK yapıcısı.**
+///
+/// `Ç2`nin dokümante ettiği istisna: join varışını motor değil, AND/quorum join'in
+/// son varışıyla aynı transaction'da `wfe::wfe_adapter` yazar; `sim` de kendi
+/// store'unda yazar. Yani satırın İKİ üreticisi var ve ikisi de çekirdeğin dışında.
+///
+/// İkisi bugüne dek satırı AYRI AYRI kuruyordu ve `sim.rs`in kendi yorumu riski
+/// söylüyordu: *"sim ile motor ayrışırsa `$valid` iki yerde farklı hesaplanır"*.
+/// `P04`ün *"sim aynı yapıcıları kullanır"* hükmü tam olarak bunu kapatıyor —
+/// alan eklendiğinde ya da anlamı değiştiğinde tek yer güncellenir, ikinci kopyayı
+/// güncellemeyi unutmak MÜMKÜN DEĞİL.
+pub fn join_row(seq: u32, applied_at: chrono::DateTime<chrono::Utc>) -> WfahEntry {
+    WfahEntry {
+        seq,
+        action: "_join".into(),
+        actor: Actor {
+            orgu_id: uuid::Uuid::nil(),
+            user_id: uuid::Uuid::nil(),
+            role: "system".into(),
+        },
+        // Join payload TAŞIMAZ (`WfahPayload::Join`).
+        input: None,
+        applied_at,
+        // Ç2: MARKER satırıdır — hareketi bu commit'in aksiyon satırı taşır
+        // (`JoinComplete` → kol node'undan join hedefine).
+        from_node: None,
+        to_node: None,
+        // Ç4/E14: join paralel modu KAPATIR; satır bir kolun İÇİNDE değildir.
+        branch_entry: None,
+        branch_round: None,
+    }
 }
 
 impl CollapsePayload<String> {
@@ -665,6 +700,36 @@ mod tests {
             p.to_value(),
             json!({"tutar": 5}),
             "ham girdi AYNEN geri verilmeli — sarmalama YOK"
+        );
+    }
+}
+
+#[cfg(test)]
+mod join_row_tests {
+    use super::*;
+
+    /// `_join` satırının şekli ÇİVİLENİR: iki üreticisi de (adapter + sim) bu
+    /// yapıcıdan geçtiği için burada doğru olan her yerde doğrudur.
+    #[test]
+    fn the_join_row_is_a_markerless_system_row() {
+        let now = chrono::Utc::now();
+        let row = join_row(7, now);
+        assert_eq!(row.seq, 7);
+        assert_eq!(row.action, "_join");
+        assert_eq!(row.actor.role, "system");
+        assert!(row.actor.user_id.is_nil(), "sistem satırı — aktör nil");
+        assert_eq!(row.input, None, "join payload taşımaz");
+        assert_eq!(row.applied_at, now);
+        // Ç2: marker satırı hareket taşımaz.
+        assert_eq!(row.from_node, None);
+        assert_eq!(row.to_node, None);
+        // Ç4/E14: join paralel modu KAPATIR — satır bir kolun içinde değildir.
+        assert_eq!(row.branch_entry, None);
+        assert_eq!(row.branch_round, None);
+        // Sınıflandırma da tutarlı olmalı: ad → sınıf zinciri aynı satırı okuyor.
+        assert_eq!(
+            crate::v22::wfah_kind::parse_marker(&row.action).kind,
+            WfahKind::Join
         );
     }
 }

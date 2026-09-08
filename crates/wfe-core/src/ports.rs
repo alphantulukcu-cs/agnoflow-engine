@@ -35,7 +35,7 @@ pub trait OrgPort: Send + Sync {
 
     /// Madde 6: `claimant`'a o an (now) geçerli — aktif + zaman penceresi içinde —
     /// vekaletlerin aday listesi. Alıcı (grantee) eşleşmesi matcher'da
-    /// (`authorize_with_delegation`) yapılır; bu yüzden dönen liste bir üst kümedir
+    /// (`authorize_with_delegation_anchored`) yapılır; bu yüzden dönen liste bir üst kümedir
     /// (adapter tenant + zaman + kaba grantee-c_u/havuz filtresiyle daraltabilir).
     /// Default `Ok(vec![])` — vekalet desteklemeyen port'lar (sim/mock) için geriye uyum.
     async fn active_delegations_for(

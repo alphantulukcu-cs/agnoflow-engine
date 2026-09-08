@@ -129,11 +129,6 @@ impl AttachmentStore {
 
     // ---- ad-hoc not dosyaları (`notes/{wfe_id}/{file_id}`) ----
 
-    /// Not dosyası slotu yüklenmiş mi?
-    pub async fn note_exists(&self, wfe_id: Uuid, file_id: Uuid) -> Result<bool, opendal::Error> {
-        self.op.exists(&Self::note_key(wfe_id, file_id)).await
-    }
-
     /// Not dosyası yükleme.
     pub async fn note_write(
         &self,

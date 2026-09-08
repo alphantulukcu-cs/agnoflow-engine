@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use wf_wfe::WfeExecutor;
 use wfe_core::ports::OrgPort;
-use wfe_core::types::actor::{Actor, CandidateActor as ResolvedCandidate, OrgUnit};
+use wfe_core::types::actor::{Actor, OrgUnit};
 use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{AutoexecDef, JoinRule, Wfd};
@@ -105,24 +105,16 @@ impl WfdStore for FixtureWfdStore {
     }
 }
 
-/// In-memory store — `view_c_a` kolonunu da tutar (adapter onu aynı tx'te yazar).
+/// In-memory store — bu dosya yalnız ctx tip kapılarına bakar, projeksiyon
+/// kolonlarını modellemez.
 #[derive(Default)]
 struct MemStore {
     wfes: Mutex<HashMap<Uuid, Wfes>>,
-    view_c_a: Mutex<HashMap<Uuid, Vec<ResolvedCandidate>>>,
 }
 
 impl MemStore {
     fn snapshot(&self, wfe_id: Uuid) -> Option<Wfes> {
         self.wfes.lock().unwrap().get(&wfe_id).cloned()
-    }
-    fn view_grants(&self, wfe_id: Uuid) -> Vec<ResolvedCandidate> {
-        self.view_c_a
-            .lock()
-            .unwrap()
-            .get(&wfe_id)
-            .cloned()
-            .unwrap_or_default()
     }
 }
 
@@ -179,10 +171,6 @@ impl WfeStore for MemStore {
             origin_orgu_id: Some(new.origin_orgu_id),
         };
         self.wfes.lock().unwrap().insert(new.wfe_id, wfes);
-        self.view_c_a
-            .lock()
-            .unwrap()
-            .insert(new.wfe_id, new.view_c_a.clone());
         Ok(())
     }
 
@@ -204,11 +192,6 @@ impl WfeStore for MemStore {
         }
         wfes.assigned_to = None;
         wfes.claimed_at = None;
-        // `view_c_a` KALICI grant kolonudur — terminalde de yazılır (silinmez).
-        self.view_c_a
-            .lock()
-            .unwrap()
-            .insert(commit.wfe_id, commit.view_c_a.clone());
         Ok(())
     }
 
@@ -396,7 +379,7 @@ async fn reading_a_corrupt_wfe_succeeds_and_reports_violations() {
 /// Temiz bir WFE'de ihlal listesi BOŞ — alan hiç serileşmez.
 #[tokio::test]
 async fn healthy_wfe_reports_no_violations() {
-    let (executor, store) = harness();
+    let (executor, _store) = harness();
     let sube = Uuid::new_v4();
     let memur = actor_in(sube, "memur");
     let mudur = actor_in(sube, "mudur");

@@ -1,7 +1,8 @@
 //! Madde 6: vekalet/delegasyon çalışma-zamanı tipi.
 //!
 //! `OrgPort::active_delegations_for` bir claimant için o an geçerli (aktif +
-//! zaman penceresi içinde) vekaletleri döndürür. Matcher (`authorize_with_delegation`)
+//! zaman penceresi içinde) vekaletleri döndürür. Matcher
+//! (`authorize_with_delegation_anchored`)
 //! her aday için iki şeyi doğrular: (a) claimant `grantee`'ye uyuyor mu, (b)
 //! delegator'ın koltuğu (`seat_orgu_id` + `seat_role`) node c_a'sına uyuyor mu.
 

@@ -5,6 +5,9 @@
 //! (`routes::portal::pool`) kullanıyor. İkinci bir uygulama olmasın diye buradan
 //! yalnız yeniden ihraç edilir — kural tek dosyada yaşar.
 //!
-//! `PARAM_COUNT` de ihraç edilir: kendi parametresi olan çağıranlar (havuz:
-//! `$1` = tenant) offset'i ondan hesaplar, elle sayı yazmaz.
-pub use wf_wfe::visibility::{sql, ViewerFilters, PARAM_COUNT};
+//! `PARAM_COUNT` YALNIZ testte ihraç edilir: üretim yolunda sorgular parçanın
+//! metnini gömüyor, parametre sayısını elle taşımıyor — sabit yalnız havuzun
+//! offset regresyon assert'inde (`routes::portal::pool`, `$1` = tenant) gerekli.
+pub use wf_wfe::visibility::{sql, ViewerFilters};
+#[cfg(test)]
+pub use wf_wfe::visibility::PARAM_COUNT;

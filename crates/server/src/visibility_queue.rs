@@ -32,12 +32,3 @@ pub async fn enqueue(pool: &PgPool, orgtnt_id: Uuid, reason: &str) {
         );
     }
 }
-
-/// `orgu_id`den tenant'ı çözüp kuyruğa yazar — org uçlarının çoğu elinde
-/// yalnız birim id'si tutuyor.
-pub async fn enqueue_for_orgu(pool: &PgPool, orgu_id: Uuid, reason: &str) {
-    match wf_org::repo::orgu::get_orgtnt_id(pool, orgu_id).await {
-        Ok(orgtnt_id) => enqueue(pool, orgtnt_id, reason).await,
-        Err(e) => tracing::warn!(%orgu_id, "tenant çözülemedi, kuyruğa yazılamadı: {e}"),
-    }
-}

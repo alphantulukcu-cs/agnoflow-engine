@@ -141,20 +141,10 @@ impl AuthDecision {
 /// İki iç çağrı da düz `authorize`'dır (vekalet-farkında DEĞİL) → tek seviye; zincir
 /// (transitif vekalet) oluşmaz. `grantee` claimant'ın kendi anchor'ıyla değerlendirilir
 /// (kişi = c_u eşleşmesi; havuz = claimant'ın rol/orgu'su).
-pub async fn authorize_with_delegation(
-    rule: &CandidateActor,
-    actor: &Actor,
-    env: MatchEnv<'_>,
-    org: &dyn OrgPort,
-    now: DateTime<Utc>,
-) -> Result<AuthDecision, EngineError> {
-    authorize_with_delegation_anchored(rule, actor, None, env, org, now).await
-}
-
-/// `authorize_with_delegation`ın çapa üstünden belirlenebilen hâli — bkz.
-/// `authorize_anchored`. Vekâlet kanalında `grantee` kuralı DAİMA aktörün kendi
-/// birimine çapalanır (o kural "vekili kim" sorusudur, WFE'nin birimiyle ilgisi
-/// yoktur); çapa yalnız ASIL kurala uygulanır.
+///
+/// Çapa üstünden belirlenebilen hâl — bkz. `authorize_anchored`. Vekâlet kanalında
+/// `grantee` kuralı DAİMA aktörün kendi birimine çapalanır (o kural "vekili kim"
+/// sorusudur, WFE'nin birimiyle ilgisi yoktur); çapa yalnız ASIL kurala uygulanır.
 pub async fn authorize_with_delegation_anchored(
     rule: &CandidateActor,
     actor: &Actor,

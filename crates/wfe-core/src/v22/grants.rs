@@ -15,7 +15,9 @@ use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::{CaGrantRule, GlobalAction, WfAdminRule};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
-use crate::v22::matcher::{authorize_or_delegated_anchored, MatchEnv};
+use crate::v22::matcher::{
+    authorize_or_delegated_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
+};
 use crate::v22::ports::Wfes;
 use crate::v22::valid::ValidRules;
 
@@ -234,6 +236,28 @@ pub async fn authorize_node(
     actor: &Actor,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError> {
+    Ok(authorize_node_decision(wfd, wfes, node_key, actor, org)
+        .await?
+        .is_authorized())
+}
+
+/// `authorize_node`ın PROVENANS taşıyan hâli — claim marker'ı "doğrudan mı vekaleten
+/// mi" yazmak zorunda (Madde 6 / `Ç13`).
+///
+/// İki soru TEK gövdede cevaplanır: `can_claim` uygunluğu, `claim_decision` de aynı
+/// kararın gerekçesini sorar ve ikisi AYRI gövdeye bakarsa portal "Claim et" düğmesini
+/// gösterip `claim` reddedebilir.
+///
+/// ⚠️ Grant'la gelen yetki bugün `Direct` döner. `Ç13`ün `authority` alanı için doğru
+/// değer `grant` olurdu; o alanın kapalı listesi `E12`nin işi ve bu kayıt onu
+/// GENİŞLETMEZ — CLAUDE.md'nin *"`authority` bugün DAİMA `c_a`"* notu yerinde durur.
+pub async fn authorize_node_decision(
+    wfd: &crate::types::wfd_v22::Wfd,
+    wfes: &Wfes,
+    node_key: &str,
+    actor: &Actor,
+    org: &dyn OrgPort,
+) -> Result<AuthDecision, EngineError> {
     let Some(node) = wfd.nodes.get(node_key) else {
         return Err(EngineError::InvalidWfd(format!(
             "bilinmeyen node '{node_key}'"
@@ -247,15 +271,29 @@ pub async fn authorize_node(
         wfah: &wfes.wfah,
         orgtnt_id: wfes.orgtnt_id,
     };
-    // 1) Node'un kendi havuzu.
-    if authorize_or_delegated_anchored(node.act_c_a(), actor, wfes.origin_orgu_id, env, org).await?
-    {
-        return Ok(true);
+    // 1) Node'un kendi havuzu — vekâlet dahil, provenans KORUNUR.
+    let direct = authorize_with_delegation_anchored(
+        node.act_c_a(),
+        actor,
+        wfes.origin_orgu_id,
+        env,
+        org,
+        chrono::Utc::now(),
+    )
+    .await?;
+    if direct.is_authorized() {
+        return Ok(direct);
     }
     // 2) Açılmış grantlar — `matches_grant_rules` ile AYNI sıra (c_a → when).
     let grants = open_grants(wfd, &wfes.wfah, node_key);
     if grants.is_empty() {
-        return Ok(false);
+        return Ok(AuthDecision::Denied);
     }
-    matches_grant_rules(grants, actor, wfes, &ValidRules::for_version(wfd), org).await
+    let by_grant =
+        matches_grant_rules(grants, actor, wfes, &ValidRules::for_version(wfd), org).await?;
+    Ok(if by_grant {
+        AuthDecision::Direct
+    } else {
+        AuthDecision::Denied
+    })
 }

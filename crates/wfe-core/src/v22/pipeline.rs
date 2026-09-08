@@ -37,12 +37,10 @@ use crate::v22::grants::{matches_grant_rules, require_global_action, wf_admin_gl
 use crate::v22::ownership::{
     seconds_between, wait_base, ClaimAuthority, ClaimReleased, ClaimTaken, OwnershipBranch,
 };
-use crate::v22::matcher::{
-    authorize, authorize_anchored, authorize_with_delegation_anchored, AuthDecision, MatchEnv,
-};
+use crate::v22::matcher::{authorize, authorize_anchored, AuthDecision, MatchEnv};
 use crate::v22::ports::{
-    AutoexecRunner, BranchState, BranchStatus, CallSite, CollapseCause, CommitOutcome, ExecEnv,
-    ExecFailure, NewWfe, StagedCall, TransitionCommit, Wfes,
+    AutoexecRunner, BranchState, BranchStatus, CallSite, ClaimRecheck, CollapseCause,
+    CommitOutcome, ExecEnv, ExecFailure, NewWfe, StagedCall, TransitionCommit, Wfes,
 };
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use crate::v22::valid;
@@ -792,7 +790,11 @@ impl<'a> Engine<'a> {
             self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
+        let claim_recheck = self
+            .stage_claim_recheck(wfd, wfes, &outcome, &wfah_entries, &final_ctx, None, now)
+            .await?;
         Ok(TransitionCommit {
+            claim_recheck,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: final_ctx,
@@ -1049,7 +1051,19 @@ impl<'a> Engine<'a> {
             self.stage_calls(wfd, landed.as_ref(), &final_ctx, actor, wfes.wfe_id, now)?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
+        let claim_recheck = self
+            .stage_claim_recheck(
+                wfd,
+                wfes,
+                &outcome,
+                &wfah_entries,
+                &final_ctx,
+                Some(branch_node),
+                now,
+            )
+            .await?;
         Ok(TransitionCommit {
+            claim_recheck,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: final_ctx,
@@ -1124,24 +1138,11 @@ impl<'a> Engine<'a> {
         if node.call.is_some() {
             return Ok(ClaimCheck::CallInProgress);
         }
-        let ctx = wfes.dynctx.as_value();
-        let env = MatchEnv {
-            ctx,
-            wfah: &wfes.wfah,
-            orgtnt_id: wfes.orgtnt_id,
-        };
-        // Madde 6: doğrudan VEYA vekaleten uygun (vekil işi görür + claim'ler).
-        if authorize_with_delegation_anchored(
-            &node.c_a,
-            actor,
-            wfes.origin_orgu_id,
-            env,
-            self.org,
-            Utc::now(),
-        )
-        .await?
-        .is_authorized()
-        {
+        // E04: havuz sorusu `node.c_a` DEĞİL, **`node.c_a ∪ açılmış grantlar`**dır.
+        // Doğrudan `node.c_a`ya bakmak, escalation'la genişletilmiş havuzu GÖRMEYEN
+        // sessiz bir kapı bırakırdı: grant ateşlenir, kişi havuzda görünür, claim
+        // düğmesi 403 döner. Vekâlet provenansı `authorize_node_decision`ta korunur.
+        if crate::v22::grants::authorize_node(wfd, wfes, node_key, actor, self.org).await? {
             Ok(ClaimCheck::Ok)
         } else {
             Ok(ClaimCheck::NotEligible)
@@ -1175,21 +1176,92 @@ impl<'a> Engine<'a> {
         if node.call.is_some() {
             return Ok(AuthDecision::Denied);
         }
-        let ctx = wfes.dynctx.as_value();
-        let env = MatchEnv {
-            ctx,
-            wfah: &wfes.wfah,
-            orgtnt_id: wfes.orgtnt_id,
+        // `can_claim` ile AYNI gövde (E04): havuz = `node.c_a ∪ açılmış grantlar`.
+        // İki yol ayrı gövdeye bakarsa portal düğmeyi gösterir, `claim` reddeder.
+        crate::v22::grants::authorize_node_decision(wfd, wfes, node_key, actor, self.org).await
+    }
+
+    /// `E02`/S2 — **commit'in SONUNDA claim sahibinin yetkisi hâlâ geçerli mi.**
+    ///
+    /// `Ç9` grant'ın `when`ini "her yetki sorgusunda değerlendirilir" dedi; guard'ın
+    /// girdileri `$ctx`, `$wfah`, `$node` ve açık grant kümesi de DEFTERDEN türüyor
+    /// (`E04`/S2). Yani deftere satır eklemek guard sonucunu (`count($wfah, …)`)
+    /// çevirebilir — ctx'e hiç dokunmayan bir marker commit'i bile. Bu yüzden soru
+    /// "ctx yazan commit"te değil, **WFAH satırı stage eden HER commit'te** sorulur ve
+    /// POST-APPEND defterle sorulur.
+    ///
+    /// ⚠️ Yetki sorusu bir AKTÖR ister (birim + rol); `Wfes` yalnız `user_id` taşır.
+    /// Aktör `Ç13`ün `claim_taken:<node>` satırından okunur — sahipliği DOĞURAN olay
+    /// aktörü de yazar. Satır yoksa (E12 öncesi açılmış claim) soru SORULMAZ: yanlış
+    /// bir aktörle sorup claim düşürmek, sormamaktan kötüdür.
+    #[allow(clippy::too_many_arguments)]
+    async fn stage_claim_recheck(
+        &self,
+        wfd: &Wfd,
+        wfes: &Wfes,
+        outcome: &CommitOutcome,
+        staged_entries: &[WfahEntry],
+        new_ctx: &Value,
+        branch: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<ClaimRecheck, EngineError> {
+        // Ç13 okuma kuralı (b): hareket claim'i zaten düşürüyorsa soru sorulmaz.
+        if outcome.clears_claim() {
+            return Ok(ClaimRecheck::NotApplicable);
+        }
+        let (node_key, owner, branch_state) = match branch {
+            Some(b) => match active_branch(wfes, b) {
+                Some(bs) => (bs.branch_node.as_str(), bs.claimed_by, Some(bs)),
+                None => return Ok(ClaimRecheck::NotApplicable),
+            },
+            None => match wfes.current_node.as_deref() {
+                Some(n) => (n, wfes.assigned_to, None),
+                None => return Ok(ClaimRecheck::NotApplicable),
+            },
         };
-        authorize_with_delegation_anchored(
-            &node.c_a,
-            actor,
-            wfes.origin_orgu_id,
-            env,
-            self.org,
-            Utc::now(),
-        )
-        .await
+        let Some(owner) = owner else {
+            return Ok(ClaimRecheck::NotApplicable);
+        };
+        let Some(claimant) = claimant_actor(&wfes.wfah, node_key, owner) else {
+            return Ok(ClaimRecheck::NotApplicable);
+        };
+
+        // POST-APPEND görünüm: bu commit'in satırları + yeni ctx. `Wfes`in kopyası
+        // yalnız BURADA kurulur ve store'a gitmez — guard'ın göreceği dünyayı temsil
+        // eder.
+        let mut post = wfes.clone();
+        post.wfah = wfes.wfah.extended(staged_entries);
+        post.dynctx = crate::types::dynctx::DynCtx(new_ctx.clone());
+        if crate::v22::grants::authorize_node(wfd, &post, node_key, &claimant, self.org).await? {
+            return Ok(ClaimRecheck::Kept);
+        }
+
+        let ownership_branch = branch_state.map(|bs| OwnershipBranch {
+            entry: bs.entry_node.as_str(),
+            at_node: bs.branch_node.as_str(),
+        });
+        let claimed_at = branch_state.map_or(wfes.claimed_at, |bs| bs.claimed_at);
+        let released = ClaimReleased::grant_guard_false(node_key, owner)
+            .held(claimed_at.map(|c| seconds_between(c, now)))
+            .in_branch(ownership_branch);
+        let seq = post.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        Ok(ClaimRecheck::Released {
+            entry: WfahEntry {
+                seq,
+                action: released.marker(),
+                // Bırakmayı KİMSE talep etmedi — kural işledi. Aktör sistemdir; sahiplik
+                // ÖZNESİ payload'ın `owner` alanındadır (Ç13: `actor` eylemi YAPAN).
+                actor: system_actor(),
+                input: Some(released.input()),
+                applied_at: now,
+                // Ç2: sahiplik satırı hareket taşımaz.
+                from_node: None,
+                to_node: None,
+                branch_entry: branch_state.map(|bs| bs.entry_node.clone()),
+                branch_round: branch_state
+                    .and_then(|bs| valid::round_of_opt(&post.wfah, Some(bs.entry_node.as_str()))),
+            },
+        })
     }
 
     /// Query-time: bir node'un c_a'sını çözülmüş aday listesine (orgu × rol / orgu ×
@@ -2139,7 +2211,11 @@ impl<'a> Engine<'a> {
         )?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
+        let claim_recheck = self
+            .stage_claim_recheck(wfd, wfes, &outcome, &wfah_entries, &final_ctx, None, now)
+            .await?;
         Ok(TransitionCommit {
+            claim_recheck,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: final_ctx,
@@ -2229,6 +2305,8 @@ impl<'a> Engine<'a> {
         );
 
         Ok(TransitionCommit {
+            // E02/S2: iptal WFE'yi terminal sınıfına alır; claim'i hareket düşürür.
+            claim_recheck: ClaimRecheck::NotApplicable,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             // `$ctx` DEĞİŞMEZ — iptal iş verisi yazmaz. Commit yine yeni bir DynCtx
@@ -2432,7 +2510,14 @@ impl<'a> Engine<'a> {
         )?;
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
+        // E02/S2: `StayAt` claim'e DOKUNMAZ, dolayısıyla sahibin yetkisi bu commit'in
+        // yazdığı marker'la düşmüş olabilir — kademe grant'ının guard'ı defterden
+        // besleniyor. Soru tam BURADA sorulur.
+        let claim_recheck = self
+            .stage_claim_recheck(wfd, wfes, &outcome, &wfah_entries, &final_ctx, branch, now)
+            .await?;
         Ok(TransitionCommit {
+            claim_recheck,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: final_ctx,
@@ -2500,6 +2585,10 @@ impl<'a> Engine<'a> {
             now,
         );
         TransitionCommit {
+            // E02/S2: SLA-3 WFE'yi TERMINAL sınıfına alır; claim'i hareketin kendisi
+            // düşürür (`clears_claim()`), sorulacak bir yetki kalmaz. Fonksiyon ayrıca
+            // SENKRONdur — org portuna gitmeden verilebilecek TEK doğru cevap budur.
+            claim_recheck: ClaimRecheck::NotApplicable,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: wfes.dynctx.as_value().clone(),
@@ -3114,7 +3203,13 @@ impl<'a> Engine<'a> {
         // ctx'e yazılır. Dış bir akışın döndürdüğü şekil bizim şemamıza uymak zorundadır.
         guard_written_ctx(wfd, wfes.dynctx.as_value(), &final_ctx)?;
 
+        // E02/S2: WFC dönüşünde kol bağlamı YOK — çağrı node'unda claim de yoktur
+        // (`can_claim` `CallInProgress` der). Soru yine TEK gövdeden geçer.
+        let claim_recheck = self
+            .stage_claim_recheck(wfd, wfes, &outcome, &wfah_entries, &final_ctx, None, now)
+            .await?;
         Ok(TransitionCommit {
+            claim_recheck,
             wfe_id: wfes.wfe_id,
             orgtnt_id: wfes.orgtnt_id,
             new_dynctx: final_ctx,
@@ -3913,6 +4008,20 @@ fn stamp_movement(entry: &mut WfahEntry, outcome: &CommitOutcome, fallback_from:
 /// İkisi TEK fonksiyondan çıkar çünkü *"`branch_entry` NULL ⇔ `branch_round` NULL"*
 /// bir DEĞİŞMEZDİR (E14/S3): ayrı ayrı yazılsalar bir üretici birini doldurup
 /// diğerini atlayabilirdi.
+/// `E02`/S2 — claim'i TUTAN aktörü defterden okur (`Ç13`in `claim_taken:<node>` satırı).
+///
+/// `Wfes.assigned_to` yalnız `user_id`dir; yetki sorusu ise birim ve rol ister. Sahipliği
+/// doğuran satır `actor`ı da yazdığı için kaynak odur. En SON eşleşen satır alınır: aynı
+/// node'da sahiplik el değiştirmiş olabilir.
+fn claimant_actor(wfah: &Wfah, node_key: &str, owner: Uuid) -> Option<Actor> {
+    let marker = format!("claim_taken:{node_key}");
+    wfah.entries()
+        .iter()
+        .rev()
+        .find(|e| e.action == marker && e.actor.user_id == owner)
+        .map(|e| e.actor.clone())
+}
+
 fn branch_label(wfes: &Wfes, branch: Option<&str>) -> (Option<String>, Option<u32>) {
     let entry = branch
         .and_then(|b| active_branch(wfes, b))

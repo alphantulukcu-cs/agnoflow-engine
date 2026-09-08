@@ -537,6 +537,20 @@ pub struct TransitionCommit {
     /// silinmez), `view_c_a`dan farkı KAPSAM (yalnız bu terminal'de biten WFE).
     /// Yalnız başarılı `Terminal` sonucunda dolar; `WfeExecutor::fill_view_grants` yazar.
     pub end_view_c_a: Vec<ResolvedCandidate>,
+    /// `E02`/S2 — bu commit'in sonunda claim SAHİBİNİN yetkisi ne oldu.
+    ///
+    /// `Ç9`, grant'ın `when`ini "her yetki sorgusunda değerlendirilir" diye tanımladı;
+    /// bunun YAZMA tarafı burada. Kapsam **"ctx yazan commit" DEĞİL, WFAH satırı stage
+    /// eden HER yoldur**: guard'ın girdileri `$ctx`, `$wfah` ve `$node`; açık grant
+    /// kümesi de defterden türer (`E04`/S2). Yani deftere satır eklemek guard sonucunu
+    /// (`count($wfah, …)`) ÇEVİREBİLİR — ctx'e hiç dokunmayan bir marker commit'i bile.
+    ///
+    /// **`Default` YOKTUR** ve olmayacak: `TransitionCommit` kuran her yer bu soruyu
+    /// CEVAPLAMAK zorundadır. Alan bir `Option` ya da `bool` olsaydı `None`/`false`
+    /// yazmak "sormadım" ile "sordum, düşmedi"yi aynı gösterirdi; enum bunları AYIRIR.
+    /// `NotApplicable` bilinçli bir cevaptır — "bu yolda sahip yok ya da soruyu
+    /// hareketin kendisi cevaplıyor" (`clears_claim()`).
+    pub claim_recheck: ClaimRecheck,
     /// VARILAN terminal id'si — yalnız başarılı `Terminal` sonucunda `Some`.
     ///
     /// `CommitOutcome::Terminal` bunu TAŞIMAZ (yalnız `end_response` taşır) ama
@@ -545,6 +559,24 @@ pub struct TransitionCommit {
     /// bunun için "hangi terminal'de bitti" satırda durmak zorunda. Aynı bilgi
     /// `stage_calls`ın kullandığı `CallSite::Terminal`den türer.
     pub end_terminal: Option<String>,
+}
+
+/// `E02`/S2 — claim sahibinin yetkisinin commit sonundaki durumu.
+///
+/// Store bu cevabı UYGULAR: `Released` ise claim AYNI transaction'da düşer ve satır
+/// deftere yazılır. İki iş ayrı transaction'a bölünseydi arada claim'i olmayan ama
+/// deftere göre hâlâ sahibi olan bir pencere kalırdı.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClaimRecheck {
+    /// Sahip var ve yetkisi post-append defterle HÂLÂ geçerli — dokunulmaz.
+    Kept,
+    /// Sahibin yetkisi düştü: claim bırakılır ve `entry` (`claim_released:<node>` /
+    /// `reason: "grant_guard_false"`) deftere yazılır. İkisi AYNI tx'te.
+    Released { entry: WfahEntry },
+    /// Soru bu yolda sorulmaz. İki hâli vardır ve ikisi de bilinçli cevaptır:
+    /// sahip YOK (claim'siz node), ya da claim'i HAREKETİN KENDİSİ düşürür
+    /// (`CommitOutcome::clears_claim()` — `Ç13` okuma kuralı (b)).
+    NotApplicable,
 }
 
 /// Yeni WFE oluşturma isteği — wfe_id ENGINE tarafından üretilir ve effects

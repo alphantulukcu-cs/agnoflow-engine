@@ -7,4 +7,7 @@ pub mod storage;
 pub mod template;
 
 pub use adapter::WfdAdapter;
-pub use storage::{build_operator, StorageBackend, StorageConfig};
+pub use storage::{
+    attachment_storage_from_env, build_operator, storage_config_from_lookup,
+    ATTACHMENT_ENV_PREFIX, DEFAULT_ATTACHMENT_PATH, StorageBackend, StorageConfig,
+};

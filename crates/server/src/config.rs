@@ -71,22 +71,10 @@ impl Config {
 
 /// Attachment storage config — `ATTACHMENT_STORAGE_*` env'inden okunur. WFD
 /// storage'ından ayrıdır; local backend'de varsayılan kök `../work-pool-portal/storage`.
+/// Deployment varsayılanı `wf_wfd::attachment_storage_from_env`te durur: aynı ad
+/// kümesini WFD'nin `$env`i de soruyor (`attachment_store::config_from_env`) ve
+/// `bin/wfe_reset` gibi sunucu dışı araçlar da aynı depoyu çözmek zorunda —
+/// `wf-server` lib target'ı olmayan bir crate olduğu için ortak yer wf-wfd'dir.
 fn attachment_storage_from_env() -> wf_wfd::StorageConfig {
-    let backend = match std::env::var("ATTACHMENT_STORAGE_BACKEND")
-        .unwrap_or_else(|_| "local".into())
-        .as_str()
-    {
-        "s3" => wf_wfd::StorageBackend::S3,
-        _ => wf_wfd::StorageBackend::Local,
-    };
-    wf_wfd::StorageConfig {
-        backend,
-        path: std::env::var("ATTACHMENT_STORAGE_PATH")
-            .unwrap_or_else(|_| "../work-pool-portal/storage".into()),
-        s3_bucket: std::env::var("ATTACHMENT_STORAGE_S3_BUCKET").ok(),
-        s3_region: std::env::var("ATTACHMENT_STORAGE_S3_REGION").ok(),
-        s3_endpoint: std::env::var("ATTACHMENT_STORAGE_S3_ENDPOINT").ok(),
-        s3_access_key_id: std::env::var("ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID").ok(),
-        s3_secret_access_key: std::env::var("ATTACHMENT_STORAGE_S3_SECRET_ACCESS_KEY").ok(),
-    }
+    wf_wfd::attachment_storage_from_env()
 }

@@ -21,6 +21,83 @@ pub enum StorageBackend {
     S3,
 }
 
+/// `<PREFIX>_BACKEND` / `_PATH` / `_S3_*` adlarını verilen arayıcıdan okuyup depo
+/// konfigürasyonu üretir.
+///
+/// Ad kümesi SÖZLEŞMEDİR (`ATTACHMENT_STORAGE_*` adları WFD ayarları ekranında
+/// tasarımcı tarafından bu adlarla girilir) ve **iki ayrı kaynaktan** sorulur:
+/// deployment ortamı (`std::env`) ve WFD'nin `$env` satırları (`wf.wfd_env_var`).
+/// İkinci bir kopya çıkarsa biri güncellenip diğeri unutulur — bu depoda kopya
+/// disiplininin üç kez kırıldığı kayıtlı (bkz. `wfd-v2.3/00-BAGLAM.md` §4).
+///
+/// `None` iki hâlde döner: `_BACKEND` yok, ya da değeri TANINMIYOR. Tanınmayan
+/// değerin sessizce `local`a düşmemesi bilinçlidir (`server::attachment_store`):
+/// yanlış yazılmış bir backend, belgeleri müşterinin bucket'ı yerine sunucu diskine
+/// yazdırır ve bu, fark edilmesi en zor hata sınıfıdır. Çağıran `None`'ı ya hata
+/// yapar ya da kendi varsayılanına düşer — karar onun.
+///
+/// `lookup` boş dizeyi "tanımlı değil" saymalıdır (`$env` tarafı öyle sayıyor);
+/// `_PATH` yoksa `fallback_path` kullanılır.
+pub fn storage_config_from_lookup(
+    prefix: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+    fallback_path: &str,
+) -> Option<StorageConfig> {
+    let key = |suffix: &str| format!("{prefix}_{suffix}");
+    let backend = match lookup(&key("BACKEND"))?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "s3" => StorageBackend::S3,
+        "local" => StorageBackend::Local,
+        _ => return None,
+    };
+    Some(StorageConfig {
+        backend,
+        path: lookup(&key("PATH")).unwrap_or_else(|| fallback_path.to_string()),
+        s3_bucket: lookup(&key("S3_BUCKET")),
+        s3_region: lookup(&key("S3_REGION")),
+        s3_endpoint: lookup(&key("S3_ENDPOINT")),
+        s3_access_key_id: lookup(&key("S3_ACCESS_KEY_ID")),
+        s3_secret_access_key: lookup(&key("S3_SECRET_ACCESS_KEY")),
+    })
+}
+
+/// Ek-belge deposunun `$env`/env ad öneki. WFD ayarları ekranında tasarımcı bu
+/// önekle girer; sözleşmedir.
+pub const ATTACHMENT_ENV_PREFIX: &str = "ATTACHMENT_STORAGE";
+
+/// Local backend'de ek-belge kökü — engine cwd'sine göre. WFD JSON deposundan
+/// (`STORAGE_PATH`) AYRI konum: dış UI'ın yüklediği dosyalar burada tutulur.
+pub const DEFAULT_ATTACHMENT_PATH: &str = "../work-pool-portal/storage";
+
+/// Ek-belge deposunun DEPLOYMENT varsayılanı (`ATTACHMENT_STORAGE_*` env'i).
+///
+/// `_BACKEND` yokluğu/tanınmaması burada hata DEĞİL, yerel köke düşülür: belge
+/// toplamayan yüzlerce akış bu ayarı hiç girmez. WFD başına `$env` override'ı
+/// sunucu tarafındadır (`server::attachment_store`) ve o yol yazmada fallback'e
+/// DÜŞMEZ; bu fonksiyon yalnız tabanı verir.
+pub fn attachment_storage_from_env() -> StorageConfig {
+    storage_config_from_lookup(
+        ATTACHMENT_ENV_PREFIX,
+        |key| std::env::var(key).ok().filter(|v| !v.trim().is_empty()),
+        DEFAULT_ATTACHMENT_PATH,
+    )
+    .unwrap_or_else(|| StorageConfig {
+        backend: StorageBackend::Local,
+        path: std::env::var("ATTACHMENT_STORAGE_PATH")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_ATTACHMENT_PATH.into()),
+        s3_bucket: None,
+        s3_region: None,
+        s3_endpoint: None,
+        s3_access_key_id: None,
+        s3_secret_access_key: None,
+    })
+}
+
 impl StorageConfig {
     pub fn from_env() -> Self {
         let backend = match std::env::var("STORAGE_BACKEND")
@@ -151,6 +228,77 @@ mod tests {
         assert_eq!(
             wfd.split('/').next().unwrap(),
             asset.split('/').next().unwrap()
+        );
+    }
+}
+
+#[cfg(test)]
+mod lookup_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    fn cfg(pairs: &[(&str, &str)]) -> Option<StorageConfig> {
+        let m = map(pairs);
+        storage_config_from_lookup(ATTACHMENT_ENV_PREFIX, |k| m.get(k).cloned(), "/fallback")
+    }
+
+    #[test]
+    fn backend_yoksa_none() {
+        assert!(cfg(&[("ATTACHMENT_STORAGE_PATH", "/x")]).is_none());
+    }
+
+    /// Tanınmayan backend SESSİZCE local'a düşmez — yanlış yazılmış bir değer,
+    /// belgeleri müşterinin bucket'ı yerine sunucu diskine yazdırırdı.
+    #[test]
+    fn taninmayan_backend_none() {
+        assert!(cfg(&[("ATTACHMENT_STORAGE_BACKEND", "S£")]).is_none());
+    }
+
+    #[test]
+    fn backend_kirpilir_ve_kucuk_harfe_cevrilir() {
+        let c = cfg(&[("ATTACHMENT_STORAGE_BACKEND", " S3 ")]).expect("s3");
+        assert!(matches!(c.backend, StorageBackend::S3));
+    }
+
+    #[test]
+    fn path_yoksa_fallback() {
+        let c = cfg(&[("ATTACHMENT_STORAGE_BACKEND", "local")]).expect("local");
+        assert_eq!(c.path, "/fallback");
+    }
+
+    #[test]
+    fn s3_alanlari_onekle_okunur() {
+        let c = cfg(&[
+            ("ATTACHMENT_STORAGE_BACKEND", "s3"),
+            ("ATTACHMENT_STORAGE_S3_BUCKET", "b"),
+            ("ATTACHMENT_STORAGE_S3_REGION", "garage"),
+            ("ATTACHMENT_STORAGE_S3_ENDPOINT", "http://x:3900"),
+            ("ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID", "id"),
+            ("ATTACHMENT_STORAGE_S3_SECRET_ACCESS_KEY", "sec"),
+        ])
+        .expect("s3");
+        assert_eq!(c.s3_bucket.as_deref(), Some("b"));
+        assert_eq!(c.s3_region.as_deref(), Some("garage"));
+        assert_eq!(c.s3_endpoint.as_deref(), Some("http://x:3900"));
+        assert_eq!(c.s3_access_key_id.as_deref(), Some("id"));
+        assert_eq!(c.s3_secret_access_key.as_deref(), Some("sec"));
+    }
+
+    /// Önek gerçekten uygulanıyor: WFD JSON deposunun adları ek-belge deposuna
+    /// SIZMAZ (iki depo AYRI konumdur).
+    #[test]
+    fn onek_yanlissa_okumaz() {
+        let m = map(&[("STORAGE_BACKEND", "s3")]);
+        assert!(
+            storage_config_from_lookup(ATTACHMENT_ENV_PREFIX, |k| m.get(k).cloned(), "/f")
+                .is_none()
         );
     }
 }

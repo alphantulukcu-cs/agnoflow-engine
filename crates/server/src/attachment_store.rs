@@ -160,28 +160,16 @@ fn env_str(env: &RunEnv, key: &str) -> Option<String> {
 }
 
 /// WFD'nin ortam değişkenlerinden depo konfigürasyonu üretir. `BACKEND` tanımlı değilse
-/// `None` → çağıran deployment varsayılanını kullanır.
+/// (ya da tanınmıyorsa) `None` → çağıran deployment varsayılanını kullanır. Ad kümesi ve
+/// "tanınmayan backend sessizce local'a DÜŞMEZ" kuralı ortak fonksiyonda
+/// (`wf_wfd::storage_config_from_lookup`) — aynı adları deployment env'i ve
+/// `bin/wfe_reset` de soruyor.
 fn config_from_env(env: &RunEnv, fallback_path: &str) -> Option<StorageConfig> {
-    let backend = match env_str(env, "ATTACHMENT_STORAGE_BACKEND")?
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "s3" => StorageBackend::S3,
-        "local" => StorageBackend::Local,
-        // Tanınmayan değer sessizce local'a düşmez: yanlış yazılmış bir "S£" yüzünden
-        // belgelerin müşterinin bucket'ı yerine sunucu diskine yazılması, fark edilmesi
-        // en zor hata sınıfıdır. Konfigürasyon yok sayılır ve varsayılana dönülür.
-        _ => return None,
-    };
-    Some(StorageConfig {
-        backend,
-        path: env_str(env, "ATTACHMENT_STORAGE_PATH").unwrap_or_else(|| fallback_path.to_string()),
-        s3_bucket: env_str(env, "ATTACHMENT_STORAGE_S3_BUCKET"),
-        s3_region: env_str(env, "ATTACHMENT_STORAGE_S3_REGION"),
-        s3_endpoint: env_str(env, "ATTACHMENT_STORAGE_S3_ENDPOINT"),
-        s3_access_key_id: env_str(env, "ATTACHMENT_STORAGE_S3_ACCESS_KEY_ID"),
-        s3_secret_access_key: env_str(env, "ATTACHMENT_STORAGE_S3_SECRET_ACCESS_KEY"),
-    })
+    wf_wfd::storage_config_from_lookup(
+        wf_wfd::ATTACHMENT_ENV_PREFIX,
+        |key| env_str(env, key),
+        fallback_path,
+    )
 }
 
 /// Ad-hoc not dosyası rotasının fallback'siz kapısı — `$env`'de backend değeri ya da

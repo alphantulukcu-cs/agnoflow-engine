@@ -3142,16 +3142,24 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
 
 // ---- Ç4-EK/S4+S5: geri gönderme kol sınırı ------------------------------------
 
+/// Kol node'unun RET aksiyonu. v2.3'te (`Ç5`) bir aksiyonun `from`'u TEK node'dur,
+/// dolayısıyla üç kol `reject` adını PAYLAŞAMAZ — her kolun kendi adı vardır.
+fn branch_reject(node: &str) -> &'static str {
+    match node {
+        "self__financeApprover" => "finans_ret",
+        "self__legalApprover" => "hukuk_ret",
+        "self__hrApprover" => "ik_ret",
+        other => panic!("bilinmeyen kol node'u: {other}"),
+    }
+}
+
 /// Bir kola geri gönderme MENÜSÜ takar; hedefleri `targets` listesinden gelir.
 fn parallel_with_send_back(from: &str, targets: &[&str]) -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") && t["from"] == json!(from) {
-            t["wft"] = json!({
-                "targets": targets.iter().map(|n| json!({"node": n})).collect::<Vec<_>>()
-            });
-        }
-    }
+    // Ç5: yönlendirme kuralı aksiyonun kendi kaydında, ayrı bir `transitions[]` yok.
+    v["actions"][branch_reject(from)]["wft"] = json!({
+        "targets": targets.iter().map(|n| json!({"node": n})).collect::<Vec<_>>()
+    });
     Wfd::from_value(v).unwrap()
 }
 
@@ -3193,7 +3201,7 @@ async fn send_back_before_the_fork_collapses_instead_of_deadlocking() {
             &wfd,
             &wfes,
             &fin,
-            "reject",
+            branch_reject("self__financeApprover"),
             &json!({}),
             Some("self__financeApprover"),
             Some("self__coordinator"),
@@ -3217,7 +3225,7 @@ async fn send_back_before_the_fork_collapses_instead_of_deadlocking() {
     assert_eq!(
         wfah_actions(&commit),
         vec![
-            "reject",
+            "finans_ret",
             "_collapse",
             "_branch_cancelled",
             "_branch_superseded"
@@ -3289,7 +3297,7 @@ async fn send_back_inside_the_fork_subgraph_stays_a_branch_move() {
             &wfd,
             &wfes,
             &legal,
-            "reject",
+            branch_reject("self__legalApprover"),
             &json!({}),
             Some("self__legalApprover"),
             Some("self__financeApprover"),
@@ -3305,7 +3313,7 @@ async fn send_back_inside_the_fork_subgraph_stays_a_branch_move() {
         }
     );
     // Paralel mod sürüyor → hiçbir collapse marker'ı yok.
-    assert_eq!(wfah_actions(&commit), vec!["reject"]);
+    assert_eq!(wfah_actions(&commit), vec!["hukuk_ret"]);
 }
 
 /// Ç4-EK/S5 — admin `send_back` paralel modda AÇIK. Acting kol SEÇİLMEZ: tetikleyici

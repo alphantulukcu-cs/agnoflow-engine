@@ -1593,11 +1593,9 @@ fn seed_parallel_visited(
 /// Finance koluna fork ÖNCESİNE (`self__coordinator`) geri gönderme menüsü takar.
 fn paralel_with_send_back_before_fork() -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
-            t["wft"] = json!({"targets": [{"node": "self__coordinator"}]});
-        }
-    }
+    // v2.3 (`Ç5`): yönlendirme kuralı aksiyonun KENDİ kaydında; finans kolunun ret
+    // aksiyonu `finans_ret`tir (`from` TEK node olduğu için ad kola özgüdür).
+    v["actions"]["finans_ret"]["wft"] = json!({"targets": [{"node": "self__coordinator"}]});
     Wfd::from_value(v).unwrap()
 }
 
@@ -1629,7 +1627,7 @@ async fn send_back_before_fork_ends_parallel_mode_instead_of_deadlocking() {
     exec.apply(
         wfe_id,
         &fin,
-        "reject",
+        "finans_ret",
         &json!({}),
         Some("self__financeApprover"),
         Some("self__coordinator"),
@@ -1933,7 +1931,9 @@ async fn branch_arrived_records_who_held_the_claim() {
     exec.apply(
         wfe_id,
         finance,
-        "approve",
+        // v2.3 (`Ç5`): bir aksiyonun `from`'u TEK node'dur, üç kol `approve` adını
+        // paylaşamaz — kolun kendi onay aksiyonu kullanılır.
+        branch_approve("self__financeApprover"),
         &json!({}),
         Some("self__financeApprover"),
         None,

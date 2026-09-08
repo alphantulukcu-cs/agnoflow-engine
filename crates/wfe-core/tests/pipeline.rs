@@ -2282,6 +2282,7 @@ fn golden_with_claim_timeout_effects(after: &str) -> Wfd {
             ),
             ("analyst_approved_at".to_string(), json!("$timestamp")),
         ]),
+        set_when: Vec::new(),
     });
     wfd
 }
@@ -6439,5 +6440,90 @@ async fn superseded_marker_finds_the_approval_after_the_branch_moved() {
         superseded["approved_by"]["user_id"],
         json!(senior.user_id),
         "onay bilgisi kol hareketinden sonra da bulunmalı: {superseded}"
+    );
+}
+
+/// `E09`/B2 — **`set_when[].when` yalnız COMMIT EDİLMİŞ geçmişi görür.**
+///
+/// O turda üretilmekte olan satırlar (`wfah_entries` yerel vektörü) `$wfah`a GİRMEZ.
+/// Kararın verdiği örnek tam olarak burası: *"autoexec effect'i kendi `trigger:`
+/// satırını görmez"*.
+///
+/// Vakayı İKİ trigger kuruyor — tek trigger yeterli DEĞİL: bir trigger'ın kendi satırı
+/// zaten effect'lerinden SONRA stage ediliyor, yani onu görmemesi sıralamadan
+/// geliyor, defter seçiminden değil. İkinci trigger koştuğunda birincinin satırı
+/// `wfah_entries`te DURUYOR; ayrımı ancak o an ölçebiliriz.
+///
+/// Gerekçe (`E09`/B): B seçeneğinin TEK gerekçesi *"`when` her yerde AYNI şeyi görür"*
+/// idi; uçuştaki satırları eklemek yönlendirme `when`i ile effect `when`i arasında YENİ
+/// bir ayrım açardı.
+#[tokio::test]
+async fn a_triggers_conditional_write_cannot_see_the_previous_triggers_row() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(750, "A", true);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+
+    let mut v: Value = serde_json::to_value(golden()).unwrap();
+    // `analyst_approve`in tek trigger'ı vardı; İKİNCİSİNİ ekliyoruz.
+    v["actions"]["analyst_approve"]["trigger"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "use": "audit_log", "required": false }));
+    // İkinci trigger'ın effect'i, BİRİNCİ trigger'ın satırını sayıyor.
+    v["autoexec"]["audit_log"]["wfes_effects"] = json!({
+        "set_when": [{
+            "when": "count($wfah, #.action == \"trigger:kredi_skoru_getir\") == 0",
+            "set": { "internal_notes": "önceki trigger satırını görmedim" }
+        }]
+    });
+    let wfd = Wfd::from_value(v).expect("mutasyon parse edilebilir kalmalı");
+
+    let orgu = Uuid::new_v4();
+    let a = analyst(orgu);
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(a.user_id),
+        json!({
+            "applicant": {"name": "Ayşe Yılmaz", "tckid": "12345678901", "income": 30000},
+            "credit_info": {"amount_requested": 5000}
+        }),
+    );
+
+    let commit = engine
+        .apply(
+            &wfd,
+            &wfes,
+            &a,
+            "analyst_approve",
+            &json!({"credit_info": {"amount_requested": 5000}}),
+            None,
+            None,
+        )
+        .await
+        .expect("aksiyon uygulanmalı");
+
+    // Ön koşul: birinci trigger'ın satırı GERÇEKTEN bu commit'te, ikincisinden ÖNCE.
+    let sıra: Vec<&str> = commit
+        .wfah_entries
+        .iter()
+        .map(|e| e.action.as_str())
+        .collect();
+    let i1 = sıra.iter().position(|a| *a == "trigger:kredi_skoru_getir");
+    let i2 = sıra.iter().position(|a| *a == "trigger:audit_log");
+    assert!(
+        matches!((i1, i2), (Some(x), Some(y)) if x < y),
+        "ön koşul: iki trigger satırı sırayla stage edildi: {sıra:?}"
+    );
+
+    assert_eq!(
+        commit.new_dynctx["internal_notes"],
+        json!("önceki trigger satırını görmedim"),
+        "koşul uçuştaki satırları SAYMAMALI — saysaydı count 1 olur, yazım ateşlenmezdi"
     );
 }

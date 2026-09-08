@@ -3605,3 +3605,171 @@ fn declared_input_path_through_a_named_type_resolves() {
         report.errors
     );
 }
+
+// ---- E09 / Ç10: koşula bağlı ctx yazımı (`wfes_effects.set_when[]`) --------------
+
+/// Bir aksiyonun effect bloğuna koşullu yazım ekler.
+fn with_set_when(action: &str, when: &str, set: Value) -> Value {
+    let mut v = fixture_value();
+    v["actions"][action]["wfes_effects"]["set_when"] = json!([{ "when": when, "set": set }]);
+    v
+}
+
+/// `E09`/B1 — **BEYAZ LİSTE.** `$branches` ve `$arrived` YALNIZ `join_when`
+/// değerlendirilirken bağlanır; effect yolunda `zen_context` onları boş kabukla
+/// doldurur ve koşul **sessizce false** olur.
+///
+/// Bu, kuralı bir konfor olmaktan çıkarıp ZORUNLULUK yapan bulgudur: serbest
+/// bırakılsalardı hata değil, hiç ateşlenmeyen bir yazım üretirlerdi.
+#[test]
+fn set_when_condition_cannot_read_branch_namespaces() {
+    for kok in ["$branches", "$arrived"] {
+        let v = with_set_when(
+            "analyst_approve",
+            &format!("count({kok}, true) > 0"),
+            json!({"internal_notes": "x"}),
+        );
+        let report = validate_value(v);
+        assert!(
+            has_error(&report, "set_when_namespace"),
+            "'{kok}' effect koşulunda YASAK olmalı — sessiz false üretir. hatalar: {:#?}",
+            report.errors
+        );
+    }
+}
+
+/// Beyaz listenin serbest tarafı: `$ctx` · `$wfah` · `$prev` · `$actor` · `$node` …
+#[test]
+fn set_when_condition_accepts_the_allowed_roots() {
+    for expr in [
+        "$ctx.credit_score > 500",
+        "count($wfah, #.action == \"analyst_approve\") >= 1",
+        "$prev.action == \"create_application\"",
+        "$actor.role == \"creditAnalyst\"",
+        "$node == \"self__creditAnalyst\"",
+    ] {
+        let report = validate_value(with_set_when(
+            "analyst_approve",
+            expr,
+            json!({"internal_notes": "x"}),
+        ));
+        assert!(
+            !has_error(&report, "set_when_namespace"),
+            "'{expr}' serbest olmalı, hatalar: {:#?}",
+            report.errors
+        );
+    }
+}
+
+/// `E09`/B1 son cümle: taşıyıcı yerin namespace yasakları `set_when[].when` metnine
+/// **ve** `set_when[].set` DEĞERLERİNE aynen uygulanır. SLA yolunda aksiyon girdisi
+/// yoktur — koşullu yazım bu yasağın arkasından dolaşamamalı.
+#[test]
+fn carrier_place_bans_reach_inside_set_when() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"] = json!([{
+        "after": "P3D",
+        "grant": { "c_a": { "c_orgu": "self", "c_r": ["branchManager"] } },
+        "wfes_effects": {
+            "set_when": [{
+                "when": "$ctx.credit_score > 500",
+                "set": { "internal_notes": "$action.input.internal_notes" }
+            }]
+        }
+    }]);
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "sla_effect_namespace"),
+        "SLA yolunda `$action.input.*` yasağı koşullu yazıma da uygulanmalı: {:#?}",
+        report.errors
+    );
+}
+
+/// `E09`/S2 birinci yarı: `context_field_never_written` koşullu yazımı **SAYAR**.
+/// Yalnız `set_when` ile yazılan bir alan "hiç yazılmıyor" diye reddedilemez.
+#[test]
+fn a_field_written_only_conditionally_counts_as_written() {
+    let mut v = fixture_value();
+    // Alanı KOŞULSUZ yazan satırı kaldır, yerine koşullu yazım koy.
+    v["actions"]["analyst_approve"]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("analyst_approved_at");
+    v["actions"]["analyst_approve"]["wfes_effects"]["set_when"] = json!([{
+        "when": "$ctx.credit_score > 500",
+        "set": { "analyst_approved_at": "$timestamp" }
+    }]);
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "context_field_never_written"),
+        "koşullu yazar da YAZARDIR: {:#?}",
+        report.errors
+    );
+}
+
+/// `E09`/S2 ikinci yarı — **tek yardımcı neden YETMEZ.**
+///
+/// `optional_input_nulls_other_writer` *"bu alan KESİN `null`'lanır"* diyor. Garantiyi
+/// veren taraf, opsiyonel girdiden yazan (yani gönderilmediğinde `null` basan) yazardır
+/// — kaybolan taraf değil. O yazar KOŞULLUysa garanti düşer: koşul tutmazsa alana hiç
+/// dokunulmaz, kimsenin değeri kaybolmaz.
+///
+/// `all_writes()` ile tek yardımcıya indirgense `optional_sourced` koşullu yazımı da
+/// "kesin null'lar" sayardı ve YANLIŞ uyarı üretirdi. Ayrım bu yüzden var.
+#[test]
+fn a_conditional_optional_input_writer_gives_no_null_guarantee() {
+    let mut v = fixture_value();
+    // `analyst_approve`in opsiyonel `internal_notes` eşlemesini KOŞULLU yap.
+    v["actions"]["analyst_approve"]["wfes_effects"]["set"]
+        .as_object_mut()
+        .unwrap()
+        .remove("internal_notes");
+    v["actions"]["analyst_approve"]["wfes_effects"]["set_when"] = json!([{
+        "when": "$ctx.credit_score > 500",
+        "set": { "internal_notes": "$action.input.internal_notes" }
+    }]);
+    let report = validate_value(v);
+    let analyst_uyarisi = report
+        .warnings
+        .iter()
+        .filter(|w| w.code == "optional_input_nulls_other_writer")
+        .filter(|w| w.path.contains("analyst_approve"))
+        .count();
+    assert_eq!(
+        analyst_uyarisi, 0,
+        "koşullu yazar 'kesin null'lanır' garantisi VERMEZ: {:#?}",
+        report.warnings
+    );
+}
+
+/// Aynı kuralın ters yönü — kural ÖLMEDİ: null'layan taraf KOŞULSUZ kaldığı sürece
+/// uyarı çıkmaya devam eder. (Yukarıdaki testin tek başına yeşil kalması, kuralı
+/// tamamen kapatarak da sağlanabilirdi.)
+#[test]
+fn an_unconditional_optional_input_writer_still_warns() {
+    let report = validate_value(fixture_value());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == "optional_input_nulls_other_writer"),
+        "golden fixture bu uyarıyı üretiyordu; kural yerinde kalmalı: {:#?}",
+        report.warnings
+    );
+}
+
+/// Değer denetimleri (`$` gramerı, tip) koşullu yazıma da uygulanır — `set` ile
+/// `set_when[].set` arasında denetim farkı OLMAZ.
+#[test]
+fn value_checks_apply_to_conditional_writes_too() {
+    let report = validate_value(with_set_when(
+        "analyst_approve",
+        "$ctx.credit_score > 500",
+        json!({"analyst_approved_at": "$aktor.role"}),
+    ));
+    assert!(
+        has_error(&report, "unknown_dollar_ref"),
+        "tanınmayan `$` referansı koşullu yazımda da yayını durdurmalı: {:#?}",
+        report.errors
+    );
+}

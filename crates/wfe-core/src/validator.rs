@@ -744,7 +744,7 @@ fn check_node_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut Validatio
     // `detached` sonucu hiç görmez — `$call.result.*` daima null olurdu.
     if call.mode == CallMode::Detached {
         if let Some(effects) = &call.wfes_effects {
-            for (target, raw) in &effects.set {
+            for (target, raw) in effects.all_writes() {
                 walk_strings(
                     raw,
                     &format!("{path}.wfes_effects.set[{target}]"),
@@ -815,7 +815,7 @@ fn check_node_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut Validatio
         );
     }
     if let Some(effects) = &call.wfes_effects {
-        for (target, raw) in &effects.set {
+        for (target, raw) in effects.all_writes() {
             walk_strings(
                 raw,
                 &format!("{path}.wfes_effects.set[{target}]"),
@@ -864,7 +864,7 @@ fn check_next_call(wfd: &Wfd, path: &str, call: &CallRef, report: &mut Validatio
     // Ardılda WFC-OUT yoktur (çağıran zaten bitti, çağrılan henüz başlamadı).
     if let Some(t) = wfd.terminals.iter().find(|t| t.id == terminal_id) {
         if let Some(effects) = &t.wfes_effects {
-            for (target, raw) in &effects.set {
+            for (target, raw) in effects.all_writes() {
                 walk_strings(
                     raw,
                     &format!("terminals[{terminal_id}].wfes_effects.set[{target}]"),
@@ -939,7 +939,7 @@ fn callee_inputs(callee: &Wfd, start_id: Option<&str>) -> Option<CalleeInputs> {
     // v2.3: start gövdesi aksiyon kaydında — `wfes_effects` de oradan okunur.
     let mut types = HashMap::new();
     if let Some(effects) = &action.wfes_effects {
-        for (ctx_path, raw) in &effects.set {
+        for (ctx_path, raw) in effects.all_writes() {
             if let Some(input_path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) {
                 if let Some(ty) = schema_type_at(&callee.context, ctx_path) {
                     types.insert(input_path.to_string(), ty);
@@ -1088,7 +1088,7 @@ fn check_calls_cross_wfd(
             let Some(effects) = &call.wfes_effects else {
                 continue;
             };
-            for (target, raw) in &effects.set {
+            for (target, raw) in effects.all_writes() {
                 walk_strings(
                     raw,
                     &format!("{site_path}.wfes_effects.set[{target}]"),
@@ -1723,6 +1723,67 @@ fn check_start_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
     }
 }
 
+/// `E09`/B1 — `wfes_effects.set_when[].when` içinde okunabilecek kökler: **BEYAZ LİSTE.**
+///
+/// Kara liste OLMAMASININ sebebi ölçülmüş bir bulgu: `evaluate_bool`un ön denetimi
+/// (`check_env_refs`) YALNIZ `$env` anahtarlarını koruyor; öteki kökleri `zen_context`
+/// DAİMA dolduruyor — bağlanmamışsa `null` ya da boş kabukla. Yani yasak kök serbest
+/// bırakılsa **hata vermez, SESSİZCE false** döner ve koşullu yazım hiç ateşlenmez.
+/// Beyaz listede unutulan kök gürültülü hata verir; kara listede unutulan kök sessiz
+/// bozukluk üretir.
+///
+/// YASAK olanlar ve neden:
+/// * `$branches` / `$arrived` — yalnız `join_when` değerlendirilirken (`EvalEnv.join`)
+///   bağlanır; effect yolunda boş kabuk okunur. Yasak **yapısaldır**, geçici değil.
+/// * `$branch_round` — `E14`ün kökü, `apply_effects`in kurduğu `EvalEnv`e bağlanmıyor
+///   (paralel mod bilgisi effect bağlamına girmiyor) → `null` okur.
+///
+/// `$valid` SERBESTTİR: `E05` ile motor tarafında bağlandı (`with_wfah` `$valid`i de
+/// kurar), kayıt onu *"bağlanana kadar yasaktır"* diye şartlı yasaklamıştı.
+///
+/// ⚠️ Taşıyıcı yerin KENDİ yasakları (`sla_effect_namespace`, `call_effect_namespace`)
+/// bu kuralın ÜSTÜNE biner ve `set_when[].when` metnine de uygulanır — burada serbest
+/// görünen `$action.input.*` SLA yolunda yine reddedilir.
+fn check_set_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
+    const ALLOWED_ROOTS: [&str; 12] = [
+        "$ctx",
+        "$wfah",
+        "$valid",
+        "$prev",
+        "$first",
+        "$actor",
+        "$timestamp",
+        "$wfe_id",
+        "$node",
+        "$env",
+        "$exec",
+        "$call",
+    ];
+    for (site, effects) in each_effects(wfd) {
+        for (i, entry) in effects.set_when.iter().enumerate() {
+            let path = format!("{site}.wfes_effects.set_when[{i}].when");
+            for r in dollar_refs_in(&entry.when) {
+                let root = r.split('.').next().unwrap_or(&r);
+                if ALLOWED_ROOTS.contains(&root) || r == "$action.input" {
+                    continue;
+                }
+                report.error(
+                    "set_when_namespace",
+                    path.clone(),
+                    format!(
+                        "koşullu yazımın `when`inde '{r}' okunamaz. `$branches`/`$arrived` \
+                         yalnız join koşulunda, `$branch_round` ise paralel mod bağlamında \
+                         bağlanır; effect yolunda boş okunur ve koşul SESSİZCE false döner \
+                         — yazım hiç ateşlenmez. Serbest kökler: $ctx · $wfah · $valid · \
+                         $prev · $first · $node · $actor · $timestamp · $wfe_id · $env \
+                         (+ taşıyıcı yerin izin verdiği $action.input.* · $exec.result.* · $call.*)"
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
     // V5: en az 1 start
     if wfd.start.is_empty() {
@@ -1748,6 +1809,7 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
         // (`check_cross_refs`), yani aynı garanti tek yerden geliyor.
     }
     check_start_when_namespace(wfd, report);
+    check_set_when_namespace(wfd, report);
 }
 
 // ---- M3: wft.conditions hedef tekilliği ----
@@ -2444,7 +2506,7 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
 pub fn expr_env(wfd: &Wfd) -> ExprEnv<'_> {
     let mut input_ctx_map: HashMap<String, String> = HashMap::new();
     for (_, effects) in each_effects(wfd) {
-        for (target, raw) in &effects.set {
+        for (target, raw) in effects.all_writes() {
             let Some(path) = raw.as_str().and_then(|s| s.strip_prefix("$action.input.")) else {
                 continue;
             };
@@ -3119,7 +3181,7 @@ fn each_effects(wfd: &Wfd) -> Vec<(String, &WfesEffects)> {
 fn collect_effect_targets(wfd: &Wfd) -> Vec<String> {
     each_effects(wfd)
         .into_iter()
-        .flat_map(|(_, e)| e.set.keys().cloned().collect::<Vec<_>>())
+        .flat_map(|(_, e)| e.all_writes().map(|(k, _)| k.clone()).collect::<Vec<_>>())
         .collect()
 }
 
@@ -3166,7 +3228,7 @@ fn effect_value_type(raw: &Value, context: &Value) -> Option<String> {
 /// çağrı girdilerinde zaten var (`call_input_type_mismatch`) — effects'te yoktu.
 fn check_effect_value_types(wfd: &Wfd, report: &mut ValidationReport) {
     for (site, effects) in each_effects(wfd) {
-        for (target, raw) in &effects.set {
+        for (target, raw) in effects.all_writes() {
             let Some(want) = schema_type_at(&wfd.context, target) else {
                 continue; // hedef şemasız/tipsiz — kıyaslanacak bir şey yok
             };
@@ -3232,7 +3294,7 @@ fn check_dollar_value(raw: &Value, site: &str, report: &mut ValidationReport) {
 /// (`$wfah`, `$prev`, `$first`…) ve kendi kuralları vardır (`expression_issues`).
 fn check_dollar_refs(wfd: &Wfd, report: &mut ValidationReport) {
     for (site, effects) in each_effects(wfd) {
-        for (target, raw) in &effects.set {
+        for (target, raw) in effects.all_writes() {
             check_dollar_value(raw, &format!("{site}.wfes_effects.set[{target}]"), report);
         }
     }
@@ -3307,7 +3369,7 @@ fn check_context_field_writers(wfd: &Wfd, report: &mut ValidationReport) {
 
 /// Bir effect bloğundaki `$action.input.<yol>` referanslarını toplar (nested değerler dahil).
 fn collect_input_refs(effects: &WfesEffects, out: &mut Vec<String>) {
-    for raw in effects.set.values() {
+    for (_, raw) in effects.all_writes() {
         walk_strings(raw, "", &mut |s, _| {
             if let Some(path) = s.strip_prefix("$action.input.") {
                 out.push(path.to_string());
@@ -3449,7 +3511,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
     // bu silmeyi ADIYLA emrediyor.
     for (action_key, t) in &wfd.actions {
         if let Some(e) = &t.wfes_effects {
-            for path in e.set.keys() {
+            for (path, _) in e.all_writes() {
                 // Site etiketi node'u da taşır. v2.3'te `from` TEK string (`K3`), yani
                 // eskiden gereken sıralı birleştirme de düştü.
                 let site = format!("'{action_key}' aksiyonu ({})", t.from);
@@ -3465,7 +3527,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
         }
         for trig in &t.trigger {
             if let Some(c) = &trig.catch {
-                for path in c.wfes_effects.set.keys() {
+                for (path, _) in c.wfes_effects.all_writes() {
                     writers.push(EffectWriter {
                         path: path.clone(),
                         site: format!("actions.{action_key} catch"),
@@ -3479,7 +3541,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
     for (key, node) in &wfd.nodes {
         for esc in &node.escalation {
             if let Some(e) = &esc.wfes_effects {
-                for path in e.set.keys() {
+                for (path, _) in e.all_writes() {
                     writers.push(EffectWriter {
                         path: path.clone(),
                         site: format!("'{key}' escalation'ı"),
@@ -3491,7 +3553,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
         }
         if let Some(ct) = &node.claim_timeout {
             if let Some(e) = &ct.wfes_effects {
-                for path in e.set.keys() {
+                for (path, _) in e.all_writes() {
                     writers.push(EffectWriter {
                         path: path.clone(),
                         site: format!("'{key}' claim süresi"),
@@ -3504,7 +3566,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for t in &wfd.terminals {
         if let Some(e) = &t.wfes_effects {
-            for path in e.set.keys() {
+            for (path, _) in e.all_writes() {
                 writers.push(EffectWriter {
                     path: path.clone(),
                     site: format!("'{}' terminali", t.id),
@@ -3516,7 +3578,7 @@ fn check_optional_input_overwrites(wfd: &Wfd, report: &mut ValidationReport) {
     }
     for (name, ax) in &wfd.autoexec {
         if let Some(e) = &ax.wfes_effects {
-            for path in e.set.keys() {
+            for (path, _) in e.all_writes() {
                 writers.push(EffectWriter {
                     path: path.clone(),
                     site: format!("'{name}' otomasyonu"),
@@ -3659,7 +3721,7 @@ fn check_effect_paths(wfd: &Wfd, report: &mut ValidationReport) {
                          path: &str,
                          report: &mut ValidationReport| {
         let Some(effects) = effects else { return };
-        for key in effects.set.keys() {
+        for (key, _) in effects.all_writes() {
             if let PathResolution::Missing = resolve_schema_path(&wfd.context, key) {
                 report.error(
                     "effect_path",
@@ -3759,7 +3821,7 @@ fn check_retries(wfd: &Wfd, report: &mut ValidationReport) {
 /// — sessizce `null` yazmak yerine WFD reddedilir. `$ctx.*`, `$actor`, `$node`,
 /// `$timestamp`, `$wfe_id`, `$env.*` geçerli.
 fn check_sla_effect_namespaces(effects: &WfesEffects, path: &str, report: &mut ValidationReport) {
-    for (target, raw) in &effects.set {
+    for (target, raw) in effects.all_writes() {
         walk_strings(raw, &format!("{path}.set[{target}]"), &mut |s, p| {
             for bad in ["$action.input.", "$exec.result.", "$call."] {
                 if s.contains(bad) {

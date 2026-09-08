@@ -192,19 +192,9 @@ pub async fn authorize_with_delegation_anchored(
     Ok(AuthDecision::Denied)
 }
 
-/// `authorize_with_delegation`'ın bool kısayolu — provenance gerekmeyen çağıranlar
-/// (visibility, listable, field x-visibility) için. `now = Utc::now()`.
-pub async fn authorize_or_delegated(
-    rule: &CandidateActor,
-    actor: &Actor,
-    env: MatchEnv<'_>,
-    org: &dyn OrgPort,
-) -> Result<bool, EngineError> {
-    authorize_or_delegated_anchored(rule, actor, None, env, org).await
-}
-
-/// `authorize_or_delegated`ın çapalı hâli — `listable`/`wf_admin` grant'ları
-/// (bkz. `authorize_anchored`).
+/// `authorize_with_delegation_anchored`'ın bool kısayolu — provenance gerekmeyen
+/// çağıranlar (visibility, listable, field x-visibility) için. `now = Utc::now()`,
+/// çapa için bkz. `authorize_anchored`.
 pub async fn authorize_or_delegated_anchored(
     rule: &CandidateActor,
     actor: &Actor,

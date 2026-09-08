@@ -52,12 +52,10 @@ use std::sync::Arc;
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use uuid::Uuid;
 use wfe_core::types::actor::Actor;
-use wfe_core::types::wfd_v22::{COrgu, CaGrantRule, Wfd};
-use wfe_core::v22::grants::matches_grant_rules;
-use wfe_core::v22::matcher::{authorize_or_delegated, MatchEnv};
+use wfe_core::types::wfd_v22::{COrgu, CaGrantRule};
 use wfe_core::v22::ports::{VisibilityPort, WfdStore, WfeStore};
 use wfe_core::v22::visibility::can_view;
-use wfe_core::{EngineError, OrgPort};
+use wfe_core::OrgPort;
 
 #[derive(sqlx::FromRow)]
 struct ActorRow {

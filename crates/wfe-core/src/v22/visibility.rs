@@ -15,7 +15,7 @@ use crate::ports::OrgPort;
 use crate::types::actor::Actor;
 use crate::types::wfd_v22::{COrgu, CandidateActor, CuItem, Wfd, WfAdminRule};
 use crate::v22::grants::matches_grant_rules;
-use crate::v22::matcher::{authorize_or_delegated, authorize_or_delegated_anchored, MatchEnv};
+use crate::v22::matcher::{authorize_or_delegated_anchored, MatchEnv};
 use crate::v22::valid::ValidRules;
 use crate::v22::ports::{BranchStatus, Wfes};
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};

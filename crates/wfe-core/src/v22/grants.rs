@@ -21,7 +21,7 @@ use crate::v22::valid::ValidRules;
 
 /// Kurallardan HERHANGİ biri aktörü yetkilendiriyor mu (OR).
 ///
-/// Vekâlet dahildir (`authorize_or_delegated`): bir kişiye vekâlet eden aktör onun
+/// Vekâlet dahildir (`authorize_or_delegated_anchored`): bir kişiye vekâlet eden aktör onun
 /// grant'larını da taşır — `listable` bugün böyle davranıyor, `wf_admin` de öyle
 /// davranmalı, aksi halde vekil akışı görebilir ama yönetemez.
 pub async fn matches_grant_rules<'r, I>(

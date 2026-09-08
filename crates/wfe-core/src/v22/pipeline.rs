@@ -1561,13 +1561,6 @@ impl<'a> Engine<'a> {
             require_global_action(&wfd.wf_admin, reassigner, needed, wfes, &ValidRules::for_version(wfd), self.org).await?;
         }
 
-        // 3. Hedef (varsa) node.c_a'ya uygun olmalı.
-        if let Some(t) = target {
-            if !authorize_anchored(&node.c_a, t, wfes.origin_orgu_id, env, self.org).await? {
-                return Err(EngineError::TargetNotEligible);
-            }
-        }
-
         // Ç4/E14: kol devrinde satır O KOLDA üretilir — kimlik + tur tek yerden.
         let (branch_entry, branch_round) = branch_label(wfes, branch);
         // E12/S5: paralel modda kol alanları ZORUNLUDUR ve YAZMA ANINDA dolar —
@@ -1617,12 +1610,36 @@ impl<'a> Engine<'a> {
             .in_branch(ownership_branch);
             rows.push((released.marker(), released.input()));
         }
+        // 3. adım — HEDEFİN UYGUNLUĞU (`E02`/S2 + `E04`).
+        //
+        // İki şey değişti. (a) Soru `node.c_a` değil **`node.c_a ∪ açılmış grantlar`**:
+        // grant'la havuza giren kişi listede GÖRÜNÜP devir alamıyordu. (b) Kapı
+        // POST-APPEND defterle sorulur — bırakma satırı zaten stage edildi ve bir
+        // guard onu sayıyor olabilir.
+        //
+        // ⚠️ Yetkisiz hedefte **RET** (403). Assign-then-release YAPILMAZ: önce atayıp
+        // sonra bırakmak `Ç13` şekliyle İKİ satır yazar ve denetim izine OLMAMIŞ bir
+        // sahiplik ekler. Ret doğru cevaptır ve hiçbir satır yazılmaz — `rows` burada
+        // düşer, çağıran `Err` alır.
         if let Some(t) = target {
-            // `authority`: hedefin uygunluğu (3. adım) bugün YALNIZ `node.c_a`ya
-            // bakıyor — açık grant'lar claim yoluna `E04` (`authorize_node`) ile
-            // girecek ve değer ORADAN gelecek. `c_a` zaten öncelikli taraftır
-            // (E12/S1), yani E04 indiğinde bu satırın anlamı değişmez, yalnız
-            // grant'la gelen hedefler `grant` yazmaya başlar.
+            let mut post = wfes.clone();
+            post.wfah = wfes.wfah.extended(&stage_rows(
+                &rows,
+                wfes,
+                now,
+                &branch_entry,
+                branch_round,
+                reassigner,
+            ));
+            if !crate::v22::grants::authorize_node(wfd, &post, node_key, t, self.org).await? {
+                return Err(EngineError::TargetNotEligible);
+            }
+        }
+
+        if let Some(t) = target {
+            // `authority`: `c_a` öncelikli taraftır (E12/S1) — grant'la gelen hedefler
+            // için doğru değer `grant` olurdu, ama o kapalı liste `E12`nin işidir ve
+            // bu kayıt onu GENİŞLETMEZ (CLAUDE.md: "`authority` bugün DAİMA `c_a`").
             let taken = if by_wf_admin {
                 ClaimTaken::admin_assigned(node_key, t.user_id, ClaimAuthority::Ca, global_action)
             } else {
@@ -1633,27 +1650,14 @@ impl<'a> Engine<'a> {
             rows.push((taken.marker(), taken.input()));
         }
 
-        let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
-        Ok(rows
-            .into_iter()
-            .map(|(action, input)| {
-                let entry = WfahEntry {
-                    seq,
-                    action,
-                    actor: reassigner.clone(),
-                    input: Some(input),
-                    applied_at: now,
-                    // Ç2: sahiplik devri node DEĞİŞTİRMEZ — hareket satırı değil.
-                    from_node: None,
-                    to_node: None,
-                    // Ç4: kol devrinde satır O KOLDA üretilir.
-                    branch_entry: branch_entry.clone(),
-                    branch_round,
-                };
-                seq += 1;
-                entry
-            })
-            .collect())
+        Ok(stage_rows(
+            &rows,
+            wfes,
+            now,
+            &branch_entry,
+            branch_round,
+            reassigner,
+        ))
     }
 
     // ------------------------------------------------------ possible actions
@@ -4003,6 +4007,40 @@ fn stamp_movement(entry: &mut WfahEntry, outcome: &CommitOutcome, fallback_from:
 /// İkisi TEK fonksiyondan çıkar çünkü *"`branch_entry` NULL ⇔ `branch_round` NULL"*
 /// bir DEĞİŞMEZDİR (E14/S3): ayrı ayrı yazılsalar bir üretici birini doldurup
 /// diğerini atlayabilirdi.
+/// `(marker, payload)` çiftlerini WFAH satırına çevirir — `seq` defterin sonundan
+/// başlar ve ardışık ilerler (`Ç13`/`E12`/S4: kişiden kişiye devir İKİ satırdır).
+///
+/// Ayrı fonksiyon çünkü İKİ tüketicisi var: hedefin uygunluk kapısı satırları
+/// POST-APPEND defter kurmak için ister (`E02`/S2), dönüş de aynı satırları verir.
+/// İki yerde iki ayrı `seq` sayacı yazmak, kapının gördüğü defterle store'a yazılanın
+/// ayrışması demekti.
+fn stage_rows(
+    rows: &[(String, Value)],
+    wfes: &Wfes,
+    now: DateTime<Utc>,
+    branch_entry: &Option<String>,
+    branch_round: Option<u32>,
+    actor: &Actor,
+) -> Vec<WfahEntry> {
+    let base = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+    rows.iter()
+        .enumerate()
+        .map(|(i, (action, input))| WfahEntry {
+            seq: base + i as u32,
+            action: action.clone(),
+            actor: actor.clone(),
+            input: Some(input.clone()),
+            applied_at: now,
+            // Ç2: sahiplik devri node DEĞİŞTİRMEZ — hareket satırı değil.
+            from_node: None,
+            to_node: None,
+            // Ç4: kol devrinde satır O KOLDA üretilir.
+            branch_entry: branch_entry.clone(),
+            branch_round,
+        })
+        .collect()
+}
+
 /// `E02`/S2 — claim'i TUTAN aktörü defterden okur (`Ç13`in `claim_taken:<node>` satırı).
 ///
 /// `Wfes.assigned_to` yalnız `user_id`dir; yetki sorusu ise birim ve rol ister. Sahipliği

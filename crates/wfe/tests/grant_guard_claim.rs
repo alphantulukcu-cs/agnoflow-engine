@@ -58,6 +58,8 @@ fn wfd_json() -> Value {
             "memur": {"c_a": {"c_orgu": "self", "c_r": ["memur"]}},
             "mudur": {
                 "c_a": {"c_orgu": "self", "c_r": ["mudur"]},
+                // Madde 7: sahibi işi devredebilir — `reassign` testinin ön koşulu.
+                "reassign": {"c_orgu": "self", "c_r": ["mudur"]},
                 "escalation": [
                     {
                         "after": "PT1H",
@@ -427,5 +429,80 @@ async fn claim_taken_through_a_grant_drops_when_its_guard_turns_false() {
         released.input.as_ref().expect("payload")["reason"],
         json!("grant_guard_false"),
         "sebep ADda değil payload'da taşınır (Ç1-EK)"
+    );
+}
+
+/// `E02`/S2 — **`reassign` hedefi de `c_a ∪ grant` üzerinden sorulur.**
+///
+/// Kapı bugüne dek düz `node.c_a`ya bakıyordu: escalation grant'ıyla havuza giren
+/// kişi listede GÖRÜNÜYOR ama admin işi ona DEVREDEMİYORDU (`TargetNotEligible`).
+/// "Görüyorum ama veremiyorum" hâli, `E04`ün kapatmayı hedeflediği ayrışmanın devir
+/// yolundaki karşılığı.
+///
+/// Karar `reassign` için ayrıca RET diyor (assign-then-release YAPILMAZ, ek satır
+/// yazılmaz) — bu test o retlerin YANLIŞ hedefe uygulanmadığını çiviler: yetkili
+/// hedef reddedilmemeli.
+#[tokio::test]
+async fn reassign_accepts_a_target_authorised_only_by_an_open_grant() {
+    let wfd = Wfd::from_value(wfd_json()).expect("fixture geçerli olmalı");
+    let sube = Uuid::new_v4();
+    let (memur, mudur, denetci) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let org = RoleOrg {
+        roles: HashMap::from([
+            (memur, vec!["memur"]),
+            (mudur, vec!["mudur"]),
+            (denetci, vec!["denetci"]),
+        ]),
+    };
+    let store = Arc::new(MemStore::default());
+    let exec = WfeExecutor::new(
+        Arc::new(org),
+        Arc::new(FixtureWfdStore(wfd)),
+        store.clone(),
+        Arc::new(NoRunner),
+    );
+
+    let started = exec
+        .start(
+            Uuid::new_v4(),
+            1,
+            &actor(memur, sube, "memur"),
+            Some("basvur"),
+            &json!({}),
+            None,
+        )
+        .await
+        .expect("başlatma");
+    let wfe_id = started.wfe_id;
+
+    // Müdür işi üstlenir (node'un KENDİ havuzu).
+    assert!(
+        exec.claim(wfe_id, &actor(mudur, sube, "mudur"), None, None)
+            .await
+            .expect("claim")
+            .success
+    );
+
+    // 1. kademe ateşlenir → denetçi havuza GRANT'la girer.
+    store.age_wfah(wfe_id, chrono::Duration::minutes(61));
+    assert!(
+        exec.tick_timers(wfe_id).await.expect("timer"),
+        "ön koşul: kademe ateşlenmeli"
+    );
+
+    // Müdür işi denetçiye devreder. Hedefin yetkisi YALNIZ grant'tan geliyor.
+    exec.reassign(
+        wfe_id,
+        &actor(mudur, sube, "mudur"),
+        Some(&actor(denetci, sube, "denetci")),
+        None,
+    )
+    .await
+    .expect("grant'la yetkili hedef reddedilmemeli");
+
+    assert_eq!(
+        store.snapshot(wfe_id).assigned_to,
+        Some(denetci),
+        "devir hedefe oturmalı"
     );
 }

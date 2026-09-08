@@ -91,16 +91,16 @@ pub fn send_back_target_label(wfd: &Wfd, node_key: &str, target_label: Option<&s
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::wfd_v22::Wft;
     use crate::types::wfd_v22::{ActionDef, InputDef, NodeDef};
     use serde_json::json;
 
     fn wfd() -> Wfd {
         let mut w: Wfd = serde_json::from_value(json!({
-            "wfd_version": "2.2",
+            "wfd_version": "2.3",
             "id": "x", "name": "X", "version": "1.0.0",
             "context": {"type": "object", "properties": {}},
             "nodes": {}, "start": [], "actions": {},
-            "transitions": [],
             "terminals": [
                 {"id": "onaylandi", "label": "Onaylandı", "wfe_end_response": {}},
                 {"id": "reddedildi", "wfe_end_response": {}}
@@ -133,6 +133,17 @@ mod tests {
                 required: vec![],
                 optional: vec![],
             },
+            // v2.3 (`Ç5`): yönlendirme alanları aksiyon kaydına indi. Bu test yalnız
+            // GÖSTERİM adını sınıyor, yönlendirmeyi değil — alanlar en yalın geçerli
+            // değerlerle doldurulur.
+            from: "self__gm".into(),
+            when: None,
+            extra_c_a: None,
+            wfes_effects: None,
+            trigger: vec![],
+            wft: Wft::Terminal {
+                terminal: "t_done".into(),
+            },
         }
     }
 
@@ -154,8 +165,10 @@ mod tests {
     #[test]
     fn send_back_actions_share_a_label_but_not_an_identity() {
         let mut w = wfd();
-        w.actions.insert("Geri_Gonder".into(), act(Some("Geri Gönder")));
-        w.actions.insert("Geri_Gonder_2".into(), act(Some("Geri Gönder")));
+        w.actions
+            .insert("Geri_Gonder".into(), act(Some("Geri Gönder")));
+        w.actions
+            .insert("Geri_Gonder_2".into(), act(Some("Geri Gönder")));
         assert_eq!(action_label(&w, "Geri_Gonder"), "Geri Gönder");
         assert_eq!(action_label(&w, "Geri_Gonder_2"), "Geri Gönder");
         // Label yazılmamışsa anahtarın okunur hâline düşer (özel hal yok).

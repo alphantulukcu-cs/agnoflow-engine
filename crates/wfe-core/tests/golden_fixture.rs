@@ -13,11 +13,15 @@ fn golden() -> Wfd {
 #[test]
 fn golden_fixture_parses_losslessly() {
     let wfd = golden();
-    assert_eq!(wfd.wfd_version, "2.2");
+    assert_eq!(wfd.wfd_version, "2.3");
     assert_eq!(wfd.id, "kredi-basvuru-v2");
-    assert_eq!(wfd.nodes.len(), 4); // 3 state + 1 simetrik start node (type_branch__branchClerk)
+    // v2.3/`A05`: `parent__creditDeptManager` node'u KALKTI — o yetki artık
+    // `self__branchManager`ın escalation `grant`ı. 2 state + 1 simetrik start node.
+    assert_eq!(wfd.nodes.len(), 3);
     assert_eq!(wfd.start.len(), 1);
-    assert_eq!(wfd.transitions.len(), 2);
+    // v2.3/`Ç5`: `transitions[]` öldü. Eskiden 2 transition + 1 start gövdesi vardı;
+    // üçü de artık birer `actions` kaydı (start gövdesi de aksiyona indi — `Ç7+Ç8`).
+    assert_eq!(wfd.actions.len(), 3);
     assert_eq!(wfd.terminals.len(), 2);
     assert_eq!(wfd.listable.len(), 2);
     assert_eq!(wfd.autoexec.len(), 3);
@@ -25,7 +29,7 @@ fn golden_fixture_parses_losslessly() {
     assert_eq!(wfd.nodes["self__creditAnalyst"].escalation.len(), 1);
     assert_eq!(wfd.nodes["self__creditAnalyst"].escalation[0].after, "P3D");
     // trigger retry/catch korunmalı
-    let t = &wfd.transitions[0];
+    let t = &wfd.actions["analyst_approve"];
     assert_eq!(t.trigger.len(), 3);
     assert_eq!(t.trigger[0].retry.len(), 1);
     assert!(t.trigger[0].catch.is_some());

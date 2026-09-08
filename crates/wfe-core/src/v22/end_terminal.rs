@@ -163,30 +163,21 @@ fn contains_dollar_ref(v: &Value) -> bool {
 fn reachable_terminals(wfd: &Wfd, last: LastAction<'_>) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
 
-    for tr in &wfd.transitions {
-        if tr.action != last.action {
-            continue;
-        }
+    // v2.3 (`Ç5`): aksiyon kimliği `actions` map ANAHTARI → aksiyon adıyla arama
+    // O(n) taramadan O(log n) lookup'a iner ve "aynı ada sahip ikinci kural" durumu
+    // yapısal olarak yok.
+    if let Some(tr) = wfd.actions.get(last.action) {
         // `from_node` bilinmiyorsa (eski WFAH satırı) aksiyon adı tek ölçüttür.
-        if let Some(node) = last.from_node {
-            if !tr.from.contains(node) {
-                continue;
-            }
+        let node_matches = last.from_node.is_none_or(|node| tr.from == *node);
+        if node_matches {
+            collect_wft_terminals(&tr.wft, &mut out);
         }
-        collect_wft_terminals(&tr.wft, &mut out);
     }
 
-    for rule in &wfd.start {
-        if rule.action != last.action {
-            continue;
-        }
-        if let Some(node) = last.from_node {
-            if rule.from != node {
-                continue;
-            }
-        }
-        collect_wft_terminals(&rule.wft, &mut out);
-    }
+    // v2.3 (`Ç7+Ç8`): start gövdesi aksiyon kaydında → start aksiyonu yukarıdaki
+    // `wfd.actions` lookup'ından ZATEN geçiyor. Ayrı start döngüsü aynı `wft`i ikinci
+    // kez tarardı; aday kümesi bir `BTreeSet` olduğu için sonuç değişmezdi ama
+    // "iki kaynak, tek gerçek" hâli geri gelirdi.
 
     // WFC dönüşü: çağrı node'unda insan ACT'i alınmaz, o yüzden yalnız `from_node`
     // biliniyorsa bakılır — aksi halde belgedeki HER çağrı node'unu aday sayardık.
@@ -229,12 +220,10 @@ fn collect_join_terminals(wfd: &Wfd, out: &mut BTreeSet<String>) {
             }
         }
     };
-    for tr in &wfd.transitions {
+    for tr in wfd.actions.values() {
         add(&tr.wft);
     }
-    for rule in &wfd.start {
-        add(&rule.wft);
-    }
+    // v2.3: start'ın `wft`i aksiyon kaydında — yukarıdaki `actions` döngüsü kapsıyor.
     for node in wfd.nodes.values() {
         if let Some(wft) = node.call.as_ref().and_then(|c| c.wft.as_ref()) {
             add(wft);
@@ -390,10 +379,11 @@ mod tests {
         let resp = synth_response(&wfd, &a);
 
         let (node, action) = transition_to(&wfd, &b).expect("fixture'da terminal geçişi olmalı");
+        // v2.3: aksiyon anahtarıyla DOĞRUDAN erişim — `from` kontrolü kaydın kendisinde.
         let tr = wfd
-            .transitions
-            .iter_mut()
-            .find(|t| t.action == action && t.from.contains(&node))
+            .actions
+            .get_mut(&action)
+            .filter(|t| t.from == node)
             .expect("geçiş");
         tr.wft = Wft::Terminal {
             terminal: b.clone(),
@@ -512,8 +502,8 @@ mod tests {
         let mut wfd = paralel;
         let join_terminal = wfd.terminals[0].id.clone();
         let fork = wfd
-            .transitions
-            .iter_mut()
+            .actions
+            .values_mut()
             .find(|t| matches!(t.wft, Wft::Parallel { .. }))
             .expect("paralel fixture bir fork taşımalı");
         if let Wft::Parallel { parallel } = &mut fork.wft {
@@ -524,10 +514,10 @@ mod tests {
 
         // Kol içindeki HERHANGİ bir aksiyon: node hedefli, join'i hiç görmüyor.
         let (node, action) = wfd
-            .transitions
+            .actions
             .iter()
-            .find(|t| matches!(t.wft, Wft::Node { .. }))
-            .map(|t| (t.from.iter()[0].to_string(), t.action.clone()))
+            .find(|(_, t)| matches!(t.wft, Wft::Node { .. }))
+            .map(|(key, t)| (t.from.clone(), key.clone()))
             .expect("node hedefli bir geçiş olmalı");
 
         let reach = reachable_terminals(
@@ -545,11 +535,11 @@ mod tests {
 
     /// Belgedeki bir terminal'e giden (node, action) ikilisi.
     fn transition_to(wfd: &Wfd, terminal_id: &str) -> Option<(String, String)> {
-        for tr in &wfd.transitions {
+        for (action_key, tr) in &wfd.actions {
             let mut hits = BTreeSet::new();
             collect_wft_terminals(&tr.wft, &mut hits);
             if hits.contains(terminal_id) {
-                return Some((tr.from.iter()[0].to_string(), tr.action.clone()));
+                return Some((tr.from.clone(), action_key.clone()));
             }
         }
         None

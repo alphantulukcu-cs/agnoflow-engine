@@ -29,7 +29,7 @@ use wfe_core::EngineError;
 /// Tek node + tek aksiyon; `tutar` NUMBER olarak bildirilmiş.
 fn wfd_json() -> Value {
     json!({
-        "wfd_version": "2.2",
+        "wfd_version": "2.3",
         "id": "tip-kapisi",
         "name": "Tip Kapısı",
         "version": "1.0.0",
@@ -41,16 +41,17 @@ fn wfd_json() -> Value {
             "self__memur": { "c_a": { "c_orgu": "self", "c_r": ["memur"] } },
             "self__mudur": { "c_a": { "c_orgu": "self", "c_r": ["mudur"] } }
         },
-        "start": [{ "id": "s1", "from": "self__memur", "action": "basvur",
-                    "wfes_effects": { "set": { "tutar": "$action.input.tutar" } },
-                    "wft": { "node": "self__mudur" } }],
+        "start": [{ "id": "s1", "action": "basvur" }],
         "actions": {
-            "basvur": { "input": { "required": ["tutar"], "optional": [] } },
-            "onayla": { "input": { "required": ["not"], "optional": [] } }
+            "basvur": { "input": { "required": ["tutar"], "optional": [] },
+                        "from": "self__memur",
+                        "wfes_effects": { "set": { "tutar": "$action.input.tutar" } },
+                        "wft": { "node": "self__mudur" } },
+            "onayla": { "input": { "required": ["not"], "optional": [] },
+                        "from": "self__mudur",
+                        "wfes_effects": { "set": { "not": "$action.input.not" } },
+                        "wft": { "terminal": "bitti" } }
         },
-        "transitions": [{ "id": "t1", "from": "self__mudur", "action": "onayla",
-                          "wfes_effects": { "set": { "not": "$action.input.not" } },
-                          "wft": { "terminal": "bitti" } }],
         "terminals": [{ "id": "bitti", "wfe_end_response": {} }]
     })
 }
@@ -119,23 +120,11 @@ impl MemStore {
 }
 
 fn outcome_parts(outcome: &CommitOutcome) -> (WfeStatus, Option<String>, Option<Value>) {
-    match outcome {
-        CommitOutcome::MoveTo { node } => (WfeStatus::Active, Some(node.clone()), None),
-        CommitOutcome::Terminal { end_response } => {
-            (WfeStatus::Terminal, None, Some(end_response.clone()))
-        }
-        CommitOutcome::Failed { end_response } => {
-            (WfeStatus::Error, None, Some(end_response.clone()))
-        }
-        CommitOutcome::Terminated { end_response } => {
-            (WfeStatus::Terminated, None, Some(end_response.clone()))
-        }
-        CommitOutcome::ForkTo { .. }
-        | CommitOutcome::BranchMoveTo { .. }
-        | CommitOutcome::BranchArrived { .. } => (WfeStatus::Active, None, None),
-        CommitOutcome::JoinComplete { next, .. } => outcome_parts(next),
-        CommitOutcome::CollapseTo { node, .. } => (WfeStatus::Active, Some(node.clone()), None),
-    }
+    // v2.3 (`E02`/S3): kopyalanmış `match` mantığı KALKTI — tek gerçek kaynak
+    // `CommitOutcome::resolution()`. Beş ayrı kopya vardı ve her yeni varyantta
+    // beşinin de elle güncellenmesi gerekiyordu.
+    let (status, node, end) = outcome.resolution();
+    (status, node.map(str::to_string), end.cloned())
 }
 
 #[async_trait]
@@ -269,7 +258,6 @@ impl WfeStore for MemStore {
     }
 }
 
-
 impl MemStore {
     /// Testin ctx'i BOZMASI için: enforcement öncesi yazılmış bir değeri taklit eder.
     fn corrupt(&self, wfe_id: Uuid, field: &str, value: Value) {
@@ -299,14 +287,24 @@ async fn wrong_typed_start_writes_nothing() {
     let (executor, store) = harness();
     let memur = actor_in(Uuid::new_v4(), "memur");
     let err = executor
-        .start(Uuid::new_v4(), 1, &memur, Some("basvur"), &json!({ "tutar": "yüz" }), None)
+        .start(
+            Uuid::new_v4(),
+            1,
+            &memur,
+            Some("basvur"),
+            &json!({ "tutar": "yüz" }),
+            None,
+        )
         .await
         .unwrap_err();
     assert!(
         matches!(&err, EngineError::InputTypeMismatch(v) if v[0].path == "tutar"),
         "{err}"
     );
-    assert!(store.wfes.lock().unwrap().is_empty(), "reddedilen start WFE yaratmamalı");
+    assert!(
+        store.wfes.lock().unwrap().is_empty(),
+        "reddedilen start WFE yaratmamalı"
+    );
 }
 
 /// Kapı C — ctx'i ELLE bozulmuş bir WFE'de aksiyon REDDEDİLİR.
@@ -317,7 +315,14 @@ async fn action_on_corrupt_ctx_is_rejected() {
     let memur = actor_in(sube, "memur");
     let mudur = actor_in(sube, "mudur");
     let started = executor
-        .start(Uuid::new_v4(), 1, &memur, Some("basvur"), &json!({ "tutar": 100 }), None)
+        .start(
+            Uuid::new_v4(),
+            1,
+            &memur,
+            Some("basvur"),
+            &json!({ "tutar": 100 }),
+            None,
+        )
         .await
         .unwrap();
 
@@ -325,7 +330,15 @@ async fn action_on_corrupt_ctx_is_rejected() {
     store.corrupt(started.wfe_id, "tutar", json!("yüz bin"));
 
     let err = executor
-        .apply(started.wfe_id, &mudur, "onayla", &json!({ "not": "ok" }), None, None, None)
+        .apply(
+            started.wfe_id,
+            &mudur,
+            "onayla",
+            &json!({ "not": "ok" }),
+            None,
+            None,
+            None,
+        )
         .await
         .unwrap_err();
     match &err {
@@ -342,12 +355,22 @@ async fn claim_on_corrupt_ctx_is_rejected() {
     let memur = actor_in(sube, "memur");
     let mudur = actor_in(sube, "mudur");
     let started = executor
-        .start(Uuid::new_v4(), 1, &memur, Some("basvur"), &json!({ "tutar": 100 }), None)
+        .start(
+            Uuid::new_v4(),
+            1,
+            &memur,
+            Some("basvur"),
+            &json!({ "tutar": 100 }),
+            None,
+        )
         .await
         .unwrap();
     store.corrupt(started.wfe_id, "tutar", json!("yüz bin"));
 
-    let err = executor.claim(started.wfe_id, &mudur, None, None).await.unwrap_err();
+    let err = executor
+        .claim(started.wfe_id, &mudur, None, None)
+        .await
+        .unwrap_err();
     assert!(matches!(&err, EngineError::CtxTypeMismatch(_)), "{err}");
 }
 
@@ -360,7 +383,14 @@ async fn reading_a_corrupt_wfe_succeeds_and_reports_violations() {
     let memur = actor_in(sube, "memur");
     let mudur = actor_in(sube, "mudur");
     let started = executor
-        .start(Uuid::new_v4(), 1, &memur, Some("basvur"), &json!({ "tutar": 100 }), None)
+        .start(
+            Uuid::new_v4(),
+            1,
+            &memur,
+            Some("basvur"),
+            &json!({ "tutar": 100 }),
+            None,
+        )
         .await
         .unwrap();
     store.corrupt(started.wfe_id, "tutar", json!("yüz bin"));
@@ -384,7 +414,14 @@ async fn healthy_wfe_reports_no_violations() {
     let memur = actor_in(sube, "memur");
     let mudur = actor_in(sube, "mudur");
     let started = executor
-        .start(Uuid::new_v4(), 1, &memur, Some("basvur"), &json!({ "tutar": 100 }), None)
+        .start(
+            Uuid::new_v4(),
+            1,
+            &memur,
+            Some("basvur"),
+            &json!({ "tutar": 100 }),
+            None,
+        )
         .await
         .unwrap();
     let view = executor.query(started.wfe_id, &mudur).await.unwrap();

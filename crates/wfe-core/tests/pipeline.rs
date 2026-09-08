@@ -16,7 +16,7 @@ use wfe_core::types::dynctx::DynCtx;
 use wfe_core::types::wfah::{Wfah, WfahEntry};
 use wfe_core::types::wfd_v22::{
     AutoexecDef, AutoexecType, COrgu, CaGrantRule, CandidateActor, ClaimTimeout, EscalationStep,
-    GlobalAction, JoinRule, Wfd, WfAdminRule, WfesEffects, Wft, WftTarget,
+    GlobalAction, JoinRule, WfAdminRule, Wfd, WfesEffects, Wft, WftTarget,
 };
 use wfe_core::types::wfe::WfeStatus;
 use wfe_core::v22::valid::{self, ValidRules};
@@ -201,12 +201,7 @@ fn wfes_at(node: &str, assigned: Option<Uuid>, ctx: Value) -> Wfes {
 /// `wfes_at` bunun boş-geçmişli hâlidir — çekirdek `visited_nodes` fonksiyonu
 /// `current_node`u zaten kümeye koyduğu için geri gönderme DIŞINDAKİ testler
 /// etkilenmez.
-fn wfes_at_visited(
-    node: &str,
-    assigned: Option<Uuid>,
-    ctx: Value,
-    visited: Vec<String>,
-) -> Wfes {
+fn wfes_at_visited(node: &str, assigned: Option<Uuid>, ctx: Value, visited: Vec<String>) -> Wfes {
     let system = Actor {
         orgu_id: Uuid::nil(),
         user_id: Uuid::nil(),
@@ -319,7 +314,9 @@ async fn declared_input_alone_does_not_reach_ctx() {
     let actor = clerk(Uuid::new_v4());
 
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    v["start"][0]["wfes_effects"]["set"] = json!({ "initiated_by": "$actor" });
+    // v2.3 (`Ç7`): `start[]` yalnız `{id, action}`; effects start AKSİYONUNDA.
+    v["actions"]["create_application"]["wfes_effects"] =
+        json!({ "set": { "initiated_by": "$actor" } });
     let wfd = Wfd::from_value(v).unwrap();
 
     let new = engine
@@ -702,14 +699,10 @@ async fn wft_conditions_do_not_see_the_action_being_applied() {
     };
 
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("analyst_approve") {
-            t["wft"] = json!({
-                "conditions": [{"when": "$prev.action == 'analyst_approve'", "terminal": "terminal_rejected"}],
-                "default": {"node": "self__branchManager"}
-            });
-        }
-    }
+    v["actions"]["analyst_approve"]["wft"] = json!({
+        "conditions": [{"when": "$prev.action == 'analyst_approve'", "terminal": "terminal_rejected"}],
+        "default": {"node": "self__branchManager"}
+    });
     let wfd = Wfd::from_value(v).unwrap();
 
     let a = analyst(Uuid::new_v4());
@@ -1116,26 +1109,15 @@ async fn missing_required_input_is_rejected() {
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
 }
 
-// ================================================================ ilk-match seçimi (M2)
-
-fn first_match_wfd() -> Wfd {
-    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    // manager_decide için iki transition: ilki when'li (false olacak), ikincisi fallback
-    let base = v["transitions"][1].clone();
-    let mut guarded = base.clone();
-    guarded["id"] = json!("t_guarded");
-    guarded["when"] = json!("$ctx.credit_info.amount_requested >= 1000000");
-    guarded["wft"] = json!({"node": "parent__creditDeptManager"});
-    let mut fallback = base;
-    fallback["id"] = json!("t_fallback");
-    fallback["when"] = json!("$ctx.credit_info.amount_requested < 1000000");
-    v["transitions"][1] = guarded;
-    v["transitions"].as_array_mut().unwrap().push(fallback);
-    Wfd::from_value(v).unwrap()
-}
-
+/// `Ç10`un YERİNE GEÇEN güvence: `when` false dönerse aksiyon o an ALINAMAZ ve
+/// İKİNCİ BİR ADAYA DÜŞÜLMEZ.
+///
+/// v2.2'de aynı `(node, action)` çifti için birden çok `transitions[]` girdisi
+/// olabiliyor, motor dizi sırasında ilk `when`i tutanı seçiyordu — guard'ı false olan
+/// bir kural "sıradakine geç" demekti. Kimlik map anahtarı olunca aday YA TEK ya da
+/// yok; guard false ise cevap `TransitionNotFound`tur, sessiz bir fallback DEĞİL.
 #[tokio::test(start_paused = true)]
-async fn first_matching_when_wins_in_array_order() {
+async fn a_false_when_makes_the_action_unavailable_with_no_fallback() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -1145,13 +1127,17 @@ async fn first_matching_when_wins_in_array_order() {
         exec: &runner,
         env: Default::default(),
     };
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    // Guard'ı asla tutmayacak şekilde kur.
+    v["actions"]["manager_decide"]["when"] = json!("$ctx.credit_info.amount_requested > 999999999");
+    let wfd = Wfd::from_value(v).unwrap();
+
     let m = manager(Uuid::new_v4());
     let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
 
-    // 30000 < 1000000 → t_guarded'ın when'i false → t_fallback seçilmeli
-    let commit = engine
+    let err = engine
         .apply(
-            &first_match_wfd(),
+            &wfd,
             &wfes,
             &m,
             "manager_decide",
@@ -1160,20 +1146,48 @@ async fn first_matching_when_wins_in_array_order() {
             None,
         )
         .await
-        .unwrap();
+        .unwrap_err();
     assert!(
-        matches!(&commit.outcome, CommitOutcome::Terminal { .. }),
-        "fallback transition'ın wft'si (terminal) seçilmeliydi: {:?}",
-        commit.outcome
+        matches!(&err, EngineError::TransitionNotFound(a) if a == "manager_decide"),
+        "guard false ⇒ aksiyon alınamaz; geldi: {err:?}"
     );
+
+    // ...ve guard tutunca AYNI aksiyon normal çalışır (test guard'ı değil, guard'ın
+    // ETKİSİNİ ölçüyor olsun).
+    let mut v2: Value = serde_json::from_str(FIXTURE).unwrap();
+    v2["actions"]["manager_decide"]["when"] = json!("$ctx.credit_info.amount_requested > 0");
+    let wfd2 = Wfd::from_value(v2).unwrap();
+    let commit = engine
+        .apply(
+            &wfd2,
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+            None,
+        )
+        .await
+        .expect("guard tutunca aksiyon uygulanmalı");
+    assert!(matches!(&commit.outcome, CommitOutcome::Terminal { .. }));
 }
+
+// v2.3 (`Ç5` + `Ç10`): **İLK-MATCH SEÇİMİ ÖLDÜ** — `first_match_wfd` ve
+// `first_matching_when_wins_in_array_order` SİLİNDİ. v2.2'de aynı `(node, action)`
+// çifti için birden çok `transitions[]` girdisi olabiliyor, motor dizi sırasında
+// ilk `when`i tutanı seçiyordu. Artık kimlik map anahtarıdır: aday YA TEKTİR ya da
+// yoktur, `when` false dönerse ikinci bir adaya DÜŞÜLMEZ. Testin kurduğu durum
+// (iki kayıt, aynı ad) v2.3'te kurulamıyor.
+//
+// ⚠️ `Ç10`un yerine geçen güvence — "`when` false ⇒ aksiyon alınamaz, yedek yok" —
+// bu dosyada HENÜZ TEST EDİLMİYOR. Ayrı kalem.
 
 // ================================================================ NoConditionMatched (M3)
 
 #[tokio::test(start_paused = true)]
 async fn conditional_without_default_and_no_match_errors() {
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    v["transitions"][1]["wft"] = json!({
+    v["actions"]["manager_decide"]["wft"] = json!({
         "conditions": [{"when": "$action.input.manager_decision == 'never'", "terminal": "terminal_approved"}]
     });
     let wfd = Wfd::from_value(v).unwrap();
@@ -1296,17 +1310,22 @@ async fn owner_sees_available_actions() {
 /// bozulmasın.
 fn golden_with_send_back() -> Wfd {
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    let base = v["actions"]["manager_decide"].clone();
+    // v2.3 (`Ç5`): kimlik ile yönlendirme tek kayıtta — müdür aksiyonunun YERİNE
+    // geçen bir `send_back` kaydı. Girdi bildirimi ve `wfes_effects` taban aksiyondan
+    // kopyalanır (WOR-70 sözleşmesi bozulmasın); değişen yalnız ad ve `wft`.
+    let mut base = v["actions"]["manager_decide"].clone();
+    let o = base.as_object_mut().unwrap();
+    // Gösterim metni hedefin KENDİ etiketinden gelir — aksiyona `label` YAZILMAZ.
+    o.remove("label");
+    o.insert(
+        "wft".into(),
+        json!({ "targets": [{"node": "self__creditAnalyst", "label": "Başa Gönder"}] }),
+    );
     v["actions"]["send_back"] = base;
-    // Rezerve aksiyonun adı sabittir, gösterim metni de — `label` YAZILMAZ.
-    v["actions"]["send_back"]["label"] = Value::Null;
-    if let Some(o) = v["actions"]["send_back"].as_object_mut() {
-        o.remove("label");
-    }
-    v["transitions"][1]["action"] = json!("send_back");
-    v["transitions"][1]["wft"] = json!({
-        "targets": [{"node": "self__creditAnalyst", "label": "Başa Gönder"}]
-    });
+    v["actions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decide");
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -1587,12 +1606,22 @@ async fn the_start_node_counts_as_visited() {
     let m = manager(Uuid::new_v4());
     // Menü YALNIZ start node'unu gösteriyor; geçmiş listesi BOŞ.
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    let start_node = v["start"][0]["from"].as_str().unwrap().to_string();
     let start_action = v["start"][0]["action"].as_str().unwrap().to_string();
-    let base = v["actions"]["manager_decide"].clone();
+    // v2.3 (`Ç7`): başlatan node `start[]`te değil, start aksiyonunun `from`unda.
+    let start_node = v["actions"][&start_action]["from"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut base = v["actions"]["manager_decide"].clone();
+    base.as_object_mut().unwrap().insert(
+        "wft".into(),
+        json!({ "targets": [{"node": start_node, "label": "Başa Gönder"}] }),
+    );
     v["actions"]["send_back"] = base;
-    v["transitions"][1]["action"] = json!("send_back");
-    v["transitions"][1]["wft"] = json!({ "targets": [{"node": start_node, "label": "Başa Gönder"}] });
+    v["actions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decide");
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -1636,16 +1665,34 @@ async fn the_menu_keeps_document_order_and_drops_only_the_unvisited() {
     let m = manager(Uuid::new_v4());
 
     let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
-    let base = v["actions"]["manager_decide"].clone();
-    v["actions"]["send_back"] = base;
-    v["transitions"][1]["action"] = json!("send_back");
-    // Belge sırası: HİÇ uğranmamış → uğranmış. Süzgeç sırayı değiştirmemeli.
-    v["transitions"][1]["wft"] = json!({
-        "targets": [
-            {"node": "parent__creditDeptManager", "label": "Departmana Gönder"},
-            {"node": "self__creditAnalyst", "label": "Analiste Gönder"}
-        ]
+    // Uğranmamış bir hedef gerek: golden'da öyle bir node yok, ekliyoruz. Geri
+    // gönderme hedefi gerçek bir çıkış kenarıdır, o yüzden node erişilebilir sayılır;
+    // çıkışını da kendi aksiyonu verir.
+    v["nodes"]["self__ikinciAnalist"] = json!({
+        "label": "İkinci Analist",
+        "c_a": {"c_orgu": "self", "c_r": ["seniorAnalyst"]}
     });
+    v["actions"]["ikinci_analiz"] = json!({
+        "input": {"required": [], "optional": []},
+        "from": "self__ikinciAnalist",
+        "wft": {"node": "self__branchManager"}
+    });
+    let mut base = v["actions"]["manager_decide"].clone();
+    // Belge sırası: HİÇ uğranmamış → uğranmış. Süzgeç sırayı değiştirmemeli.
+    base.as_object_mut().unwrap().insert(
+        "wft".into(),
+        json!({
+            "targets": [
+                {"node": "self__ikinciAnalist", "label": "İkinci Analiste Gönder"},
+                {"node": "self__creditAnalyst", "label": "Analiste Gönder"}
+            ]
+        }),
+    );
+    v["actions"]["send_back"] = base;
+    v["actions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("manager_decide");
     if let Some(terminals) = v["terminals"].as_array_mut() {
         terminals.retain(|t| t["id"] != json!("terminal_rejected"));
     }
@@ -1657,7 +1704,10 @@ async fn the_menu_keeps_document_order_and_drops_only_the_unvisited() {
         start_input(),
         vec!["self__creditAnalyst".into()],
     );
-    let actions = engine.possible_actions(&wfd, &wfes, &m, None).await.unwrap();
+    let actions = engine
+        .possible_actions(&wfd, &wfes, &m, None)
+        .await
+        .unwrap();
     let targets = actions
         .iter()
         .find(|a| a.action == "send_back")
@@ -1673,7 +1723,7 @@ async fn the_menu_keeps_document_order_and_drops_only_the_unvisited() {
 // ================================================================ escalation (M6)
 
 #[tokio::test]
-async fn escalation_fires_after_sla_and_moves_wfe() {
+async fn escalation_fires_after_sla_and_keeps_the_work_in_place() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -1701,13 +1751,19 @@ async fn escalation_fires_after_sla_and_moves_wfe() {
         Some(0)
     );
 
-    // fire → şube müdürüne taşınır, effects uygulanır (assigned olsa bile çalışır)
+    // fire → effects uygulanır (assigned olsa bile çalışır), İŞ YERİNDE KALIR.
+    //
+    // v2.3 (`K10` + `Ç1-EK`): kademe devir DEĞİL yetki genişlemesidir. Eskiden burada
+    // `MoveTo{self__branchManager}` bekleniyordu; artık müdür analistin havuzuna
+    // EKLENİR ve iş analist node'unda durur.
     let commit = engine
         .fire_escalation(&wfd, &wfes, 0, now, None)
         .await
         .unwrap();
     assert!(
-        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+        matches!(&commit.outcome, CommitOutcome::StayAt { node } if node == "self__creditAnalyst"),
+        "outcome: {:?}",
+        commit.outcome
     );
     assert!(commit.new_dynctx["internal_notes"]
         .as_str()
@@ -1758,7 +1814,9 @@ async fn escalation_resolves_anchored_listable_via_wfah_actor() {
         .expect("escalation nil-anchor hatası vermeden çözülmeli");
 
     assert!(
-        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
+        matches!(&commit.outcome, CommitOutcome::StayAt { node } if node == "self__creditAnalyst"),
+        "outcome: {:?}",
+        commit.outcome
     );
     // Çözüm wfah'taki son insan aktörüne çapalanır — listable `self` buna göre çözülür.
     assert!(commit
@@ -1770,37 +1828,11 @@ async fn escalation_resolves_anchored_listable_via_wfah_actor() {
     assert!(commit.wfah_entries[0].actor.orgu_id.is_nil());
 }
 
-/// SLA-1 Move yolu aynı çözümü yapar → aynı çapa gerekir.
-#[tokio::test]
-async fn claim_timeout_move_resolves_anchored_listable_via_wfah_actor() {
-    let org = StrictAnchorOrg;
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
-    let (wfes, human_orgu) =
-        wfes_with_human_history("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let now = wfes.claimed_at.unwrap() + Duration::hours(1) + Duration::seconds(1);
-
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .expect("claim timeout nil-anchor hatası vermeden çözülmeli")
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(commit
-                .resolved_c_a
-                .iter()
-                .any(|c| c.orgu_id == Some(human_orgu)));
-            assert_eq!(commit.wfah_entries[0].actor.role, "system");
-            assert!(commit.wfah_entries[0].actor.orgu_id.is_nil());
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
+// v2.3 (`K13`): `claim_timeout_move_resolves_anchored_listable_via_wfah_actor`
+// SİLİNDİ — `ClaimTimeoutOutcome::Move` yolu ÖLDÜ. Süre dolduğunda yapılan tek şey
+// claim'i bırakmak; devir hedefi olmadığı için çözülecek bir `listable`/`c_a` da
+// yok, dolayısıyla çapa sorusu bu yolda artık sorulmuyor. Havuz node'un kendi
+// `c_a`sıdır ve değişmez.
 
 #[tokio::test]
 async fn fired_escalation_step_does_not_refire() {
@@ -1858,10 +1890,12 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__branchManager".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let t0 = Utc::now();
@@ -1930,7 +1964,12 @@ async fn start_wft_targeting_own_from_node_lands_there() {
     // akış müdür node'una gider; müdür başlatınca memur node'una — burada
     // sadeleştirilmiş biçimde: start.wft kendi from'unu hedefliyor).
     let mut wfd = golden();
-    wfd.start[0].wft = Wft::Node {
+    // v2.3 (`Ç7+Ç8`): start gövdesi aksiyon kaydında.
+    let start_action = wfd.start[0].action.clone();
+    wfd.actions
+        .get_mut(&start_action)
+        .expect("start aksiyonu")
+        .wft = Wft::Node {
         node: "type_branch__branchClerk".into(),
     };
 
@@ -1976,10 +2015,12 @@ async fn escalation_fires_normally_at_start_node() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__creditAnalyst".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let org = MockOrg {
@@ -2011,7 +2052,9 @@ async fn escalation_fires_normally_at_start_node() {
         .await
         .unwrap();
     assert!(
-        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__creditAnalyst")
+        matches!(&commit.outcome, CommitOutcome::StayAt { node } if node == "type_branch__branchClerk"),
+        "outcome: {:?}",
+        commit.outcome
     );
 }
 
@@ -2158,7 +2201,9 @@ async fn start_without_deadline_or_timeout_leaves_deadline_null() {
 // ================================================================ SLA-1 claim timeout (2026-07-16)
 
 /// self__creditAnalyst'e claim_timeout ekleyen golden varyantı.
-fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
+/// v2.3 (K13 + K19): `wft` parametresi KALKTI — claim timeout artık yalnız claim'i
+/// bırakır, hedefi yok.
+fn golden_with_claim_timeout(after: &str) -> Wfd {
     let mut wfd = golden();
     wfd.nodes
         .get_mut("self__creditAnalyst")
@@ -2166,8 +2211,6 @@ fn golden_with_claim_timeout(after: &str, wft: Option<&str>) -> Wfd {
         .claim_timeout = Some(ClaimTimeout {
         after: after.into(),
         wfes_effects: None,
-        wft: wft.map(String::from),
-        collapses_parallel: false,
     });
     wfd
 }
@@ -2183,7 +2226,7 @@ async fn claim_timeout_due_without_wft_releases_claim() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout("PT2H", None);
+    let wfd = golden_with_claim_timeout("PT2H");
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
@@ -2212,93 +2255,19 @@ async fn claim_timeout_due_without_wft_releases_claim() {
     }
 }
 
-#[tokio::test]
-async fn claim_timeout_due_with_wft_moves_like_escalation() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
-    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let claimed_at = wfes.created_at;
-    wfes.claimed_at = Some(claimed_at);
-    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
-
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .unwrap()
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(
-                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
-            );
-            assert_eq!(
-                commit.wfah_entries[0].action,
-                "claim_released:self__creditAnalyst"
-            );
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
+// v2.3: `claim_timeout_due_with_wft_moves_like_escalation` testi SİLİNDİ — konusu (claim timeout'un iş TAŞIMASI) K13 ile öldü
 
 /// WOR-56/SLA-1 (2026-08-03): `collapses_parallel` işaretli olsa bile WFE paralel
 /// modda DEĞİLSE bayrak yok sayılır — normal `{node}` devri uygulanır. Aksi halde
 /// `resolve_wft` collapse'ı Single modda reddeder ve WFE zaman aşımında kilitlenirdi
 /// (aynı node kol içinden de kol dışından da erişilebilir).
-#[tokio::test]
-async fn claim_timeout_collapse_flag_ignored_outside_parallel() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let mut wfd = golden_with_claim_timeout("PT1H", Some("self__branchManager"));
-    wfd.nodes
-        .get_mut("self__creditAnalyst")
-        .unwrap()
-        .claim_timeout
-        .as_mut()
-        .unwrap()
-        .collapses_parallel = true;
-    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let claimed_at = wfes.created_at;
-    wfes.claimed_at = Some(claimed_at);
-    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
-
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .unwrap()
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(
-                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
-                "paralel dışı: collapse DEĞİL düz devir bekleniyordu — {:?}",
-                commit.outcome
-            );
-            // audit'te `collapse` anahtarı yazılmaz (yalnız gerçek collapse'ta).
-            let input = commit.wfah_entries[0].input.as_ref().unwrap();
-            assert!(input.get("collapse").is_none());
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
+// v2.3: `claim_timeout_collapse_flag_ignored_outside_parallel` testi SİLİNDİ — `collapses_parallel` bayrağı K19 ile kalktı
 
 // ---- 2026-07-28: SLA-1 wfes_effects (opsiyonel DynCtx yazımı) ----
 
 /// `golden_with_claim_timeout` + `wfes_effects` — SLA-1 dolduğunda ctx'e yazar.
-fn golden_with_claim_timeout_effects(after: &str, wft: Option<&str>) -> Wfd {
-    let mut wfd = golden_with_claim_timeout(after, wft);
+fn golden_with_claim_timeout_effects(after: &str) -> Wfd {
+    let mut wfd = golden_with_claim_timeout(after);
     wfd.nodes
         .get_mut("self__creditAnalyst")
         .unwrap()
@@ -2328,7 +2297,7 @@ async fn claim_timeout_release_applies_wfes_effects() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout_effects("PT2H", None);
+    let wfd = golden_with_claim_timeout_effects("PT2H");
     let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
     let claimed_at = wfes.created_at;
     wfes.claimed_at = Some(claimed_at);
@@ -2356,40 +2325,7 @@ async fn claim_timeout_release_applies_wfes_effects() {
     }
 }
 
-#[tokio::test]
-async fn claim_timeout_move_applies_wfes_effects_before_wft() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let wfd = golden_with_claim_timeout_effects("PT1H", Some("self__branchManager"));
-    let mut wfes = wfes_at("self__creditAnalyst", Some(Uuid::new_v4()), start_input());
-    let claimed_at = wfes.created_at;
-    wfes.claimed_at = Some(claimed_at);
-    let now = claimed_at + Duration::hours(1) + Duration::seconds(1);
-
-    match engine
-        .fire_claim_timeout(&wfd, &wfes, now, None)
-        .await
-        .unwrap()
-    {
-        ClaimTimeoutOutcome::Move(commit) => {
-            assert!(
-                matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager")
-            );
-            assert_eq!(
-                commit.new_dynctx["internal_notes"],
-                json!("Claim süresi doldu, iş havuza döndü.")
-            );
-        }
-        ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
-    }
-}
+// v2.3: `claim_timeout_move_applies_wfes_effects_before_wft` testi SİLİNDİ — devir yok; effects'in release yolunda uygulanması `claim_timeout_release_applies_wfes_effects` ile zaten sınanıyor
 
 #[tokio::test]
 async fn claim_timeout_not_due_without_claim() {
@@ -2402,7 +2338,7 @@ async fn claim_timeout_not_due_without_claim() {
         exec: &runner,
         env: Default::default(),
     };
-    let wfd = golden_with_claim_timeout("PT1H", None);
+    let wfd = golden_with_claim_timeout("PT1H");
     // hiç claim edilmemiş (claimed_at None) — asla due olmaz
     let wfes = wfes_at("self__creditAnalyst", None, start_input());
     assert!(!engine
@@ -2415,36 +2351,11 @@ async fn claim_timeout_not_due_without_claim() {
 /// `terminate` kaldırıldı: hedefsiz bir escalation adımı artık akışı sonlandırmaz,
 /// hata verir. Akışı zaman aşımıyla bitiren TEK kural SLA-3 (root `timeout`) —
 /// bkz. `deadline_due_fires_terminated_not_error`.
-#[tokio::test]
-async fn escalation_without_wft_errors_instead_of_terminating() {
-    let org = MockOrg {
-        role_assigned: true,
-    };
-    let runner = MockRunner::ok(0, "-", false);
-    let engine = Engine {
-        org: &org,
-        exec: &runner,
-        env: Default::default(),
-    };
-    let mut wfd = golden();
-    {
-        let esc = &mut wfd.nodes.get_mut("self__creditAnalyst").unwrap().escalation[0];
-        esc.wft = None;
-        esc.terminate = Some(true); // eski alan; runtime artık dikkate almaz
-    }
-    let wfes = wfes_at("self__creditAnalyst", None, start_input());
-    let now = wfes.created_at + Duration::days(3) + Duration::seconds(1);
-
-    let err = engine
-        .fire_escalation(&wfd, &wfes, 0, now, None)
-        .await
-        .expect_err("hedefsiz escalation hata vermeli");
-    assert!(matches!(err, EngineError::InvalidWfd(_)), "err: {err:?}");
-}
+// v2.3: `escalation_without_wft_errors_instead_of_terminating` testi SİLİNDİ — `escalation[].wft` YOK ve `grant` ZORUNLU alan — eksikliği serde'de patlar, runtime hatası diye bir durum kalmadı
 
 /// Hedefi olan adım normal node devri yapar — `Terminated` ASLA üretmez.
 #[tokio::test]
-async fn escalation_with_node_target_moves_and_never_terminates() {
+async fn escalation_never_terminates_and_keeps_the_work_in_place() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -2462,8 +2373,9 @@ async fn escalation_with_node_target_moves_and_never_terminates() {
         .fire_escalation(&wfd, &wfes, 0, now, None)
         .await
         .unwrap();
+    // `K10`: escalation WFE'yi ASLA bitirmez — ve v2.3'te (`Ç1-EK`) taşımaz da.
     assert!(
-        matches!(&commit.outcome, CommitOutcome::MoveTo { node } if node == "self__branchManager"),
+        matches!(&commit.outcome, CommitOutcome::StayAt { node } if node == "self__creditAnalyst"),
         "outcome: {:?}",
         commit.outcome
     );
@@ -2818,7 +2730,7 @@ async fn branch_approve_arrives_without_occupying_join() {
             &paralel(),
             &wfes,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -2833,7 +2745,10 @@ async fn branch_approve_arrives_without_occupying_join() {
     );
     // kol transition effect'i staged
     assert!(commit.new_dynctx["finans_onay_zamani"].is_string());
-    assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+    assert_eq!(
+        wfah_actions(&commit),
+        vec!["finans_onay", "_branch_arrived"]
+    );
     // Ç3: kol kimliği (`branch_entry`) + varış anındaki konum (`at_node`).
     let arrived = commit.wfah_entries[1].input.as_ref().unwrap();
     assert_eq!(arrived["branch_entry"], json!("self__financeApprover"));
@@ -2848,7 +2763,7 @@ async fn branch_approve_arrives_without_occupying_join() {
 }
 
 #[tokio::test]
-async fn ambiguous_action_without_node_hint_is_rejected() {
+async fn apply_with_a_hint_that_is_not_an_active_branch_is_rejected() {
     let org = MockOrg {
         role_assigned: true,
     };
@@ -2873,27 +2788,20 @@ async fn ambiguous_action_without_node_hint_is_rejected() {
         parallel_ctx(),
     );
 
-    // `approve` üç kolun da transition'ıyla eşleşir — node ipucu yoksa belirsiz
-    let err = engine
-        .apply(&paralel(), &wfes, &fin, "approve", &json!({}), None, None)
-        .await
-        .unwrap_err();
-    match err {
-        EngineError::AmbiguousAction { action, candidates } => {
-            assert_eq!(action, "approve");
-            assert_eq!(candidates.len(), 3);
-            assert!(candidates.contains(&"self__legalApprover".to_string()));
-        }
-        other => panic!("AmbiguousAction bekleniyordu: {other}"),
-    }
-
-    // geçersiz ipucu: aktif kol değil
+    // v2.3 (`Ç5` + `Ç11`): bu testin ESKİ ilk yarısı — "`approve` üç kolun da
+    // transition'ıyla eşleşir, node ipucu yoksa `AmbiguousAction`" — KALDIRILDI.
+    // `apply_parallel` adayı `wfd.actions.get(action).filter(|t| t.from == branch_node)`
+    // ile buluyor: kayıt TEK, `from` da tekil string (`K3`), dolayısıyla eşleşen kol
+    // en fazla BİR tane olabilir. `AmbiguousAction` kolu artık savunma amaçlıdır ve
+    // GEÇERLİ bir belgeyle tetiklenemez.
+    //
+    // geçersiz ipucu: aktif kol değil — bu yarı CANLI
     let err = engine
         .apply(
             &paralel(),
             &wfes,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__coordinator"),
             None,
@@ -2931,7 +2839,7 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
             &paralel(),
             &wfes,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -2959,7 +2867,7 @@ async fn parallel_apply_enforces_branch_claim_ownership() {
             &paralel(),
             &wfes,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -2993,7 +2901,7 @@ async fn last_branch_arrival_completes_join_to_node() {
 
     // tek aktif kol kaldığından node ipucu GEREKMEZ (belirsizlik yok)
     let commit = engine
-        .apply(&paralel(), &wfes, &hr, "approve", &json!({}), None, None)
+        .apply(&paralel(), &wfes, &hr, "ik_onay", &json!({}), None, None)
         .await
         .unwrap();
 
@@ -3014,7 +2922,7 @@ async fn last_branch_arrival_completes_join_to_node() {
         .iter()
         .any(|c| c.role == "resultCoordinator"));
     // engine `_branch_arrived` staged eder; `_join` ADAPTER'ın işidir (T3)
-    assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+    assert_eq!(wfah_actions(&commit), vec!["ik_onay", "_branch_arrived"]);
 }
 
 #[tokio::test]
@@ -3022,10 +2930,10 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     // join hedefi terminal olan varyant: kol wft'leri de aynı terminale çözülür,
     // son varışta JoinComplete{next: Terminal} üretilmeli.
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    v["transitions"][0]["wft"]["parallel"]["join"] = json!({"terminal": "terminal_approved"});
-    for idx in [1, 3, 5] {
-        // t_finance_approve / t_legal_approve / t_hr_approve
-        v["transitions"][idx]["wft"] = json!({"terminal": "terminal_approved"});
+    v["actions"]["start_review"]["wft"]["parallel"]["join"] =
+        json!({"terminal": "terminal_approved"});
+    for a in ["finans_onay", "hukuk_onay", "ik_onay"] {
+        v["actions"][a]["wft"] = json!({"terminal": "terminal_approved"});
     }
     let wfd = Wfd::from_value(v).unwrap();
 
@@ -3052,7 +2960,7 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     );
 
     let commit = engine
-        .apply(&wfd, &wfes, &hr, "approve", &json!({}), None, None)
+        .apply(&wfd, &wfes, &hr, "ik_onay", &json!({}), None, None)
         .await
         .unwrap();
 
@@ -3068,7 +2976,7 @@ async fn last_branch_arrival_completes_join_to_terminal() {
     };
     assert_eq!(end_response["status"], json!("approved"));
     assert_eq!(end_response["request_title"], json!("Sunucu alımı"));
-    assert_eq!(wfah_actions(&commit), vec!["approve", "_branch_arrived"]);
+    assert_eq!(wfah_actions(&commit), vec!["ik_onay", "_branch_arrived"]);
 }
 
 #[tokio::test]
@@ -3103,7 +3011,7 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
             &paralel(),
             &wfes,
             &legal,
-            "reject",
+            "hukuk_ret",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -3121,7 +3029,7 @@ async fn branch_reject_ends_wfe_and_cancels_active_siblings() {
     assert_eq!(
         wfah_actions(&commit),
         vec![
-            "reject",
+            "hukuk_ret",
             "_collapse",
             "_branch_cancelled",
             "_branch_superseded"
@@ -3153,12 +3061,8 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     // WOR-56: kol collapse aksiyonu bir NODE hedefine (fork-initiator = restart).
     // Paralel mod biter, WFE o node'a geçer, AKTİF kardeşler iptal marker'ı alır.
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    // finance "reject" transition'ını collapse-to-node yap (hedef: self__coordinator).
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
-            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
-        }
-    }
+    // finans kolunun ret aksiyonunu collapse-to-node yap (hedef: self__coordinator).
+    v["actions"]["finans_ret"]["wft"] = json!({"collapse": {"node": "self__coordinator"}});
     let wfd = Wfd::from_value(v).unwrap();
 
     let org = MockOrg {
@@ -3191,7 +3095,7 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
             &wfd,
             &wfes,
             &fin,
-            "reject",
+            "finans_ret",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -3218,7 +3122,7 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
     assert_eq!(
         wfah_actions(&commit),
         vec![
-            "reject",
+            "finans_ret",
             "_collapse",
             "_branch_cancelled",
             "_branch_superseded"
@@ -3238,16 +3142,24 @@ async fn branch_collapse_to_node_ends_parallel_and_moves_wfe() {
 
 // ---- Ç4-EK/S4+S5: geri gönderme kol sınırı ------------------------------------
 
+/// Kol node'unun RET aksiyonu. v2.3'te (`Ç5`) bir aksiyonun `from`'u TEK node'dur,
+/// dolayısıyla üç kol `reject` adını PAYLAŞAMAZ — her kolun kendi adı vardır.
+fn branch_reject(node: &str) -> &'static str {
+    match node {
+        "self__financeApprover" => "finans_ret",
+        "self__legalApprover" => "hukuk_ret",
+        "self__hrApprover" => "ik_ret",
+        other => panic!("bilinmeyen kol node'u: {other}"),
+    }
+}
+
 /// Bir kola geri gönderme MENÜSÜ takar; hedefleri `targets` listesinden gelir.
 fn parallel_with_send_back(from: &str, targets: &[&str]) -> Wfd {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") && t["from"] == json!(from) {
-            t["wft"] = json!({
-                "targets": targets.iter().map(|n| json!({"node": n})).collect::<Vec<_>>()
-            });
-        }
-    }
+    // Ç5: yönlendirme kuralı aksiyonun kendi kaydında, ayrı bir `transitions[]` yok.
+    v["actions"][branch_reject(from)]["wft"] = json!({
+        "targets": targets.iter().map(|n| json!({"node": n})).collect::<Vec<_>>()
+    });
     Wfd::from_value(v).unwrap()
 }
 
@@ -3289,7 +3201,7 @@ async fn send_back_before_the_fork_collapses_instead_of_deadlocking() {
             &wfd,
             &wfes,
             &fin,
-            "reject",
+            branch_reject("self__financeApprover"),
             &json!({}),
             Some("self__financeApprover"),
             Some("self__coordinator"),
@@ -3313,7 +3225,7 @@ async fn send_back_before_the_fork_collapses_instead_of_deadlocking() {
     assert_eq!(
         wfah_actions(&commit),
         vec![
-            "reject",
+            "finans_ret",
             "_collapse",
             "_branch_cancelled",
             "_branch_superseded"
@@ -3385,7 +3297,7 @@ async fn send_back_inside_the_fork_subgraph_stays_a_branch_move() {
             &wfd,
             &wfes,
             &legal,
-            "reject",
+            branch_reject("self__legalApprover"),
             &json!({}),
             Some("self__legalApprover"),
             Some("self__financeApprover"),
@@ -3401,7 +3313,7 @@ async fn send_back_inside_the_fork_subgraph_stays_a_branch_move() {
         }
     );
     // Paralel mod sürüyor → hiçbir collapse marker'ı yok.
-    assert_eq!(wfah_actions(&commit), vec!["reject"]);
+    assert_eq!(wfah_actions(&commit), vec!["hukuk_ret"]);
 }
 
 /// Ç4-EK/S5 — admin `send_back` paralel modda AÇIK. Acting kol SEÇİLMEZ: tetikleyici
@@ -3495,11 +3407,7 @@ async fn collapse_marker_carries_dropped_claim_owner() {
     // WOR-59: iptal edilen kolun claim'i adapter'da düşürülür; sahibinin ve
     // claimed_at'in TEK kaydı `_branch_cancelled` marker'ıdır.
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
-            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
-        }
-    }
+    v["actions"]["finans_ret"]["wft"] = json!({"collapse": {"node": "self__coordinator"}});
     let wfd = Wfd::from_value(v).unwrap();
 
     let org = MockOrg {
@@ -3537,7 +3445,7 @@ async fn collapse_marker_carries_dropped_claim_owner() {
             &wfd,
             &wfes,
             &fin,
-            "reject",
+            "finans_ret",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -3561,11 +3469,7 @@ async fn collapse_summary_marker_describes_whole_event() {
     // WOR-61: collapse'ın tamamı tek `_collapse` kaydından okunabilmeli —
     // tetikleyen kol/aksiyon, hedef, iptal edilen ve geçersizleşen kollar.
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["action"] == json!("reject") && t["from"] == json!("self__financeApprover") {
-            t["wft"] = json!({"collapse": {"node": "self__coordinator"}});
-        }
-    }
+    v["actions"]["finans_ret"]["wft"] = json!({"collapse": {"node": "self__coordinator"}});
     let wfd = Wfd::from_value(v).unwrap();
 
     let org = MockOrg {
@@ -3597,7 +3501,7 @@ async fn collapse_summary_marker_describes_whole_event() {
             &wfd,
             &wfes,
             &fin,
-            "reject",
+            "finans_ret",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -3609,7 +3513,7 @@ async fn collapse_summary_marker_describes_whole_event() {
     assert_eq!(
         wfah_actions(&commit),
         vec![
-            "reject",
+            "finans_ret",
             "_collapse",
             "_branch_cancelled",
             "_branch_superseded"
@@ -3619,7 +3523,7 @@ async fn collapse_summary_marker_describes_whole_event() {
     assert_eq!(summary.actor.role, "system");
     let input = summary.input.as_ref().unwrap();
     assert_eq!(input["trigger_branch"], json!("self__financeApprover"));
-    assert_eq!(input["trigger_action"], json!("reject"));
+    assert_eq!(input["trigger_action"], json!("finans_ret"));
     assert_eq!(input["trigger_actor"]["user_id"], json!(fin.user_id));
     assert_eq!(input["kind"], json!("collapse_to"));
     assert_eq!(input["reason"], json!("collapsed"));
@@ -3638,7 +3542,12 @@ async fn collapse_summary_marker_describes_whole_event() {
             "{}",
             detail.action
         );
-        assert_eq!(d["trigger_action"], json!("reject"), "{}", detail.action);
+        assert_eq!(
+            d["trigger_action"],
+            json!("finans_ret"),
+            "{}",
+            detail.action
+        );
         assert_eq!(
             d["trigger_actor"]["user_id"],
             json!(fin.user_id),
@@ -3678,10 +3587,12 @@ async fn branch_escalation_does_not_touch_sibling_branches() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__coordinator".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
     let wfes = parallel_wfes(
         vec![
@@ -3698,12 +3609,9 @@ async fn branch_escalation_does_not_touch_sibling_branches() {
         .await
         .unwrap();
 
+    // v2.3 (`Ç1-EK`): kol hareket etmez, yerinde kalır.
     assert!(
-        matches!(
-            &commit.outcome,
-            CommitOutcome::BranchMoveTo { from_node, node }
-                if from_node == "self__financeApprover" && node == "self__coordinator"
-        ),
+        matches!(&commit.outcome, CommitOutcome::StayAt { node } if node == "self__financeApprover"),
         "outcome: {:?}",
         commit.outcome
     );
@@ -3762,14 +3670,15 @@ async fn collapse_outside_parallel_is_rejected() {
     // WOR-56: collapse yalnız kol bağlamında geçerli — tekil modda hata.
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
     // coordinator'ın fork transition'ını collapse'a çevir (tekil modda uygulanır).
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["from"] == json!("self__coordinator") {
-            t["action"] = json!("collapse_here");
-            t["wft"] = json!({"collapse": {"node": "self__requester"}});
-        }
-    }
-    v["actions"]["collapse_here"] =
-        json!({"label": "X", "input": {"required": [], "optional": []}});
+    // v2.3 (`Ç5`): kimlik ile yönlendirme tek kayıtta — fork aksiyonunun yerine
+    // aynı node'dan çıkan bir collapse aksiyonu koyuyoruz.
+    v["actions"].as_object_mut().unwrap().remove("start_review");
+    v["actions"]["collapse_here"] = json!({
+        "label": "X",
+        "input": {"required": [], "optional": []},
+        "from": "self__coordinator",
+        "wft": {"collapse": {"node": "self__requester"}}
+    });
     // validator collapse'ı reddetmesin diye şema kontrolünü atlayıp doğrudan runtime'ı
     // sınıyoruz — Wfd::from_value validator çalıştırmaz (yalnız parse).
     let wfd = Wfd::from_value(v).unwrap();
@@ -3805,21 +3714,20 @@ fn paralel_with_delegate_step() -> Wfd {
         "description": "Kol-içi ara durak (test).",
         "c_a": {"c_orgu": "self", "c_r": ["financeSenior"]}
     });
-    v["actions"]["delegate"] =
-        json!({"label": "Devret", "input": {"required": [], "optional": []}});
-    let ts = v["transitions"].as_array_mut().unwrap();
-    ts.push(json!({
-        "id": "t_finance_delegate",
+    // v2.3 (`Ç5`): iki transition yerine iki AKSİYON kaydı; kıdemli adımın kendi
+    // kimliği var (`Ç11`: bir aksiyonu yalnız bir node kullanır).
+    v["actions"]["delegate"] = json!({
+        "label": "Devret",
+        "input": {"required": [], "optional": []},
         "from": "self__financeApprover",
-        "action": "delegate",
         "wft": {"node": "self__financeSenior"}
-    }));
-    ts.push(json!({
-        "id": "t_senior_approve",
+    });
+    v["actions"]["kidemli_onay"] = json!({
+        "label": "Kıdemli Onayı",
+        "input": {"required": [], "optional": []},
         "from": "self__financeSenior",
-        "action": "approve",
         "wft": {"node": "self__resultCoordinator"}
-    }));
+    });
     Wfd::from_value(v).unwrap()
 }
 
@@ -3884,8 +3792,8 @@ async fn branch_moves_to_normal_node_and_stays_parallel() {
 #[tokio::test]
 async fn nested_parallel_at_runtime_is_rejected() {
     let mut v: Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    // t_finance_approve'un wft'ini parallel yap (validator dışı, runtime koruması)
-    v["transitions"][1]["wft"] = json!({
+    // finans onayının wft'ini parallel yap (validator dışı, runtime koruması)
+    v["actions"]["finans_onay"]["wft"] = json!({
         "parallel": {
             "branches": ["self__legalApprover", "self__hrApprover"],
             "join": {"node": "self__resultCoordinator"}
@@ -3922,7 +3830,7 @@ async fn nested_parallel_at_runtime_is_rejected() {
             &wfd,
             &wfes,
             &fin,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -3939,7 +3847,19 @@ async fn nested_parallel_at_runtime_is_rejected() {
 async fn start_wft_parallel_is_rejected_at_runtime() {
     // Validator start'ta parallel'i reddeder; runtime koruması bağımsız çalışmalı.
     let mut wfd = paralel();
-    wfd.start[0].wft = wfd.transitions[0].wft.clone(); // t_fork'un parallel wft'i
+    // v2.3: fork'un `wft`i aksiyon kaydında. Belgeden parallel taşıyan kaydı bul.
+    let fork_wft = wfd
+        .actions
+        .values()
+        .find(|a| matches!(a.wft, wfe_core::types::wfd_v22::Wft::Parallel { .. }))
+        .expect("paralel fixture bir fork taşımalı")
+        .wft
+        .clone();
+    let start_action = wfd.start[0].action.clone();
+    wfd.actions
+        .get_mut(&start_action)
+        .expect("start aksiyonu")
+        .wft = fork_wft;
 
     let org = MockOrg {
         role_assigned: true,
@@ -3988,8 +3908,6 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
         .claim_timeout = Some(ClaimTimeout {
         after: "PT2H".into(),
         wfes_effects: None,
-        wft: None,
-        collapses_parallel: false,
     });
 
     let fin = Uuid::new_v4();
@@ -4061,10 +3979,12 @@ async fn branch_escalation_fires_from_branch_entered_at() {
         .push(EscalationStep {
             after: "P1D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__resultCoordinator".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let wfes = parallel_wfes(
@@ -4100,19 +4020,21 @@ async fn branch_escalation_fires_from_branch_entered_at() {
     // wfe-seviyesi görünüm paralel modda dwell izlemez (current_node NULL)
     assert_eq!(engine.due_escalation(&wfd, &wfes, now, None).unwrap(), None);
 
-    // escalation wft'i join'i hedefliyor → kol VARIŞ sayılır (2 aktif kol kaldı)
+    // v2.3 (`Ç1-EK`): kademe kolu da HAREKET ETTİRMEZ. Eskiden escalation `wft`i
+    // join'i hedefleyince kol VARIŞ sayılıyordu; artık kol yerinde kalır, yalnız
+    // yetki havuzu genişler — dolayısıyla `_branch_arrived` marker'ı da YAZILMAZ.
     let commit = engine
         .fire_escalation(&wfd, &wfes, 0, now, Some("self__financeApprover"))
         .await
         .unwrap();
     assert!(
-        matches!(&commit.outcome, CommitOutcome::BranchArrived { from_node, .. } if from_node == "self__financeApprover"),
+        matches!(&commit.outcome, CommitOutcome::StayAt { node } if node == "self__financeApprover"),
         "{:?}",
         commit.outcome
     );
     assert_eq!(
         wfah_actions(&commit),
-        vec!["escalate:self__financeApprover:0", "_branch_arrived"]
+        vec!["escalate:self__financeApprover:0"]
     );
 }
 
@@ -4643,6 +4565,14 @@ fn expr_wfes(branches: Vec<BranchState>) -> Wfes {
 }
 
 async fn apply_approve(wfes: &Wfes, actor: &Actor, node: &str) -> CommitOutcome {
+    // v2.3 (`Ç11`): onay aksiyonunun adı kol başına ayrıdır — bir aksiyonu yalnız
+    // bir node kullanır, dolayısıyla üç kol `approve` adını paylaşamaz.
+    let action = match node {
+        "self__financeApprover" => "finans_onay",
+        "self__legalApprover" => "hukuk_onay",
+        "self__hrApprover" => "ik_onay",
+        other => panic!("bilinmeyen kol node'u: {other}"),
+    };
     let org = MockOrg {
         role_assigned: true,
     };
@@ -4657,7 +4587,7 @@ async fn apply_approve(wfes: &Wfes, actor: &Actor, node: &str) -> CommitOutcome 
             &paralel(),
             wfes,
             actor,
-            "approve",
+            action,
             &json!({}),
             Some(node),
             None,
@@ -5087,10 +5017,12 @@ async fn skipping_does_not_shift_the_escalation_base() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__branchManager".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): hedef yerine GRANT — iş adımda kalır, havuz genişler.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let orgu = Uuid::new_v4();
@@ -5241,10 +5173,13 @@ async fn an_escalation_marker_row_does_not_shift_the_base() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__branchManager".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): kademe hedef taşımaz, GRANT taşır. R02'nin sorusu
+            // (marker satırı tabanı kaydırır mı) kademenin GÖVDESİNDEN bağımsızdır.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let t0 = Utc::now();
@@ -5842,7 +5777,11 @@ async fn empty_allowed_global_actions_grants_nothing() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     assert!(
         engine
@@ -5948,7 +5887,11 @@ async fn escalation_intervention_requires_its_own_power() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let err = engine
         .skip_escalation(&wfd, &wfes, &admin, None, Utc::now())
@@ -5977,7 +5920,11 @@ async fn multiple_rules_union_their_powers() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let powers = engine
         .admin_global_actions(&wfd, &wfes, &admin)
@@ -6043,7 +5990,11 @@ async fn admin_send_back_rejects_unvisited_node() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let err = engine
         .admin_send_back(&wfd, &wfes, &admin, "self__branchManager", Utc::now())
@@ -6064,7 +6015,11 @@ async fn admin_send_back_rejects_current_node() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let err = engine
         .admin_send_back(&wfd, &wfes, &admin, "self__creditAnalyst", Utc::now())
@@ -6086,7 +6041,11 @@ async fn admin_send_to_start_rewinds_same_wfe() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let commit = engine
         .admin_send_to_start(&wfd, &wfes, &admin, None, Utc::now())
@@ -6142,7 +6101,11 @@ async fn admin_cancel_terminates_with_reason() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
 
     let commit = engine
         .admin_cancel(&wfd, &wfes, &admin, Some("müşteri vazgeçti"), Utc::now())
@@ -6180,7 +6143,11 @@ async fn global_actions_rejected_on_terminal_wfe() {
 
     let orgu = Uuid::new_v4();
     let admin = manager(orgu);
-    let mut wfes = wfes_at("self__creditAnalyst", Some(analyst(orgu).user_id), start_input());
+    let mut wfes = wfes_at(
+        "self__creditAnalyst",
+        Some(analyst(orgu).user_id),
+        start_input(),
+    );
     wfes.status = WfeStatus::Terminated;
 
     for err in [

@@ -400,6 +400,15 @@ impl SimState {
                 self.branches.clear();
             }
             CommitOutcome::MoveTo { .. } => {}
+            // v2.3 (`E02`): `StayAt` kol durumuna DOKUNMAZ — escalation iş taşımıyor,
+            // yani kol hareketi/iptali/varışı yok. `sim` gerçek akışla aynı kararı
+            // verir (`outcome_parts` de `resolution()`a devrediyor).
+            //
+            // ⚠️ `sim`in KÖRLÜĞÜ kayda geçer (`E02`/S3): burada `claimed_at` DAİMA
+            // NULL (claim bypass) ve projeksiyon kolonu YOK → guard-false claim
+            // düşürmesi `sim`de SINANAMAZ. Test kapısı `crates/wfe/tests/` MemStore'unda
+            // ve adapter testinde kurulur.
+            CommitOutcome::StayAt { .. } => {}
         }
     }
 
@@ -445,26 +454,10 @@ impl SimState {
 fn outcome_parts(
     outcome: &CommitOutcome,
 ) -> (WfeStatus, Option<String>, Option<serde_json::Value>) {
-    match outcome {
-        CommitOutcome::MoveTo { node } => (WfeStatus::Active, Some(node.clone()), None),
-        CommitOutcome::Terminal { end_response } => {
-            (WfeStatus::Terminal, None, Some(end_response.clone()))
-        }
-        CommitOutcome::Failed { end_response } => {
-            (WfeStatus::Error, None, Some(end_response.clone()))
-        }
-        CommitOutcome::Terminated { end_response } => {
-            (WfeStatus::Terminated, None, Some(end_response.clone()))
-        }
-        // WOR-31: paralel outcome'lar aktiftir, wfe-seviyesi current_node
-        // taşımaz; kol durumunun sim'e işlenmesi T4'te (SimState.branches).
-        CommitOutcome::ForkTo { .. }
-        | CommitOutcome::BranchMoveTo { .. }
-        | CommitOutcome::BranchArrived { .. } => (WfeStatus::Active, None, None),
-        CommitOutcome::JoinComplete { next, .. } => outcome_parts(next),
-        // WOR-56: node hedefli collapse — paralel mod biter, WFE tekil modda `node`'a.
-        CommitOutcome::CollapseTo { node, .. } => (WfeStatus::Active, Some(node.clone()), None),
-    }
+    // v2.3 (`E02`/S3): `resolution()`a devreder — sim ile gerçek akış AYNI sınıflamayı
+    // kullanmak zorunda, iki kopya bir gün ayrışırdı.
+    let (status, node, end) = outcome.resolution();
+    (status, node.map(str::to_string), end.cloned())
 }
 
 /// Bir adımın motor tarafı — `routes/simulate.rs` ve `scenario::run` ORTAK kullanır.

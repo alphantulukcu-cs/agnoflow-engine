@@ -162,7 +162,10 @@ fn env_str(env: &RunEnv, key: &str) -> Option<String> {
 /// WFD'nin ortam değişkenlerinden depo konfigürasyonu üretir. `BACKEND` tanımlı değilse
 /// `None` → çağıran deployment varsayılanını kullanır.
 fn config_from_env(env: &RunEnv, fallback_path: &str) -> Option<StorageConfig> {
-    let backend = match env_str(env, "ATTACHMENT_STORAGE_BACKEND")?.to_ascii_lowercase().as_str() {
+    let backend = match env_str(env, "ATTACHMENT_STORAGE_BACKEND")?
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "s3" => StorageBackend::S3,
         "local" => StorageBackend::Local,
         // Tanınmayan değer sessizce local'a düşmez: yanlış yazılmış bir "S£" yüzünden
@@ -244,16 +247,17 @@ async fn store_for_wfd_impl(
     // Ortam verilmemişse tenant varsayılanı — `$env` çözümü bir ortam kimliği ister.
     let env_id = match environment_id {
         Some(id) => id,
-        None => wf_wfe::repo::env::resolve_environment(&s.pool, orgtnt_id, None)
-            .await
-            .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?
-            .id,
+        None => {
+            wf_wfe::repo::env::resolve_environment(&s.pool, orgtnt_id, None)
+                .await
+                .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?
+                .id
+        }
     };
 
-    let run_env =
-        wf_wfe::repo::env::load_run_env(&s.pool, project_id, &wfd_name, env_id, true)
-            .await
-            .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
+    let run_env = wf_wfe::repo::env::load_run_env(&s.pool, project_id, &wfd_name, env_id, true)
+        .await
+        .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
 
     if strict {
         let missing = missing_required_env_keys(&run_env);
@@ -370,7 +374,7 @@ mod tests {
     /// parametrelenir — kapının sorduğu tam olarak bu ikisidir.
     fn wfd_with(items: serde_json::Value, node_refs: serde_json::Value) -> Wfd {
         Wfd::from_value(json!({
-            "wfd_version": "2.2",
+            "wfd_version": "2.3",
             "id": "t", "name": "t", "version": "1",
             "context": { "type": "object", "properties": {} },
             "nodes": {
@@ -379,7 +383,7 @@ mod tests {
                     "attachments": node_refs
                 }
             },
-            "start": [], "actions": {}, "transitions": [], "terminals": [],
+            "start": [], "actions": {}, "terminals": [],
             "attachments": { "evraklar": { "items": items } }
         }))
         .expect("minimal wfd")
@@ -405,7 +409,10 @@ mod tests {
             json!([])
         )));
         // Referans var ama grubun dosya slotu yok → yüklenecek bir şey yok.
-        assert!(!collects_attachments(&wfd_with(json!([]), json!(["evraklar"]))));
+        assert!(!collects_attachments(&wfd_with(
+            json!([]),
+            json!(["evraklar"])
+        )));
     }
 
     #[test]

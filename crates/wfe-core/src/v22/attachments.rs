@@ -165,10 +165,7 @@ pub fn find_item<'a>(wfd: &'a Wfd, group: &str, item: &str) -> Option<&'a Attach
 /// Eksik zorunlu slotlar (`"grup/item"`) — yalnız `gates: true` slotlar sayılır.
 /// `uploaded(group, item)` çağıranın gerçeğidir: gerçek akışta depo + staging,
 /// simülasyonda `SimState.attachments`.
-pub fn missing_required(
-    slots: &[GateSlot],
-    uploaded: impl Fn(&str, &str) -> bool,
-) -> Vec<String> {
+pub fn missing_required(slots: &[GateSlot], uploaded: impl Fn(&str, &str) -> bool) -> Vec<String> {
     slots
         .iter()
         .filter(|s| s.gates && s.required && !uploaded(&s.group, &s.item))
@@ -183,7 +180,7 @@ mod tests {
 
     fn wfd_with_gate(node_attachments: serde_json::Value) -> Wfd {
         serde_json::from_value(json!({
-            "wfd_version": "2.2",
+            "wfd_version": "2.3",
             "id": "belgeli-v1",
             "name": "Belgeli",
             "version": "1.0.0",
@@ -195,22 +192,19 @@ mod tests {
                     { "id": "ekstra.pdf", "required": false }
                 ]}
             },
-            "start": [{ "id": "s1", "from": "basvuru", "action": "gonder",
-                        "wft": { "terminal": "Bitti" } }],
+            "start": [{ "id": "s1", "action": "gonder" }],
             "nodes": {
                 "basvuru": {
                     "c_a": { "c_orgu": "self" },
                     "attachments": node_attachments
                 }
             },
-            "actions": { "gonder": { "input": { "required": [], "optional": [] } },
-                         "iptal": { "input": { "required": [], "optional": [] } } },
-            "transitions": [
-                { "id": "t1", "from": "basvuru", "action": "gonder",
-                  "wft": { "terminal": "Bitti" } },
-                { "id": "t2", "from": "basvuru", "action": "iptal",
-                  "wft": { "terminal": "Bitti" } }
-            ],
+            "actions": {
+                "gonder": { "input": { "required": [], "optional": [] },
+                            "from": "basvuru", "wft": { "terminal": "Bitti" } },
+                "iptal":  { "input": { "required": [], "optional": [] },
+                            "from": "basvuru", "wft": { "terminal": "Bitti" } }
+            },
             "terminals": [{ "id": "Bitti", "wfe_end_response": {} }]
         }))
         .expect("fixture parse")
@@ -222,7 +216,10 @@ mod tests {
         let slots = gate_slots(&wfd, "basvuru", Some("iptal"));
         assert_eq!(slots.len(), 2);
         assert!(slots.iter().all(|s| s.gates));
-        assert_eq!(missing_required(&slots, |_, _| false), vec!["kimlik/kimlik.pdf"]);
+        assert_eq!(
+            missing_required(&slots, |_, _| false),
+            vec!["kimlik/kimlik.pdf"]
+        );
         // Yüklenmişse kapı açılır; `required: false` slot hiç kapı değildir.
         assert!(missing_required(&slots, |g, i| g == "kimlik" && i == "kimlik.pdf").is_empty());
     }

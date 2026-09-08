@@ -127,3 +127,135 @@ pub async fn require_global_action(
     }
     Err(EngineError::Unauthorized)
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// v2.3 (`E04`) — `c_a ∪ grant` YETKİ KÜMESİ
+//
+// Escalation artık havuzu GENİŞLETİYOR (`Ç9`), yani "bu kişi bu işi alabilir mi"
+// sorusu artık `node.c_a`ya değil **`node.c_a ∪ açılmış grantlar`**a bakmak zorunda.
+// Mantık üç satır; kararın asıl konusu NEREYE konacağıydı.
+//
+// **Neden `grants.rs`, `matcher.rs` DEĞİL:** `matcher` saf eşleştiricidir ve ZEN
+// görmez. Grant'ın `when` guard'ı bir ZEN ifadesidir → genişletmeyi matcher'a koymak
+// saf eşleştiriciye ifade değerlendirmesi sokardı. `matcher`ın `authorize` ailesinin
+// imzaları ve `MatchEnv` bu yüzden DEĞİŞMEZ.
+//
+// **Grant sırası `matches_grant_rules` gövdesiyle BİREBİR AYNIDIR:** önce `c_a`
+// (vekâlet dahil), sonra `when` guard'ı. İki ayrı sıra iki ayrı cevap üretirdi.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Bir WFE'nin ŞU ANDA bulunduğu node'a girdiği an.
+///
+/// ⚠️ **Bu hesap `R02`nin tanımıdır ve TEK YERDE durmak ZORUNDADIR.** Üç tüketici
+/// aynı fonksiyonu çağırır: `next_escalation` (kademe vadesi), `waited_for_seconds`
+/// (`Ç13`/`E12`) ve açık grant kümesi (aşağısı). İki yerde iki ayrı taban tanımı
+/// yazılırsa sayaçlar sessizce ayrışır — bir kademe vadesini geçmiş sayılırken grant'ı
+/// henüz açılmamış görünür.
+///
+/// **Bugünkü tanım geçicidir:** escalation marker'larını önek filtresiyle eleyip son
+/// satırı alır. `R02` bunu `to_node != null` olan son satıra çevirecek — o alan
+/// (`WfahEntry.to_node`) henüz YOK (`Ç2`/`Ç3` işi). Gövde değişince ÜÇ tüketici
+/// birlikte doğru cevaba geçer; çağrı yerlerine dokunmak gerekmez. Bu, fonksiyonun
+/// tek yerde olmasının asıl kazancıdır.
+pub fn node_entered_at(wfah: &crate::types::wfah::Wfah) -> Option<chrono::DateTime<chrono::Utc>> {
+    wfah.entries()
+        .iter()
+        .filter(|e| !e.action.starts_with("escalate:"))
+        .last()
+        .map(|e| e.applied_at)
+}
+
+/// Bir node'da AÇILMIŞ escalation grant'ları — defterden TÜRETİLİR.
+///
+/// **`Wfes`e alan EKLENMEZ.** Kaynak defterdeki `escalate:<node_key>:<idx>` satırları:
+/// `applied_at`i node'a giriş anından SONRA olanların `idx`leri o node'un
+/// `escalation[idx].grant`ına karşılık gelir. Alan eklemek aynı gerçeği iki yerde
+/// tutmak (ve senkronda kalmasını ummak) olurdu.
+///
+/// Dönüş sırası belge sırasıdır (kademe sırası), tekrarsız.
+pub fn open_grants<'w>(
+    wfd: &'w crate::types::wfd_v22::Wfd,
+    wfah: &crate::types::wfah::Wfah,
+    node_key: &str,
+) -> Vec<&'w CaGrantRule> {
+    let Some(node) = wfd.nodes.get(node_key) else {
+        return Vec::new();
+    };
+    if node.escalation.is_empty() {
+        return Vec::new();
+    }
+    let entered = node_entered_at(wfah);
+    let mut fired: BTreeSet<usize> = BTreeSet::new();
+    for entry in wfah.entries() {
+        // `escalate:<node>:<idx>` — `:skipped` soneki de sayılır: WF Admin'in elle
+        // atlaması kademeyi ATEŞLENMİŞ sayar (`E13`: sayaç kaymaz), dolayısıyla
+        // grant'ı da açılmış sayılır.
+        let Some(rest) = entry.action.strip_prefix("escalate:") else {
+            continue;
+        };
+        let rest = rest.strip_suffix(":skipped").unwrap_or(rest);
+        let Some((node_part, idx_part)) = rest.rsplit_once(':') else {
+            continue;
+        };
+        if node_part != node_key {
+            continue;
+        }
+        let Ok(idx) = idx_part.parse::<usize>() else {
+            continue;
+        };
+        // Node'a girişten ÖNCEki satırlar önceki bir turun kalıntısıdır — o turun
+        // grant'ı bu turda açık değildir.
+        if let Some(entered) = entered {
+            if entry.applied_at < entered {
+                continue;
+            }
+        }
+        if idx < node.escalation.len() {
+            fired.insert(idx);
+        }
+    }
+    fired
+        .into_iter()
+        .map(|i| &node.escalation[i].grant)
+        .collect()
+}
+
+/// "Bu aktör bu node'da iş alabilir mi" — **`node.c_a ∪ açılmış grantlar`** üzerinde
+/// karar.
+///
+/// Bu, `authorize(&node.c_a, …)`nın v2.3 karşılığıdır ve node yetkisi soran YEDİ çağrı
+/// yeri yalnız bunu çağırır. Doğrudan `node.c_a`ya bakan bir yol bırakmak, grant'ı
+/// görmeyen sessiz bir kapı bırakmak olurdu — bu yüzden `NodeDef::act_c_a()`
+/// accessor'ı ayrı bir adla durur ve "havuz" sorusu buradan geçer.
+pub async fn authorize_node(
+    wfd: &crate::types::wfd_v22::Wfd,
+    wfes: &Wfes,
+    node_key: &str,
+    actor: &Actor,
+    org: &dyn OrgPort,
+) -> Result<bool, EngineError> {
+    let Some(node) = wfd.nodes.get(node_key) else {
+        return Err(EngineError::InvalidWfd(format!(
+            "bilinmeyen node '{node_key}'"
+        )));
+    };
+    let ctx = wfes.dynctx.as_value();
+    // ⚠️ `MatchEnv`/`EvalEnv` kurulumu kural döngüsünün DIŞINDA (`E04`/S4). Bu bir
+    // optimizasyon değil, aynı işi kural başına tekrarlamayı bırakmaktır.
+    let env = MatchEnv {
+        ctx,
+        wfah: &wfes.wfah,
+        orgtnt_id: wfes.orgtnt_id,
+    };
+    // 1) Node'un kendi havuzu.
+    if authorize_or_delegated_anchored(node.act_c_a(), actor, wfes.origin_orgu_id, env, org).await?
+    {
+        return Ok(true);
+    }
+    // 2) Açılmış grantlar — `matches_grant_rules` ile AYNI sıra (c_a → when).
+    let grants = open_grants(wfd, &wfes.wfah, node_key);
+    if grants.is_empty() {
+        return Ok(false);
+    }
+    matches_grant_rules(grants, actor, wfes, &ValidRules::for_version(wfd), org).await
+}

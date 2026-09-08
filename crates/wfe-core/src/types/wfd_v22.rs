@@ -7,7 +7,46 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-pub const SUPPORTED_WFD_VERSION: &str = "2.2";
+/// Desteklenen WFD wire sürümü — **TEK DEĞERLİ EŞİTLİK kapısı** (aralık/liste/"en az"
+/// mantığı YOKTUR).
+///
+/// v2.3'e çevrildi (`R07`, kullanıcı kararı 2026-09-07). Şemanın kendi hükmü:
+/// *"2.2 belgeleri arşivlenir, çeviri aracı yazılmaz."* Yani 2.2'ye pinli koşan WFE'ler
+/// için geriye uyum okuyucusu YAZILMAZ — Değişmez #9 gereği ürün production'da
+/// olmadığı için o kod saf borç olurdu.
+/// v2.3 (`Ç7+Ç8`): start kuralının GÖVDESİ aksiyon kaydındadır.
+///
+/// `start[]` yalnız `{id, action}` taşır; `from` · `when` · `wfes_effects` · `trigger` ·
+/// `wft` hepsi `actions.<action>` içinde. Bu yardımcı o dolaylılığı TEK yerde tutar —
+/// yoksa "start'ın node'u" sorusu her çağrı yerinde elle çözülür ve biri unutulunca
+/// sessizce farklı cevap verir.
+///
+/// `None` dönmesi belgenin BOZUK olduğunu gösterir (validator `start_action` bunu
+/// yakalar); çağıranlar `continue` ile geçer, kendi hatasını üretmez.
+impl NodeDef {
+    /// Node'un HAM havuz kuralı (`c_a`) — grant genişlemesi DAHİL DEĞİL.
+    ///
+    /// Meşru iki kullanıcısı var: (1) `grants::authorize_node`ın birinci ayağı,
+    /// (2) START yolu — orada defter boştur, `escalate:` satırı olamaz, dolayısıyla
+    /// açık grant kümesi YAPISAL OLARAK boştur ve grant sormak anlamsızdır.
+    /// Üçüncü bir çağıran ekleniyorsa önce "grant'ı görmesi gerekir mi" sorulmalı.
+    pub fn act_c_a(&self) -> &CandidateActor {
+        &self.c_a
+    }
+
+    /// START yolunun yetki kuralı. `act_c_a()` ile aynı değeri döner ama ADI niyeti
+    /// söyler: burada grant SORULMAZ ve bu bir eksiklik değil, `E04`ün bağlayıcı
+    /// sonucudur ("Start yolunda grant AÇILAMAZ").
+    pub fn start_c_a(&self) -> &CandidateActor {
+        &self.c_a
+    }
+}
+
+pub fn start_action<'a>(wfd: &'a Wfd, rule: &StartRule) -> Option<&'a ActionDef> {
+    wfd.actions.get(&rule.action)
+}
+
+pub const SUPPORTED_WFD_VERSION: &str = "2.3";
 
 fn default_true() -> bool {
     true
@@ -46,7 +85,6 @@ pub struct Wfd {
     /// (`nodes.<k>.call` veya `terminals[].call`). `autoexec` ↔ `trigger` ayrımının aynısı.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub calls: BTreeMap<String, CallDef>,
-    pub transitions: Vec<Transition>,
     pub terminals: Vec<Terminal>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub listable: Vec<ListableRule>,
@@ -159,7 +197,16 @@ pub struct NodeDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// v2.2: TEK kural (obje). Eski array formu deserialize edilmez.
-    pub c_a: CandidateActor,
+    /// v2.3 (`E04`/S1-EK): **`pub` OLMAKTAN ÇIKTI.** Erişim accessor'lar üzerinden
+    /// verilir ki "node havuzu" sorusu grant'ı GÖRMEYEN bir yoldan sorulamasın:
+    ///   - `act_c_a()` — ham havuz kuralı; YALNIZ `grants::authorize_node` ve start
+    ///     yolu kullanır (start'ta defter boş → grant yapısal olarak olamaz)
+    ///   - yetki kararı için `grants::authorize_node(...)`
+    ///   - çözülmüş aday listesi için `Engine::node_candidates(...)`
+    ///
+    /// Alanı `pub` bırakmak, `c_a ∪ grant` genişlemesini atlayan bir kapıyı bir
+    /// nokta uzaklıkta tutardı.
+    pub(crate) c_a: CandidateActor,
     /// Madde 7: opsiyonel claim devri yetkisi. `c_a` ile birebir aynı C_A şekli;
     /// bu kurala uyan aktör (amir) bu node'daki claim'i başkasına devredebilir ya da
     /// havuza bırakabilir. Verilmezse devir bu node'da tamamen kapalıdır (403).
@@ -201,30 +248,10 @@ pub struct NodeDef {
 pub struct ClaimTimeout {
     /// ISO 8601 duration — claim anından itibaren.
     pub after: String,
-    /// 2026-07-28 (SLA-1 effects): opsiyonel DynCtx yazımı — süre dolduğunda
-    /// `$actor` = system aktörü, `$node` = SLA'nın tetiklendiği node. `$action.input.*`
-    /// ve `$exec.result.*` bu bağlamda YOKTUR (validator `sla_effect_namespace`).
+    /// Opsiyonel DynCtx yazımı — süre dolduğunda `$actor` = system aktörü,
+    /// `$node` = SLA'nın tetiklendiği node (validator `sla_effect_namespace`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wft: Option<String>,
-    /// WOR-56/SLA-1 (2026-08-03): TASARIMCININ TERCİHİ — bu node bir paralel kolun
-    /// içindeyken süre dolarsa yalnız kolu taşımak yerine PARALELİ SONLANDIR:
-    /// kardeş kollar iptal edilir, WFE paralel moddan çıkar ve `wft` hedefine gider
-    /// (aksiyon tarafındaki `Wft::Collapse` ile birebir aynı semantik).
-    ///
-    /// Sözleşme:
-    /// - `wft` ZORUNLU olur (validator `claim_timeout_collapse_requires_wft`) —
-    ///   "aynı havuza dön" ile collapse birlikte anlamsızdır: gidilecek hedef yok.
-    /// - Hedef hâlâ yalnız NODE olabilir (`sla_terminal_target` değişmedi): collapse
-    ///   paraleli bitirir, AKIŞI bitirmez — zaman aşımıyla akışı bitiren tek kural
-    ///   root `timeout` (SLA-3).
-    /// - Node paralel modda DEĞİLKEN tetiklenirse bayrak yok sayılır ve normal
-    ///   `{node}` devri uygulanır (bkz. `Pipeline::fire_claim_timeout`) — aynı node
-    ///   hem kol içinde hem dışında erişilebilir olabilir, runtime hatası vermek
-    ///   WFE'yi kilitlerdi.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub collapses_parallel: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -234,23 +261,22 @@ fn is_false(b: &bool) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EscalationStep {
-    /// ISO 8601 duration — node'a girişten itibaren.
+    /// ISO 8601 duration — node'a girişten itibaren (taban `R02`: `to_node != null`
+    /// olan son WFAH satırı).
     pub after: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wfes_effects: Option<WfesEffects>,
-    /// SLA-2 hedefi — ZORUNLU (validator `escalation_wft_required`). Yalnız NODE
-    /// olabilir: terminal hedef 2026-07-28'de yasaklandı (`sla_terminal_target`).
-    /// `Option` kalır ki eksikliği serde parse hatası yerine anlaşılır bir
-    /// validasyon mesajı üretsin.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wft: Option<Wft>,
-    /// KALDIRILDI (2026-07-28) — SLA-2 akışı BİTİREMEZ; yalnız SLA-3 (root `timeout`)
-    /// bitirir. Alan sırf eski WFD'lere anlaşılır hata verebilmek için deserialize
-    /// edilir (`deny_unknown_fields` yüzünden aksi halde ham parse hatası olurdu);
-    /// validator `escalation_terminate_removed` ile reddeder ve yeni dokümanlara
-    /// asla yazılmaz.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminate: Option<bool>,
+    /// v2.3 (`Ç9`) — **C EKSENİNİN ÇEKİRDEĞİ.** Escalation artık İŞ TAŞIMAZ: süre
+    /// dolunca iş node'da KALIR, yalnız o node'un yetki HAVUZU genişler.
+    ///
+    /// Şekil `CaGrantRule` — `listable`/`wf_admin` ile TEK TİP (beşinci kullanıcısı).
+    /// **ZORUNLU:** eskiden `wft` `Option`du ki eksikliği anlaşılır bir validasyon
+    /// mesajı üretsin; grant'ta o gerekçe yok — grant'sız bir kademe hiçbir şey
+    /// yapmaz, yani belge şemadan geçmemeli.
+    ///
+    /// `when` guard'ı **her yetki sorgusunda** değerlendirilir (ateşleme anında DEĞİL);
+    /// marker ise guard'dan BAĞIMSIZ yazılır ve sayaç kaymaz (`E13`).
+    pub grant: CaGrantRule,
 }
 
 /// `c_u` listesinin bir öğesi: sabit kimlik ya da context referansı.
@@ -447,6 +473,31 @@ pub struct ActionDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub input: InputDef,
+    /// v2.3 (`Ç5`, K3): bu aksiyonun kullanıldığı KAYNAK node — **TEKİL string, dizi YOK**.
+    /// Start aksiyonunda ayrıca BAŞLATAN node'dur (`start[]` yalnız `{id, action}` taşır).
+    ///
+    /// v2.2'de `transitions[].from` idi ve `FromNodes` (string | string[]) taşıyordu; K3
+    /// çoklu `from`u kaldırdı, `Ç11` de paylaşımı kimlik düzeyinde yasakladı → bir aksiyonu
+    /// yalnız bir node kullanır, dolayısıyla alan tekil.
+    pub from: String,
+    /// Opsiyonel ek veri guard'ı — state seçimi DEĞİL. Start aksiyonunda da geçerlidir;
+    /// seçim sırası yetki → `validate_action_input` → `when` (`E11`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    /// v2.2'de `transitions[].c_a` idi (`Ç6`). Node'un c_a **HAVUZUNU DARALTIR**,
+    /// genişletmez: havuzda olmak yetmez, aktör ayrıca bu kurala da match etmelidir.
+    /// TEK kural (Değişmez #5).
+    ///
+    /// ⚠️ `actions.<x>.c_a` diye bir alan **YOKTUR ve olmayacaktır** — bir aksiyonun
+    /// havuzu daima node'un `c_a`'sıdır. Ad ayrımı bilinçli: aynı adla farklı iş yapan
+    /// iki alan bu projede daha önce zarar verdi (`Ç6` gerekçesi).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_c_a: Option<CandidateActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wfes_effects: Option<WfesEffects>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trigger: Vec<TriggerInvocation>,
+    pub wft: Wft,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -943,56 +994,13 @@ pub struct WftCondition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartRule {
+    /// v2.3 (`Ç7+Ç8`): `id` **AYRI KALIR ve aksiyon adına DÖNÜŞMEZ**. Gerekçe belge
+    /// dışıdır: `calls.<x>.start` başka bir WFD'nin start kuralına ADIYLA işaret ediyor
+    /// ve bu canlı bir örnekte kullanılıyor (`akis-cagrisi.json`). `CallDef.start` ve
+    /// `call_start_ambiguous` bu yüzden AYNEN kalır.
     pub id: String,
-    /// v2.2 simetrik start: giriş node id'si (nodes katalogunda; initiator c_a'sını taşır). Tekil.
-    pub from: String,
-    /// Start aksiyonunun gerçek adı (M16) — actions{} içinde normal bir ACT olarak tanımlıdır.
+    /// Start aksiyonunun gerçek adı — `actions{}` içinde normal bir ACT olarak tanımlıdır.
     pub action: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wfes_effects: Option<WfesEffects>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trigger: Vec<TriggerInvocation>,
-    pub wft: Wft,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Transition {
-    pub id: String,
-    /// Kaynak node slug'ı veya slug listesi (M2).
-    pub from: FromNodes,
-    /// Opsiyonel ek veri guard'ı — state seçimi DEĞİL (M2).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when: Option<String>,
-    pub action: String,
-    /// Opsiyonel EK yetki kısıtı — node c_a'sının üstüne AND'lenir.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub c_a: Option<CandidateActor>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wfes_effects: Option<WfesEffects>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trigger: Vec<TriggerInvocation>,
-    pub wft: Wft,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum FromNodes {
-    One(String),
-    Many(Vec<String>),
-}
-
-impl FromNodes {
-    pub fn iter(&self) -> Vec<&str> {
-        match self {
-            FromNodes::One(s) => vec![s.as_str()],
-            FromNodes::Many(v) => v.iter().map(String::as_str).collect(),
-        }
-    }
-
-    pub fn contains(&self, node: &str) -> bool {
-        self.iter().iter().any(|n| *n == node)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

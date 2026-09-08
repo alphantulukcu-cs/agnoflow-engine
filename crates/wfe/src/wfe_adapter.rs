@@ -498,6 +498,16 @@ impl WfeStore for WfeAdapter {
 
         let (status, current_node, end_response) = match &new.outcome {
             CommitOutcome::MoveTo { node } => ("active", Some(node.as_str()), None),
+            // v2.3 (`E02`/S1): **`create` yolu `StayAt` alırsa HATA.** Start'ta defter
+            // BOŞTUR → `escalate:` satırı olamaz → açık grant kümesi yapısal olarak
+            // boştur, yani grant AÇILAMAZ. Buraya ulaşması programlama hatasıdır ve
+            // sessizce "active" yazmak, olmayan bir grant'ı varmış gibi kolonlayabilirdi.
+            CommitOutcome::StayAt { .. } => {
+                return Err(EngineError::InvalidWfd(
+                    "start yolunda StayAt outcome'u üretilemez — start'ta açık grant yoktur"
+                        .into(),
+                ))
+            }
             CommitOutcome::Terminal { end_response } => ("terminal", None, Some(end_response)),
             CommitOutcome::Failed { end_response } => ("error", None, Some(end_response)),
             CommitOutcome::Terminated { end_response } => ("terminated", None, Some(end_response)),
@@ -596,6 +606,26 @@ impl WfeStore for WfeAdapter {
         insert_wfah_entries(&mut tx, commit.wfe_id, &commit.wfah_entries).await?;
 
         match &commit.outcome {
+            // v2.3 (`E02`/S1) — **"YERİNDE KAL AMA YAZ".** `node`/`status`/`claim`'e
+            // DOKUNULMAZ; yazılan tek şey genişlemiş havuz projeksiyonudur.
+            // `current_c_a` + `current_view_c_a` AYNI UPDATE'te (`MoveTo`daki sözleşmenin
+            // aynısı: ikisi ayrı ifadelere bölünürse bir outcome kolunda biri unutulur).
+            CommitOutcome::StayAt { .. } => {
+                let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
+                let view_json = serde_json::to_value(&commit.current_view_c_a).map_err(db_err)?;
+                sqlx::query(
+                    "UPDATE wf.wfe
+                     SET current_c_a = $1, current_view_c_a = $2, updated_at = now()
+                     WHERE wfe_id = $3 AND orgtnt_id = $4",
+                )
+                .bind(&c_a_json)
+                .bind(&view_json)
+                .bind(commit.wfe_id)
+                .bind(commit.orgtnt_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(db_err)?;
+            }
             CommitOutcome::MoveTo { node } => {
                 let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
                 // 2026-08-13: node listable projeksiyonu `current_c_a` ile AYNI

@@ -20,8 +20,7 @@ use wfe_core::v22::pipeline::Engine;
 use wfe_core::v22::ports::{AutoexecRunner, ExecEnv, ExecFailure};
 use wfe_core::EngineError;
 
-const PARALLEL_FIXTURE: &str =
-    include_str!("../../../docs/spec/examples/paralel-onay.json");
+const PARALLEL_FIXTURE: &str = include_str!("../../../docs/spec/examples/paralel-onay.json");
 
 // ---- mock'lar (fork_join.rs / pipeline.rs kalıbı — authorize anchor = actor.orgu_id) ----
 
@@ -145,7 +144,15 @@ async fn sim_happy_path_fork_join_finalize() {
         let a = actor(role);
         let wfes = sim_state.to_wfes(Some(a.user_id));
         let commit = eng
-            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node), None)
+            .apply(
+                &wfd,
+                &wfes,
+                &a,
+                branch_approve(node),
+                &json!({}),
+                Some(node),
+                None,
+            )
             .await
             .unwrap();
         sim_state.apply_commit(&commit);
@@ -167,7 +174,15 @@ async fn sim_happy_path_fork_join_finalize() {
     let a = actor(role);
     let wfes = sim_state.to_wfes(Some(a.user_id));
     let commit = eng
-        .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node), None)
+        .apply(
+            &wfd,
+            &wfes,
+            &a,
+            branch_approve(node),
+            &json!({}),
+            Some(node),
+            None,
+        )
         .await
         .unwrap();
     sim_state.apply_commit(&commit);
@@ -223,7 +238,7 @@ async fn sim_branch_reject_terminates_and_cancels_siblings() {
             &wfd,
             &wfes,
             &legal,
-            "reject",
+            "hukuk_ret",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -253,28 +268,11 @@ async fn sim_branch_reject_terminates_and_cancels_siblings() {
     );
 }
 
-/// Aksiyon ≥2 aktif kolun transition'ıyla eşleşir ve `node` hint verilmezse
-/// `AmbiguousAction` — üç kol da aynı `approve`/`reject` action adını taşır.
-#[tokio::test]
-async fn sim_apply_without_node_hint_is_ambiguous() {
-    let wfd = wfd();
-    let eng = engine();
-    let sim_state = fork_setup(&eng, &wfd).await;
-
-    let a = actor("financeApprover");
-    let wfes = sim_state.to_wfes(Some(a.user_id));
-    let err = eng
-        .apply(&wfd, &wfes, &a, "approve", &json!({}), None, None)
-        .await
-        .unwrap_err();
-    match err {
-        EngineError::AmbiguousAction { action, candidates } => {
-            assert_eq!(action, "approve");
-            assert_eq!(candidates.len(), 3);
-        }
-        other => panic!("AmbiguousAction bekleniyordu, geldi: {other:?}"),
-    }
-}
+// v2.3 (`Ç5` + `Ç11`): `sim_apply_without_node_hint_is_ambiguous` SİLİNDİ.
+// `apply_parallel` adayı `actions.get(action).filter(|t| t.from == branch_node)` ile
+// buluyor; kayıt TEK, `from` da tekil string (`K3`) → eşleşen kol en fazla BİR tane.
+// `AmbiguousAction` geçerli bir belgeyle artık tetiklenemez, dolayısıyla "node ipucu
+// yoksa belirsiz" diye bir durum yok: `approve` adını üç kol paylaşamıyor.
 
 /// `possible_actions_for` paralel modda TÜM aktif kollar için birleşim döner,
 /// her öğe kendi kol `node`'uyla etiketli (T4 — `routes/simulate.rs` bunu
@@ -285,38 +283,55 @@ async fn sim_possible_actions_unions_active_branches() {
     let eng = engine();
     let sim_state = fork_setup(&eng, &wfd).await;
 
-    // bypass: aktör her aktif kolun claimed_by'ı sayılır — üçü de "approve"/"reject" sunar
+    // bypass: aktör her aktif kolun claimed_by'ı sayılır — üçü de kendi onay/ret
+    // aksiyonunu sunar. v2.3 (`Ç11`): ad kol başına ayrı olduğu için birleşim artık
+    // "tek ad, üç node" değil "üç ad, her biri kendi node'unda" şeklinde ölçülür.
     let a = actor("anyone");
     let wfes = sim_state.to_wfes(Some(a.user_id));
     let actions = possible_actions_for(&eng, &wfd, &wfes, &a).await.unwrap();
 
-    let nodes: std::collections::BTreeSet<_> = actions
+    let onaylar: std::collections::BTreeSet<_> = actions
         .iter()
-        .filter(|pa| pa.action.id == "approve")
-        .filter_map(|pa| pa.branch.as_ref().map(|b| b.id.clone()))
+        .filter(|pa| pa.action.id.ends_with("_onay"))
+        .filter_map(|pa| {
+            pa.branch
+                .as_ref()
+                .map(|b| (pa.action.id.clone(), b.id.clone()))
+        })
         .collect();
     assert_eq!(
-        nodes,
+        onaylar,
         std::collections::BTreeSet::from([
-            "self__financeApprover".to_string(),
-            "self__legalApprover".to_string(),
-            "self__hrApprover".to_string(),
+            (
+                "finans_onay".to_string(),
+                "self__financeApprover".to_string()
+            ),
+            ("hukuk_onay".to_string(), "self__legalApprover".to_string()),
+            ("ik_onay".to_string(), "self__hrApprover".to_string()),
         ]),
-        "approve üç kolda da mümkün olmalı, her biri kendi node'uyla"
+        "üç kolun onayı da sunulmalı, her biri kendi node'uyla"
     );
 }
 
 // ---- WOR-72: OR-join (quorum) sim karşılığı ------------------------------------
 
+/// v2.3 (`Ç11`): onay aksiyonunun adı kol BAŞINA ayrıdır — bir aksiyonu yalnız bir
+/// node kullanır, dolayısıyla üç kol `approve` adını paylaşamaz.
+fn branch_approve(node: &str) -> &'static str {
+    match node {
+        "self__financeApprover" => "finans_onay",
+        "self__legalApprover" => "hukuk_onay",
+        "self__hrApprover" => "ik_onay",
+        other => panic!("bilinmeyen kol node'u: {other}"),
+    }
+}
+
 /// Fixture'ın fork'unu quorum join'e çevirir (3 kol, `join_mode: or`, eşik k).
 fn quorum_wfd(k: u32) -> Wfd {
     let mut v: serde_json::Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["wft"].get("parallel").is_some() {
-            t["wft"]["parallel"]["join_mode"] = json!("or");
-            t["wft"]["parallel"]["join_threshold"] = json!(k);
-        }
-    }
+    let wft = &mut v["actions"]["start_review"]["wft"];
+    wft["parallel"]["join_mode"] = json!("or");
+    wft["parallel"]["join_threshold"] = json!(k);
     Wfd::from_value(v).unwrap()
 }
 
@@ -328,7 +343,11 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
     let wfd = quorum_wfd(2);
     let eng = engine();
     let mut sim_state = fork_setup(&eng, &wfd).await;
-    assert_eq!(sim_state.join_threshold, Some(2), "eşik sim state'e yazıldı");
+    assert_eq!(
+        sim_state.join_threshold,
+        Some(2),
+        "eşik sim state'e yazıldı"
+    );
 
     let a = actor("financeApprover");
     let wfes = sim_state.to_wfes(Some(a.user_id));
@@ -337,7 +356,7 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
             &wfd,
             &wfes,
             &a,
-            "approve",
+            "finans_onay",
             &json!({}),
             Some("self__financeApprover"),
             None,
@@ -345,7 +364,10 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
         .await
         .unwrap();
     sim_state.apply_commit(&commit);
-    assert!(sim_state.join_target.is_some(), "eşik dolmadı, hâlâ paralel");
+    assert!(
+        sim_state.join_target.is_some(),
+        "eşik dolmadı, hâlâ paralel"
+    );
 
     let b = actor("legalApprover");
     let wfes = sim_state.to_wfes(Some(b.user_id));
@@ -354,7 +376,7 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
             &wfd,
             &wfes,
             &b,
-            "approve",
+            "hukuk_onay",
             &json!({}),
             Some("self__legalApprover"),
             None,
@@ -399,14 +421,11 @@ async fn sim_quorum_2_of_3_completes_on_second_arrival() {
 /// Fixture'ın fork'unu ZEN join koşuluna çevirir: "(finans VE hukuk) YA DA İK".
 fn join_expr_wfd() -> Wfd {
     let mut v: serde_json::Value = serde_json::from_str(PARALLEL_FIXTURE).unwrap();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["wft"].get("parallel").is_some() {
-            t["wft"]["parallel"]["join_mode"] = json!("expr");
-            t["wft"]["parallel"]["join_when"] = json!(
-                "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover"
-            );
-        }
-    }
+    let wft = &mut v["actions"]["start_review"]["wft"];
+    wft["parallel"]["join_mode"] = json!("expr");
+    wft["parallel"]["join_when"] = json!(
+        "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover"
+    );
     Wfd::from_value(v).unwrap()
 }
 
@@ -417,7 +436,10 @@ async fn sim_join_expr_or_side_completes_alone() {
     let wfd = join_expr_wfd();
     let eng = engine();
     let mut sim_state = fork_setup(&eng, &wfd).await;
-    assert!(sim_state.join_when.is_some(), "ZEN kuralı sim state'e yazıldı");
+    assert!(
+        sim_state.join_when.is_some(),
+        "ZEN kuralı sim state'e yazıldı"
+    );
 
     let hr = actor("hrApprover");
     let wfes = sim_state.to_wfes(Some(hr.user_id));
@@ -426,7 +448,7 @@ async fn sim_join_expr_or_side_completes_alone() {
             &wfd,
             &wfes,
             &hr,
-            "approve",
+            "ik_onay",
             &json!({}),
             Some("self__hrApprover"),
             None,
@@ -467,7 +489,15 @@ async fn sim_join_expr_and_side_needs_both() {
         let a = actor(role);
         let wfes = sim_state.to_wfes(Some(a.user_id));
         let commit = eng
-            .apply(&wfd, &wfes, &a, "approve", &json!({}), Some(node), None)
+            .apply(
+                &wfd,
+                &wfes,
+                &a,
+                branch_approve(node),
+                &json!({}),
+                Some(node),
+                None,
+            )
             .await
             .unwrap();
         sim_state.apply_commit(&commit);

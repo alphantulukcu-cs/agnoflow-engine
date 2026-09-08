@@ -376,6 +376,63 @@ impl CommitOutcome {
         }
     }
 
+    /// Bu outcome hangi KOL satırlarına dokunur — `wfe_branch.c_a` / `view_c_a`
+    /// projeksiyonunun yazılacağı kol kimlikleri (`E02`/S1-EK).
+    ///
+    /// ⚠️ `StayAt` **kendi node'unu döndürür.** Kol escalation'ı `StayAt` üretir ve o
+    /// kolun havuzu grant'la genişler; boş dönmek E04'ün 6/7 satırının sessiz hâliydi
+    /// (marker yazılır, kol havuzu eski kalır, iş kol kanalında görünmez). Tek-kol
+    /// modunda eşleşecek kol satırı YOKTUR, dolayısıyla yazma kendiliğinden no-op olur
+    /// — burada mod sorulmaz, çünkü outcome modu bilmez ve bilmesi de gerekmez.
+    ///
+    /// `ForkTo` tüm kolları doğurur; `BranchMoveTo` tek kolu taşır. Kalan varyantlar
+    /// kol satırlarına dokunmaz: `BranchArrived`/`JoinComplete`/`CollapseTo` kolları
+    /// KAPATIR (havuz yazmak anlamsız), `MoveTo`/`Terminal`/`Failed`/`Terminated` ise
+    /// paralel modun tamamen dışındadır.
+    pub fn branch_nodes(&self) -> Vec<&str> {
+        match self {
+            CommitOutcome::ForkTo { branches, .. } => branches.iter().map(String::as_str).collect(),
+            CommitOutcome::BranchMoveTo { node, .. } => vec![node.as_str()],
+            CommitOutcome::StayAt { node } => vec![node.as_str()],
+            CommitOutcome::BranchArrived { .. }
+            | CommitOutcome::JoinComplete { .. }
+            | CommitOutcome::CollapseTo { .. }
+            | CommitOutcome::MoveTo { .. }
+            | CommitOutcome::Terminal { .. }
+            | CommitOutcome::Failed { .. }
+            | CommitOutcome::Terminated { .. } => Vec::new(),
+        }
+    }
+
+    /// WFC: bu outcome ÇAĞIRANA "alt akış bitti" der mi — `(statü, end_response)`
+    /// (`E02`/S1-EK).
+    ///
+    /// Statü metinleri `mark_callee_finished`ın sözleşmesidir (`completed` | `failed` |
+    /// `terminated`); WFE'nin kendi `WfeStatus`'undan AYRI tutulur çünkü çağıranın
+    /// gördüğü şey alt akışın SONUCUDUR, satırın durumu değil.
+    ///
+    /// ⚠️ `JoinComplete` kendi başına bir sonuç DEĞİLDİR — içteki `next`e devreder.
+    /// Bugün `next` yalnız `MoveTo` ya da `Terminal` olabiliyor, dolayısıyla eski
+    /// joker (`_ => return Ok(())`) doğru cevap veriyordu — ama TESADÜFEN. `next`e
+    /// bir gün `Failed`/`Terminated` konursa joker onu sessizce yutar, çağıran alt
+    /// akışın bittiğini HİÇ öğrenmezdi.
+    ///
+    /// `StayAt` hiçbir kapanış sinyali üretmez: iş node'da duruyor.
+    pub fn settles_call(&self) -> Option<(&'static str, &Value)> {
+        match self {
+            CommitOutcome::Terminal { end_response } => Some(("completed", end_response)),
+            CommitOutcome::Failed { end_response } => Some(("failed", end_response)),
+            CommitOutcome::Terminated { end_response } => Some(("terminated", end_response)),
+            CommitOutcome::JoinComplete { next, .. } => next.settles_call(),
+            CommitOutcome::StayAt { .. }
+            | CommitOutcome::MoveTo { .. }
+            | CommitOutcome::ForkTo { .. }
+            | CommitOutcome::BranchMoveTo { .. }
+            | CommitOutcome::BranchArrived { .. }
+            | CommitOutcome::CollapseTo { .. } => None,
+        }
+    }
+
     /// Bu outcome bir claim'i düşürür mü — node değişimi assignment'ı sıfırlar.
     ///
     /// ⚠️ `StayAt` claim'i **DÜŞÜRMEZ**: iş yerinde kalır, sahibi de. (Guard'ı false'a
@@ -926,5 +983,110 @@ impl EnvPort for NoEnv {
         environment_id: Option<Uuid>,
     ) -> Result<Option<Uuid>, EngineError> {
         Ok(environment_id)
+    }
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+    use crate::types::wfe::WfeStatus;
+
+    fn end_response() -> Value {
+        serde_json::json!({"ok": true})
+    }
+
+    /// Her varyant için birer örnek — listeyi ELDE tutmak zorunda kalmayalım diye
+    /// değil, tam tersine: yeni bir varyant eklendiğinde bu dizinin eksik kaldığını
+    /// `resolution()`ın jokersiz `match`i zaten derleyicide gösterir, buradaki
+    /// beklentiler de o varyantın CEVABINI çivileme yeri olur.
+    fn every_variant() -> Vec<CommitOutcome> {
+        vec![
+            CommitOutcome::MoveTo { node: "n".into() },
+            CommitOutcome::StayAt { node: "n".into() },
+            CommitOutcome::Terminal {
+                end_response: end_response(),
+            },
+            CommitOutcome::Failed {
+                end_response: end_response(),
+            },
+            CommitOutcome::Terminated {
+                end_response: end_response(),
+            },
+            CommitOutcome::ForkTo {
+                branches: vec!["a".into(), "b".into()],
+                join: WftTarget::Node { node: "j".into() },
+                join_rule: JoinRule::All,
+            },
+            CommitOutcome::BranchMoveTo {
+                from_node: "a".into(),
+                node: "a2".into(),
+            },
+            CommitOutcome::BranchArrived {
+                from_node: "a".into(),
+                arrived_entries: vec!["a".into()],
+            },
+            CommitOutcome::CollapseTo {
+                from_node: Some("a".into()),
+                node: "n".into(),
+                cause: CollapseCause::Collapse,
+            },
+            CommitOutcome::JoinComplete {
+                from_node: "a".into(),
+                quorum_collapse: false,
+                arrived_entries: vec![],
+                next: Box::new(CommitOutcome::MoveTo { node: "n".into() }),
+            },
+        ]
+    }
+
+    /// `E02`/S1-EK: WFC çağıranına "alt akış bitti" diyen TEK yer. Joker
+    /// (`_ => return Ok(())`) bugün doğru cevap veriyordu ama TESADÜFEN — `next`
+    /// alanına bir gün `Failed`/`Terminated` konursa joker onu sessizce yutardı.
+    #[test]
+    fn settles_call_answers_only_for_terminal_class() {
+        for outcome in every_variant() {
+            let got = outcome.settles_call().map(|(s, _)| s);
+            let expected = match &outcome {
+                CommitOutcome::Terminal { .. } => Some("completed"),
+                CommitOutcome::Failed { .. } => Some("failed"),
+                CommitOutcome::Terminated { .. } => Some("terminated"),
+                // `next: MoveTo` → çağıran BİTMEDİ.
+                CommitOutcome::JoinComplete { .. } => None,
+                _ => None,
+            };
+            assert_eq!(got, expected, "settles_call() — {outcome:?}");
+        }
+    }
+
+    /// Join'in İÇİNDEKİ terminal de çağıranı kapatır: soru dıştaki varyantın adı
+    /// değil, işin gerçekten bitip bitmediğidir.
+    #[test]
+    fn settles_call_looks_through_join_complete() {
+        let join = CommitOutcome::JoinComplete {
+            from_node: "a".into(),
+            quorum_collapse: false,
+            arrived_entries: vec![],
+            next: Box::new(CommitOutcome::Terminal {
+                end_response: end_response(),
+            }),
+        };
+        assert_eq!(join.settles_call().map(|(s, _)| s), Some("completed"));
+    }
+
+    /// `StayAt` hiçbir kapanış sinyali üretmez — iş yerinde duruyor.
+    #[test]
+    fn stay_at_neither_settles_nor_moves_nor_clears_claim() {
+        let stay = CommitOutcome::StayAt { node: "n".into() };
+        assert_eq!(stay.settles_call(), None);
+        assert_eq!(stay.to_node(), None, "Ç2: marker satırı hareket taşımaz");
+        assert_eq!(stay.from_node(), None, "Ç2");
+        assert!(!stay.clears_claim(), "iş yerinde kalır, sahibi de");
+        assert_eq!(
+            stay.branch_nodes(),
+            vec!["n"],
+            "kol havuzu grant'la genişler"
+        );
+        let (status, node, end) = stay.resolution();
+        assert_eq!((status, node, end), (WfeStatus::Active, Some("n"), None));
     }
 }

@@ -1593,21 +1593,23 @@ impl WfeExecutor {
         self.wfe.commit(commit).await?;
         self.after_wfe_settled(wfes.wfe_id, &commit.outcome).await?;
         self.nudge_timers();
-        let node = match &commit.outcome {
-            CommitOutcome::MoveTo { node } => Some(Ref::node(wfd, node)),
-            _ => None,
-        };
-        let terminal = !matches!(commit.outcome, CommitOutcome::MoveTo { .. });
+        // E02/S1-EK: JOKER SİLİNDİ. Eskiden `MoveTo` DIŞINDAKİ her outcome "node yok +
+        // terminal" sayılıyordu; Ç4-EK admin `send_back`i paralelde `CollapseTo`ya
+        // çevirince bu kol HER paralel geri göndermede çalışır oldu ve cevap iki kez
+        // yalan söyledi: varılan node düştü, `terminal` "WFE sonlandı" dedi — oysa WFE
+        // hedefte ve AKTİF.
+        //
+        // Soru outcome varyantının ADI değil, "iş bir node'da durdu mu": `resolution()`
+        // tek yerde cevaplar (E03/S2) ve yeni bir varyant geldiğinde derleyici ORAYI
+        // gösterir, burayı değil.
+        let (status, node, _) = commit.outcome.resolution();
+        let terminal = node.is_none();
         Ok(GlobalActionOutcome {
             wfe_id: wfes.wfe_id,
             global_action,
             marker: format!("admin:{global_action}"),
-            status: if terminal {
-                WfeStatus::Terminated
-            } else {
-                WfeStatus::Active
-            },
-            current_node: node,
+            status,
+            current_node: node.map(|n| Ref::node(wfd, n)),
             terminal,
         })
     }
@@ -1725,13 +1727,15 @@ impl WfeExecutor {
                 )
                 .await?;
         }
-        // Kol c_a'ları: fork tüm kolları doğurur, kol hareketi tek kolu taşır.
-        // Diğer sonuçlarda kol satırlarına dokunulmaz → boş bırakılır.
-        let branch_nodes: Vec<String> = match &commit.outcome {
-            CommitOutcome::ForkTo { branches, .. } => branches.clone(),
-            CommitOutcome::BranchMoveTo { node, .. } => vec![node.clone()],
-            _ => Vec::new(),
-        };
+        // E02/S1-EK: JOKER SİLİNDİ. `_ => Vec::new()` kol escalation'ını da yutuyordu
+        // (o yol `StayAt` üretir) → grant ateşlenir, marker yazılır, kolun havuzu
+        // ESKİ kalırdı. Soru artık tek yerde cevaplanıyor: `branch_nodes()`.
+        let branch_nodes: Vec<String> = commit
+            .outcome
+            .branch_nodes()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
         for node_key in branch_nodes {
             // Kol c_a'sı node c_a'sıdır; çapası node yolundakiyle AYNI kalır
             // (geçişi yapan aktör) — bu kolon havuz eşleşmesi içindir, kalıcı
@@ -2274,16 +2278,12 @@ impl WfeExecutor {
         wfe_id: Uuid,
         outcome: &CommitOutcome,
     ) -> Result<(), EngineError> {
-        let (status, end_response) = match outcome {
-            CommitOutcome::Terminal { end_response } => ("completed", Some(end_response)),
-            CommitOutcome::Failed { end_response } => ("failed", Some(end_response)),
-            CommitOutcome::Terminated { end_response } => ("terminated", Some(end_response)),
-            CommitOutcome::JoinComplete { next, .. } => match next.as_ref() {
-                CommitOutcome::Terminal { end_response } => ("completed", Some(end_response)),
-                _ => return Ok(()),
-            },
-            _ => return Ok(()),
+        // E02/S1-EK: İKİ JOKER SİLİNDİ (dıştaki + `JoinComplete`in içindeki).
+        // "Alt akış bitti mi" sorusu artık `settles_call()`ta tek yerde cevaplanıyor.
+        let Some((status, end_response)) = outcome.settles_call() else {
+            return Ok(());
         };
+        let end_response = Some(end_response);
         self.wfe
             .mark_callee_finished(wfe_id, status, end_response)
             .await?;

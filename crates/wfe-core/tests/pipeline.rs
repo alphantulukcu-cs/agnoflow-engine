@@ -5165,10 +5165,13 @@ async fn an_escalation_marker_row_does_not_shift_the_base() {
         .push(EscalationStep {
             after: "P5D".into(),
             wfes_effects: None,
-            wft: Some(Wft::Node {
-                node: "self__branchManager".into(),
-            }),
-            terminate: None,
+            // v2.3 (`Ç9`): kademe hedef taşımaz, GRANT taşır. R02'nin sorusu
+            // (marker satırı tabanı kaydırır mı) kademenin GÖVDESİNDEN bağımsızdır.
+            grant: CaGrantRule {
+                c_a: serde_json::from_value(json!({"c_orgu": "self", "c_r": ["branchManager"]}))
+                    .unwrap(),
+                when: None,
+            },
         });
 
     let t0 = Utc::now();

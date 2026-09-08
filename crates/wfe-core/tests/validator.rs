@@ -1102,20 +1102,12 @@ fn claim_timeout_effects_with_system_tokens_is_valid() {
 #[test]
 fn a_node_cannot_be_the_entry_of_two_forks() {
     let mut v = parallel_fixture_value();
-    let fork = v["transitions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["id"] == "t_fork")
-        .cloned()
-        .expect("fixture'da fork transition'ı var");
-    // İkinci fork AYNI giriş kollarını kullanıyor.
-    let mut second = fork.clone();
-    second["id"] = json!("t_fork_again");
+    // v2.3 (`Ç5`): fork kaydı `transitions[]`te DEĞİL, aksiyonun kendi gövdesinde —
+    // kurulum ikinci fork'u ikinci bir AKSİYON olarak yazar.
+    let mut second = v["actions"]["start_review"].clone();
     second["from"] = json!("self__resultCoordinator");
-    second["action"] = json!("start_review_again");
-    v["transitions"].as_array_mut().unwrap().push(second);
-    v["actions"]["start_review_again"] = v["actions"]["start_review"].clone();
+    // İkinci fork AYNI giriş kollarını kullanıyor.
+    v["actions"]["start_review_again"] = second;
     let report = validate_value(v);
     assert!(
         has_error(&report, "parallel_entry_node_shared"),
@@ -1129,15 +1121,11 @@ fn a_node_cannot_be_the_entry_of_two_forks() {
 #[test]
 fn duplicate_branch_within_one_fork_keeps_its_own_code() {
     let mut v = parallel_fixture_value();
-    for t in v["transitions"].as_array_mut().unwrap() {
-        if t["id"] == "t_fork" {
-            t["wft"]["parallel"]["branches"] = json!([
-                "self__financeApprover",
-                "self__financeApprover",
-                "self__hrApprover"
-            ]);
-        }
-    }
+    v["actions"]["start_review"]["wft"]["parallel"]["branches"] = json!([
+        "self__financeApprover",
+        "self__financeApprover",
+        "self__hrApprover"
+    ]);
     let report = validate_value(v);
     assert!(has_error(&report, "parallel_branches"));
     assert!(

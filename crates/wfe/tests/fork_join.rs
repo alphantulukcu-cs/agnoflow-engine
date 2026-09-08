@@ -2898,7 +2898,7 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     exec.apply(
         wfe_id,
         &actors[1],
-        "approve",
+        branch_approve("self__legalApprover"),
         &json!({}),
         Some("self__legalApprover"),
         None,
@@ -2909,7 +2909,7 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     exec.apply(
         wfe_id,
         &actors[0],
-        "reject",
+        "finans_ret",
         &json!({}),
         Some("self__financeApprover"),
         None,
@@ -2926,7 +2926,11 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
         "E14/S2: collapse sonrası kol satırı kalmamalı"
     );
     assert_eq!(
-        rounds_of(&w, "approve", "self__legalApprover"),
+        rounds_of(
+            &w,
+            branch_approve("self__legalApprover"),
+            "self__legalApprover"
+        ),
         vec![Some(1)],
         "1. turun onayı tur 1 etiketli"
     );
@@ -2954,7 +2958,7 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     exec.apply(
         wfe_id,
         &actors[1],
-        "approve",
+        branch_approve("self__legalApprover"),
         &json!({}),
         Some("self__legalApprover"),
         None,
@@ -2966,7 +2970,11 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     let w = store.snapshot(wfe_id);
     // (d) tur ilerledi; `_fork`/`_collapse` gibi kolda OLMAYAN satırlar NULL kaldı.
     assert_eq!(
-        rounds_of(&w, "approve", "self__legalApprover"),
+        rounds_of(
+            &w,
+            branch_approve("self__legalApprover"),
+            "self__legalApprover"
+        ),
         vec![Some(1), Some(2)],
         "aynı kolun iki turu ayrı numaralandı"
     );
@@ -2988,7 +2996,8 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     let valid_legal_rounds: Vec<Option<u32>> = valid
         .iter()
         .filter(|e| {
-            e.action == "approve" && e.branch_entry.as_deref() == Some("self__legalApprover")
+            e.action == branch_approve("self__legalApprover")
+                && e.branch_entry.as_deref() == Some("self__legalApprover")
         })
         .map(|e| e.branch_round)
         .collect();

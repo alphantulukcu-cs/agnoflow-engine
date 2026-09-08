@@ -31,6 +31,19 @@ pub struct WfahEntry {
     /// olmayan WFE'lerin tüm satırları. Sentinel (`_main` vb.) KULLANILMAZ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_entry: Option<String>,
+    /// E14: satırın yazıldığı TUR — aynı fork'a ikinci kez girilirse (geri gönderme
+    /// sonrası join'e dönüş) birinci turun satırları ikinci turunkilerle aynı
+    /// `branch_entry`'yi taşır; ayrım bu alandadır.
+    ///
+    /// **1'den başlar ve FORK BAŞINA sayar** — global bir sayaç DEĞİL. Değeri
+    /// defterden türetilir: kolun giriş node'unu `input.branches`inde taşıyan `_fork`
+    /// satırlarının sayısı (`pipeline::branch_round_of`). Kol tablosunda tur kolonu
+    /// YOKTUR; tek girdi defterdir (`$valid` saflık sözleşmesi, §3.1).
+    ///
+    /// `branch_entry` ile BİRLİKTE null ya da birlikte doludur — bu bir DEĞİŞMEZDİR:
+    /// `branch_entry` NULL ⇔ `branch_round` NULL (*"bu satır bir kolda değil"*).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_round: Option<u32>,
 }
 
 /// Append-only action history. push() returns a new Wfah — never mutates.
@@ -44,7 +57,8 @@ impl Wfah {
 
     /// Returns a new Wfah with the entry appended. seq = last_seq + 1.
     ///
-    /// Ç2/Ç4 alanları (`from_node`/`to_node`/`branch_entry`) `None` kalır: bu kısayol
+    /// Ç2/Ç4/E14 alanları (`from_node`/`to_node`/`branch_entry`/`branch_round`) `None`
+    /// kalır: bu kısayol
     /// TEST/geçmiş kurma yoludur, hareket üreten satırı KURAN yol değildir. Motorun
     /// gerçek üreticileri `WfahEntry` literali kurar ve alanları açıkça doldurur.
     pub fn push(&self, action: String, actor: Actor, input: Option<Value>) -> Self {
@@ -59,6 +73,7 @@ impl Wfah {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         });
         Self(entries)
     }

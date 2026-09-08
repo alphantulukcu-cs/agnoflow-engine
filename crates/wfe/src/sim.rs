@@ -366,11 +366,12 @@ impl SimState {
                     from_node: None,
                     to_node: None,
                     branch_entry: None,
+                    branch_round: None,
                 });
-                // Join doldu — paralel mod biter; kollar (DB'nin aksine, audit
-                // amacıyla) sim'de basitçe temizlenir. WOR-72: quorum modunda
-                // geride kalan aktif kollar iptal edilmiş sayılır (marker'lar
-                // engine'de staged edildi) — sim'de ayrı işaretleme gerekmez.
+                // Join doldu — paralel mod biter, kol satırları düşer. E14/S2 ile
+                // adapter da AYNI şeyi yapar (eskiden quorum modunda satırları
+                // `cancelled` bırakıyordu): iki yol ayrışmaz. Kalan aktif kollar
+                // iptal edilmiş sayılır — marker'lar engine'de staged edildi.
                 self.join_target = None;
                 self.join_threshold = None;
                 self.join_when = None;
@@ -381,7 +382,8 @@ impl SimState {
             | CommitOutcome::Terminated { .. } => {
                 // WFE tümden bitti — paralel modda aktif kollar iptal edilmiş
                 // sayılır (`_branch_cancelled` marker'ları engine tarafından
-                // zaten wfah_entries'e staged edildi); sim'de satırlar tutulmaz.
+                // zaten wfah_entries'e staged edildi). Satırlar düşer; E14/S2 ile
+                // adapter da AYNI yolu izler.
                 self.join_target = None;
                 self.join_threshold = None;
                 self.join_when = None;
@@ -389,7 +391,8 @@ impl SimState {
             }
             // WOR-56: node hedefli collapse — paralel mod biter (kardeşler iptal,
             // marker'lar engine'de staged), WFE `node`'a geçer (current_node
-            // outcome_parts'ta set edilir); kol satırları sim'de temizlenir.
+            // outcome_parts'ta set edilir); kol satırları düşer (E14/S2: adapter da
+            // artık siliyor, eskiden `cancelled` bırakıyordu).
             CommitOutcome::CollapseTo { .. } => {
                 self.join_target = None;
                 self.join_threshold = None;

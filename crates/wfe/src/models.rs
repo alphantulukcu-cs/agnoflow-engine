@@ -109,4 +109,8 @@ pub struct WfahRow {
     /// Ç4 (v2.3): satırı yazan kolun kimliği (`wfe_branch.entry_node`).
     /// NULL TEK anlam taşır: "bu satır bir kolda değil".
     pub branch_entry: Option<String>,
+    /// E14 (v2.3): satırın yazıldığı TUR (fork başına, 1'den). `branch_entry` ile
+    /// BİRLİKTE null ya da birlikte dolu — aynı fork'a ikinci girişte iki turun
+    /// satırlarını ayıran tek alan.
+    pub branch_round: Option<i32>,
 }

@@ -81,8 +81,9 @@ async fn insert_wfah_entries(
         let actor_json = serde_json::to_value(&entry.actor).map_err(db_err)?;
         sqlx::query(
             "INSERT INTO wf.wfah
-               (wfe_id, seq, action, actor, input, applied_at, from_node, to_node, branch_entry)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+               (wfe_id, seq, action, actor, input, applied_at, from_node, to_node,
+                branch_entry, branch_round)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
         )
         .bind(wfe_id)
         .bind(entry.seq as i32)
@@ -93,6 +94,7 @@ async fn insert_wfah_entries(
         .bind(entry.from_node.as_deref())
         .bind(entry.to_node.as_deref())
         .bind(entry.branch_entry.as_deref())
+        .bind(entry.branch_round.map(|r| r as i32))
         .execute(&mut **tx)
         .await
         // WOR-65: seq çakışması = eşzamanlı commit (bkz. `insert_err`).
@@ -112,12 +114,18 @@ async fn insert_wfah_entries(
 const CLEAR_BRANCH_CLAIM: &str = "claimed_by = NULL, claimed_at = NULL";
 
 /// WOR-31: WFE terminal/terminated/failed olurken paralel modda aktif TÜM kolları
-/// `cancelled` işaretler (audit için satırlar kalır) — çağıran ayrıca wfe satırında
-/// `join_target = NULL` yapar. Paralel modda değilse 0 satır etkiler (no-op).
+/// `cancelled` işaretler — çağıran ayrıca wfe satırında `join_target = NULL` yapar.
+/// Paralel modda değilse 0 satır etkiler (no-op).
 ///
 /// WOR-59: statü ile BİRLİKTE claim de düşürülür. Ayrı iki UPDATE olamaz — statü
 /// `cancelled` olduktan sonra `status = 'active'` filtresi artık eşleşmez. Düşen
 /// claim'in sahibi engine'in `_branch_cancelled` marker'ında zaten kayıtlıdır.
+///
+/// E14/S2: *"audit için satırlar kalır"* GEÇERSİZ — çağıran hemen ardından
+/// `drop_branch_rows` ile satırları SİLER, kol geçmişinin kaynağı WFAH'tır. `cancelled`
+/// yine de anlamlı bir hâldir: bu tx'in İÇİNDE (kilit altında) bir kol silinmeden önce
+/// anlık olarak `cancelled` görülebilir — kol `c_a` projeksiyonunu yazan UPDATE bu
+/// yüzden `status = 'active'` süzgecini korur ve `status` CHECK'i `cancelled`ı tutar.
 async fn cancel_active_branches(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     wfe_id: Uuid,
@@ -130,6 +138,30 @@ async fn cancel_active_branches(
     .execute(&mut **tx)
     .await
     .map_err(db_err)?;
+    Ok(())
+}
+
+/// E14/S2: paralel modu bitiren HER yol kol satırlarını siler — `wf.wfe_branch`
+/// yalnız YAŞAYAN turun tablosudur (`COMMENT ON TABLE`: *"paralel mod kol
+/// DURUMLARI"* — canlı durum, geçmiş değil).
+///
+/// Eskiden yalnız düz AND-join siliyordu; quorum join (WOR-72) ve collapse satırları
+/// `cancelled` olarak BIRAKIYORDU. İki sonucu vardı: (1) portalın kol geçmişi akışın
+/// join tipine göre var ya da yok; (2) aynı fork'a ikinci kez girildiğinde artık satır
+/// `UNIQUE (wfe_id, branch_node)` kısıtını ihlal ediyordu. Kol GEÇMİŞİNİN tek kaynağı
+/// WFAH'tır (`_fork` · `_branch_arrived` · `_branch_cancelled` · `_branch_superseded` ·
+/// `_join`/`_collapse` + aksiyon satırlarının `branch_entry`si) — tabloda olup defterde
+/// olmayan alan YOKTUR. Bu sayede kısmi indeks YAZILMAZ ve tam kısıt *"aynı kolu iki
+/// kez açan MOTOR HATASINI yakala"* kalkanı olarak yerinde kalır.
+async fn drop_branch_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    wfe_id: Uuid,
+) -> Result<(), EngineError> {
+    sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
+        .bind(wfe_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(db_err)?;
     Ok(())
 }
 
@@ -324,10 +356,11 @@ fn build_wfes(
                 actor,
                 input: r.input,
                 applied_at: r.applied_at,
-                // Ç2/Ç4: kolonlar SATIRIN alanlarıdır — türetilmez, taşınır.
+                // Ç2/Ç4/E14: kolonlar SATIRIN alanlarıdır — türetilmez, taşınır.
                 from_node: r.from_node,
                 to_node: r.to_node,
                 branch_entry: r.branch_entry,
+                branch_round: r.branch_round.map(|v| v as u32),
             }
         })
         .collect();
@@ -596,6 +629,8 @@ impl WfeStore for WfeAdapter {
                 // arkasında bekler, sonra kendi CAS'larında Conflict alır.
                 lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
+                // E14/S2: paralel mod bitti → kol satırları düşer.
+                drop_branch_rows(&mut tx, commit.wfe_id).await?;
                 // 2026-08-17: `current_view_c_a` (node listable) BOŞALTILIRKEN aynı
                 // UPDATE'te `end_view_c_a` (terminal listable) DOLDURULUR — iki kolonun
                 // ömrü tam olarak burada ayrışıyor: node'dan çıkan iş o node'un görme
@@ -626,6 +661,8 @@ impl WfeStore for WfeAdapter {
                 // WOR-62: kilit sırası wfe → wfe_branch.
                 lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
+                // E14/S2: paralel mod bitti → kol satırları düşer.
+                drop_branch_rows(&mut tx, commit.wfe_id).await?;
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'error', current_node = NULL, current_c_a = '[]'::jsonb,
@@ -647,6 +684,8 @@ impl WfeStore for WfeAdapter {
                 // WOR-62: kilit sırası wfe → wfe_branch.
                 lock_wfe(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
+                // E14/S2: paralel mod bitti → kol satırları düşer.
+                drop_branch_rows(&mut tx, commit.wfe_id).await?;
                 sqlx::query(
                     "UPDATE wf.wfe
                      SET status = 'terminated', current_node = NULL, current_c_a = '[]'::jsonb,
@@ -780,9 +819,7 @@ impl WfeStore for WfeAdapter {
                 }
                 if *quorum_collapse {
                     // Kalan kollar `cancelled` + claim'leri düşer (engine
-                    // `_branch_cancelled` marker'larını zaten stage etti). Satırlar
-                    // AND yolunun aksine SİLİNMEZ (aşağıya bak) — "hangi kol quorum
-                    // yüzünden düştü" portal tarafında görünür kalsın.
+                    // `_branch_cancelled` marker'larını zaten stage etti).
                     cancel_active_branches(&mut tx, commit.wfe_id).await?;
                 }
                 // `_join` sistem marker'ı (dokümante istisna: adapter ekler) —
@@ -802,16 +839,18 @@ impl WfeStore for WfeAdapter {
                     // satırı taşır (`JoinComplete` → kol node'undan join hedefine).
                     from_node: None,
                     to_node: None,
-                    // Ç4: join paralel modu KAPATIR; satır bir kolun içinde değildir.
+                    // Ç4/E14: join paralel modu KAPATIR; satır bir kolun içinde değildir.
                     branch_entry: None,
+                    branch_round: None,
                 };
                 insert_wfah_entries(&mut tx, commit.wfe_id, std::slice::from_ref(&join_entry))
                     .await?;
 
-                // WOR-31: AND-join'de kol satırları silinir (audit WFAH'ta durur).
-                // WOR-72: quorum join'de SİLİNMEZ — iptal edilen kolların satırı
-                // `cancelled` olarak kalır (collapse yolundaki davranış).
-                let drop_branch_rows = !*quorum_collapse;
+                // E14/S2: join paralel modu bitirir → kol satırları HER İKİ modda da
+                // silinir. WOR-72'nin "quorum join'de SİLİNMEZ" kararı DEĞİŞTİ:
+                // gerekçesi ("hangi kol quorum yüzünden düştü portalda görünsün")
+                // yazılmamış bir kodun eksikliğiydi ve o bilgi defterde duruyor
+                // (`_branch_cancelled` + `_collapse` `kind: "join_quorum"`).
                 match next.as_ref() {
                     CommitOutcome::MoveTo { node } => {
                         // Join node'a UNASSIGNED giriş; paralel mod biter
@@ -837,13 +876,7 @@ impl WfeStore for WfeAdapter {
                         .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
-                        if drop_branch_rows {
-                            sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
-                                .bind(commit.wfe_id)
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(db_err)?;
-                        }
+                        drop_branch_rows(&mut tx, commit.wfe_id).await?;
                     }
                     CommitOutcome::Terminal { end_response } => {
                         // Join hedefi terminal → WFE burada başarıyla biter.
@@ -862,13 +895,7 @@ impl WfeStore for WfeAdapter {
                         .execute(&mut *tx)
                         .await
                         .map_err(db_err)?;
-                        if drop_branch_rows {
-                            sqlx::query("DELETE FROM wf.wfe_branch WHERE wfe_id = $1")
-                                .bind(commit.wfe_id)
-                                .execute(&mut *tx)
-                                .await
-                                .map_err(db_err)?;
-                        }
+                        drop_branch_rows(&mut tx, commit.wfe_id).await?;
                     }
                     other => {
                         return Err(EngineError::WfePort(format!(
@@ -897,6 +924,10 @@ impl WfeStore for WfeAdapter {
             CommitOutcome::CollapseTo { node, .. } => {
                 lock_wfe_parallel(&mut tx, commit.wfe_id, commit.orgtnt_id).await?;
                 cancel_active_branches(&mut tx, commit.wfe_id).await?;
+                // E14/S2: collapse paralel modu KAPATIR → kol satırları düşer.
+                // Eskiden `cancelled` olarak bırakılıyordu ("audit için"); audit
+                // WFAH'tadır ve kalan satır ikinci fork girişinde kısıt ihlaliydi.
+                drop_branch_rows(&mut tx, commit.wfe_id).await?;
                 let c_a_json = serde_json::to_value(&commit.resolved_c_a).map_err(db_err)?;
                 // Collapse'ta da paralel mod biter → node listable WFE-seviyesine döner.
                 let view_json = serde_json::to_value(&commit.current_view_c_a).map_err(db_err)?;

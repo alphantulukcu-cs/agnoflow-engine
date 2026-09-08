@@ -223,6 +223,7 @@ fn wfes_at_visited(
         from_node: None,
         to_node: Some(node.into()),
         branch_entry: None,
+        branch_round: None,
     }]);
     let created_at = wfah.entries()[0].applied_at;
     Wfes {
@@ -1879,6 +1880,7 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
             from_node: None,
             to_node: Some("self__creditAnalyst".into()),
             branch_entry: None,
+            branch_round: None,
         },
         WfahEntry {
             seq: 2,
@@ -1889,6 +1891,7 @@ async fn multi_step_escalation_measures_after_from_node_entry() {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         },
     ]);
 
@@ -4732,6 +4735,7 @@ fn wfah_with_markers(
         from_node: None,
         to_node: Some(node.into()),
         branch_entry: None,
+        branch_round: None,
     }];
     for (i, (action, at)) in markers.iter().enumerate() {
         entries.push(WfahEntry {
@@ -4743,6 +4747,7 @@ fn wfah_with_markers(
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         });
     }
     Wfah(entries)
@@ -6019,6 +6024,7 @@ async fn superseded_marker_finds_the_approval_after_the_branch_moved() {
                 from_node: None,
                 to_node: None,
                 branch_entry: Some("self__financeApprover".into()),
+                branch_round: Some(1),
             }))
             .collect(),
     );

@@ -180,12 +180,15 @@ fn cancel_active_branches(w: &mut Wfes) {
     }
 }
 
-/// `drop_branch_rows`: WOR-31 AND-join'de kol satırları silinir (audit WFAH'ta);
-/// WOR-72 quorum join'de KALIR (iptal edilen kol `cancelled` olarak görünür).
-fn apply_next(w: &mut Wfes, next: &CommitOutcome, drop_branch_rows: bool) {
-    if drop_branch_rows {
-        w.branches.clear();
-    }
+/// `WfeAdapter::drop_branch_rows` taklidi — E14/S2: paralel modu bitiren HER yol kol
+/// satırlarını siler (`wf.wfe_branch` yalnız YAŞAYAN turu taşır). WOR-72'nin "quorum
+/// join'de satırlar KALIR" davranışı DEĞİŞTİ; kol geçmişi WFAH'tan okunur.
+fn drop_branch_rows(w: &mut Wfes) {
+    w.branches.clear();
+}
+
+fn apply_next(w: &mut Wfes, next: &CommitOutcome) {
+    drop_branch_rows(w);
     match next {
         CommitOutcome::MoveTo { node } => {
             w.current_node = Some(node.clone());
@@ -328,6 +331,8 @@ impl WfeStore for ParStore {
                 w.claimed_at = None;
                 // paralel modda aktif kolları iptal et + join_target temizle
                 cancel_active_branches(w);
+                // E14/S2: paralel mod bitti → kol satırları düşer.
+                drop_branch_rows(w);
                 w.join_target = None;
                 w.join_rule = JoinRule::All;
             }
@@ -341,6 +346,16 @@ impl WfeStore for ParStore {
                 w.claimed_at = None;
                 w.join_target = Some(join.clone());
                 w.join_rule = join_rule.clone();
+                // E14/S2 + Ç4-EK: `UNIQUE (wfe_id, branch_node)` TAM kısıt olarak
+                // duruyor (kısmi indeks YAZILMADI). Önceki turdan kalan bir satır
+                // ikinci fork girişinde INSERT'i patlatırdı; kısıtı burada da taklit
+                // ediyoruz — yoksa mimic, adapter'ın yakaladığı motor hatasını
+                // sessizce yutar.
+                assert!(
+                    w.branches.is_empty(),
+                    "UNIQUE (wfe_id, branch_node): fork öncesi kol satırı kalmış: {:?}",
+                    w.branches.iter().map(|b| &b.branch_node).collect::<Vec<_>>()
+                );
                 let now = chrono::Utc::now();
                 w.branches = branches
                     .iter()
@@ -405,9 +420,8 @@ impl WfeStore for ParStore {
                 if !matches || *quorum_collapse != (leftover_active > 0) {
                     return Err(EngineError::Conflict(ConflictKind::BranchArrival));
                 }
-                // WOR-72: quorum join'de kalan aktif kollar iptal edilir; satırlar
-                // (adapter'da olduğu gibi) SİLİNMEZ — `apply_next` yalnız AND
-                // yolunda temizler.
+                // WOR-72: quorum join'de kalan aktif kollar iptal edilir; E14/S2 ile
+                // satırlar İKİ modda da `apply_next` içinde silinir.
                 if *quorum_collapse {
                     cancel_active_branches(w);
                 }
@@ -427,12 +441,15 @@ impl WfeStore for ParStore {
                     from_node: None,
                     to_node: None,
                     branch_entry: None,
+                    branch_round: None,
                 });
-                apply_next(w, next, !*quorum_collapse);
+                apply_next(w, next);
             }
             CommitOutcome::CollapseTo { node, .. } => {
                 // WOR-56: paralel mod biter, WFE `node`'a; aktif kollar iptal.
                 cancel_active_branches(w);
+                // E14/S2: collapse paralel modu KAPATIR → kol satırları düşer.
+                drop_branch_rows(w);
                 w.join_target = None;
                 w.current_node = Some(node.clone());
                 w.assigned_to = None;
@@ -889,13 +906,12 @@ async fn arrived_branch_gets_superseded_marker_on_collapse() {
     .unwrap();
 
     let w = store.snapshot(wfe_id);
-    // kol satırı `arrived` KALIR (yeni statü yok — bkz. decisions.md)
-    let legal_row = w
-        .branches
-        .iter()
-        .find(|b| b.branch_node == "self__legalApprover")
-        .unwrap();
-    assert_eq!(legal_row.status, BranchStatus::Arrived);
+    // E14/S2: kol satırları düştü — onayın geçersizleştiği DEFTERDEN okunur.
+    assert!(w.branches.is_empty(), "kol satırları düştü");
+    assert_eq!(
+        marked_branches(&w, "_branch_superseded"),
+        vec!["self__legalApprover"]
+    );
 
     let superseded: Vec<&WfahEntry> = w
         .wfah
@@ -1299,15 +1315,11 @@ async fn collapse_wins_race_and_losing_sibling_gets_collapsed_conflict() {
     let w = store.snapshot(wfe_id);
     assert!(w.join_target.is_none(), "paralel mod bitti");
     assert_eq!(active_count(&w), 0, "collapse tüm aktif kolları düşürdü");
-    let legal_row = w
-        .branches
-        .iter()
-        .find(|b| b.branch_node == "self__legalApprover")
-        .unwrap();
+    assert!(w.branches.is_empty(), "E14/S2: kol satırları düştü");
     assert_eq!(
-        legal_row.status,
-        BranchStatus::Cancelled,
-        "kaybeden kol `arrived` değil, collapse ile `cancelled` olmalı"
+        marked_branches(&w, "_branch_cancelled"),
+        vec!["self__hrApprover", "self__legalApprover"],
+        "kaybeden kol varış değil, collapse ile İPTAL kaydı almalı"
     );
     assert!(
         !w.wfah
@@ -1359,13 +1371,14 @@ async fn sibling_arrival_first_then_collapse_still_wins() {
     let w = store.snapshot(wfe_id);
     assert!(w.join_target.is_none());
     assert_eq!(active_count(&w), 0);
-    // Önce varan kol `arrived` KALIR (WOR-60: statü değişmez, marker eklenir).
-    let legal_row = w
-        .branches
-        .iter()
-        .find(|b| b.branch_node == "self__legalApprover")
-        .unwrap();
-    assert_eq!(legal_row.status, BranchStatus::Arrived);
+    // E14/S2: kol satırları düştü; önce varan kolun varışı + onayının
+    // geçersizleşmesi DEFTERDE durur (WOR-60).
+    assert!(w.branches.is_empty(), "kol satırları düştü");
+    assert!(marked_branches(&w, "_branch_arrived").contains(&"self__legalApprover".to_string()));
+    assert_eq!(
+        marked_branches(&w, "_branch_superseded"),
+        vec!["self__legalApprover"]
+    );
 }
 
 /// İki kardeş AYNI ANDA collapse ederse tam olarak BİRİ kazanır; ikincisi
@@ -2050,11 +2063,25 @@ fn marker<'w>(w: &'w Wfes, action: &str) -> Option<&'w Value> {
         .and_then(|e| e.input.as_ref())
 }
 
-fn branch_status(w: &Wfes, node: &str) -> Option<BranchStatus> {
-    w.branches
+/// E14/S2: kol GEÇMİŞİ tablodan değil DEFTERDEN okunur — `wf.wfe_branch` yalnız
+/// yaşayan turu taşır ve paralel mod bitince boşalır. Verilen marker'ın konusu olan
+/// kolların kimlikleri (sıralı, deterministik karşılaştırma için).
+fn marked_branches(w: &Wfes, action: &str) -> Vec<String> {
+    let mut out: Vec<String> = w
+        .wfah
+        .entries()
         .iter()
-        .find(|b| b.branch_node == node)
-        .map(|b| b.status)
+        .filter(|e| e.action == action)
+        .filter_map(|e| {
+            e.input
+                .as_ref()?
+                .get("branch_entry")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    out.sort();
+    out
 }
 
 /// Saf OR (1-of-N): İLK varış join'i tamamlar; kalan iki kol `cancelled`,
@@ -2099,18 +2126,15 @@ async fn or_join_first_arrival_completes_and_cancels_siblings() {
         w.wfah.entries().iter().any(|e| e.action == "_join"),
         "_join marker"
     );
-    // Kol satırları quorum yolunda KALIR: hangi kol düştü görünür.
+    // E14/S2: paralel mod bitti → kol satırları düştü; hangi kolun düştüğü DEFTERDE.
+    assert!(w.branches.is_empty(), "kol satırları düştü");
     assert_eq!(
-        branch_status(&w, "self__financeApprover"),
-        Some(BranchStatus::Arrived)
+        marked_branches(&w, "_branch_arrived"),
+        vec!["self__financeApprover"]
     );
     assert_eq!(
-        branch_status(&w, "self__legalApprover"),
-        Some(BranchStatus::Cancelled)
-    );
-    assert_eq!(
-        branch_status(&w, "self__hrApprover"),
-        Some(BranchStatus::Cancelled)
+        marked_branches(&w, "_branch_cancelled"),
+        vec!["self__hrApprover", "self__legalApprover"]
     );
     let collapse = marker(&w, "_collapse").expect("_collapse özeti");
     assert_eq!(collapse["kind"], json!("join_quorum"));
@@ -2180,14 +2204,15 @@ async fn quorum_2_of_3_completes_on_second_arrival() {
     let w = store.snapshot(wfe_id);
     assert_eq!(w.current_node.as_deref(), Some("self__resultCoordinator"));
     assert!(w.join_target.is_none());
+    assert!(w.branches.is_empty(), "E14/S2: kol satırları düştü");
     assert_eq!(
-        branch_status(&w, "self__financeApprover"),
-        Some(BranchStatus::Arrived),
-        "quorum üyesi varmış kol arrived KALIR"
+        marked_branches(&w, "_branch_arrived"),
+        vec!["self__financeApprover", "self__legalApprover"],
+        "eşiği dolduran iki varış defterde"
     );
     assert_eq!(
-        branch_status(&w, "self__hrApprover"),
-        Some(BranchStatus::Cancelled),
+        marked_branches(&w, "_branch_cancelled"),
+        vec!["self__hrApprover"],
         "eşik dışında kalan kol iptal"
     );
     assert!(
@@ -2335,13 +2360,10 @@ async fn expr_join_hr_alone_completes_and_cancels_siblings() {
     let w = store.snapshot(wfe_id);
     assert_eq!(w.current_node.as_deref(), Some("self__resultCoordinator"));
     assert_eq!(w.join_rule, JoinRule::All, "paralel mod bitti, kural temizlendi");
+    assert!(w.branches.is_empty(), "E14/S2: kol satırları düştü");
     assert_eq!(
-        branch_status(&w, "self__financeApprover"),
-        Some(BranchStatus::Cancelled)
-    );
-    assert_eq!(
-        branch_status(&w, "self__legalApprover"),
-        Some(BranchStatus::Cancelled)
+        marked_branches(&w, "_branch_cancelled"),
+        vec!["self__financeApprover", "self__legalApprover"]
     );
     let collapse = marker(&w, "_collapse").expect("_collapse özeti");
     assert_eq!(collapse["kind"], json!("join_quorum"));
@@ -2384,15 +2406,15 @@ async fn expr_join_finance_alone_waits_then_legal_completes() {
 
     let w = store.snapshot(wfe_id);
     assert_eq!(w.current_node.as_deref(), Some("self__resultCoordinator"));
+    assert!(w.branches.is_empty(), "E14/S2: kol satırları düştü");
     assert_eq!(
-        branch_status(&w, "self__hrApprover"),
-        Some(BranchStatus::Cancelled),
+        marked_branches(&w, "_branch_cancelled"),
+        vec!["self__hrApprover"],
         "kural dolduğu için İK kolu iptal"
     );
-    assert_eq!(
-        branch_status(&w, "self__financeApprover"),
-        Some(BranchStatus::Arrived),
-        "kuralın üyesi kol arrived kalır"
+    assert!(
+        marked_branches(&w, "_branch_arrived").contains(&"self__financeApprover".to_string()),
+        "kuralın üyesi kolun varışı defterde"
     );
 }
 
@@ -2572,4 +2594,138 @@ async fn listable_only_viewer_can_never_claim_any_branch() {
         let (single, _) = exec.can_claim(wfe_id, &observer, Some(node)).await.unwrap();
         assert!(!single, "tekil can_claim '{node}' için toplu karardan ayrıştı");
     }
+}
+
+// ---- E14: fork'a YENİDEN giriş (tur ayrımı) -----------------------------------
+
+/// Verilen kolun, verilen aksiyonu taşıyan satırlarının turları (`seq` sırasında).
+fn rounds_of(w: &Wfes, action: &str, branch_entry: &str) -> Vec<Option<u32>> {
+    w.wfah
+        .entries()
+        .iter()
+        .filter(|e| e.action == action && e.branch_entry.as_deref() == Some(branch_entry))
+        .map(|e| e.branch_round)
+        .collect()
+}
+
+/// **E14 ANA KABUL.** Aynı fork'a İKİNCİ kez girilir (collapse hedefi fork
+/// node'unun kendisi) ve iki tur birbirinden ayrılır:
+///
+/// - (c) ikinci giriş `UNIQUE (wfe_id, branch_node)` ihlali VERMEZ — kol satırları
+///   collapse'ta silindiği için çakışacak bir şey yok (`ParStore` kısıtı taklit
+///   ediyor, ihlal olsa test panikle düşerdi);
+/// - (g) paralel modu bitiren yol kol tablosunu BOŞALTIR;
+/// - (d) `branch_round` 1 → 2 ilerler, kolda olmayan satırda NULL kalır;
+/// - (a) birinci turun onayı `$valid`'de YOK, ikinci turunki VAR (eleme kuralı 5).
+#[tokio::test]
+async fn re_entering_the_same_fork_separates_the_two_rounds() {
+    let store = Arc::new(ParStore::default());
+    // `reject` → `{collapse: {node: self__coordinator}}`; hedef fork node'unun
+    // KENDİSİ, yani akış aynı fork'a geri döner.
+    let exec = collapse_executor(store.clone());
+    let wfe_id = fork_setup(&exec).await;
+
+    // ---- 1. TUR: hukuk onaylar (varış), finans reddeder → collapse ------------
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+    exec.apply(
+        wfe_id,
+        &actors[1],
+        "approve",
+        &json!({}),
+        Some("self__legalApprover"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    exec.apply(
+        wfe_id,
+        &actors[0],
+        "reject",
+        &json!({}),
+        Some("self__financeApprover"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let w = store.snapshot(wfe_id);
+    assert_eq!(w.current_node.as_deref(), Some("self__coordinator"));
+    // (g) collapse paralel modu kapattı → kol satırları düştü.
+    assert!(
+        w.branches.is_empty(),
+        "E14/S2: collapse sonrası kol satırı kalmamalı"
+    );
+    assert_eq!(
+        rounds_of(&w, "approve", "self__legalApprover"),
+        vec![Some(1)],
+        "1. turun onayı tur 1 etiketli"
+    );
+
+    // ---- 2. TUR: aynı fork'a yeniden giriş -----------------------------------
+    let coord = actor("coordinator");
+    assert!(exec.claim(wfe_id, &coord, None, None).await.unwrap().success);
+    exec.apply(wfe_id, &coord, "start_review", &json!({}), None, None, None)
+        .await
+        .unwrap();
+
+    let w = store.snapshot(wfe_id);
+    assert_eq!(active_count(&w), 3, "ikinci tur kolları açıldı");
+    assert_eq!(
+        w.wfah
+            .entries()
+            .iter()
+            .filter(|e| e.action == "_fork")
+            .count(),
+        2,
+        "iki `_fork` satırı = iki tur"
+    );
+
+    let actors = claim_all_branches(&exec, &store, wfe_id).await;
+    exec.apply(
+        wfe_id,
+        &actors[1],
+        "approve",
+        &json!({}),
+        Some("self__legalApprover"),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let w = store.snapshot(wfe_id);
+    // (d) tur ilerledi; `_fork`/`_collapse` gibi kolda OLMAYAN satırlar NULL kaldı.
+    assert_eq!(
+        rounds_of(&w, "approve", "self__legalApprover"),
+        vec![Some(1), Some(2)],
+        "aynı kolun iki turu ayrı numaralandı"
+    );
+    for e in w.wfah.entries() {
+        assert_eq!(
+            e.branch_entry.is_none(),
+            e.branch_round.is_none(),
+            "branch_entry ⇔ branch_round birlikteliği bozuldu: seq {} ({})",
+            e.seq,
+            e.action
+        );
+    }
+
+    // (a) `$valid`: birinci turun onayı ELENDİ, ikinci turunki KALDI.
+    let valid = wfe_core::v22::valid::derive_valid(&w.wfah);
+    let valid_legal_rounds: Vec<Option<u32>> = valid
+        .iter()
+        .filter(|e| {
+            e.action == "approve" && e.branch_entry.as_deref() == Some("self__legalApprover")
+        })
+        .map(|e| e.branch_round)
+        .collect();
+    assert_eq!(
+        valid_legal_rounds,
+        vec![Some(2)],
+        "$valid yalnız YAŞAYAN turun onayını taşımalı"
+    );
+    // `$branch_round` = yaşayan tur.
+    assert_eq!(wfe_core::v22::valid::live_round(&w.wfah), Some(2));
 }

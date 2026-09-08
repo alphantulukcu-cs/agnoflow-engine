@@ -37,7 +37,8 @@ use zen_expression::parser::{Node, Parser};
 use crate::validator::{schema_type_at, types_compatible};
 
 /// `$wfah` girdisinin motordaki izdüşümü (`v22/eval.rs::project_entry`) — `{seq, action,
-/// actor, input, at}`. Editördeki `WFAH_FIELDS` ile AYNI küme olmak zorundadır.
+/// actor, input, at, branch_round}`. Editördeki `WFAH_FIELDS` ile AYNI küme olmak
+/// zorundadır.
 const WFAH_SCALARS: &[(&str, &str)] = &[
     ("seq", "number"),
     ("action", "string"),
@@ -45,6 +46,9 @@ const WFAH_SCALARS: &[(&str, &str)] = &[
     ("actor.orgu_id", "string"),
     ("actor.user_id", "string"),
     ("actor.role", "string"),
+    // E14: satırın TURU — paralel olmayan/kolda olmayan satırda `null` (karşılaştırma
+    // sessizce false okur). `#.branch_round == $branch_round - 1` = "geçen tur".
+    ("branch_round", "number"),
 ];
 
 /// `$wfah` izdüşümünün ZAMAN DAMGASI alanları.
@@ -197,6 +201,9 @@ fn flatten_path<'a>(node: &'a Node<'a>) -> Option<(Root, String)> {
                 "$actor" => Root::Known(Ty::Obj),
                 "$wfah" => Root::Known(Ty::Arr),
                 "$timestamp" | "$wfe_id" | "$node" => Root::Known(Ty::Str),
+                // E14: YAŞAYAN turun numarası. Paralel mod dışında `null`; tipi
+                // sayıdır ki `$branch_round - 1` aritmetiği tip denetiminden geçsin.
+                "$branch_round" => Root::Known(Ty::Num),
                 _ => Root::Other,
             },
             String::new(),
@@ -366,7 +373,8 @@ impl<'e, 'a> Checker<'e, 'a> {
                 true,
                 format!(
                     "'{key}' motorun $wfah izdüşümünde yok (yalnız seq, action, actor.role, \
-                     actor.orgu_id, actor.user_id, at) — koşul sessizce null okur, hep-false olur"
+                     actor.orgu_id, actor.user_id, at, branch_round) — koşul sessizce null \
+                     okur, hep-false olur"
                 ),
             ));
             return;

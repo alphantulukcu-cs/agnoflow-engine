@@ -15,4 +15,5 @@ pub mod matcher;
 pub mod pipeline;
 pub mod ports;
 pub mod resolver;
+pub mod valid;
 pub mod visibility;

@@ -10,8 +10,14 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// WFE'nin TÜM kol satırları (active + arrived + cancelled). Engine `active`
-/// olanları kendi filtreler; cancelled/arrived yükü audit + join doğrulaması
-/// için taşınır. entered_at'a göre sıralı — deterministik görünüm.
+/// olanları kendi filtreler; `arrived` yükü join doğrulaması için, `cancelled` ise
+/// YALNIZ canlı turun içinde anlık olarak (silen transaction commit edene kadar)
+/// görülebilir. entered_at'a göre sıralı — deterministik görünüm.
+///
+/// E14/S2: tablo yalnız YAŞAYAN turu taşır — kapanan turun satırları silinir, yani
+/// bu sorgu bir GEÇMİŞ kaynağı DEĞİLDİR. Kol geçmişinin tek kaynağı WFAH'tır
+/// (`_fork` · `_branch_arrived` · `_branch_cancelled` · `_branch_superseded` ·
+/// `_join`/`_collapse` + satırların `branch_entry`/`branch_round`'u).
 pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<BranchRow>, WfeError> {
     sqlx::query_as::<_, BranchRow>(
         "SELECT wfe_id, branch_node, entry_node, status, claimed_by, claimed_at, entered_at
@@ -27,7 +33,7 @@ pub async fn load_all(pool: &PgPool, wfe_id: Uuid) -> Result<Vec<BranchRow>, Wfe
 ///
 /// `load_active_for_wfes`ten farkı bilinçlidir: o havuz/liste GÖRÜNÜMÜ içindir ve
 /// yalnız aktif kolları taşır; bu ise `Wfes` KURMAK içindir, dolayısıyla `load_all`
-/// ile aynı kümeyi (active + arrived + cancelled) ve aynı sırayı döndürmek
+/// ile aynı kümeyi (yaşayan turun active + arrived satırları) ve aynı sırayı döndürmek
 /// ZORUNDADIR — `WfeStore::load_many` sözleşmesi "load ile tıpatıp aynı" der.
 /// Sıralama `wfe_id` ile başlar ki gruplama tek geçişte yapılabilsin.
 pub async fn load_all_for_wfes(

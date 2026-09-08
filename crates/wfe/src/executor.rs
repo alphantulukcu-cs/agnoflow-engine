@@ -382,6 +382,13 @@ pub struct WfeView {
     pub priority: i32,
     /// WOR-31 T4: paralel mod kol durumları — paralel modda değilken boş.
     /// JSON alan adı `node` (bkz. `BranchState`), artı sorgu-anında çözülmüş `c_a`.
+    ///
+    /// E14/S2: bu alan YALNIZ YAŞAYAN TURU taşır — paralel mod bitince kol satırları
+    /// silinir ve liste boşalır. Kol GEÇMİŞİ (hangi kol iptal oldu, kimin onayı
+    /// geçersizleşti, ne zaman varıldı) buradan DEĞİL defterden okunur: `_fork`,
+    /// `_branch_arrived`, `_branch_cancelled`, `_branch_superseded`,
+    /// `_join`/`_collapse` satırları ve aksiyon satırlarının
+    /// `branch_entry`/`branch_round`u.
     pub branches: Vec<BranchView>,
     /// WOR-31 T4: fork'ta persist edilen join hedefi; `Some` = paralel mod
     /// (bu durumda `current_node` `None`'dur).
@@ -1390,6 +1397,12 @@ impl WfeExecutor {
                 seat_role,
             } => {
                 let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+                let branch_entry = node.and_then(|n| {
+                    wfes.branches
+                        .iter()
+                        .find(|b| b.branch_node == n)
+                        .map(|b| b.entry_node.clone())
+                });
                 Some(WfahEntry {
                     seq,
                     action: "claim:delegated".into(),
@@ -1404,12 +1417,12 @@ impl WfeExecutor {
                     from_node: None,
                     to_node: None,
                     // Ç4: kol claim'inde satır O KOLDA üretilir (kolun kimliği).
-                    branch_entry: node.and_then(|n| {
-                        wfes.branches
-                            .iter()
-                            .find(|b| b.branch_node == n)
-                            .map(|b| b.entry_node.clone())
-                    }),
+                    branch_entry: branch_entry.clone(),
+                    // E14: kimlik ile tur BİRLİKTE yazılır (S3 değişmezi).
+                    branch_round: wfe_core::v22::valid::round_of_opt(
+                        &wfes.wfah,
+                        branch_entry.as_deref(),
+                    ),
                 })
             }
             _ => None,

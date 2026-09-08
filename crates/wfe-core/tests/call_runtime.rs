@@ -523,6 +523,7 @@ fn callee_history(base: DateTime<Utc>) -> Vec<wfe_core::types::wfah::WfahEntry> 
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         },
         WfahEntry {
             seq: 2,
@@ -533,6 +534,7 @@ fn callee_history(base: DateTime<Utc>) -> Vec<wfe_core::types::wfah::WfahEntry> 
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         },
     ]
 }
@@ -664,6 +666,7 @@ async fn inlined_actions_are_namespaced_to_avoid_wfah_collisions() {
         from_node: None,
         to_node: None,
         branch_entry: None,
+        branch_round: None,
     }];
 
     let commit = engine
@@ -713,6 +716,7 @@ async fn long_callee_history_is_truncated_with_an_explicit_marker() {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         })
         .collect();
 

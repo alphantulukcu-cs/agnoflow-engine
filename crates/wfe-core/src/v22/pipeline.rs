@@ -40,6 +40,7 @@ use crate::v22::ports::{
     NewWfe, StagedCall, TransitionCommit, Wfes,
 };
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
+use crate::v22::valid;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -431,6 +432,7 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         });
         seq += 1;
 
@@ -669,6 +671,7 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         });
         seq += 1;
 
@@ -906,6 +909,7 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             branch_entry: Some(branch.entry_node.clone()),
+            branch_round: branch_round_of(&wfes.wfah, Some(branch.entry_node.as_str())),
         });
         seq += 1;
 
@@ -1469,6 +1473,8 @@ impl<'a> Engine<'a> {
             }
             .as_str());
         }
+        // Ç4/E14: kol devrinde satır O KOLDA üretilir — kimlik + tur tek yerden.
+        let (branch_entry, branch_round) = branch_label(wfes, branch);
         Ok(WfahEntry {
             seq,
             action: action.to_string(),
@@ -1479,7 +1485,8 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             // Ç4: kol devrinde satır O KOLDA üretilir.
-            branch_entry: branch_entry_of(wfes, branch),
+            branch_entry,
+            branch_round,
         })
     }
 
@@ -1746,6 +1753,8 @@ impl<'a> Engine<'a> {
         };
         let marker = skipped_escalation_marker(&node_key, forecast.step_idx);
         let seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
+        // Ç4/E14: kol sayacı atlanıyorsa satır O KOLDA.
+        let (branch_entry, branch_round) = branch_label(wfes, branch);
         Ok(Some(EscalationSkip {
             step_idx: forecast.step_idx,
             node: node_key,
@@ -1759,7 +1768,8 @@ impl<'a> Engine<'a> {
                 from_node: None,
                 to_node: None,
                 // Ç4: kol sayacı atlanıyorsa satır O KOLDA.
-                branch_entry: branch_entry_of(wfes, branch),
+                branch_entry,
+                branch_round,
             },
             marker,
         }))
@@ -1927,6 +1937,7 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         }];
         seq += 1;
 
@@ -2048,6 +2059,7 @@ impl<'a> Engine<'a> {
             to_node: None,
             // Ç4: iptal WFE GENELİDİR, bir kolun içinde değil.
             branch_entry: None,
+            branch_round: None,
         }];
         seq += 1;
 
@@ -2197,6 +2209,8 @@ impl<'a> Engine<'a> {
         // WOR-56/SLA-2 (2026-08-03): collapse ateşlenecekse audit'e yazılır — `collapse`
         // anahtarı YALNIZ gerçek collapse'ta görünür (eski kayıtların şekli korunur).
         let collapsing = branch.is_some() && matches!(&step.wft, Some(Wft::Collapse { .. }));
+        // Ç4/E14: kol escalation'ında satır O KOLDA üretilir.
+        let (branch_entry, branch_round) = branch_label(wfes, branch);
         let mut wfah_entries = vec![WfahEntry {
             seq,
             action: trigger_action.clone(),
@@ -2213,7 +2227,8 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             // Ç4: kol escalation'ında satır O KOLDA üretilir.
-            branch_entry: branch_entry_of(wfes, branch),
+            branch_entry,
+            branch_round,
         }];
         seq += 1;
 
@@ -2370,6 +2385,7 @@ impl<'a> Engine<'a> {
             to_node: None,
             // Ç4: akış süresi WFE GENELİDİR.
             branch_entry: None,
+            branch_round: None,
         }];
         seq += 1;
         let outcome = CommitOutcome::Terminated {
@@ -2491,6 +2507,8 @@ impl<'a> Engine<'a> {
         let system = system_actor();
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let marker = format!("claim_timeout:{node_key}");
+        // Ç4/E14: kolun claim'i düşüyorsa satır O KOLDA — iki dal da aynı etiketi taşır.
+        let (branch_entry, branch_round) = branch_label(wfes, branch);
 
         // SLA-1 effects (2026-07-28): varsa DynCtx'e uygulanır; yoksa staged ctx
         // aynen kalır ve Release yolu ctx satırı YAZMAZ (`new_dynctx: None`).
@@ -2522,7 +2540,8 @@ impl<'a> Engine<'a> {
                     from_node: None,
                     to_node: None,
                     // Ç4: kolun claim'i düşüyorsa satır O KOLDA.
-                    branch_entry: branch_entry_of(wfes, branch),
+                    branch_entry,
+                    branch_round,
                 };
                 Ok(ClaimTimeoutOutcome::Release(ClaimRelease {
                     wfah_entry,
@@ -2574,7 +2593,8 @@ impl<'a> Engine<'a> {
                     from_node: None,
                     to_node: None,
                     // Ç4: kol claim timeout'unda satır O KOLDA üretilir.
-                    branch_entry: branch_entry_of(wfes, branch),
+                    branch_entry,
+                    branch_round,
                 }];
                 seq += 1;
                 let all_entries = all_entry_nodes(wfes);
@@ -2745,6 +2765,7 @@ impl<'a> Engine<'a> {
                         from_node: None,
                         to_node: None,
                         branch_entry: branch_entry.map(str::to_string),
+                        branch_round: branch_round_of(wfah, branch_entry),
                     });
                     *seq += 1;
                 }
@@ -2780,6 +2801,7 @@ impl<'a> Engine<'a> {
                             from_node: None,
                             to_node: None,
                             branch_entry: branch_entry.map(str::to_string),
+                            branch_round: branch_round_of(wfah, branch_entry),
                         });
                         *seq += 1;
                         continue; // handled — devam (routing YOK)
@@ -2805,6 +2827,7 @@ impl<'a> Engine<'a> {
                         from_node: None,
                         to_node: None,
                         branch_entry: branch_entry.map(str::to_string),
+                        branch_round: branch_round_of(wfah, branch_entry),
                     });
                     *seq += 1;
                 }
@@ -2974,6 +2997,7 @@ impl<'a> Engine<'a> {
                 to_node: None,
                 // Ç4: çağrı node'u paralel modda olamaz (validator).
                 branch_entry: None,
+                branch_round: None,
             });
             seq += 1;
         }
@@ -2994,6 +3018,7 @@ impl<'a> Engine<'a> {
                 from_node: None,
                 to_node: None,
                 branch_entry: None,
+                branch_round: None,
             });
             seq += 1;
         }
@@ -3012,6 +3037,7 @@ impl<'a> Engine<'a> {
             from_node: None,
             to_node: None,
             branch_entry: None,
+            branch_round: None,
         });
         seq += 1;
 
@@ -3755,13 +3781,30 @@ fn stamp_movement(entry: &mut WfahEntry, outcome: &CommitOutcome, fallback_from:
     entry.to_node = outcome.to_node().map(str::to_string);
 }
 
-/// Ç4: kol node'u (KONUM) → kol kimliği (`entry_node`). Kol bağlamında üretilen
-/// satırların `branch_entry`'si böyle çözülür; paralel-olmayan yolda `None`
-/// ("bu satır bir kolda değil").
-fn branch_entry_of(wfes: &Wfes, branch: Option<&str>) -> Option<String> {
-    branch
+/// Ç4 + E14: kol node'u (KONUM) → satırın KOL ETİKETİ = (kimlik, tur). Kol
+/// bağlamında üretilen her satır bu ikiliyi taşır; paralel-olmayan yolda
+/// `(None, None)` ("bu satır bir kolda değil").
+///
+/// İkisi TEK fonksiyondan çıkar çünkü *"`branch_entry` NULL ⇔ `branch_round` NULL"*
+/// bir DEĞİŞMEZDİR (E14/S3): ayrı ayrı yazılsalar bir üretici birini doldurup
+/// diğerini atlayabilirdi.
+fn branch_label(wfes: &Wfes, branch: Option<&str>) -> (Option<String>, Option<u32>) {
+    let entry = branch
         .and_then(|b| active_branch(wfes, b))
-        .map(|b| b.entry_node.clone())
+        .map(|b| b.entry_node.clone());
+    let round = branch_round_of(&wfes.wfah, entry.as_deref());
+    (entry, round)
+}
+
+/// E14: satırın TURU — kolu açan `_fork` satırlarının defterdeki sayısı; **1'den
+/// başlar, FORK BAŞINA sayar** (global sayaç DEĞİL). Türetim, çapa gerekçesi ve tur
+/// eleme kuralı `v22::valid` modülündedir — sayım iki yerde AYRI yazılmaz.
+///
+/// `branch_entry` NULL ⇔ dönüş NULL (E14/S3 değişmezi). Taban 1'e sabitlenir: kol
+/// bağlamında `_fork` satırı olmadan satır üretilemez, ama sayının 0 çıktığı bir hâlde
+/// `None` dönmek *"bu satır bir kolda değil"* anlamına gelir ve değişmezi delerdi.
+fn branch_round_of(wfah: &Wfah, branch_entry: Option<&str>) -> Option<u32> {
+    valid::round_of_opt(wfah, branch_entry)
 }
 
 /// Kol node'una göre AKTİF branch state'i.
@@ -3877,6 +3920,7 @@ fn stage_parallel_markers(
             from_node: None,
             to_node: None,
             branch_entry: branch_entry.map(str::to_string),
+            branch_round: branch_round_of(&wfes.wfah, branch_entry),
         });
         *seq += 1;
     };
@@ -4106,6 +4150,13 @@ struct Trigger<'a> {
 /// Ç3: arama anahtarı kolun KİMLİĞİDİR (`branch_entry` = `entry_node`), o anki
 /// konumu değil — kol varıştan sonra hareket etmiş olabilir ve `branch_node` ile
 /// arama çok adımlı kolda hiçbir şey bulamazdı (`approved_by: null`).
+///
+/// E14 (UYGULAMA NOTU — bu bağımlılık SÖZLEŞMEDİR): aynı fork'a ikinci kez
+/// girildiğinde defterde AYNI kimliğe ait İKİ turun `_branch_arrived` satırı bulunur.
+/// Doğru cevabı veren şey `.rev()`tir: tarama sondan başladığı için YAŞAYAN turun
+/// varışı ilk bulunur. Yön değişirse (ya da `find_map` `filter().next()`e çevrilirse)
+/// birinci turun onaylayanı ikinci turun collapse marker'ına yazılır — sessiz yanlış.
+/// Tur ALANINA bakmak gerekmez, ama yön değiştirilemez.
 fn branch_approval(wfah: &Wfah, branch_entry: &str) -> (Value, Value) {
     let field = |input: &Value, key: &str| input.get(key).cloned().unwrap_or(Value::Null);
     wfah.entries()

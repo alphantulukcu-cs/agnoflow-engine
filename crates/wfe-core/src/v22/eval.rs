@@ -14,6 +14,11 @@ use uuid::Uuid;
 /// Bir WFAH girdisinin ZEN'e açılan izdüşümü. `seq` ve `input` DE açıktır (WOR-84):
 /// "önceki onayda girilen tutar" gibi koşullar aksi hâlde sessizce `null` okuyordu.
 /// `input` ham `$action.input` ağacıdır (girdi ctx'e yazılmamış olsa da geçmişte durur).
+///
+/// E14: `branch_round` de açılır — `#.branch_entry == "hukuk"` iki turu TOPLAR, ayrım
+/// yalnız bu alanla yazılabilir (`#.branch_round == $branch_round - 1`). Satırın kalan
+/// v2.3 alanları (`from_node`/`to_node`/`branch_entry`) `E05` ile açılır; sıra
+/// bağlayıcıdır (E14, E05'in ÖN ŞARTI).
 fn project_entry(e: &WfahEntry) -> Value {
     json!({
         "seq": e.seq,
@@ -21,6 +26,7 @@ fn project_entry(e: &WfahEntry) -> Value {
         "actor": e.actor,
         "input": e.input.clone().unwrap_or(Value::Null),
         "at": crate::timestamp::timestamp_string(e.applied_at),
+        "branch_round": e.branch_round,
     })
 }
 
@@ -34,6 +40,9 @@ fn empty_entry_shell() -> Value {
         "actor": Value::Null,
         "input": Value::Null,
         "at": Value::Null,
+        // E14: kabuk da alanı TAŞIR — `$prev.branch_round == 1` boş defterde false
+        // okumalı, eksik alan yüzünden patlamamalı.
+        "branch_round": Value::Null,
     })
 }
 
@@ -55,6 +64,14 @@ pub struct EvalEnv {
     /// Ortam konfigürasyonu (`$env`) — **secret'sız** görünüm. Secret bir değer ZEN'e
     /// hiç girmez: girseydi bir `calc` ifadesi onu ctx'e yazar ve portalda görünürdü.
     pub env: PublicEnv,
+    /// E14 — `$branch_round`: YAŞAYAN turun numarası, paralel mod dışında `None`.
+    ///
+    /// `with_wfah` tarafından DEFTERDEN türetilir (`valid::live_round`), ayrı bir
+    /// `with_*` çağrısıyla verilmez: `$wfah` ile `$branch_round` aynı defterin iki
+    /// okumasıdır ve tek yerde bağlanmazsa çağıran biri bağlayıp diğerini atlar —
+    /// o zaman tasarımcının ifadesi bir yüzeyde çalışıp diğerinde sessizce false
+    /// okurdu.
+    pub branch_round: Option<u32>,
 }
 
 /// WOR-73: join koşulunun gördüğü kol durumu. Kol kimliği **giriş node'udur**
@@ -116,6 +133,8 @@ impl EvalEnv {
 
     pub fn with_wfah(mut self, wfah: &Wfah) -> Self {
         self.wfah = wfah.entries().iter().map(project_entry).collect();
+        // E14: tur, defterin bir okumasıdır — `$wfah` ile AYNI yerde bağlanır.
+        self.branch_round = crate::v22::valid::live_round(wfah);
         self
     }
 
@@ -224,6 +243,12 @@ impl EvalEnv {
         map.insert("$branches".into(), branches);
         map.insert("$arrived".into(), arrived);
         map.insert("$env".into(), self.env.to_json());
+        // E14: paralel mod dışında `null` — karşılaştırma sessizce false okur, ifade
+        // patlamaz ($call/$branches ile aynı gerekçe).
+        map.insert(
+            "$branch_round".into(),
+            self.branch_round.map(Value::from).unwrap_or(Value::Null),
+        );
         Value::Object(map)
     }
 }
@@ -309,6 +334,102 @@ mod tests {
         let env = EvalEnv::new(&json!({}));
         assert!(!evaluate_bool("$branches.self__fin == true", &env).unwrap());
         assert!(evaluate_bool("len($arrived) == 0", &env).unwrap());
+    }
+
+    /// E14 — `$branch_round` paralel mod dışında `null`. EŞİTLİK sessizce false okur;
+    /// SIRALAMA ve ARİTMETİK ise zen'de PATLAR.
+    ///
+    /// Bu test o sınırı ÇİVİLER: E14 kaydı *"karşılaştırma sessizce false okur, ifade
+    /// patlamaz"* diyor ve bu, kaydın kendi önerdiği kanonik yazım (`== $branch_round
+    /// - 1`) için DOĞRU DEĞİL — `null - 1` `Opcode Subtract: Unsupported type` verir.
+    /// Tasarımcı paralel modun dışında da değerlendirilebilecek bir ifadede kapı
+    /// yazmak zorundadır: `$branch_round != null and some(...)` (zen `and`i tembel
+    /// değerlendirir; `#.input.*` sıralama kapısıyla AYNI desen). Kapının tasarım
+    /// zamanında zorlanması ayrı bir karar ister — bkz. `zen_input_needs_action_gate`
+    /// emsali.
+    #[test]
+    fn branch_round_is_null_outside_parallel_mode() {
+        let wfah = Wfah::empty().push("basvuru".into(), actor(), None);
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$branch_round == null", &env).unwrap());
+        assert!(!evaluate_bool("$branch_round == 1", &env).unwrap());
+        assert!(!evaluate_bool("$branch_round in [1, 2]", &env).unwrap());
+        // SINIR 1: SIRALAMA karşılaştırması null'da PATLAR (`Opcode Compare:
+        // Unsupported type`) — projedeki `#.input.*` sıralama tuzağının aynısı.
+        assert!(evaluate_bool("$branch_round > 0", &env).is_err());
+        // SINIR 2: ARİTMETİK de patlar (`Opcode Subtract: Unsupported type`), yani
+        // kaydın kanonik yazımı kapısız hâlde paralel mod dışında 500 üretir.
+        assert!(evaluate_value("$branch_round - 1", &env).is_err());
+        // Kapı ÇALIŞIR: zen `and`i tembel değerlendirir.
+        assert!(!evaluate_bool(
+            "$branch_round != null and $branch_round - 1 == 0",
+            &env
+        )
+        .unwrap());
+        // Kolda olmayan satırın alanı da `null` — ham `$wfah` üzerinde sayım
+        // yazan tasarımcı hata almaz, sadece eşleşme bulamaz.
+        assert!(!evaluate_bool("some($wfah, #.branch_round == 1)", &env).unwrap());
+    }
+
+    /// E14 — GEÇEN TURU bulmanın kanonik yazımı: `$branch_round - 1`.
+    /// Kural 5 `$valid`ten eleyecek olsa da soru HAM `$wfah` üzerinde sorulabilir.
+    #[test]
+    fn previous_round_is_addressable_on_the_raw_ledger() {
+        let branch_row = |seq: u32, action: &str, round: u32| WfahEntry {
+            seq,
+            action: action.into(),
+            actor: actor(),
+            input: None,
+            applied_at: chrono::Utc::now(),
+            from_node: None,
+            to_node: None,
+            branch_entry: Some("hukuk".into()),
+            branch_round: Some(round),
+        };
+        let fork = |seq: u32| WfahEntry {
+            seq,
+            action: "_fork".into(),
+            actor: actor(),
+            input: Some(json!({"branches": ["hukuk"]})),
+            applied_at: chrono::Utc::now(),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
+            branch_round: None,
+        };
+        let closer = |seq: u32| WfahEntry {
+            seq,
+            action: "_join".into(),
+            actor: actor(),
+            input: None,
+            applied_at: chrono::Utc::now(),
+            from_node: None,
+            to_node: None,
+            branch_entry: None,
+            branch_round: None,
+        };
+        // 1. tur onaylandı, join doldu, fork'a İKİNCİ kez girildi.
+        let wfah = Wfah(vec![
+            fork(1),
+            branch_row(2, "hukuk_onay", 1),
+            closer(3),
+            fork(4),
+            branch_row(5, "hukuk_inceleme", 2),
+        ]);
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$branch_round == 2", &env).unwrap());
+        assert!(
+            evaluate_bool(r#"some($wfah, #.branch_round == $branch_round - 1)"#, &env).unwrap(),
+            "geçen turun satırı bulunmalı"
+        );
+        assert!(
+            !evaluate_bool(
+                r#"some($wfah, #.branch_round == $branch_round - 2)"#,
+                &env
+            )
+            .unwrap(),
+            "iki tur öncesi yok"
+        );
     }
 
     #[test]

@@ -1603,7 +1603,7 @@ async fn tick_timers_fires_branch_claim_timeout_release() {
         .wfah
         .entries()
         .iter()
-        .any(|e| e.action == "claim_timeout:self__financeApprover"));
+        .any(|e| e.action == "claim_released:self__financeApprover"));
 }
 
 /// WOR-56/SLA-1 (2026-08-03): kol node'unda `collapses_parallel` + node hedefli
@@ -1661,7 +1661,7 @@ async fn tick_timers_branch_claim_timeout_collapses_parallel() {
     );
     let actions: Vec<&str> = w.wfah.entries().iter().map(|e| e.action.as_str()).collect();
     assert!(
-        actions.contains(&"claim_timeout:self__financeApprover"),
+        actions.contains(&"claim_released:self__financeApprover"),
         "SLA-1 marker'ı: {actions:?}"
     );
     assert!(actions.contains(&"_collapse"), "collapse özeti: {actions:?}");

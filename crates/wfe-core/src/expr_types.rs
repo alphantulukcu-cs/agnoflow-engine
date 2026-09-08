@@ -163,7 +163,10 @@ impl Ty {
 /// Bir üye zincirinin kökü — hangi ad alanına bakıyor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root {
-    /// `#` (closure) / `$prev` / `$first` — hepsi AYNI `$wfah` izdüşümüne bakar.
+    /// `#` (closure) / `$prev` / `$first` — hepsi AYNI ŞEKLİ taşır, ama **KAYNAKLARI
+    /// FARKLIDIR** (R04): `#` ham `$wfah` dizisi üzerinde çalışır, `$prev`/`$first`
+    /// yalnız AKSİYON satırlarına süzülmüş uçları gösterir. Tip denetimi bu ayrımı
+    /// YAKALAMAZ ve yakalamamalıdır — üçü aynı alan kümesine sahiptir.
     WfahEntry,
     Ctx,
     ActionInput,

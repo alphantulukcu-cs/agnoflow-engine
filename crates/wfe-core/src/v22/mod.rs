@@ -17,3 +17,4 @@ pub mod ports;
 pub mod resolver;
 pub mod valid;
 pub mod visibility;
+pub mod wfah_kind;

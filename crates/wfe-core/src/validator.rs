@@ -2232,7 +2232,7 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
             "zen_negative_index",
             true,
             "negatif indeks zen'de desteklenmez — parse edilir ama runtime'da patlar. \
-             Son/ilk girdi için $prev / $first kullan."
+             Son/ilk AKSİYON girdisi için $prev / $first kullan."
                 .to_string(),
         ));
     }
@@ -2246,8 +2246,10 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
             "wfah_index_unguarded",
             false,
             "$wfah doğrudan indeksleniyor — geçmiş o kadar uzun değilse ifade \
-             runtime'da patlar (boş geçmişte kesin patlar). $prev (son girdi) / \
-             $first (ilk girdi) bu durumda null döner."
+             runtime'da patlar (boş geçmişte kesin patlar). $prev (son AKSİYON girdisi) / \
+             $first (ilk AKSİYON girdisi) bu durumda null döner. DİKKAT: R04'ten beri \
+             $wfah[len($wfah)-1] ile $prev AYNI SATIRI VERMEZ — elle indeksleme marker \
+             satırını görür, $prev görmez."
                 .to_string(),
         ));
     }

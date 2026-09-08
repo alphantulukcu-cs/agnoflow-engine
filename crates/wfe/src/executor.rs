@@ -18,6 +18,10 @@ use wfe_core::v22::ports::{
     PendingCall, VisibilityPort, WfdStore, WfeStore, Wfes,
 };
 use wfe_core::v22::visibility::{can_view, filter_dynctx};
+/// `R04`: ad→sınıf kuralı `wfe-core`'a indi (`v22::wfah_kind`) — çekirdeğin iki
+/// tüketicisi (`project_entry`, `$valid` elemesi) adapter'ı göremez. Adapter tipi
+/// RE-EXPORT eder: `WfahView` ve API görünümü DEĞİŞMEDİ.
+pub use wfe_core::v22::wfah_kind::{parse_marker, ParsedMarker, WfahKind};
 use wfe_core::{ConflictKind, EngineError, OrgPort};
 
 /// SLA-1 (2026-07-16): `claimed_at + node.claim_timeout.after`; claim yoksa,
@@ -585,38 +589,6 @@ impl WfahPathSource for NoWfahPath {
 
 // ---------------------------------------------------------------- wfah görünümü
 
-/// Bir WFAH satırının NE OLDUĞU — kapalı liste.
-///
-/// Motorun kendi marker adları (`_branch_cancelled`, `escalate:<node>:<idx>`,
-/// `call:<key>/<action>` …) DEĞİŞMEZ: yayınlanmış akışlar `count($wfah, #.action ==
-/// ...)` ile karar veriyor ve `$wfah` izdüşümü sözleşmedir. Değişen yalnız API
-/// GÖRÜNÜMÜDÜR — sınıflandırma burada yapılır, istemciye ham metin ASLA verilmez.
-/// İstemci kendi metnini yazmak isterse `label` yerine `kind` üzerinden switch yapar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WfahKind {
-    /// İnsan (ya da WF Admin) eliyle alınan normal aksiyon — varsayılan sınıf.
-    Action,
-    /// SLA-3: akış deadline'ı doldu.
-    Deadline,
-    Escalation,
-    EscalationSkipped,
-    ClaimTimeout,
-    Trigger,
-    CallReturn,
-    /// Alt akış geçmişi çağıranın defterine sığmadı, kırpıldı.
-    CallTruncated,
-    Fork,
-    BranchArrived,
-    /// Kollar birleşti. Motor bugün ayrı bir `_join` marker'ı YAZMAZ (join varışı
-    /// `_branch_arrived` ile kaydedilir); varyant kapalı listenin bütünlüğü için
-    /// durur, istemci switch'i eksik kalmasın.
-    Join,
-    Collapse,
-    BranchCancelled,
-    BranchSuperseded,
-}
-
 /// `GET /wfe/:id` → `wfah[]` satırı. Sihirli metin ayrıştırması BURADA biter.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct WfahView {
@@ -647,96 +619,6 @@ pub struct WfahView {
     pub step: Option<usize>,
 }
 
-/// Marker adının çözümlenmiş hâli — `WfahView`'ın metin ayrıştırma çekirdeği.
-/// Saf (WFD'siz, `Ref`siz) tutulur ki birim testlenebilsin.
-#[derive(Debug, Clone, PartialEq)]
-struct ParsedMarker {
-    kind: WfahKind,
-    /// `kind: action` ise aksiyonun KENDİ adı (call öneki sökülmüş).
-    action: Option<String>,
-    node: Option<String>,
-    step: Option<usize>,
-    from_call: Option<String>,
-}
-
-/// Ham WFAH `action` adını sınıflandırır.
-///
-/// Ayrıştırma önek/desen tabanlıdır çünkü marker adlarının KENDİSİ sözleşmedir:
-/// `escalate:` öneki bu sınıflandırma ve yayınlanmış `count($wfah, …)` sayımları için
-/// ZORUNLUDUR (bkz. CLAUDE.md WF Admin bölümü). Önek `next_escalation`ın TABANINI
-/// artık BELİRLEMEZ — R02'den beri taban `to_node != null` satırlardan gelir. Tanınmayan her ad
-/// `Action`a düşer: bilinmeyen bir markerı "sistem" diye etiketlemek, ham adı
-/// ekrana basmaktan daha yanıltıcı olurdu.
-fn parse_marker(raw: &str) -> ParsedMarker {
-    let plain = |kind: WfahKind| ParsedMarker {
-        kind,
-        action: None,
-        node: None,
-        step: None,
-        from_call: None,
-    };
-
-    // Alt akış izdüşümü: `call:<key>/<action>` — önek SÖKÜLÜR, kalan ad kendi
-    // kurallarıyla yeniden sınıflandırılır (alt akışın markerları da markerdır).
-    if let Some(rest) = raw.strip_prefix("call:") {
-        return match rest.split_once('/') {
-            // `call:<key>/…` — kırpma işareti (bkz. pipeline `format!("{marker}/…")`).
-            Some((key, "…")) => ParsedMarker {
-                from_call: Some(key.to_string()),
-                ..plain(WfahKind::CallTruncated)
-            },
-            Some((key, inner)) => ParsedMarker {
-                from_call: Some(key.to_string()),
-                ..parse_marker(inner)
-            },
-            // Önek tek başına = çağrının KAPANIŞ marker'ı (dönüş işlendi).
-            None => ParsedMarker {
-                from_call: Some(rest.to_string()),
-                ..plain(WfahKind::CallReturn)
-            },
-        };
-    }
-    if let Some(rest) = raw.strip_prefix("escalate:") {
-        // `<node>:<idx>` ya da `<node>:<idx>:skipped`
-        let (body, kind) = match rest.strip_suffix(":skipped") {
-            Some(b) => (b, WfahKind::EscalationSkipped),
-            None => (rest, WfahKind::Escalation),
-        };
-        // Node anahtarı `:` içermez; sondaki alan adım numarasıdır.
-        let (node, step) = match body.rsplit_once(':') {
-            Some((n, idx)) => (Some(n.to_string()), idx.parse::<usize>().ok()),
-            None => (Some(body.to_string()), None),
-        };
-        return ParsedMarker {
-            node,
-            step,
-            ..plain(kind)
-        };
-    }
-    if let Some(node) = raw.strip_prefix("claim_timeout:") {
-        return ParsedMarker {
-            node: Some(node.to_string()),
-            ..plain(WfahKind::ClaimTimeout)
-        };
-    }
-    if raw.starts_with("trigger:") {
-        return plain(WfahKind::Trigger);
-    }
-    match raw {
-        "timeout:deadline" => plain(WfahKind::Deadline),
-        "_fork" => plain(WfahKind::Fork),
-        "_branch_arrived" => plain(WfahKind::BranchArrived),
-        "_join" => plain(WfahKind::Join),
-        "_collapse" => plain(WfahKind::Collapse),
-        "_branch_cancelled" => plain(WfahKind::BranchCancelled),
-        "_branch_superseded" => plain(WfahKind::BranchSuperseded),
-        other => ParsedMarker {
-            action: Some(other.to_string()),
-            ..plain(WfahKind::Action)
-        },
-    }
-}
-
 /// Collapse/iptal marker'larının `reason` alanını okunur metne çevirir. Kod kapalı
 /// bir listedir (motor `stage_parallel_markers` yazar); tanımadığımız bir değer
 /// gelirse etiketi susturmak yerine ham kodu göstermek daha dürüsttür.
@@ -751,6 +633,41 @@ fn collapse_reason_label(input: Option<&Value>) -> Option<String> {
             other => other,
         }
         .to_string(),
+    )
+}
+
+/// Ç13: `claim_taken:` satırının `via` kapalı listesi → ekran metni.
+const OWNERSHIP_VIA: &[(&str, &str)] = &[
+    ("self", "kendi aldı"),
+    ("delegated", "vekaleten aldı"),
+    ("assigned", "yetkili atadı"),
+    ("admin_assigned", "WF Admin atadı"),
+];
+
+/// Ç1-EK + Ç9 + Ç13: `claim_released:` satırının `reason` kapalı listesi.
+const OWNERSHIP_REASON: &[(&str, &str)] = &[
+    ("timeout", "üstlenme süresi doldu"),
+    ("grant_guard_false", "grant koşulu artık sağlanmıyor"),
+    ("self", "kendi bıraktı"),
+    ("taken_by_other", "yetkili başkasına verdi"),
+    ("admin", "WF Admin havuza attı"),
+];
+
+/// Sahiplik satırının payload alanını okunur metne çevirir. `collapse_reason_label` ile
+/// AYNI dürüstlük kuralı: tanımadığımız bir değer gelirse etiketi susturmak yerine ham
+/// kodu göstermek daha dürüsttür (kapalı liste büyüyebilir — Ç1-EK).
+fn ownership_label(
+    input: Option<&Value>,
+    field: &str,
+    table: &[(&str, &str)],
+) -> Option<String> {
+    let raw = input?.get(field)?.as_str()?;
+    Some(
+        table
+            .iter()
+            .find(|(code, _)| *code == raw)
+            .map(|(_, text)| (*text).to_string())
+            .unwrap_or_else(|| raw.to_string()),
     )
 }
 
@@ -774,7 +691,17 @@ fn wfah_label(wfd: &Wfd, p: &ParsedMarker, node: Option<&Ref>, input: Option<&Va
         WfahKind::Deadline => "Akış süresi doldu".into(),
         WfahKind::Escalation => format!("{step_no}. escalation adımı işletildi{}", at_node()),
         WfahKind::EscalationSkipped => format!("{step_no}. escalation adımı atlandı{}", at_node()),
-        WfahKind::ClaimTimeout => format!("Üstlenme süresi doldu{}", at_node()),
+        // Ç13/Ç1-EK: sahiplik ailesi. Sebep/yol ADda değil PAYLOAD'da — etiket onu
+        // okur, yoksa çıplak cümleye düşer. Metinlerin içeriği `P05`in katalogunun
+        // işidir; `E07` yalnız kolun VARLIĞINI zorunlu kılar.
+        WfahKind::ClaimTaken => match ownership_label(input, "via", OWNERSHIP_VIA) {
+            Some(via) => format!("İş üstlenildi{} — {via}", at_node()),
+            None => format!("İş üstlenildi{}", at_node()),
+        },
+        WfahKind::ClaimReleased => match ownership_label(input, "reason", OWNERSHIP_REASON) {
+            Some(reason) => format!("Üstlenme bırakıldı{} — {reason}", at_node()),
+            None => format!("Üstlenme bırakıldı{}", at_node()),
+        },
         WfahKind::Trigger => "Otomatik işlem çalıştı".into(),
         WfahKind::CallReturn => "Alt akış tamamlandı".into(),
         WfahKind::CallTruncated => "Alt akış geçmişi kısaltıldı".into(),

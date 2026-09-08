@@ -205,7 +205,7 @@ pub fn visited_nodes<'w>(wfd: &'w Wfd, wfes: &'w Wfes) -> BTreeSet<&'w str> {
 ///
 /// Cevap: WFAH'ın **`to_node != null` olan SON satırının** `applied_at`'i, yani
 /// akışı gerçekten bir node'a TAŞIYAN son satır. Marker satırları (`escalate:`,
-/// `trigger:`, `claim_timeout:` — Ç1-EK sonrası `claim_released:` —, `_branch_*`,
+/// `trigger:`, `claim_released:`, `claim_taken:`, `_branch_*`,
 /// `_collapse`, `_join`, `call:`) `to_node` taşımaz (Ç2) ve tabanı kaydırmaz.
 ///
 /// Soru bir ad öneki listesiyle SORULMAZ: eski hâl `!action.starts_with("escalate:")`
@@ -2506,7 +2506,14 @@ impl<'a> Engine<'a> {
         })?;
         let system = system_actor();
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
-        let marker = format!("claim_timeout:{node_key}");
+        // Ç1-EK: marker adı `claim_timeout:` DEĞİL `claim_released:`. İki olay tek
+        // olaydır (bir claim düşer, iş havuza döner); farkları SEBEPTİR ve sebep
+        // payload'daki `reason` alanında taşınır. `claim_timeout:` adı SLA-1 dışı
+        // bırakma sebeplerinde (Ç9 grant guard) YALAN söylüyordu.
+        //
+        // WFD tarafındaki ayar bloğunun adı (`nodes.<k>.claim_timeout`) DEĞİŞMEZ: o blok
+        // bir ZAMANLAYICI tarif eder, bırakmayı değil.
+        let marker = format!("claim_released:{node_key}");
         // Ç4/E14: kolun claim'i düşüyorsa satır O KOLDA — iki dal da aynı etiketi taşır.
         let (branch_entry, branch_round) = branch_label(wfes, branch);
 
@@ -2534,7 +2541,10 @@ impl<'a> Engine<'a> {
                     seq,
                     action: marker,
                     actor: system,
-                    input: Some(json!({"after": ct.after})),
+                    // Ç1-EK payload'ı: `reason` kapalı listedir; `after` YALNIZ
+                    // `reason: "timeout"` satırlarında yazılır. Kalan alanlar
+                    // (`claimed_by`/`claimed_at`/`held_for_seconds`) `E12`nin işi.
+                    input: Some(json!({"reason": "timeout", "after": ct.after})),
                     applied_at: now,
                     // Ç2: yalnız claim düşer, node DEĞİŞMEZ — marker satırı.
                     from_node: None,

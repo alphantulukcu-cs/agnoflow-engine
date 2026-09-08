@@ -8,6 +8,7 @@ use crate::types::{
     wfah::{Wfah, WfahEntry},
 };
 use crate::v22::env::{self, PublicEnv};
+use crate::v22::wfah_kind::parse_marker;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
@@ -51,6 +52,16 @@ fn empty_entry_shell() -> Value {
 pub struct EvalEnv {
     pub ctx: Value,
     pub wfah: Vec<Value>,
+    /// R04 — `$prev`/`$first`: defterin son/ilk **AKSİYON** satırının izdüşümü.
+    ///
+    /// Ham `$wfah` dizisinden AYRI tutulur (dizi süzülmez, R04/S3). `None` = defterde
+    /// hiç aksiyon satırı yok → `zen_context` `empty_entry_shell` bağlar.
+    ///
+    /// `with_wfah` tarafından AYNI çağrıda kurulur: uçları ayrı bir `with_*` ile
+    /// vermek, çağıranın birini bağlayıp diğerini atlamasına yer bırakırdı
+    /// (`$branch_round` ile aynı gerekçe).
+    pub prev: Option<Value>,
+    pub first: Option<Value>,
     pub node: Option<String>,
     pub actor: Option<Actor>,
     pub wfe_id: Option<Uuid>,
@@ -133,6 +144,19 @@ impl EvalEnv {
 
     pub fn with_wfah(mut self, wfah: &Wfah) -> Self {
         self.wfah = wfah.entries().iter().map(project_entry).collect();
+        // R04: uç kısayolları HAM defter üzerinde, AKSİYON satırlarına süzülerek
+        // hesaplanır. Dizi süzülmez (`self.wfah` yukarıda ham kaldı); süzülen yalnız
+        // iki uçtur. Ölçüt SINIFTIR (`parse_marker` → `WfahKind::Action`), koda ad
+        // listesi girmez.
+        //
+        // Tarama O(n) ve WFAH boyu sınırlı; alternatif (izdüşümdeki `#.kind` üzerinden
+        // filtrelemek) uç hesabını `E05`in alan kümesine bağımlı kılardı.
+        let mut actions = wfah
+            .entries()
+            .iter()
+            .filter(|e| parse_marker(&e.action).kind.is_action());
+        self.first = actions.next().map(project_entry);
+        self.prev = actions.last().map(project_entry).or_else(|| self.first.clone());
         // E14: tur, defterin bir okumasıdır — `$wfah` ile AYNI yerde bağlanır.
         self.branch_round = crate::v22::valid::live_round(wfah);
         self
@@ -188,13 +212,17 @@ impl EvalEnv {
         // WOR-84: geçmişin uç girdilerine kısayol. `$wfah[len($wfah) - 1]` ifadesi BOŞ
         // geçmişte indeks -1'e düşüp VM'i patlatıyordu (parse aşaması yakalamaz); tasarımcı
         // her seferinde `len($wfah) > 0 and ...` guard'ı yazmak zorunda kalıyordu.
+        //
+        // R04: uçlar artık son/ilk **AKSİYON** satırıdır — `$wfah[len($wfah)-1]` ile
+        // AYNI SATIRI VERMEZLER. Marker satırları (fork, escalation, sahiplik, trigger,
+        // çağrı kapanışı, kol olayları) elenir; ham dizi DEĞİŞMEZ.
         map.insert(
             "$prev".into(),
-            self.wfah.last().cloned().unwrap_or_else(empty_entry_shell),
+            self.prev.clone().unwrap_or_else(empty_entry_shell),
         );
         map.insert(
             "$first".into(),
-            self.wfah.first().cloned().unwrap_or_else(empty_entry_shell),
+            self.first.clone().unwrap_or_else(empty_entry_shell),
         );
         map.insert(
             "$node".into(),
@@ -506,6 +534,98 @@ mod tests {
         assert!(evaluate_bool("$prev.actor.role == 'creditAnalyst'", &env).unwrap());
         assert!(evaluate_bool("$first.action == 'basvuru'", &env).unwrap());
         assert!(evaluate_bool("$first.seq == 1", &env).unwrap());
+    }
+
+    /// R04/S1 — uçlar son/ilk **AKSİYON** satırıdır; marker satırları ELENİR.
+    ///
+    /// Kapı (a): fork commit'i `_fork` marker'ını yazar ve editörün ürettiği gate
+    /// (`$prev.action == "start_review"`) fork biter bitmez ters dönüyordu. Ölçüt
+    /// SINIF olduğu için fork AKSİYONU görünür kalır, `_fork` MARKER'ı elenir.
+    #[test]
+    fn prev_sees_the_last_action_row_not_the_marker() {
+        let wfah = Wfah::empty()
+            .push("basvuru".into(), actor(), None)
+            .push("start_review".into(), actor(), None)
+            .push("_fork".into(), actor(), Some(json!({"branches": ["hukuk"]})));
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$prev.action == 'start_review'", &env).unwrap());
+        assert!(evaluate_bool("$prev.seq == 2", &env).unwrap());
+        assert!(evaluate_bool("$first.action == 'basvuru'", &env).unwrap());
+    }
+
+    /// Kapı (b): sahiplik / escalation / trigger / kol / çağrı KAPANIŞ marker'larının
+    /// hiçbiri ucu kaydırmaz. Liste kapsayıcıdır ama ölçüt ADA bakmaz — yeni bir
+    /// marker türü eklendiğinde bu testi güncellemek gerekmez, `WfahKind` zorlar.
+    #[test]
+    fn markers_do_not_move_the_ends() {
+        for marker in [
+            "claim_taken:self__memur",
+            "claim_released:self__memur",
+            "escalate:self__memur:0",
+            "escalate:self__memur:0:skipped",
+            "trigger:use_skor",
+            "timeout:deadline",
+            "_fork",
+            "_branch_arrived",
+            "_branch_cancelled",
+            "_branch_superseded",
+            "_collapse",
+            "_join",
+            "call:krediler",
+            "call:krediler/…",
+        ] {
+            let wfah = Wfah::empty()
+                .push("onayla".into(), actor(), None)
+                .push(marker.into(), actor(), None);
+            let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+            assert!(
+                evaluate_bool("$prev.action == 'onayla'", &env).unwrap(),
+                "'{marker}' $prev'i kaydırmamalı"
+            );
+        }
+    }
+
+    /// Kapı (c): alt akış AKSİYONU (`call:<anahtar>/<aksiyon>`) özyinelemeli
+    /// çözümlemeyle `Action`a düşer → uçta GÖRÜNÜR. Bilinçli bedel (R04, FEDA
+    /// EDİLENLER): alt akış opak DEĞİLDİR, çağıranın `$prev`i onu görebilir.
+    /// Değer `action` alanının HAM hâlidir — izdüşüm marker adını sökmez.
+    #[test]
+    fn sub_flow_actions_stay_visible_at_the_ends() {
+        let wfah = Wfah::empty()
+            .push("onayla".into(), actor(), None)
+            .push("call:krediler/skor_gir".into(), actor(), None);
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$prev.action == 'call:krediler/skor_gir'", &env).unwrap());
+    }
+
+    /// Kapı (d): YALNIZ marker taşıyan defterde uçlar kabuk döner — ifade PATLAMAZ,
+    /// hep-false okur (boş defterle aynı davranış).
+    #[test]
+    fn marker_only_ledger_yields_the_empty_shell() {
+        let wfah = Wfah::empty()
+            .push("_fork".into(), actor(), None)
+            .push("trigger:use_skor".into(), actor(), None);
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("$prev.action == null", &env).unwrap());
+        assert!(!evaluate_bool("$prev.action == '_fork'", &env).unwrap());
+        assert!(evaluate_bool("$first.action == null", &env).unwrap());
+        assert!(evaluate_bool("$prev.branch_round == null", &env).unwrap());
+    }
+
+    /// Kapı (e): dizi HAM kalır (R04/S3) — yayınlanmış `count($wfah, …)` sayımları
+    /// marker'ları saymaya DEVAM eder. Süzülen yalnız iki uçtur.
+    #[test]
+    fn the_array_itself_stays_raw() {
+        let wfah = Wfah::empty()
+            .push("onayla".into(), actor(), None)
+            .push("_fork".into(), actor(), None)
+            .push("escalate:self__memur:0".into(), actor(), None);
+        let env = EvalEnv::new(&json!({})).with_wfah(&wfah);
+        assert!(evaluate_bool("len($wfah) == 3", &env).unwrap());
+        assert!(evaluate_bool("some($wfah, #.action == '_fork')", &env).unwrap());
+        assert!(
+            evaluate_bool("count($wfah, #.action == 'escalate:self__memur:0') == 1", &env).unwrap()
+        );
     }
 
     /// Tek girişli geçmişte `$prev` ve `$first` AYNI girdiyi gösterir.

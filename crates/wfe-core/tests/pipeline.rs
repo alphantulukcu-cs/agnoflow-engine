@@ -2199,7 +2199,7 @@ async fn claim_timeout_due_without_wft_releases_claim() {
         ClaimTimeoutOutcome::Release(release) => {
             assert_eq!(
                 release.wfah_entry.action,
-                "claim_timeout:self__creditAnalyst"
+                "claim_released:self__creditAnalyst"
             );
             assert_eq!(release.wfah_entry.actor.role, "system");
             // wfes_effects yok → ctx satırı yazılmaz
@@ -2237,7 +2237,7 @@ async fn claim_timeout_due_with_wft_moves_like_escalation() {
             );
             assert_eq!(
                 commit.wfah_entries[0].action,
-                "claim_timeout:self__creditAnalyst"
+                "claim_released:self__creditAnalyst"
             );
         }
         ClaimTimeoutOutcome::Release(_) => panic!("wft varken Move bekleniyordu"),
@@ -3769,7 +3769,7 @@ async fn branch_claim_timeout_measured_from_branch_claim() {
         ClaimTimeoutOutcome::Release(release) => {
             assert_eq!(
                 release.wfah_entry.action,
-                "claim_timeout:self__financeApprover"
+                "claim_released:self__financeApprover"
             );
             assert_eq!(release.wfah_entry.actor.role, "system");
             assert!(release.new_dynctx.is_none());
@@ -4774,8 +4774,9 @@ async fn marker_rows_never_shift_the_escalation_base() {
         ("_branch_arrived", t0 + Duration::hours(3)),
         ("_collapse", t0 + Duration::hours(4)),
         ("_join", t0 + Duration::hours(5)),
-        ("claim_timeout:self__creditAnalyst", t0 + Duration::hours(6)),
-        ("_marker_that_does_not_exist_yet", t0 + Duration::hours(7)),
+        ("claim_released:self__creditAnalyst", t0 + Duration::hours(6)),
+        ("claim_taken:self__creditAnalyst", t0 + Duration::hours(7)),
+        ("_marker_that_does_not_exist_yet", t0 + Duration::hours(8)),
     ];
 
     for n in 1..=markers.len() {

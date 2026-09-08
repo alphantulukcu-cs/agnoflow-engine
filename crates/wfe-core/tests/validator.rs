@@ -370,13 +370,13 @@ fn unreachable_node_is_error() {
     );
 }
 
-#[test]
-fn escalation_edges_count_for_reachability() {
-    // golden fixture'da parent__creditDeptManager'a YALNIZCA escalation üzerinden ulaşılır;
-    // temiz geçmesi escalation kenarlarının BFS'e dahil olduğunu kanıtlar.
-    let report = validate_value(fixture_value());
-    assert!(report.errors.is_empty());
-}
+// v2.3 (`Ç9` + `E08` Faz 2): `escalation_edges_count_for_reachability` SİLİNDİ —
+// iddiası TERSİNE döndü. Escalation artık bir graf KENARI DEĞİL, ve v2.3'te kademe
+// hiç node referansı taşımıyor (`{after, grant}`), dolayısıyla "yalnız escalation ile
+// erişilen node" diye bir belge YAZILAMIYOR. Faz 2'nin (a) sonucu bu yüzden ayrıca
+// test edilemez: o hâl düz `unreachable` kuralına karışır ve
+// `unreachable_node_is_error` ile kapsanır. (b) sonucu ise
+// `node_without_exit_is_error`ta ölçülüyor — bkz. oradaki not.
 
 #[test]
 fn node_without_exit_is_error() {
@@ -385,6 +385,17 @@ fn node_without_exit_is_error() {
     // başka node'a taşı → node erişilebilir kalır (analistin `wft`i oraya gidiyor)
     // ama hiçbir aksiyon oradan çıkmaz.
     v["actions"]["manager_decide"]["from"] = json!("self__creditAnalyst");
+    // ⚠️ Bu test AYNI ZAMANDA `E08` Faz 2'nin (b) sonucunun kapısıdır: seçilen node
+    // ESCALATION TAŞIYOR ve v2.2'de `&& node.escalation.is_empty()` şartı sayesinde
+    // `no_exit`ten MUAFTI. Muafiyet düştüğü için artık hata veriyor. Şartı geçici
+    // olarak geri koyup testin kırmızıya döndüğünü doğruladım; aşağıdaki assert
+    // testin o hâle sürüklenmesini (escalation'sız bir node'a kayması) engelliyor.
+    assert!(
+        !v["nodes"]["self__branchManager"]["escalation"]
+            .as_array()
+            .is_none_or(|e| e.is_empty()),
+        "Faz 2/(b) kapısı: seçilen node escalation taşımak ZORUNDA"
+    );
     let report = validate_value(v);
     assert!(
         has_error(&report, "no_exit"),
@@ -452,6 +463,92 @@ fn expression_issues_matches_wfd_validator_verdicts() {
 }
 
 /// WOR-84: negatif indeks parse edilir ama runtime'da patlar → parse kapısı yetmez.
+// ---- `E08` Faz 3: `zen_action_unknown` — `#.action` literalleri katalog ∪ marker
+//      grameriyle çözülmek ZORUNDA ------------------------------------------------
+
+/// Kataloğa da marker gramerine de uymayan bir ad HATA.
+#[test]
+fn zen_action_literal_outside_catalog_and_marker_grammar_is_error() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("count($wfah, #.action == \"analyst_aprove\") > 0");
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "zen_action_unknown" && e.message.contains("analyst_aprove")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Katalogdaki gerçek bir aksiyon adı temiz geçer.
+#[test]
+fn zen_action_literal_in_the_catalog_is_clean() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("count($wfah, #.action == \"manager_decide\") > 0");
+    assert!(!has_error(&validate_value(v), "zen_action_unknown"));
+}
+
+/// Motorun kapalı marker kalıpları da geçerli kimliktir — ve kalıbın İÇİNDEKİ node
+/// anahtarı `nodes{}`'te çözülür.
+#[test]
+fn zen_action_literal_that_is_a_known_marker_is_clean() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] = json!(
+        "count($wfah, #.action == \"escalate:self__creditAnalyst:0\") > 0 or count($wfah, #.action == \"_fork\") > 0"
+    );
+    assert!(!has_error(&validate_value(v), "zen_action_unknown"));
+}
+
+/// Kalıp DOĞRU ama içindeki node yok → HATA. Kuralın asıl değeri burada: marker
+/// adları yayınlanmış akışların sayım sözleşmesi, node adı yanlışsa sayım sessizce
+/// hep sıfır döner.
+#[test]
+fn zen_action_marker_naming_an_unknown_node_is_error() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("count($wfah, #.action == \"escalate:self__yokBoyleNode:0\") > 0");
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "zen_action_unknown" && e.message.contains("self__yokBoyleNode")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// `in [...]` de tam-kimlik formudur — listenin HER öğesi denetlenir.
+#[test]
+fn zen_action_literal_inside_an_in_list_is_checked() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("count($wfah, #.action in [\"manager_decide\", \"hayali_aksiyon\"]) > 0");
+    let report = validate_value(v);
+    assert!(
+        report
+            .errors
+            .iter()
+            .any(|e| e.code == "zen_action_unknown" && e.message.contains("hayali_aksiyon")),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// PARÇA karşılaştırması ATLANIR (kayıtlı sınır): `contains` bir kimlik değil metin
+/// arar, o metnin kataloğa uyması gerekmez.
+#[test]
+fn zen_action_partial_comparison_is_skipped() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["wft"]["conditions"][0]["when"] =
+        json!("count($wfah, contains(#.action, \"escalate:\")) > 0");
+    assert!(!has_error(&validate_value(v), "zen_action_unknown"));
+}
+
 #[test]
 fn negative_index_is_error() {
     let mut v = fixture_value();
@@ -1192,6 +1289,60 @@ fn expr_join_with_unparsable_when_is_error() {
 
 /// Yazım hatası SESSİZ kalmamalı: `$branches.yanlisKol` runtime'da `false` döner ve
 /// join hiç dolmaz — statik olarak yakalanır.
+/// `E08` Faz 3 — TERS YÖN: tanımlı bir kol `join_when`de HİÇ geçmiyorsa uyarı.
+/// Hata değil, çünkü tasarımcı bilerek "bu kolu bekleme" demiş olabilir; ama sessiz
+/// bırakılırsa yazım hatası da aynı şekilde görünür (kolun adı yanlış yazıldığında
+/// `..._unknown_branch` hatası o adı yakalar, DOĞRU yazılan ama unutulan kolu hiçbir
+/// şey yakalamaz).
+#[test]
+fn expr_join_leaving_a_branch_out_of_the_condition_is_warned() {
+    let mut v = parallel_fixture_value();
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    // Üç kol var; koşul yalnız ikisini anıyor — `self__hrApprover` dışarıda.
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] =
+        json!("$branches.self__financeApprover and $branches.self__legalApprover");
+    let report = validate_value(v);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.code == "parallel_join_when_unused_branch"
+                && w.message.contains("self__hrApprover")),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
+    // Anılan iki kol için uyarı ÜRETİLMEZ — kural yalnız dışarıda kalanı gösterir.
+    assert_eq!(
+        report
+            .warnings
+            .iter()
+            .filter(|w| w.code == "parallel_join_when_unused_branch")
+            .count(),
+        1,
+        "yalnız bir kol dışarıda: {:#?}",
+        report.warnings
+    );
+}
+
+/// Üç kolun üçü de anılıyorsa uyarı YOK.
+#[test]
+fn expr_join_naming_every_branch_is_clean() {
+    let mut v = parallel_fixture_value();
+    v["actions"]["start_review"]["wft"]["parallel"]["join_mode"] = json!("expr");
+    v["actions"]["start_review"]["wft"]["parallel"]["join_when"] = json!(
+        "($branches.self__financeApprover and $branches.self__legalApprover) or $branches.self__hrApprover"
+    );
+    let report = validate_value(v);
+    assert!(
+        !report
+            .warnings
+            .iter()
+            .any(|w| w.code == "parallel_join_when_unused_branch"),
+        "uyarılar: {:#?}",
+        report.warnings
+    );
+}
+
 #[test]
 fn expr_join_referencing_unknown_branch_is_error() {
     let mut v = parallel_fixture_value();

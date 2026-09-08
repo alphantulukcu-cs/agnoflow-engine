@@ -11,6 +11,7 @@ use crate::types::wfd_v22::{
 use crate::v22::dollar::{self, DollarForm};
 use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::env;
+use crate::v22::wfah_kind::{parse_marker, WfahKind};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -1373,7 +1374,6 @@ fn check_cross_refs(wfd: &Wfd, report: &mut ValidationReport) {
         // v2.3 (`Ç9`): escalation'ın `wft`i YOK — hedefi olmayan bir kademe için
         // cross-ref denetlenecek bir referans da yok. `grant.c_a`nın kendi kuralları
         // ayrı issue'nun işi (`E13`).
-        let _ = &node.escalation;
         // WFC node'unun çıkışı `call.wft`'dir — normal bir wft kenarı gibi doğrulanır.
         if let Some(call) = &node.call {
             if let Some(wft) = &call.wft {
@@ -1747,7 +1747,6 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
             // Bedel ÖLÇÜLDÜ ve sıfır: 6 örnek belgenin hiçbirinde tek çıkışı escalation
             // olan node yok (golden'ın iki escalation'lı node'unun ikisinin de aksiyon
             // çıkışı var).
-            let _ = &node.escalation;
             // WFC-RETURN de bir çıkıştır (BFS'e girmezse hedefi "unreachable" görünür).
             if let Some(call) = &node.call {
                 if let Some(wft) = &call.wft {
@@ -1762,7 +1761,6 @@ fn check_graph(wfd: &Wfd, report: &mut ValidationReport) {
             // v2.3 (K13 + K19): `claim_timeout.wft` KALKTI — claim timeout artık YALNIZ
             // claim'i bırakır, iş taşımaz. Dolayısıyla BFS'in claim_timeout ayağı da
             // yok; escalation'la aynı gerekçe (bkz. yukarıdaki Faz 2 notu).
-            let _ = &node.claim_timeout;
         }
     }
 
@@ -2036,13 +2034,30 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
                                 format!("join_when ZEN ifadesi parse edilemedi: {e}"),
                             );
                         }
-                        for referenced in branch_refs_in(expr) {
-                            if !spec.branches.iter().any(|b| b == &referenced) {
+                        let referenced = branch_refs_in(expr);
+                        for r in &referenced {
+                            if !spec.branches.iter().any(|b| b == r) {
                                 report.error(
                                     "parallel_join_when_unknown_branch",
                                     format!("{path}.parallel.join_when"),
                                     format!(
-                                        "join_when '$branches.{referenced}' referansı bu fork'un kolu değil — kol kimliği kolun GİRİŞ node'udur"
+                                        "join_when '$branches.{r}' referansı bu fork'un kolu değil — kol kimliği kolun GİRİŞ node'udur"
+                                    ),
+                                );
+                            }
+                        }
+                        // `E08` Faz 3 — TERS YÖN. Yukarıdaki kural yanlış YAZILAN kolu
+                        // yakalar; DOĞRU yazılıp unutulan kolu hiçbir şey yakalamıyordu.
+                        // Bilinçli tercih olabileceği için UYARI: koşul o kolu hiç
+                        // anmıyorsa join, kol varsın diye beklemez.
+                        for b in &spec.branches {
+                            if !referenced.iter().any(|r| r == b) {
+                                report.warn(
+                                    "parallel_join_when_unused_branch",
+                                    format!("{path}.parallel.join_when"),
+                                    format!(
+                                        "'{b}' kolu join_when içinde hiç geçmiyor — join bu kolu beklemez. \
+                                         Bilinçliyse sorun yok; değilse koşul o kolu atlıyor"
                                     ),
                                 );
                             }
@@ -2296,9 +2311,144 @@ pub fn expr_env(wfd: &Wfd) -> ExprEnv<'_> {
     }
 }
 
+/// `#.action` TAM-KİMLİK literallerini çıkarır — `zen_action_unknown`ın girdisi.
+///
+/// Kayıtlı sınır (`E08` Faz 3): yalnız kimliğin BÜTÜNÜ ile karşılaştıran formlar
+/// okunur. `contains(#.action, "escalate:")` gibi PARÇA karşılaştırmaları atlanır —
+/// orada aranan şey bir kimlik değil bir metin parçasıdır ve kataloğa uyması
+/// gerekmez.
+///
+/// Okunan formlar: `#.action == "X"`, `#.action != "X"`, `#.action in ["A", "B"]`.
+///
+/// ⚠️ `!=` kayıtta ADIYLA sayılmıyor (kayıt `==` ve `in`i sayıyor), ama kaydın
+/// çizdiği sınır "tam kimlik / parça" ayrımıdır ve `!=` tam kimlik tarafındadır.
+/// Bir yazım hatası `!=` içinde de aynı şekilde sessizdir (koşul hep true döner),
+/// o yüzden dahil edildi. Ayna sırası (`"X" == #.action`) BİLİNÇLE okunmuyor:
+/// kayıtta yok, ZEN'de deyimsel değil, ve geriye doğru tarama kuralı kırılgan yapar.
+fn action_literals_in(expr: &str) -> Vec<String> {
+    /// `pos`taki tırnaklı diziyi okur (kaçış işlemez — ZEN aksiyon adlarında `\\` yok).
+    fn quoted(b: &[u8], pos: usize) -> Option<(String, usize)> {
+        let q = *b.get(pos)?;
+        if q != b'"' && q != b'\'' {
+            return None;
+        }
+        let start = pos + 1;
+        let mut end = start;
+        while end < b.len() && b[end] != q {
+            end += 1;
+        }
+        if end >= b.len() {
+            return None;
+        }
+        Some((
+            String::from_utf8_lossy(&b[start..end]).into_owned(),
+            end + 1,
+        ))
+    }
+    let b = expr.as_bytes();
+    let needle = "#.action";
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(rel) = expr[i..].find(needle) {
+        let mut j = i + rel + needle.len();
+        while j < b.len() && b[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        if expr[j..].starts_with("==") || expr[j..].starts_with("!=") {
+            let mut k = j + 2;
+            while k < b.len() && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if let Some((lit, _)) = quoted(b, k) {
+                out.push(lit);
+            }
+        } else if expr[j..].starts_with("in") {
+            let mut k = j + 2;
+            while k < b.len() && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            if b.get(k) == Some(&b'[') {
+                k += 1;
+                // Liste kapanana kadar her tırnaklı diziyi topla.
+                while k < b.len() && b[k] != b']' {
+                    match quoted(b, k) {
+                        Some((lit, next)) => {
+                            out.push(lit);
+                            k = next;
+                        }
+                        None => k += 1,
+                    }
+                }
+            }
+        }
+        i = i + rel + 1;
+    }
+    out
+}
+
+/// `E08` Faz 3 — `zen_action_unknown`. Bir `#.action` literali YA `actions{}`'te
+/// çözülecek YA motorun kapalı marker gramerine uyacak; marker kalıbı bir node
+/// anahtarı taşıyorsa o anahtar da `nodes{}`'te çözülecek.
+///
+/// Kalıp listesi `v22::wfah_kind::parse_marker`dan gelir — bu kuralın kendi listesi
+/// YOKTUR. Motora yeni bir marker eklendiğinde kural onu kendiliğinden tanır.
+///
+/// Neden HATA: marker adları yayınlanmış akışların SAYIM sözleşmesidir. Yanlış
+/// yazılmış bir ad hiçbir satırla eşleşmez, `count(...)` sessizce hep 0 döner ve
+/// koşul yanlış dalı seçer — yayın sonrası, tasarımcı hiç uyarılmadan.
+fn check_action_literals(wfd: &Wfd, expr: &str, path: &str, report: &mut ValidationReport) {
+    for lit in action_literals_in(expr) {
+        if wfd.actions.contains_key(&lit) {
+            continue;
+        }
+        let parsed = parse_marker(&lit);
+        if let Some(call_key) = &parsed.from_call {
+            // `call:<key>/<action>` — İÇ kimlik BAŞKA belgeye aittir ve bu belgeden
+            // çözülemez. Yerel olan tek parça çağrı anahtarıdır; yalnız o denetlenir.
+            if !wfd.calls.contains_key(call_key) {
+                report.error(
+                    "zen_action_unknown",
+                    path.to_string(),
+                    format!(
+                        "'{lit}' içindeki '{call_key}' çağrı anahtarı `calls{{}}`'te tanımlı değil"
+                    ),
+                );
+            }
+            continue;
+        }
+        if parsed.kind == WfahKind::Action {
+            report.error(
+                "zen_action_unknown",
+                path.to_string(),
+                format!(
+                    "#.action == '{lit}' — bu ad ne `actions{{}}`'te tanımlı ne de motorun \
+                     marker kalıplarından birine uyuyor. Sayım hiçbir satırla eşleşmez"
+                ),
+            );
+            continue;
+        }
+        if let Some(node) = &parsed.node {
+            if !wfd.nodes.contains_key(node) {
+                report.error(
+                    "zen_action_unknown",
+                    path.to_string(),
+                    format!(
+                        "'{lit}' marker kalıbı doğru ama içindeki '{node}' node'u \
+                         `nodes{{}}`'te tanımlı değil"
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     let env = expr_env(wfd);
     let check = |expr: &str, path: String, report: &mut ValidationReport| {
+        // `E08` Faz 3: `#.action` literalleri katalog ∪ marker grameriyle çözülür.
+        // Ayrı bir kapı çünkü BELGEYİ görmesi gerekiyor — `expression_issues` saf bir
+        // metin fonksiyonudur ve `/wfd/validate-expression` ucundan WFD'siz de çağrılır.
+        check_action_literals(wfd, expr, &path, report);
         // Yüzey kontrolleri (parse/indeks) + TİP kontrolleri aynı kapıdan geçer: editörün
         // koşul kurucusundaki kural setiyle motor tarafı ayrışmasın.
         let issues = expression_issues(expr)

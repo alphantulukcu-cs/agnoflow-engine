@@ -679,10 +679,7 @@ fn ownership_label(
 /// anahtarlarını basmak zorunda kalır — sözleşmenin kaçındığı şey tam olarak budur.
 fn wfah_label(wfd: &Wfd, p: &ParsedMarker, node: Option<&Ref>, input: Option<&Value>) -> String {
     let step_no = p.step.map(|s| s + 1).unwrap_or(1);
-    let at_node = || {
-        node.map(|n| format!(" ({})", n.label))
-            .unwrap_or_default()
-    };
+    let at_node = || node.map(|n| format!(" ({})", n.label)).unwrap_or_default();
     match p.kind {
         WfahKind::Action => p
             .action
@@ -772,7 +769,6 @@ fn to_wfah_view(
         step: parsed.step,
     }
 }
-
 
 /// **Kapı C** — bozuk `dynctx` taşıyan bir WFE'de EYLEM reddedilir.
 ///
@@ -1158,15 +1154,17 @@ impl WfeExecutor {
         if branch_owner_is(wfes, node, actor.user_id) {
             return Ok((true, None));
         }
-        Ok(match self.engine().can_claim(wfd, wfes, actor, node).await? {
-            ClaimCheck::Ok => (true, None),
-            ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
-            ClaimCheck::Terminal => (false, Some("terminal".into())),
-            ClaimCheck::Expired => (false, Some("expired".into())),
-            ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
-            // WFC: alt akış sürüyor — iş görünür ama claim edilemez.
-            ClaimCheck::CallInProgress => (false, Some("call_in_progress".into())),
-        })
+        Ok(
+            match self.engine().can_claim(wfd, wfes, actor, node).await? {
+                ClaimCheck::Ok => (true, None),
+                ClaimCheck::AlreadyClaimed => (false, Some("already_claimed".into())),
+                ClaimCheck::Terminal => (false, Some("terminal".into())),
+                ClaimCheck::Expired => (false, Some("expired".into())),
+                ClaimCheck::NotEligible => (false, Some("not_eligible".into())),
+                // WFC: alt akış sürüyor — iş görünür ama claim edilemez.
+                ClaimCheck::CallInProgress => (false, Some("call_in_progress".into())),
+            },
+        )
     }
 
     /// TOPLU claim uygunluğu — havuz listesinin `can_claim` alanı (2026-08-14).
@@ -1792,9 +1790,11 @@ impl WfeExecutor {
         // kod hem de görme yetkisi olmayan kişiye varlık sızıntısı.
         let wfd = match &self.visibility {
             Some(port) => {
-                let filters =
-                    crate::visibility::ViewerFilters::build(viewer, &*self.org).await?;
-                if !port.can_view_projection(wfe_id, &filters.as_binds()).await? {
+                let filters = crate::visibility::ViewerFilters::build(viewer, &*self.org).await?;
+                if !port
+                    .can_view_projection(wfe_id, &filters.as_binds())
+                    .await?
+                {
                     return Err(EngineError::Unauthorized);
                 }
                 self.wfd.fetch(wfes.wfd_id, wfes.wfd_version).await?
@@ -1820,8 +1820,15 @@ impl WfeExecutor {
         };
         // Alan bazlı gizlilik de WFE-seviyesi görünürlükle AYNI çapayı kullanır
         // (2026-08-13): `x-visibility: {c_orgu:"self"}` "işin birimi" demektir.
-        let filtered =
-            filter_dynctx(&wfd.context, ctx, viewer, wfes.origin_orgu_id, env, &*self.org).await?;
+        let filtered = filter_dynctx(
+            &wfd.context,
+            ctx,
+            viewer,
+            wfes.origin_orgu_id,
+            env,
+            &*self.org,
+        )
+        .await?;
 
         let now = Utc::now();
         let priority = crate::priority::compute_priority(wfes.created_at, wfes.deadline, now);
@@ -1910,15 +1917,16 @@ impl WfeExecutor {
             .map(|e| to_wfah_view(&wfd, e, &from_nodes))
             .collect();
         // Sıradaki escalation adımı (vade gerekmez) — WF Admin'in göreceği sayaç.
-        let next_escalation = engine
-            .next_escalation(&wfd, &wfes, now, None)?
-            .map(|f| EscalationView {
-                step_idx: f.step_idx,
-                node: Ref::node(&wfd, wfes.current_node.as_deref().unwrap_or_default()),
-                entered_at: f.entered_at,
-                deadline: f.deadline,
-                overdue: f.overdue,
-            });
+        let next_escalation =
+            engine
+                .next_escalation(&wfd, &wfes, now, None)?
+                .map(|f| EscalationView {
+                    step_idx: f.step_idx,
+                    node: Ref::node(&wfd, wfes.current_node.as_deref().unwrap_or_default()),
+                    entered_at: f.entered_at,
+                    deadline: f.deadline,
+                    overdue: f.overdue,
+                });
         let current_node = wfes.current_node.as_deref().map(|n| Ref::node(&wfd, n));
         let join_target = wfes
             .join_target
@@ -1940,10 +1948,7 @@ impl WfeExecutor {
             priority,
             rev,
             branches: branch_views,
-            join_mode: wfes
-                .join_target
-                .as_ref()
-                .map(|_| wfes.join_rule.kind()),
+            join_mode: wfes.join_target.as_ref().map(|_| wfes.join_rule.kind()),
             join_threshold: match &wfes.join_rule {
                 JoinRule::Quorum(k) => Some(*k),
                 _ => None,
@@ -2221,7 +2226,8 @@ impl WfeExecutor {
             )
             .await?;
         // Sistem yolu: aktör yok → çapa yalnız `origin_orgu_id`den gelir.
-        self.fill_view_grants(&wfd, &caller, None, &mut commit).await?;
+        self.fill_view_grants(&wfd, &caller, None, &mut commit)
+            .await?;
         self.wfe.commit(&commit).await?;
         self.wfe.set_call_status(call.id, "consumed", None).await?;
         self.after_wfe_settled(caller.wfe_id, &commit.outcome)
@@ -2309,7 +2315,8 @@ impl WfeExecutor {
         // SLA-3 deadline wfe-seviyesidir (paralel modda da) — tüm kolları iptal eder.
         if engine.deadline_due(&wfes, now) {
             let mut commit = engine.fire_deadline_timeout(&wfes, now);
-            self.fill_view_grants(&wfd, &wfes, None, &mut commit).await?;
+            self.fill_view_grants(&wfd, &wfes, None, &mut commit)
+                .await?;
             self.wfe.commit(&commit).await?;
             // SLA-3 ile sonlanma da bir sonlanmadır: bekleyen çağrı `terminated`
             // olarak döner (çağıran karar verir), alt akışlar iptal edilir.
@@ -2330,7 +2337,8 @@ impl WfeExecutor {
             if engine.claim_timeout_due(&wfd, &wfes, now, b)? {
                 match engine.fire_claim_timeout(&wfd, &wfes, now, b).await? {
                     ClaimTimeoutOutcome::Move(mut commit) => {
-                        self.fill_view_grants(&wfd, &wfes, None, &mut commit).await?;
+                        self.fill_view_grants(&wfd, &wfes, None, &mut commit)
+                            .await?;
                         self.wfe.commit(&commit).await?;
                         self.after_wfe_settled(wfe_id, &commit.outcome).await?;
                     }
@@ -2350,7 +2358,8 @@ impl WfeExecutor {
             }
             if let Some(idx) = engine.due_escalation(&wfd, &wfes, now, b)? {
                 let mut commit = engine.fire_escalation(&wfd, &wfes, idx, now, b).await?;
-                self.fill_view_grants(&wfd, &wfes, None, &mut commit).await?;
+                self.fill_view_grants(&wfd, &wfes, None, &mut commit)
+                    .await?;
                 self.wfe.commit(&commit).await?;
                 self.after_wfe_settled(wfe_id, &commit.outcome).await?;
                 return Ok(true);
@@ -2471,7 +2480,12 @@ mod branch_hint_tests {
     /// dokunulduğu belirsiz kalırdı.
     #[test]
     fn parallel_mode_requires_branch_hint() {
-        let w = wfes(Some(WftTarget::Node { node: "join".into() }), None);
+        let w = wfes(
+            Some(WftTarget::Node {
+                node: "join".into(),
+            }),
+            None,
+        );
         assert!(require_branch_hint(&w, None).is_err());
         assert!(require_branch_hint(&w, Some("kol_a")).is_ok());
     }

@@ -2713,7 +2713,10 @@ async fn re_entering_the_same_fork_separates_the_two_rounds() {
     }
 
     // (a) `$valid`: birinci turun onayı ELENDİ, ikinci turunki KALDI.
-    let valid = wfe_core::v22::valid::derive_valid(&w.wfah);
+    let valid = wfe_core::v22::valid::derive_valid(
+        &w.wfah,
+        &wfe_core::v22::valid::ValidRules::default(),
+    );
     let valid_legal_rounds: Vec<Option<u32>> = valid
         .iter()
         .filter(|e| {

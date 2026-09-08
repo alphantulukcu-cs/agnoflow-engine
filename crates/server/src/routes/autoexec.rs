@@ -87,6 +87,12 @@ async fn test_autoexec(
         wfah: body.wfah,
         action_input: body.action_input,
         env: run_env,
+        // `/autoexec/test` bir TASARIM ZAMANI probudur: gövde bir WFD belgesi
+        // taşımıyor, yalnız elle kurulmuş bir `wfah` ve ctx. Kural seti bu yüzden
+        // varsayılandır — `$valid` yalnız belgeden BAĞIMSIZ kuralları (tur, kol
+        // marker'ı, sahiplik) uygular, `#.is_send_back` de yalnız admin
+        // marker'larını tanır. Gerçek koşumda kural seti belgeden gelir.
+        valid_rules: Default::default(),
     };
 
     // Çözüm başarısızsa (ör. tanımsız `$env` anahtarı) request_info gösterilecek bir şey

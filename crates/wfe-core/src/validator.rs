@@ -1952,6 +1952,41 @@ fn check_parallel(wfd: &Wfd, report: &mut ValidationReport) {
         }
     }
 
+    // E05/BAĞLI KURAL 3: bir node belgede EN FAZLA BİR fork'un GİRİŞ kolu olabilir.
+    //
+    // Ayrıklık denetimi (aşağıdaki `owner` haritası) FORK BAŞINA çalışıyor; iç içe
+    // OLMAYAN iki fork aynı giriş node'unu kullanabiliyor ve hiçbir hata çıkmıyordu.
+    // `branch_entry` ZEN'e açıldığı an bu BELİRSİZ bir KİMLİK demektir:
+    // `#.branch_entry == "hukuk"` iki farklı fork'un kollarını aynı şey sayar.
+    // Ayrıca `E14`in tur elemesinin ÖN ŞARTIDIR — çapa (`X`i açan son `_fork`)
+    // ancak giriş node'u tekilse TEK olur.
+    //
+    // Emsal Değişmez #4 (bir canonical `c_a` belgede en fazla bir node'da): kimlik
+    // olarak kullanılan ad belge genelinde tekil olmak ZORUNDADIR.
+    //
+    // Alt-grafların tamamen ayrık olması İSTENMEZ — aynı adımın iki paralel aşamada
+    // kullanılması meşrudur; kısıt YALNIZ giriş node'larına konur.
+    let mut entry_owner: HashMap<&str, &str> = HashMap::new();
+    for fork in &forks {
+        for b in &fork.spec.branches {
+            match entry_owner.get(b.as_str()) {
+                Some(first) if *first != fork.path.as_str() => report.error(
+                    "parallel_entry_node_shared",
+                    format!("{}.parallel.branches", fork.path),
+                    format!(
+                        "node '{b}' iki fork'un giriş kolu ({first} ve {}) — kol KİMLİĞİ giriş node'udur ve belge genelinde TEKİL olmak zorundadır (#.branch_entry aksi halde iki fork'un kollarını aynı sayar)",
+                        fork.path
+                    ),
+                ),
+                // Aynı fork içindeki tekrar `parallel_branches`ın işi.
+                Some(_) => {}
+                None => {
+                    entry_owner.insert(b.as_str(), fork.path.as_str());
+                }
+            }
+        }
+    }
+
     for fork in &forks {
         let path = &fork.path;
         let spec = fork.spec;
@@ -2195,17 +2230,24 @@ fn has_negative_index(expr: &str) -> bool {
     false
 }
 
-/// WOR-84: `$wfah` doğrudan indeksleniyor mu (`$wfah[...]`). Geçmiş yeterince uzun
-/// değilse VM patlar — `$prev`/`$first` boş geçmişte null döner, patlamaz.
-fn indexes_wfah_directly(expr: &str) -> bool {
-    let mut rest = expr;
-    while let Some(pos) = rest.find("$wfah") {
-        rest = &rest[pos + "$wfah".len()..];
-        if rest.trim_start().starts_with('[') {
-            return true;
+/// WOR-84: defter dizisi doğrudan indeksleniyor mu (`$wfah[...]` / `$valid[...]`).
+/// Geçmiş yeterince uzun değilse VM patlar — `$prev`/`$first` boş geçmişte null
+/// döner, patlamaz.
+///
+/// `E05`/A3: kural `$valid`e DE uygulanır ve orada DAHA tehlikelidir — `$valid`de
+/// `seq` boşluklu olduğu için `len($valid)` son `seq`e eşit değildir, yani
+/// "son satır" hesabı ham listede işleyen aritmetikle bile tutmaz.
+fn indexes_wfah_directly(expr: &str) -> Option<&'static str> {
+    for root in ["$wfah", "$valid"] {
+        let mut rest = expr;
+        while let Some(pos) = rest.find(root) {
+            rest = &rest[pos + root.len()..];
+            if rest.trim_start().starts_with('[') {
+                return Some(root);
+            }
         }
     }
-    false
+    None
 }
 
 /// TEK bir ZEN ifadesinin yüzey kontrolleri — `(kod, hata_mı, mesaj)` üçlüleri.
@@ -2241,17 +2283,23 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
     if let Err(e) = env::references(expr) {
         out.push(("env_reference_malformed", true, e.to_string()));
     }
-    if indexes_wfah_directly(expr) {
-        out.push((
-            "wfah_index_unguarded",
-            false,
-            "$wfah doğrudan indeksleniyor — geçmiş o kadar uzun değilse ifade \
+    if let Some(root) = indexes_wfah_directly(expr) {
+        let mut msg = format!(
+            "{root} doğrudan indeksleniyor — geçmiş o kadar uzun değilse ifade \
              runtime'da patlar (boş geçmişte kesin patlar). $prev (son AKSİYON girdisi) / \
              $first (ilk AKSİYON girdisi) bu durumda null döner. DİKKAT: R04'ten beri \
              $wfah[len($wfah)-1] ile $prev AYNI SATIRI VERMEZ — elle indeksleme marker \
              satırını görür, $prev görmez."
-                .to_string(),
-        ));
+        );
+        if root == "$valid" {
+            // A3: elenmiş listede `seq` boşluklu — indeks aritmetiği ham listede
+            // işlese bile burada başka satırı gösterir.
+            msg.push_str(
+                " $valid'de seq BOŞLUKLUDUR: len($valid) son seq'e eşit DEĞİLDİR, \
+                 dolayısıyla indeksleme ham listeden DAHA tehlikelidir.",
+            );
+        }
+        out.push(("wfah_index_unguarded", false, msg));
     }
     out
 }

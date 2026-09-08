@@ -728,6 +728,10 @@ pub struct ExecEnv {
     /// `db_connection` alanları tek çözüm yoludur; `calc` ifadeleri ZEN üzerinden
     /// yalnız secret'sız görünümü görür (`EnvSet::public`).
     pub env: RunEnv,
+    /// E05: `calc` ifadeleri `$valid`i ve `#.is_send_back`i görür; ikisi de BELGEDEN
+    /// türer (`ValidRules::for_version`). Alan zorunludur — `Option` olsaydı
+    /// doldurmayan bir çağıran `$valid`i sessizce eksik elenmiş bırakırdı.
+    pub valid_rules: crate::v22::valid::ValidRules,
 }
 
 #[async_trait]

@@ -36,9 +36,9 @@ use zen_expression::parser::{Node, Parser};
 
 use crate::validator::{schema_type_at, types_compatible};
 
-/// `$wfah` girdisinin motordaki izdüşümü (`v22/eval.rs::project_entry`) — `{seq, action,
-/// actor, input, at, branch_round}`. Editördeki `WFAH_FIELDS` ile AYNI küme olmak
-/// zorundadır.
+/// `$wfah` girdisinin motordaki izdüşümü (`v22/eval.rs::project_entry`) — **11 alan**
+/// (`input` nesnesi ayrı ele alınır, `actor` üç yolla temsil edilir). Editördeki
+/// `WFAH_FIELDS` ile AYNI küme olmak zorundadır.
 const WFAH_SCALARS: &[(&str, &str)] = &[
     ("seq", "number"),
     ("action", "string"),
@@ -46,10 +46,37 @@ const WFAH_SCALARS: &[(&str, &str)] = &[
     ("actor.orgu_id", "string"),
     ("actor.user_id", "string"),
     ("actor.role", "string"),
+    // E05: satırın SINIFI — `WfahKind`in kapalı listesi (15 değer, snake_case).
+    // `#.kind == "action"` ile aksiyon satırları sayılır; kabalaştırma YOK.
+    ("kind", "string"),
+    // E05 (Ç2'nin devri): akış izi. `null` olabilir — sıralama DEĞİL eşitlik/`in`
+    // ile karşılaştırılır (metin).
+    ("from_node", "string"),
+    ("to_node", "string"),
+    // E05 (Ç4'ün devri): satırı yazan KOLUN kimliği; kolda değilse `null`.
+    ("branch_entry", "string"),
+    // E05 (§3.1): satırın aksiyonu bir geri gönderme mi — ölçüt AD DEĞİL YAPI
+    // (aksiyonun `wft`i `{targets}` formunda mı).
+    ("is_send_back", "boolean"),
     // E14: satırın TURU — paralel olmayan/kolda olmayan satırda `null` (karşılaştırma
     // sessizce false okur). `#.branch_round == $branch_round - 1` = "geçen tur".
     ("branch_round", "number"),
 ];
+
+/// YALNIZ `$valid` satırlarında bulunan HESAPLANAN alanlar (`K7`/`K9`).
+///
+/// Ham `$wfah` üzerinde yazılırsa `zen_wfah_field_unknown` **HATASI** verilir ve yayın
+/// durur: elenmiş satırları hesaba katmış bir "ilk mi" cevabı ham listede YANLIŞTIR.
+/// Bu, tip denetiminin `#` kökünü ONU SARAN dizi fonksiyonunun İLK ARGÜMANINA göre
+/// çözmesini zorunlu kılar (`Checker::ptr`).
+const VALID_ONLY_SCALARS: &[(&str, &str)] = &[
+    ("first_by_actor_at_node", "boolean"),
+    ("first_by_orgu_at_node", "boolean"),
+];
+
+/// İki argümanlı dizi fonksiyonları — `#` kökünün KAYNAĞI bunların İLK argümanıdır.
+/// CLAUDE.md'deki tam liste ile aynı küme.
+const ARRAY_FNS: &[&str] = &["count", "some", "all", "none", "one", "filter", "map", "flatMap"];
 
 /// `$wfah` izdüşümünün ZAMAN DAMGASI alanları.
 ///
@@ -163,11 +190,20 @@ impl Ty {
 /// Bir üye zincirinin kökü — hangi ad alanına bakıyor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root {
-    /// `#` (closure) / `$prev` / `$first` — hepsi AYNI ŞEKLİ taşır, ama **KAYNAKLARI
-    /// FARKLIDIR** (R04): `#` ham `$wfah` dizisi üzerinde çalışır, `$prev`/`$first`
-    /// yalnız AKSİYON satırlarına süzülmüş uçları gösterir. Tip denetimi bu ayrımı
-    /// YAKALAMAZ ve yakalamamalıdır — üçü aynı alan kümesine sahiptir.
+    /// HAM defter satırı: `#` (ham `$wfah` üzerindeki closure) / `$prev` / `$first`.
+    ///
+    /// Üçü AYNI ŞEKLİ taşır ama **KAYNAKLARI FARKLIDIR** (R04): `#` bütün satırları
+    /// görür, `$prev`/`$first` yalnız AKSİYON satırlarına süzülmüş uçları. Tip
+    /// denetimi bu ayrımı YAKALAMAZ ve yakalamamalıdır — alan kümeleri aynıdır.
     WfahEntry,
+    /// `$valid` üzerindeki closure satırı — `WfahEntry`in alanları + `K7`nin iki
+    /// hesaplanan alanı (`VALID_ONLY_SCALARS`).
+    ValidEntry,
+    /// `$wfah` DİZİSİNİN kendisi. `Known(Ty::Arr)`dan ayrı bir varyant çünkü `#`
+    /// kökünün hangi satır şekline çözüleceği tam olarak bu ayrıma bağlıdır.
+    WfahList,
+    /// `$valid` dizisinin kendisi.
+    ValidList,
     Ctx,
     ActionInput,
     /// Tipi bilinen sistem kökleri.
@@ -175,15 +211,38 @@ enum Root {
     Other,
 }
 
+impl Root {
+    /// Bu kök bir WFAH satırı mı (ham ya da elenmiş) — alan denetimi ikisine de aynı
+    /// kuralı uygular, farkı yalnız `VALID_ONLY_SCALARS`ın görünürlüğüdür.
+    fn is_entry(self) -> bool {
+        matches!(self, Root::WfahEntry | Root::ValidEntry)
+    }
+
+    /// Bir dizi kökünün `#` satır şekli — `map($valid, …)` içindeki `#` `ValidEntry`,
+    /// `map($wfah, …)` içindeki `WfahEntry`. Dizi olmayan/bilinmeyen kaynak `None`
+    /// döner ve saran bağlamın kökü KORUNUR.
+    fn entry_of_list(self) -> Option<Root> {
+        match self {
+            Root::WfahList => Some(Root::WfahEntry),
+            Root::ValidList => Some(Root::ValidEntry),
+            _ => None,
+        }
+    }
+}
+
 /// `Member{Member{root, "a"}, "b"}` zincirini `(kök, "a.b")` hâline düzleştirir.
 /// Sayısal indeks (`[0]`) ya da hesaplanmış property varsa `None` — yol değildir.
-fn flatten_path<'a>(node: &'a Node<'a>) -> Option<(Root, String)> {
+///
+/// `ptr` = `#` kökünün İÇİNDE BULUNDUĞUMUZ bağlamdaki satır şekli (`E05`/S3). Kaynak
+/// izlemesi olmadan `#.first_by_actor_at_node` ham `$wfah` üzerinde de geçerli
+/// görünürdü; oysa o alan orada TANIMSIZDIR ve koşul sessizce hep-false okurdu.
+fn flatten_path<'a>(node: &'a Node<'a>, ptr: Root) -> Option<(Root, String)> {
     match node {
         Node::Member { node, property } => {
             let Node::String(name) = property else {
                 return None;
             };
-            let (root, prefix) = flatten_path(node)?;
+            let (root, prefix) = flatten_path(node, ptr)?;
             Some((
                 root,
                 if prefix.is_empty() {
@@ -193,16 +252,20 @@ fn flatten_path<'a>(node: &'a Node<'a>) -> Option<(Root, String)> {
                 },
             ))
         }
-        Node::Parenthesized(inner) => flatten_path(inner),
+        Node::Parenthesized(inner) => flatten_path(inner, ptr),
         // Closure içinde `#` kökü `Pointer` olarak gelir, dışında `Identifier("#")`.
-        Node::Pointer => Some((Root::WfahEntry, String::new())),
+        Node::Pointer => Some((ptr, String::new())),
         Node::Identifier(name) => Some((
             match *name {
-                "#" | "$prev" | "$first" => Root::WfahEntry,
+                "#" => ptr,
+                // R04: uçlar HAM listeye bakar — `$valid`in hesaplanan alanlarını
+                // TAŞIMAZLAR ("son geçerli aksiyon" diye bir kavram yoktur).
+                "$prev" | "$first" => Root::WfahEntry,
                 "$ctx" => Root::Ctx,
                 "$action" => Root::ActionInput,
                 "$actor" => Root::Known(Ty::Obj),
-                "$wfah" => Root::Known(Ty::Arr),
+                "$wfah" => Root::WfahList,
+                "$valid" => Root::ValidList,
                 "$timestamp" | "$wfe_id" | "$node" => Root::Known(Ty::Str),
                 // E14: YAŞAYAN turun numarası. Paralel mod dışında `null`; tipi
                 // sayıdır ki `$branch_round - 1` aritmetiği tip denetiminden geçsin.
@@ -212,6 +275,15 @@ fn flatten_path<'a>(node: &'a Node<'a>) -> Option<(Root, String)> {
             String::new(),
         )),
         _ => None,
+    }
+}
+
+/// Bir dizi fonksiyonunun İLK argümanından `#` kökünün satır şeklini çözer.
+/// Çözülemeyen kaynakta saran bağlamın kökü KORUNUR (`fallback`).
+fn pointer_root<'a>(source: &'a Node<'a>, fallback: Root) -> Root {
+    match flatten_path(source, fallback) {
+        Some((root, p)) if p.is_empty() => root.entry_of_list().unwrap_or(fallback),
+        _ => fallback,
     }
 }
 
@@ -236,12 +308,14 @@ fn input_path_type(path: &str, env: &ExprEnv) -> Ty {
     Ty::Unknown
 }
 
-/// `$wfah` izdüşümündeki bir alanın tipi. Çıplak girdi ve `actor`/`input` NESNEDİR.
-fn wfah_field_type(field: &str, env: &ExprEnv) -> Ty {
+/// Satır izdüşümündeki bir alanın tipi. Çıplak girdi ve `actor`/`input` NESNEDİR.
+///
+/// KÖK DUYARLIDIR: `$valid` satırında iki tablo birleşik okunur.
+fn wfah_field_type(field: &str, env: &ExprEnv, root: Root) -> Ty {
     if field.is_empty() || field == "actor" || field == "input" {
         return Ty::Obj;
     }
-    if let Some((_, t)) = WFAH_SCALARS.iter().find(|(name, _)| *name == field) {
+    if let Some((_, t)) = scalar_tables(root).find(|(name, _)| *name == field) {
         return Ty::from_schema(t);
     }
     match field.strip_prefix("input.") {
@@ -250,7 +324,17 @@ fn wfah_field_type(field: &str, env: &ExprEnv) -> Ty {
     }
 }
 
-fn type_of<'a>(node: &'a Node<'a>, env: &ExprEnv) -> Ty {
+/// Kökün gördüğü skaler alan tabloları — `$valid` ikisini, ham liste yalnız birini.
+fn scalar_tables(root: Root) -> impl Iterator<Item = &'static (&'static str, &'static str)> {
+    let extra: &[(&str, &str)] = if root == Root::ValidEntry {
+        VALID_ONLY_SCALARS
+    } else {
+        &[]
+    };
+    WFAH_SCALARS.iter().chain(extra.iter())
+}
+
+fn type_of<'a>(node: &'a Node<'a>, env: &ExprEnv, ptr: Root) -> Ty {
     match node {
         Node::Null => Ty::Null,
         Node::Bool(_) => Ty::Bool,
@@ -258,12 +342,12 @@ fn type_of<'a>(node: &'a Node<'a>, env: &ExprEnv) -> Ty {
         Node::String(_) | Node::TemplateString(_) => Ty::Str,
         Node::Array(_) => Ty::Arr,
         Node::Object(_) => Ty::Obj,
-        Node::Parenthesized(inner) => type_of(inner, env),
+        Node::Parenthesized(inner) => type_of(inner, env, ptr),
         // Fonksiyon sonuçları BİLİNMEZ sayılır: `d(#.at) > d($ctx.son)` gibi meşru tarih
         // karşılaştırmaları yanlış yere hata almasın (motor Dynamic/Dynamic çiftini bilir).
         Node::FunctionCall { .. } | Node::MethodCall { .. } => Ty::Unknown,
-        _ => match flatten_path(node) {
-            Some((Root::WfahEntry, path)) => wfah_field_type(&path, env),
+        _ => match flatten_path(node, ptr) {
+            Some((root, path)) if root.is_entry() => wfah_field_type(&path, env, root),
             Some((Root::Ctx, path)) if !path.is_empty() => schema_type_at(env.context, &path)
                 .map(|t| Ty::from_schema(&t))
                 .unwrap_or(Ty::Unknown),
@@ -272,23 +356,25 @@ fn type_of<'a>(node: &'a Node<'a>, env: &ExprEnv) -> Ty {
                 None => Ty::Unknown,
             },
             Some((Root::Known(t), path)) if path.is_empty() => t,
+            // `$wfah` / `$valid` çıplak hâlde DİZİdir.
+            Some((Root::WfahList | Root::ValidList, path)) if path.is_empty() => Ty::Arr,
             _ => Ty::Unknown,
         },
     }
 }
 
 /// İfadenin metinsel karşılığı — hata mesajında hangi tarafın kastedildiği görünsün.
-fn describe<'a>(node: &'a Node<'a>) -> String {
+fn describe<'a>(node: &'a Node<'a>, ptr: Root) -> String {
     match node {
         Node::Null => "null".into(),
         Node::Bool(b) => b.to_string(),
         Node::Number(n) => n.to_string(),
         Node::String(s) => format!("\"{s}\""),
-        Node::Parenthesized(inner) => describe(inner),
-        _ => match flatten_path(node) {
+        Node::Parenthesized(inner) => describe(inner, ptr),
+        _ => match flatten_path(node, ptr) {
             Some((root, path)) => {
                 let prefix = match root {
-                    Root::WfahEntry => "#.",
+                    Root::WfahEntry | Root::ValidEntry => "#.",
                     Root::Ctx => "$ctx.",
                     Root::ActionInput => "$action.",
                     _ => "",
@@ -325,7 +411,7 @@ fn flatten_and<'a>(node: &'a Node<'a>, out: &mut Vec<&'a Node<'a>>) {
 /// Bu düğüm bir AKSİYON KAPISI mı — kendisinden sonraki `#.input.*` sıralama
 /// karşılaştırmalarını güvenli kılar mı? Yalnız `#.action == …` ve `#.action in […]`:
 /// `!=` girdinin VARLIĞINI garanti etmez (bkz. `tests/editor_zen_contract.rs`).
-fn is_action_gate<'a>(node: &'a Node<'a>) -> bool {
+fn is_action_gate<'a>(node: &'a Node<'a>, ptr: Root) -> bool {
     let Node::Binary {
         left,
         operator,
@@ -338,14 +424,14 @@ fn is_action_gate<'a>(node: &'a Node<'a>) -> bool {
         operator,
         Operator::Comparison(ComparisonOperator::Equal) | Operator::Comparison(ComparisonOperator::In)
     );
-    gate_op && matches!(flatten_path(left), Some((Root::WfahEntry, p)) if p == "action")
+    gate_op && matches!(flatten_path(left, ptr), Some((r, p)) if r.is_entry() && p == "action")
 }
 
 /// Bu düğüm bir `$wfah` ZAMAN DAMGASI alanı mı (`#.at` / `$prev.at` / `$first.at`).
-fn is_wfah_timestamp<'a>(node: &'a Node<'a>) -> bool {
+fn is_wfah_timestamp<'a>(node: &'a Node<'a>, ptr: Root) -> bool {
     matches!(
-        flatten_path(node),
-        Some((Root::WfahEntry, p)) if WFAH_TIMESTAMP_FIELDS.contains(&p.as_str())
+        flatten_path(node, ptr),
+        Some((r, p)) if r.is_entry() && WFAH_TIMESTAMP_FIELDS.contains(&p.as_str())
     )
 }
 
@@ -353,16 +439,68 @@ struct Checker<'e, 'a> {
     env: &'e ExprEnv<'a>,
     out: Vec<Issue>,
     seen_fields: HashSet<String>,
+    /// `E05`/S3 — `#` kökünün İÇİNDE BULUNDUĞUMUZ bağlamdaki satır şekli.
+    ///
+    /// Dizi fonksiyonunun İLK argümanına göre çözülür (`pointer_root`) ve closure'a
+    /// girerken güncellenir; dışarıda ham satır varsayılır (bugünkü davranış).
+    /// Kaynak izlenmezse `#.first_by_actor_at_node` ham `$wfah` üzerinde de geçerli
+    /// GÖRÜNÜR ve koşul sessizce hep-false okur.
+    ptr: Root,
+    /// Aynı bilinmeyen kök için tek hata — `$valdi.a == $valdi.b` iki kez bağırmasın.
+    seen_roots: HashSet<String>,
 }
 
 impl<'e, 'a> Checker<'e, 'a> {
+    /// `E05`/BAĞLI KURAL 2 — `$` ile başlayan kök kapalı tabloda mı.
+    ///
+    /// Tablonun tek kaynağı motorun değerlendirme ortamıdır (`eval::ZEN_ROOTS`, bir
+    /// testle `zen_context`e çivili). `$` ile başlamayan adlar (zen'in kendi
+    /// sözcükleri, `#`) bu kuralın DIŞINDADIR.
+    fn check_root(&mut self, name: &str) {
+        if !name.starts_with('$') || crate::v22::eval::ZEN_ROOTS.contains(&name) {
+            return;
+        }
+        if !self.seen_roots.insert(name.to_string()) {
+            return;
+        }
+        self.out.push((
+            "zen_unknown_root",
+            true,
+            format!(
+                "'{name}' bir ZEN kökü DEĞİL — tanınmayan kök sessizce null okur ve koşul \
+                 hep-false olur. Geçerli kökler: {}",
+                crate::v22::eval::ZEN_ROOTS.join(", ")
+            ),
+        ));
+    }
+
+    /// Dizi fonksiyonunun closure'ı içinde `#` hangi satır şekline çözülür — `E05`/S3.
+    /// `None` = bu çağrı `#` kökünü DEĞİŞTİRMEZ (saran bağlamın kökü sürer).
+    fn call_pointer<'n>(&self, name: &str, arguments: &'n [&'n Node<'n>]) -> Option<Root> {
+        (ARRAY_FNS.contains(&name) && arguments.len() == 2)
+            .then(|| pointer_root(arguments[0], self.ptr))
+    }
+
+    /// `f`yi verilen satır kökü altında koşar, sonra eski kökü geri yükler.
+    fn with_pointer<R>(&mut self, root: Root, f: impl FnOnce(&mut Self) -> R) -> R {
+        let saved = std::mem::replace(&mut self.ptr, root);
+        let out = f(self);
+        self.ptr = saved;
+        out
+    }
+
     /// `#.<alan>` motorun izdüşümünde var mı — yoksa koşul sessizce `null` okur ve
     /// hep-false olur. Editörün `wfahFieldVerdict`i ile AYNI küme.
-    fn check_wfah_field(&mut self, path: &str, origin: &str) {
+    ///
+    /// KÖK DUYARLIDIR (`E05`/S3): hesaplanan iki alan (`first_by_*_at_node`) yalnız
+    /// `$valid` satırlarında vardır ve ham listede yazılırsa mesaj bunu SÖYLER —
+    /// "böyle bir alan yok" demek tasarımcıyı yanlış yere gönderirdi. Kural adı
+    /// `zen_wfah_field_unknown` KALIR (yeni kod açılmaz).
+    fn check_wfah_field(&mut self, path: &str, origin: &str, root: Root) {
         if path.is_empty()
             || path == "actor"
             || path == "input"
-            || WFAH_SCALARS.iter().any(|(name, _)| *name == path)
+            || scalar_tables(root).any(|(name, _)| *name == path)
         {
             return;
         }
@@ -370,14 +508,33 @@ impl<'e, 'a> Checker<'e, 'a> {
         if !self.seen_fields.insert(key.clone()) {
             return;
         }
-        let Some(rest) = path.strip_prefix("input.") else {
+        // Ham listede YAZILAN hesaplanan alan: alan VAR ama burada anlamsız.
+        if root != Root::ValidEntry && VALID_ONLY_SCALARS.iter().any(|(name, _)| *name == path) {
             self.out.push((
                 "zen_wfah_field_unknown",
                 true,
                 format!(
-                    "'{key}' motorun $wfah izdüşümünde yok (yalnız seq, action, actor.role, \
-                     actor.orgu_id, actor.user_id, at, branch_round) — koşul sessizce null \
-                     okur, hep-false olur"
+                    "'{key}' yalnız $valid üzerinde anlamlıdır — ham $wfah elenmiş \
+                     satırları da taşır ve orada 'ilk mi' cevabı YANLIŞ olur. İfadeyi \
+                     $valid üzerine alın: count($valid, {key} ...)"
+                ),
+            ));
+            return;
+        }
+        let Some(rest) = path.strip_prefix("input.") else {
+            let known: Vec<&str> = scalar_tables(root).map(|(name, _)| *name).collect();
+            let list = known.join(", ");
+            let surface = if root == Root::ValidEntry {
+                "$valid"
+            } else {
+                "$wfah"
+            };
+            self.out.push((
+                "zen_wfah_field_unknown",
+                true,
+                format!(
+                    "'{key}' motorun {surface} izdüşümünde yok (yalnız {list}, input.<yol>) \
+                     — koşul sessizce null okur, hep-false olur"
                 ),
             ));
             return;
@@ -406,9 +563,11 @@ impl<'e, 'a> Checker<'e, 'a> {
     /// Tüm alt ağaçtaki `$wfah` alan referanslarını denetler (karşılaştırma dışındaki
     /// konumlar dahil: `map(...)`, `filter(...)`, fonksiyon argümanı…).
     fn collect_fields<'n>(&mut self, node: &'n Node<'n>) {
-        if let Some((Root::WfahEntry, path)) = flatten_path(node) {
-            self.check_wfah_field(&path, "#");
-            return;
+        if let Some((root, path)) = flatten_path(node, self.ptr) {
+            if root.is_entry() {
+                self.check_wfah_field(&path, "#", root);
+                return;
+            }
         }
         match node {
             Node::Member { node, .. } => self.collect_fields(node),
@@ -428,9 +587,13 @@ impl<'e, 'a> Checker<'e, 'a> {
                 self.collect_fields(on_false);
             }
             Node::Closure { body, .. } => self.collect_fields(body),
-            Node::FunctionCall { arguments, .. } => {
-                for a in *arguments {
-                    self.collect_fields(a);
+            Node::FunctionCall { kind, arguments } => {
+                let inner = self.call_pointer(&kind.to_string(), arguments);
+                for (i, a) in arguments.iter().enumerate() {
+                    match inner {
+                        Some(r) if i > 0 => self.with_pointer(r, |c| c.collect_fields(a)),
+                        _ => self.collect_fields(a),
+                    }
                 }
             }
             Node::MethodCall { this, arguments, .. } => {
@@ -459,6 +622,9 @@ impl<'e, 'a> Checker<'e, 'a> {
                     self.collect_fields(t);
                 }
             }
+            // BAĞLI KURAL 2: yazım hatası olan kök BURADA yakalanır. `flatten_path`
+            // onu `Root::Other`a düşürüyor ve hiçbir tip kuralı görmüyordu.
+            Node::Identifier(name) => self.check_root(name),
             _ => {}
         }
     }
@@ -478,7 +644,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                 format!(
                     "'{}' bir {} — motor obje/dizi karşılaştırmasını desteklemez, 'in' hiçbir \
                      öğeyle eşleşmez. Skaler bir alt alanı karşılaştırın",
-                    describe(left),
+                    describe(left, self.ptr),
                     lt.label()
                 ),
             ));
@@ -492,7 +658,7 @@ impl<'e, 'a> Checker<'e, 'a> {
         }
         // `#.at in [...]` listesinin öğeleri TAM damga olmalı (biçim kuralı, bkz.
         // WFAH_TIMESTAMP_FIELDS): yarım bir önek `In`in öğe eşitliğinde asla tutmaz.
-        if is_wfah_timestamp(left) {
+        if is_wfah_timestamp(left, self.ptr) {
             for item in *items {
                 if let Node::String(s) = item {
                     if !is_timestamp_literal(s, true) {
@@ -502,7 +668,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                             format!(
                                 "'{}' bir zaman damgasıdır (yyyyMMddHHmmss, 14 rakam) — listedeki \
                                  \"{s}\" hiçbir kayıtla eşleşmez",
-                                describe(left)
+                                describe(left, self.ptr)
                             ),
                         ));
                         return;
@@ -511,7 +677,7 @@ impl<'e, 'a> Checker<'e, 'a> {
             }
         }
         for item in *items {
-            let it = type_of(item, self.env);
+            let it = type_of(item, self.env, self.ptr);
             if matches!(it, Ty::Unknown | Ty::Null) || types_compatible(it.label(), lt.label()) {
                 continue;
             }
@@ -521,9 +687,9 @@ impl<'e, 'a> Checker<'e, 'a> {
                 format!(
                     "'{}' {} tipinde ama listedeki {} bir {} — motor öğe öğe eşitlik arar, \
                      farklı tipli öğe hiçbir zaman eşleşmez (koşul sessizce hep-false olur)",
-                    describe(left),
+                    describe(left, self.ptr),
                     lt.label(),
-                    describe(item),
+                    describe(item, self.ptr),
                     it.label()
                 ),
             ));
@@ -543,7 +709,7 @@ impl<'e, 'a> Checker<'e, 'a> {
         }
         let (subject, arg) = (arguments[0], arguments[1]);
         // `matches` regex alır — biçim kuralı uygulanamaz.
-        if is_wfah_timestamp(subject) && name != "matches" {
+        if is_wfah_timestamp(subject, self.ptr) && name != "matches" {
             if let Node::String(s) = arg {
                 // `startsWith` ÖNEK ister; `contains`/`endsWith` yalnız rakam (damgada harf yok).
                 let ok = if name == "startsWith" {
@@ -560,14 +726,14 @@ impl<'e, 'a> Checker<'e, 'a> {
                              eşleşmez. Önek anlamlı bir sınırda bitmeli: \"2026\" (yıl), \
                              \"202601\" (ay), \"20260115\" (gün), \"2026011510\" (saat), \
                              \"202601151030\" (dakika), \"20260115103000\" (saniye)",
-                            describe(subject)
+                            describe(subject, self.ptr)
                         ),
                     ));
                 }
             }
             return;
         }
-        let st = type_of(subject, self.env);
+        let st = type_of(subject, self.env, self.ptr);
         if matches!(st, Ty::Num | Ty::Bool | Ty::Obj | Ty::Arr) {
             self.out.push((
                 "zen_text_op_not_string",
@@ -575,7 +741,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                 format!(
                     "'{}' {} tipinde — '{name}' yalnız metinde çalışır, motor diğer tiplerde \
                      hata verir ya da sessizce yanlış sonuç döner",
-                    describe(subject),
+                    describe(subject, self.ptr),
                     st.label()
                 ),
             ));
@@ -594,8 +760,12 @@ impl<'e, 'a> Checker<'e, 'a> {
                 let fname = kind.to_string();
                 self.check_text_op(&fname, arguments);
                 self.check_numeric_agg(&fname, arguments);
-                for a in *arguments {
-                    self.check_calls(a);
+                let inner = self.call_pointer(&fname, arguments);
+                for (i, a) in arguments.iter().enumerate() {
+                    match inner {
+                        Some(r) if i > 0 => self.with_pointer(r, |c| c.check_calls(a)),
+                        _ => self.check_calls(a),
+                    }
                 }
             }
             Node::MethodCall { this, arguments, .. } => {
@@ -648,7 +818,9 @@ impl<'e, 'a> Checker<'e, 'a> {
             Node::Closure { body, .. } => body,
             other => other,
         };
-        let et = type_of(projection, self.env);
+        // Yordamın gördüğü satır şekli `map`in KAYNAĞINDAN gelir.
+        let src_ptr = pointer_root(map_args[0], self.ptr);
+        let et = type_of(projection, self.env, src_ptr);
         if matches!(et, Ty::Str | Ty::Bool | Ty::Obj | Ty::Arr) {
             self.out.push((
                 "zen_agg_not_numeric",
@@ -657,7 +829,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                     "'{}' {} tipinde — '{name}' yalnız SAYI dizisi toplar, motor \
                      çalışma anında \"Expected a number array\" ile patlar. Sayısal bir \
                      alan seçin",
-                    describe(projection),
+                    describe(projection, src_ptr),
                     et.label()
                 ),
             ));
@@ -668,7 +840,10 @@ impl<'e, 'a> Checker<'e, 'a> {
         // olduğu garanti olabilir (ilk adımdan sonraki bir geçiş) — bunu ifade metninden
         // bilemeyiz. `sum` listede yok, boş dizide 0 döner.
         if EMPTY_UNSAFE_AGGS.contains(&name)
-            && matches!(flatten_path(map_args[0]), Some((Root::Known(Ty::Arr), p)) if p.is_empty())
+            && matches!(
+                flatten_path(map_args[0], self.ptr),
+                Some((Root::WfahList | Root::ValidList, p)) if p.is_empty()
+            )
         {
             self.out.push((
                 "zen_agg_empty_history",
@@ -690,7 +865,7 @@ impl<'e, 'a> Checker<'e, 'a> {
         right: &'n Node<'n>,
         gated: bool,
     ) {
-        let (lt, rt) = (type_of(left, self.env), type_of(right, self.env));
+        let (lt, rt) = (type_of(left, self.env, self.ptr), type_of(right, self.env, self.ptr));
         // `in` / `not in` liste semantiğidir: İKİ TARAFIN tipi eşit olmak zorunda değil,
         // ama listenin ÖĞELERİ sol tarafla aynı tipte olmalı — `In` opcode'u öğe öğe
         // `Equal` yapar, yani `#.seq in ["a"]` hiçbir öğeyle eşleşmez ve koşul sessizce
@@ -719,7 +894,7 @@ impl<'e, 'a> Checker<'e, 'a> {
         //    (metinde `Compare` runtime patlar) — o yüzden yalnız eşitlikte bakılır.
         if !ordering {
             for (node, other) in [(left, right), (right, left)] {
-                if !is_wfah_timestamp(node) {
+                if !is_wfah_timestamp(node, self.ptr) {
                     continue;
                 }
                 if let Node::String(s) = other {
@@ -732,8 +907,8 @@ impl<'e, 'a> Checker<'e, 'a> {
                                  20260115103000) — \"{s}\" bu biçimde değil, hiçbir kayıtla \
                                  eşleşmez. Yalnız yıl/ay/gün eşleştirmek için \
                                  startsWith({}, \"20260115\") kullanın",
-                                describe(node),
-                                describe(node),
+                                describe(node, self.ptr),
+                                describe(node, self.ptr),
                             ),
                         ));
                         return;
@@ -752,7 +927,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                         "'{}' bir {} — motor obje/dizi karşılaştırmasını desteklemez ({} daima \
                          yanlış sonuç verir). Skaler bir alt alanı karşılaştırın ya da varlığını \
                          `!= null` ile sorun",
-                        describe(node),
+                        describe(node, self.ptr),
                         ty.label(),
                         if ordering { "sıralama" } else { "eşitlik" }
                     ),
@@ -771,7 +946,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                         format!(
                             "'{}' {} tipinde — '{}' yalnız sayı (ve d() ile tarih) üzerinde \
                              çalışır, motor diğer tiplerde runtime hatası verir",
-                            describe(node),
+                            describe(node, self.ptr),
                             ty.label(),
                             op_symbol(op)
                         ),
@@ -781,7 +956,9 @@ impl<'e, 'a> Checker<'e, 'a> {
             }
             // Kapısız `#.input.*` sıralaması: girdi yoksa `null > 5` RUNTIME patlar.
             if !gated {
-                if let Some((Root::WfahEntry, path)) = flatten_path(left) {
+                if let Some((root, path)) = flatten_path(left, self.ptr).filter(|(r, _)| r.is_entry())
+                {
+                    let _ = root;
                     if path.starts_with("input.") {
                         self.out.push((
                             "zen_input_needs_action_gate",
@@ -813,9 +990,9 @@ impl<'e, 'a> Checker<'e, 'a> {
                 format!(
                     "'{}' {} tipinde ama '{}' bir {} — motor farklı tipleri eşleştirmez, koşul \
                      sessizce hep aynı sonucu verir",
-                    describe(left),
+                    describe(left, self.ptr),
                     lt.label(),
-                    describe(right),
+                    describe(right, self.ptr),
                     rt.label()
                 ),
             ));
@@ -835,7 +1012,7 @@ impl<'e, 'a> Checker<'e, 'a> {
                 let mut running = gated;
                 for item in items {
                     self.visit(item, running);
-                    if is_action_gate(item) {
+                    if is_action_gate(item, self.ptr) {
                         running = true;
                     }
                 }
@@ -879,8 +1056,15 @@ impl<'e, 'a> Checker<'e, 'a> {
                 let fname = kind.to_string();
                 self.check_text_op(&fname, arguments);
                 self.check_numeric_agg(&fname, arguments);
-                for a in *arguments {
-                    self.visit(a, gated);
+                // E05/S3: `#` kökü SARAN dizi fonksiyonunun İLK argümanına göre
+                // çözülür — `count($valid, #.first_by_orgu_at_node)` geçerli,
+                // `count($wfah, …)` aynı alanla HATA.
+                let inner = self.call_pointer(&fname, arguments);
+                for (i, a) in arguments.iter().enumerate() {
+                    match inner {
+                        Some(r) if i > 0 => self.with_pointer(r, |c| c.visit(a, gated)),
+                        _ => self.visit(a, gated),
+                    }
                 }
             }
             Node::MethodCall { this, arguments, .. } => {
@@ -939,6 +1123,10 @@ pub fn expression_type_issues(expr: &str, env: &ExprEnv) -> Vec<Issue> {
         env,
         out: Vec::new(),
         seen_fields: HashSet::new(),
+        // Dizi fonksiyonu DIŞINDA `#` ham satırdır (bugünkü davranış); `$valid`
+        // içine girildiğinde `with_pointer` bunu değiştirir.
+        ptr: Root::WfahEntry,
+        seen_roots: HashSet::new(),
     };
     checker.visit(result.root, false);
     checker.out

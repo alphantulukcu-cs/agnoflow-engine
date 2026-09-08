@@ -17,6 +17,7 @@ use crate::types::wfd_v22::{CaGrantRule, GlobalAction, WfAdminRule};
 use crate::v22::eval::{evaluate_bool, EvalEnv};
 use crate::v22::matcher::{authorize_or_delegated_anchored, MatchEnv};
 use crate::v22::ports::Wfes;
+use crate::v22::valid::ValidRules;
 
 /// Kurallardan HERHANGİ biri aktörü yetkilendiriyor mu (OR).
 ///
@@ -27,6 +28,9 @@ pub async fn matches_grant_rules<'r, I>(
     rules: I,
     actor: &Actor,
     wfes: &Wfes,
+    // E05: guard ifadesi `$valid`/`#.is_send_back` görebilir ve ikisi de BELGEDEN
+    // türer; bu fonksiyonun elinde WFD olmadığı için kural seti parametredir.
+    valid_rules: &ValidRules,
     org: &dyn OrgPort,
 ) -> Result<bool, EngineError>
 where
@@ -53,7 +57,7 @@ where
             None => true,
             Some(expr) => {
                 let eval_env = EvalEnv::new(ctx)
-                    .with_wfah(&wfes.wfah)
+                    .with_wfah(&wfes.wfah, valid_rules)
                     .with_node(wfes.current_node.as_deref())
                     .with_actor(actor)
                     .with_wfe_id(wfes.wfe_id);
@@ -83,6 +87,7 @@ pub async fn wf_admin_global_actions(
     rules: &[WfAdminRule],
     actor: &Actor,
     wfes: &Wfes,
+    valid_rules: &ValidRules,
     org: &dyn OrgPort,
 ) -> Result<BTreeSet<GlobalAction>, EngineError> {
     let mut out = BTreeSet::new();
@@ -92,7 +97,9 @@ pub async fn wf_admin_global_actions(
         if rule.allowed_global_actions.is_empty() {
             continue;
         }
-        if matches_grant_rules(std::iter::once(&rule.grant), actor, wfes, org).await? {
+        if matches_grant_rules(std::iter::once(&rule.grant), actor, wfes, valid_rules, org)
+            .await?
+        {
             out.extend(rule.allowed_global_actions.iter().copied());
         }
     }
@@ -109,9 +116,10 @@ pub async fn require_global_action(
     actor: &Actor,
     action: GlobalAction,
     wfes: &Wfes,
+    valid_rules: &ValidRules,
     org: &dyn OrgPort,
 ) -> Result<(), EngineError> {
-    if wf_admin_global_actions(rules, actor, wfes, org)
+    if wf_admin_global_actions(rules, actor, wfes, valid_rules, org)
         .await?
         .contains(&action)
     {

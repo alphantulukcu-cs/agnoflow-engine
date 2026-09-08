@@ -41,6 +41,7 @@ use crate::v22::ports::{
 };
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use crate::v22::valid;
+use crate::v22::valid::ValidRules;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
@@ -595,7 +596,7 @@ impl<'a> Engine<'a> {
                 None => true,
                 Some(expr) => {
                     let env = EvalEnv::new(&ctx)
-                        .with_wfah(&wfes.wfah)
+                        .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
                         .with_node(Some(current_node))
                         .with_actor(actor)
                         .with_wfe_id(wfes.wfe_id)
@@ -816,7 +817,7 @@ impl<'a> Engine<'a> {
                     None => true,
                     Some(expr) => {
                         let env = EvalEnv::new(&ctx)
-                            .with_wfah(&wfes.wfah)
+                            .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
                             .with_node(Some(&b.branch_node))
                             .with_actor(actor)
                             .with_wfe_id(wfes.wfe_id)
@@ -1190,6 +1191,7 @@ impl<'a> Engine<'a> {
             &wfd.listable,
             ctx,
             wfah,
+            &ValidRules::for_version(wfd),
             current_node,
             wfe_id,
             origin_orgu,
@@ -1203,6 +1205,7 @@ impl<'a> Engine<'a> {
             wfd.wf_admin.iter().map(WfAdminRule::grant_ref),
             ctx,
             wfah,
+            &ValidRules::for_version(wfd),
             current_node,
             wfe_id,
             origin_orgu,
@@ -1251,6 +1254,7 @@ impl<'a> Engine<'a> {
             &node.listable,
             ctx,
             wfah,
+            &ValidRules::for_version(wfd),
             guard_node,
             wfe_id,
             origin_orgu,
@@ -1293,6 +1297,7 @@ impl<'a> Engine<'a> {
             &terminal.listable,
             ctx,
             wfah,
+            &ValidRules::for_version(wfd),
             None,
             wfe_id,
             origin_orgu,
@@ -1316,6 +1321,10 @@ impl<'a> Engine<'a> {
         rules: I,
         ctx: &Value,
         wfah: &Wfah,
+        // E05: `$valid`/`#.is_send_back` belgeden türer; guard ifadesi de onları
+        // görebildiği için kural seti buraya kadar taşınmak ZORUNDA (bu fonksiyonun
+        // elinde WFD yok).
+        valid_rules: &ValidRules,
         guard_node: Option<&str>,
         wfe_id: Uuid,
         origin_orgu: Uuid,
@@ -1327,7 +1336,7 @@ impl<'a> Engine<'a> {
         for rule in rules {
             if let Some(expr) = &rule.when {
                 let env = EvalEnv::new(ctx)
-                    .with_wfah(wfah)
+                    .with_wfah(wfah, valid_rules)
                     .with_node(guard_node)
                     .with_wfe_id(wfe_id);
                 if !evaluate_bool(expr, &env)? {
@@ -1418,6 +1427,7 @@ impl<'a> Engine<'a> {
                 wfd.wf_admin.iter().map(WfAdminRule::grant_ref),
                 reassigner,
                 wfes,
+                &ValidRules::for_version(wfd),
                 self.org,
             )
             .await?
@@ -1438,7 +1448,7 @@ impl<'a> Engine<'a> {
                 (true, false) => GlobalAction::AssignFromPool,
                 (true, true) => GlobalAction::Reassign,
             };
-            require_global_action(&wfd.wf_admin, reassigner, needed, wfes, self.org).await?;
+            require_global_action(&wfd.wf_admin, reassigner, needed, wfes, &ValidRules::for_version(wfd), self.org).await?;
         }
 
         // 3. Hedef (varsa) node.c_a'ya uygun olmalı.
@@ -1546,7 +1556,7 @@ impl<'a> Engine<'a> {
                 None => true,
                 Some(expr) => {
                     let env = EvalEnv::new(&ctx)
-                        .with_wfah(&wfes.wfah)
+                        .with_wfah(&wfes.wfah, &ValidRules::for_version(wfd))
                         .with_node(Some(node_key))
                         .with_actor(actor)
                         .with_wfe_id(wfes.wfe_id);
@@ -1701,6 +1711,7 @@ impl<'a> Engine<'a> {
             admin,
             GlobalAction::FireEscalation,
             wfes,
+            &ValidRules::for_version(wfd),
             self.org,
         )
         .await?;
@@ -1741,6 +1752,7 @@ impl<'a> Engine<'a> {
             admin,
             GlobalAction::SkipEscalation,
             wfes,
+            &ValidRules::for_version(wfd),
             self.org,
         )
         .await?;
@@ -1800,7 +1812,7 @@ impl<'a> Engine<'a> {
         wfes: &Wfes,
         admin: &Actor,
     ) -> Result<BTreeSet<GlobalAction>, EngineError> {
-        wf_admin_global_actions(&wfd.wf_admin, admin, wfes, self.org).await
+        wf_admin_global_actions(&wfd.wf_admin, admin, wfes, &ValidRules::for_version(wfd), self.org).await
     }
 
     /// `send_back` — akışı, bu WFE'nin GERÇEKTEN uğradığı bir node'a geri atar.
@@ -1879,7 +1891,7 @@ impl<'a> Engine<'a> {
         if self.deadline_due(wfes, now) {
             return Err(EngineError::WfeExpired);
         }
-        require_global_action(&wfd.wf_admin, admin, action, wfes, self.org).await?;
+        require_global_action(&wfd.wf_admin, admin, action, wfes, &ValidRules::for_version(wfd), self.org).await?;
         // PARALEL MOD SINIRI: kolları toplayıp tek bir node'a inmek `collapse`
         // semantiğidir ve kol bağlamı ister (`WftMode::Branch` bir `from_node`
         // bekler) — adminin ise kolu yoktur. Hangi kolun "geri gönderen" sayılacağı
@@ -2040,7 +2052,7 @@ impl<'a> Engine<'a> {
         // `terminated`a taşımamış olabilir ve o satırı kapatmak tam olarak bu
         // aksiyonun işidir (diğer global aksiyonlar `WfeExpired` ile reddedilir —
         // onlar akışı SÜRDÜRÜR, bu bitirir).
-        require_global_action(&wfd.wf_admin, admin, GlobalAction::Cancel, wfes, self.org).await?;
+        require_global_action(&wfd.wf_admin, admin, GlobalAction::Cancel, wfes, &ValidRules::for_version(wfd), self.org).await?;
 
         let mut seq = wfes.wfah.entries().last().map(|e| e.seq + 1).unwrap_or(1);
         let marker = global_action_marker(GlobalAction::Cancel);
@@ -2726,7 +2738,7 @@ impl<'a> Engine<'a> {
             // when guard — staged ctx üzerinden
             if let Some(when) = &trig.when {
                 let mut env = EvalEnv::new(staged)
-                    .with_wfah(wfah)
+                    .with_wfah(wfah, &ValidRules::for_version(wfd))
                     .with_node(node)
                     .with_actor(actor)
                     .with_wfe_id(wfe_id);
@@ -2747,7 +2759,17 @@ impl<'a> Engine<'a> {
                 ..actor.clone()
             };
             match self
-                .execute_with_retry(def, trig, staged, wfe_id, node, &system, wfah, action_input)
+                .execute_with_retry(
+                    def,
+                    trig,
+                    staged,
+                    wfe_id,
+                    node,
+                    &system,
+                    wfah,
+                    action_input,
+                    &ValidRules::for_version(wfd),
+                )
                 .await
             {
                 Ok(result) => {
@@ -2858,9 +2880,11 @@ impl<'a> Engine<'a> {
         system: &Actor,
         wfah: &Wfah,
         action_input: Option<&Value>,
+        valid_rules: &ValidRules,
     ) -> Result<Value, ExecFailure> {
         let env = ExecEnv {
             env: self.env.clone(),
+            valid_rules: valid_rules.clone(),
             wfe_id,
             ctx: staged.clone(),
             node: node.map(String::from),
@@ -3342,7 +3366,7 @@ impl<'a> Engine<'a> {
                 let mut chosen = None;
                 for cond in conditions {
                     let mut env = EvalEnv::new(&staged)
-                        .with_wfah(wfah)
+                        .with_wfah(wfah, &ValidRules::for_version(wfd))
                         .with_actor(actor)
                         .with_wfe_id(wfe_id);
                     if let Some(input) = action_input {
@@ -3411,7 +3435,7 @@ impl<'a> Engine<'a> {
                     JoinRule::Quorum(k) => arrived_entries.len() as u32 >= *k,
                     JoinRule::Expr(expr) => {
                         let mut env = EvalEnv::new(&staged)
-                            .with_wfah(wfah)
+                            .with_wfah(wfah, &ValidRules::for_version(wfd))
                             .with_node(Some(from_node))
                             .with_actor(actor)
                             .with_wfe_id(wfe_id)

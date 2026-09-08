@@ -291,7 +291,7 @@ fn run_calc(def: &AutoexecDef, env: &ExecEnv) -> Result<Value, ExecFailure> {
     // ctx/node/actor/wfe_id bağlıydı; `$wfah` kullanan calc ifadesi sessizce null okuyup
     // yanlış hesaplıyordu (`len($wfah)` ise patlıyordu).
     let mut eval_env = EvalEnv::new(&env.ctx)
-        .with_wfah(&env.wfah)
+        .with_wfah(&env.wfah, &env.valid_rules)
         .with_node(env.node.as_deref())
         .with_actor(&env.actor)
         .with_wfe_id(env.wfe_id)
@@ -518,6 +518,7 @@ mod tests {
             },
             wfah: Wfah::empty(),
             action_input: None,
+            valid_rules: Default::default(),
         }
     }
 

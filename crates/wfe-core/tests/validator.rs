@@ -1051,6 +1051,59 @@ fn claim_timeout_effects_with_system_tokens_is_valid() {
 
 // ---- WOR-31: Parallel fork/join ----
 
+/// `E05`/BAĞLI KURAL 3: bir node İKİ fork'un giriş kolu OLAMAZ.
+///
+/// Bugün ayrıklık denetimi fork BAŞINA koşuyordu; iç içe olmayan iki fork aynı giriş
+/// node'unu kullanabiliyor ve hiçbir hata çıkmıyordu. `branch_entry` ZEN'e açıldığı
+/// an bu belirsiz bir KİMLİKTİR (`#.branch_entry == "hukuk"` iki fork'u toplar) ve
+/// `E14`in tur çapasını da ikiye böler.
+#[test]
+fn a_node_cannot_be_the_entry_of_two_forks() {
+    let mut v = parallel_fixture_value();
+    let fork = v["transitions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["id"] == "t_fork")
+        .cloned()
+        .expect("fixture'da fork transition'ı var");
+    // İkinci fork AYNI giriş kollarını kullanıyor.
+    let mut second = fork.clone();
+    second["id"] = json!("t_fork_again");
+    second["from"] = json!("self__resultCoordinator");
+    second["action"] = json!("start_review_again");
+    v["transitions"].as_array_mut().unwrap().push(second);
+    v["actions"]["start_review_again"] = v["actions"]["start_review"].clone();
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "parallel_entry_node_shared"),
+        "iki fork aynı giriş node'unu kullanamaz, hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Aynı fork içindeki tekrar BAŞKA bir kuralın işidir (`parallel_branches`) — yeni
+/// kural onu ikinci kez raporlamaz.
+#[test]
+fn duplicate_branch_within_one_fork_keeps_its_own_code() {
+    let mut v = parallel_fixture_value();
+    for t in v["transitions"].as_array_mut().unwrap() {
+        if t["id"] == "t_fork" {
+            t["wft"]["parallel"]["branches"] = json!([
+                "self__financeApprover",
+                "self__financeApprover",
+                "self__hrApprover"
+            ]);
+        }
+    }
+    let report = validate_value(v);
+    assert!(has_error(&report, "parallel_branches"));
+    assert!(
+        !has_error(&report, "parallel_entry_node_shared"),
+        "fork İÇİ tekrar belge geneli kuralına düşmemeli"
+    );
+}
+
 #[test]
 fn parallel_fixture_is_valid() {
     let report = validate_value(parallel_fixture_value());
@@ -2142,6 +2195,116 @@ fn unknown_wfah_field_is_error() {
     // sessizce null okur.
     assert!(errors_for_when(r#"some($wfah, #.actor.name == "ali")"#)
         .contains(&"zen_wfah_field_unknown".to_string()));
+}
+
+// ---- E05: `$valid` yüzeyi + kök tablosu + kaynak izleme ----
+
+/// Kapı (b): hesaplanan alan HAM `$wfah` üzerinde HATA — mesaj alanın yalnız
+/// `$valid`de anlamlı olduğunu SÖYLEMEK zorunda (tasarımcıyı "böyle bir alan yok"
+/// diye yanlış yere göndermemeli).
+#[test]
+fn computed_field_on_the_raw_ledger_is_error() {
+    for field in ["first_by_actor_at_node", "first_by_orgu_at_node"] {
+        let report = validate_value(fixture_with_when(&format!(
+            "count($wfah, #.{field}) >= 2"
+        )));
+        let issue = report
+            .errors
+            .iter()
+            .find(|e| e.code == "zen_wfah_field_unknown")
+            .unwrap_or_else(|| panic!("'{field}' ham listede reddedilmeli"));
+        assert!(
+            issue.message.contains("$valid"),
+            "mesaj doğru yüzeyi göstermeli: {}",
+            issue.message
+        );
+    }
+}
+
+/// Kapı (c): AYNI ifade `$valid` üzerinde GEÇERLİ. Kaynak izlemesi olmadan bu ikisi
+/// ayırt edilemezdi — `#` her iki bağlamda da aynı düğüm tipiyle geliyor.
+#[test]
+fn computed_field_on_valid_is_clean() {
+    let report = validate_value(fixture_with_when(
+        "count($valid, #.first_by_orgu_at_node) >= 2",
+    ));
+    assert!(
+        !has_error(&report, "zen_wfah_field_unknown"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Kaynak izleme İÇ İÇE de çalışır: dıştaki `$valid` içteki `$wfah`ı kapatmaz.
+#[test]
+fn pointer_root_is_scoped_per_array_call() {
+    let report = validate_value(fixture_with_when(
+        "count($valid, #.first_by_orgu_at_node) >= 1 and count($wfah, #.kind == 'action') >= 1",
+    ));
+    assert!(report.errors.is_empty(), "hatalar: {:#?}", report.errors);
+    // Sıra ters olduğunda da: ham liste hesaplanan alanı GÖRMEZ.
+    assert!(errors_for_when(
+        "count($valid, #.kind == 'action') >= 1 and count($wfah, #.first_by_orgu_at_node) >= 1"
+    )
+    .contains(&"zen_wfah_field_unknown".to_string()));
+}
+
+/// Kapı: `E05`in açtığı beş saklanan alan İKİ yüzeyde de geçerli.
+#[test]
+fn new_row_fields_are_open_on_both_surfaces() {
+    for surface in ["$wfah", "$valid"] {
+        let expr = format!(
+            "count({surface}, #.kind == 'action' and #.from_node == 'self__creditAnalyst' \
+             and #.to_node == 'self__branchManager' and #.branch_entry == null \
+             and #.is_send_back == false) >= 1"
+        );
+        let report = validate_value(fixture_with_when(&expr));
+        assert!(
+            report.errors.is_empty(),
+            "{surface}: {:#?}",
+            report.errors
+        );
+    }
+}
+
+/// Kapı (e): BAĞLI KURAL 2 — tanınmayan kök yayını DURDURUR. Bugün `$valdi`
+/// sessizce hep-false okuyordu.
+#[test]
+fn unknown_dollar_root_is_error() {
+    assert!(errors_for_when("$valdi != null").contains(&"zen_unknown_root".to_string()));
+    assert!(
+        errors_for_when("count($valdi, #.action == 'x') >= 1")
+            .contains(&"zen_unknown_root".to_string())
+    );
+    assert!(errors_for_when("$status == 'active'").contains(&"zen_unknown_root".to_string()));
+}
+
+/// Kapalı tablonun TAMAMI kabul edilir — şema sözlüğü bu adlardan DÖRDÜNÜ uzun süre
+/// hiç saymamıştı; tablo sözlükten üretilseydi bugün ÇALIŞAN ifadeler reddedilirdi.
+#[test]
+fn every_declared_root_is_accepted() {
+    for root in wfe_core::v22::eval::ZEN_ROOTS {
+        let expr = format!("{root} != null");
+        assert!(
+            !errors_for_when(&expr).contains(&"zen_unknown_root".to_string()),
+            "'{root}' kapalı tabloda ama reddedildi"
+        );
+    }
+}
+
+/// A3: indeksleme kuralları `$valid`e DE uygulanır ve uyarı `seq` boşluğunu SÖYLER.
+#[test]
+fn valid_indexing_rules_apply() {
+    let report = validate_value(fixture_with_when("$valid[0].action == 'basvuru'"));
+    let warn = report
+        .warnings
+        .iter()
+        .find(|w| w.code == "wfah_index_unguarded")
+        .expect("$valid indekslemesi uyarmalı");
+    assert!(warn.message.contains("BOŞLUKLU"), "{}", warn.message);
+    assert!(
+        errors_for_when("$valid[-1].action == 'x'").contains(&"zen_negative_index".to_string())
+    );
 }
 
 #[test]

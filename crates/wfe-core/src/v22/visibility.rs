@@ -16,6 +16,7 @@ use crate::types::actor::Actor;
 use crate::types::wfd_v22::{COrgu, CandidateActor, CuItem, Wfd, WfAdminRule};
 use crate::v22::grants::matches_grant_rules;
 use crate::v22::matcher::{authorize_or_delegated, authorize_or_delegated_anchored, MatchEnv};
+use crate::v22::valid::ValidRules;
 use crate::v22::ports::{BranchStatus, Wfes};
 use crate::v22::resolver::{resolve_c_orgu, resolve_cu_ident};
 use serde::Deserialize;
@@ -179,10 +180,10 @@ pub async fn can_view(
     // görmeye yetkili" kalır. Bu sıra `server::visibility::sql`in sırasıyla
     // AYNIDIR — ikisi aynı kuralın iki okumasıdır (biri belgeden, biri
     // proje­ksiyondan) ve kontrat testiyle eşitlikleri korunur.
-    if matches_grant_rules(&wfd.listable, viewer, wfes, org).await? {
+    if matches_grant_rules(&wfd.listable, viewer, wfes, &ValidRules::for_version(wfd), org).await? {
         return Ok(true);
     }
-    if matches_grant_rules(wfd.wf_admin.iter().map(WfAdminRule::grant_ref), viewer, wfes, org)
+    if matches_grant_rules(wfd.wf_admin.iter().map(WfAdminRule::grant_ref), viewer, wfes, &ValidRules::for_version(wfd), org)
         .await? {
         return Ok(true);
     }
@@ -193,7 +194,7 @@ pub async fn can_view(
     // dönüşün üstünde olması onu ATLAMAMAK içindir.
     if let Some(terminal_id) = wfes.end_terminal.as_deref() {
         if let Some(terminal) = wfd.terminals.iter().find(|t| t.id == terminal_id) {
-            if matches_grant_rules(&terminal.listable, viewer, wfes, org).await? {
+            if matches_grant_rules(&terminal.listable, viewer, wfes, &ValidRules::for_version(wfd), org).await? {
                 return Ok(true);
             }
         }
@@ -260,7 +261,7 @@ pub async fn can_view(
             // "aktif node" kümesi (c) ile paylaşılır, ikinci bir liste kurulmaz. Aynı
             // ÇAPA (`origin_orgu_id`) ve aynı matcher (`matches_grant_rules`, kök
             // `listable`/`wf_admin` (d)/(e) ile birebir) — ACT/claim'e dokunmaz.
-            if matches_grant_rules(&node.listable, viewer, wfes, org).await? {
+            if matches_grant_rules(&node.listable, viewer, wfes, &ValidRules::for_version(wfd), org).await? {
                 return Ok(true);
             }
         }

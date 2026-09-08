@@ -78,6 +78,7 @@ fn validate_local(wfd: &Wfd) -> ValidationReport {
     check_calls(wfd, &mut report);
     check_uniqueness(wfd, &mut report);
     check_duplicate_c_a(wfd, &mut report);
+    check_escalation_grant_noop(wfd, &mut report);
     check_cross_refs(wfd, &mut report);
     check_send_back(wfd, &mut report);
     check_start_rules(wfd, &mut report);
@@ -1569,6 +1570,159 @@ fn wft_targets(wft: &Wft) -> Vec<(TargetKind, &str)> {
 // (2026-07-16): start node yeniden girilebilir; mid-flow'da normal node gibi
 // davranır, wft hedefi ve escalation geçerlidir. ----
 
+/// Bir ZEN ifadesindeki `$` REFERANSLARINI, en fazla iki nokta segmentiyle, çıkarır
+/// (`$ctx`, `$actor`, `$action.input`, `$env.ANAHTAR` …).
+///
+/// Metin taraması, ZEN AST'si değil — `branch_refs_in`in aynı gerekçesi: `zen_expression`
+/// ayrıştırılmış ağacı public API'de vermiyor.
+fn dollar_refs_in(expr: &str) -> Vec<String> {
+    fn ident(b: &[u8], mut i: usize) -> (usize, usize) {
+        let start = i;
+        while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+            i += 1;
+        }
+        (start, i)
+    }
+    let b = expr.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while let Some(rel) = expr[i..].find('$') {
+        let at = i + rel;
+        let (s1, e1) = ident(b, at + 1);
+        if e1 == s1 {
+            i = at + 1;
+            continue;
+        }
+        let mut end = e1;
+        if b.get(end) == Some(&b'.') {
+            let (s2, e2) = ident(b, end + 1);
+            if e2 > s2 {
+                end = e2;
+            }
+        }
+        out.push(expr[at..end].to_string());
+        i = end.max(at + 1);
+    }
+    out
+}
+
+/// `E11` — **start `when`i BEYAZ LİSTEDİR.** Serbest beş kök:
+/// `$action.input.*` · `$actor` · `$timestamp` · `$wfe_id` · `$env`.
+/// Geri kalan HER kök yasak — bilinen ya da bilinmeyen. `$node` DAHİL yasak
+/// (start anında sabittir: start aksiyonunun `from`u).
+///
+/// Neden kara liste DEĞİL: kara listede unutulan bir kök tasarımcıya SESSİZCE hiç
+/// başlamayan bir akış verir. `$prev`/`$first` boş defterde boş kabuk döner ve
+/// karşılaştırma false'a düşer — akış hiç başlamaz, hiçbir yerde hata görünmez.
+/// `Ç7+Ç8`in kara listesi üç günde çürüdü (`$valid`, `$branch_round`, `$env`,
+/// `$branches`/`$arrived` listede yoktu). Beyaz listede unutulan kök ise GÜRÜLTÜLÜ
+/// bir hata verir: bedeli tasarımcının bir kez şikâyet etmesidir, sessiz bir akış değil.
+///
+/// Emsal: `grant_when_actor_ref`. Kapsam: yalnız START aksiyonunun `when`i — normal
+/// aksiyonların guard'ı bu kısıttan ETKİLENMEZ (orada `$ctx` meşru ve gereklidir).
+/// `E13`/S2 — grant guard'ının KAPALI kök listesi. Yasak altı kök:
+/// `$action.*` · `$exec.*` · `$call.*` · `$env.*` · `$branches` · `$arrived`.
+///
+/// `$actor` bu kuralın DIŞINDADIR: onu mevcut `grant_when_actor_ref` yakalar (aynı
+/// yasak, ayrı gerekçe — orada konu tutarlılıktır, `$actor` bağlıdır ama projeksiyon
+/// yolu ile doğrudan sorgu yolu iki farklı cevap verir). İki kural aynı ifadeyi iki
+/// kez raporlamaz.
+///
+/// Yasağın ölçülmüş bedeli (kayıt `E13`, `grants.rs:52-60` üzerinden):
+/// - `$action.input.*` / `$exec.result.*` → `null`. `null > sayı` ZEN'de sessiz false
+///   DEĞİL, `Compare: Unsupported type`. Guard her yetki sorgusunda koştuğu için bu
+///   havuz listesinin HER AÇILIŞINDA HTTP 500 demektir.
+/// - `$call.*` → boş kabuk, alanlar `null`; aynı karşılaştırma tuzağı.
+/// - `$env.*` → bu yolda `with_env` HİÇ çağrılmıyor → "bu ortamda tanımlı değil".
+/// - `$branches`/`$arrived` → join bağlamı yok; ifade patlamaz ama YANLIŞ cevap verir
+///   ("hiç kol yokmuş").
+///
+/// ⚠️ **KARA LİSTE — ve bu bir risktir.** `E11` start `when`i için beyaz listeyi
+/// seçerken kara listelerin çürüdüğünü ölçmüştü. Burada kayıt (`E13`/S2) yasak kümeyi
+/// ADIYLA sayıyor, o yüzden harfiyen uygulanıyor; ama ölçüldü ki listede OLMAYAN bir
+/// kök (`$hayaliKok`, ya da `E14`ün henüz yazılmamış `$branch_round`ü) validator'dan
+/// HİÇ hata almadan geçiyor — expression yüzeyinde "bilinmeyen kök" diye bir kural yok.
+/// Yeni bir ZEN kökü eklendiğinde bu liste ELLE güncellenmek zorunda.
+fn grant_when_namespace(when: &str, path: String, report: &mut ValidationReport) {
+    const FORBIDDEN: [&str; 6] = ["$action", "$exec", "$call", "$env", "$branches", "$arrived"];
+    for r in dollar_refs_in(when) {
+        let root = r.split('.').next().unwrap_or(&r);
+        if FORBIDDEN.contains(&root) {
+            report.error(
+                "grant_when_namespace",
+                path.clone(),
+                format!(
+                    "grant guard'ında '{r}' okunamaz. Guard yalnız ctx / defter / node / \
+                     zaman görür: $ctx · $wfah · $valid · $prev · $first · $node · $wfe_id · \
+                     $timestamp. Aksiyon, otomasyon, çağrı, ortam ve kol bağlamları bu \
+                     yolda BAĞLANMAZ — okunursa ya 500 verir ya sessizce yanlış cevap"
+                ),
+            );
+        }
+    }
+}
+
+/// `E13`/S1 — `escalation_grant_noop`. Bir kademenin `grant.c_a`'sı, bulunduğu node'un
+/// `c_a`'sıyla BİREBİR AYNIYSA hata: kademe hiç kimseyi eklemiyor, yani hiçbir şey
+/// yapmıyor. §3.7'nin kopyala-yapıştır hatası (node'un `c_a`'sını escalation'a olduğu
+/// gibi yapıştırmak) en olası tasarımcı hatasıdır.
+///
+/// Karşılaştırma `CandidateActor::canonical()` string eşitliğidir — `duplicate_c_a`nın
+/// kullandığı fonksiyonun AYNISI. **Alt küme testi YAZILMAZ:** ne kanal kanal, ne
+/// `canonical()` üzerinden. Gerekçe kayıtta: grant'ın gerçekten kimseyi eklemediği
+/// diğer hâller (rol o birimde yok; selector çalışma anında aynı kümeye çözülüyor) ORG
+/// AĞACINA bağlıdır ve belge okunarak cevaplanamaz. Motorun tasarım zamanında
+/// bilebileceği tek KESİN sinyal birebir eşitliktir.
+///
+/// Grant'ın `when`i YOK SAYILIR (`Ç9` hükmü): guard eklemek birebir eşitliği
+/// "genişletme" hâline getirmez.
+fn check_escalation_grant_noop(wfd: &Wfd, report: &mut ValidationReport) {
+    for (key, node) in &wfd.nodes {
+        let node_canon = node.act_c_a().canonical();
+        for (i, esc) in node.escalation.iter().enumerate() {
+            if esc.grant.c_a.canonical() == node_canon {
+                report.error(
+                    "escalation_grant_noop",
+                    format!("nodes[{key}].escalation[{i}].grant"),
+                    format!(
+                        "kademe '{key}' node'unun havuzunu BİREBİR tekrarlıyor — kimseyi \
+                         eklemiyor, yani hiçbir şey yapmıyor. Kademe havuzu GENİŞLETMELİ"
+                    ),
+                );
+            }
+        }
+    }
+}
+
+fn check_start_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
+    const ALLOWED_ROOTS: [&str; 4] = ["$actor", "$timestamp", "$wfe_id", "$env"];
+    for s in &wfd.start {
+        let Some(action) = crate::types::wfd_v22::start_action(wfd, s) else {
+            continue; // `start_action` kuralı raporlar
+        };
+        let Some(when) = &action.when else {
+            continue;
+        };
+        let path = format!("actions.{}.when (start)", s.action);
+        for r in dollar_refs_in(when) {
+            let root = r.split('.').next().unwrap_or(&r);
+            let ok = ALLOWED_ROOTS.contains(&root) || r == "$action.input";
+            if !ok {
+                report.error(
+                    "start_when_namespace",
+                    path.clone(),
+                    format!(
+                        "start `when`inde '{r}' okunamaz. Serbest olan BEŞ kök: \
+                         $action.input.<yol> · $actor · $timestamp · $wfe_id · $env.ANAHTAR. \
+                         Akış henüz başlamadığı için defter, context ve çalışma-anı \
+                         bağlamları YOKTUR; okunsa sessizce false döner ve akış hiç başlamaz"
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
     // V5: en az 1 start
     if wfd.start.is_empty() {
@@ -1593,6 +1747,7 @@ fn check_start_rules(wfd: &Wfd, report: &mut ValidationReport) {
         // Alan artık YOK; `ActionDef.from` kendi cross-ref kuralıyla denetleniyor
         // (`check_cross_refs`), yani aynı garanti tek yerden geliyor.
     }
+    check_start_when_namespace(wfd, report);
 }
 
 // ---- M3: wft.conditions hedef tekilliği ----
@@ -2486,7 +2641,17 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
     // v2.3: start'ın `when`/`trigger`/`wft`i aksiyon kaydında — yukarıdaki `actions`
     // döngüsü kapsıyor. Escalation ise `wft` taşımıyor (`Ç9`).
     for (key, node) in &wfd.nodes {
-        let _ = &node.escalation;
+        // `E13`: escalation grant'ının `when`i — `grant_when_actor_ref`in BEŞİNCİ
+        // çağrı yeri. `listable` yolundaki SIRANIN aynısı: önce tip denetimi (`check`),
+        // sonra iki namespace kapısı.
+        for (i, esc) in node.escalation.iter().enumerate() {
+            if let Some(when) = &esc.grant.when {
+                let path = format!("nodes[{key}].escalation[{i}].grant.when");
+                check(when, path.clone(), report);
+                grant_when_actor_ref(when, path.clone(), report);
+                grant_when_namespace(when, path, report);
+            }
+        }
         if let Some(call) = &node.call {
             if let Some(wft) = &call.wft {
                 visit_wft(wft, &format!("nodes[{key}].call.wft"), report);
@@ -2497,6 +2662,7 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         if let Some(when) = &l.when {
             check(when, format!("listable[{i}].when"), report);
             grant_when_actor_ref(when, format!("listable[{i}].when"), report);
+            grant_when_namespace(when, format!("listable[{i}].when"), report);
         }
     }
     // T‑A5: `wf_admin[]` kuralları `listable` ile aynı şekli taşır (`CaGrantRule`) ve
@@ -2506,6 +2672,7 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         if let Some(when) = &a.grant.when {
             check(when, format!("wf_admin[{i}].when"), report);
             grant_when_actor_ref(when, format!("wf_admin[{i}].when"), report);
+            grant_when_namespace(when, format!("wf_admin[{i}].when"), report);
         }
         // A-1 (2026-08-21): `allowed_global_actions` boş = admin YALNIZ görür. Hata
         // DEĞİL (gözlemci admin meşru bir yapılandırmadır) ama tasarımcının niyeti
@@ -2544,7 +2711,8 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
             if let Some(when) = &l.when {
                 let path = format!("nodes[{key}].listable[{i}].when");
                 check(when, path.clone(), report);
-                grant_when_actor_ref(when, path, report);
+                grant_when_actor_ref(when, path.clone(), report);
+                grant_when_namespace(when, path, report);
             }
         }
     }
@@ -2557,7 +2725,8 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
             if let Some(when) = &l.when {
                 let path = format!("terminals[{}].listable[{i}].when", t.id);
                 check(when, path.clone(), report);
-                grant_when_actor_ref(when, path, report);
+                grant_when_actor_ref(when, path.clone(), report);
+                grant_when_namespace(when, path, report);
             }
         }
     }

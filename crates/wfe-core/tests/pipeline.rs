@@ -1109,6 +1109,69 @@ async fn missing_required_input_is_rejected() {
     assert!(matches!(err, EngineError::InvalidInput(_)), "{err}");
 }
 
+/// `Ç10`un YERİNE GEÇEN güvence: `when` false dönerse aksiyon o an ALINAMAZ ve
+/// İKİNCİ BİR ADAYA DÜŞÜLMEZ.
+///
+/// v2.2'de aynı `(node, action)` çifti için birden çok `transitions[]` girdisi
+/// olabiliyor, motor dizi sırasında ilk `when`i tutanı seçiyordu — guard'ı false olan
+/// bir kural "sıradakine geç" demekti. Kimlik map anahtarı olunca aday YA TEK ya da
+/// yok; guard false ise cevap `TransitionNotFound`tur, sessiz bir fallback DEĞİL.
+#[tokio::test(start_paused = true)]
+async fn a_false_when_makes_the_action_unavailable_with_no_fallback() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = Engine {
+        org: &org,
+        exec: &runner,
+        env: Default::default(),
+    };
+    let mut v: Value = serde_json::from_str(FIXTURE).unwrap();
+    // Guard'ı asla tutmayacak şekilde kur.
+    v["actions"]["manager_decide"]["when"] = json!("$ctx.credit_info.amount_requested > 999999999");
+    let wfd = Wfd::from_value(v).unwrap();
+
+    let m = manager(Uuid::new_v4());
+    let wfes = wfes_at("self__branchManager", Some(m.user_id), start_input());
+
+    let err = engine
+        .apply(
+            &wfd,
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, EngineError::TransitionNotFound(a) if a == "manager_decide"),
+        "guard false ⇒ aksiyon alınamaz; geldi: {err:?}"
+    );
+
+    // ...ve guard tutunca AYNI aksiyon normal çalışır (test guard'ı değil, guard'ın
+    // ETKİSİNİ ölçüyor olsun).
+    let mut v2: Value = serde_json::from_str(FIXTURE).unwrap();
+    v2["actions"]["manager_decide"]["when"] = json!("$ctx.credit_info.amount_requested > 0");
+    let wfd2 = Wfd::from_value(v2).unwrap();
+    let commit = engine
+        .apply(
+            &wfd2,
+            &wfes,
+            &m,
+            "manager_decide",
+            &json!({"manager_decision": "approve"}),
+            None,
+            None,
+        )
+        .await
+        .expect("guard tutunca aksiyon uygulanmalı");
+    assert!(matches!(&commit.outcome, CommitOutcome::Terminal { .. }));
+}
+
 // v2.3 (`Ç5` + `Ç10`): **İLK-MATCH SEÇİMİ ÖLDÜ** — `first_match_wfd` ve
 // `first_matching_when_wins_in_array_order` SİLİNDİ. v2.2'de aynı `(node, action)`
 // çifti için birden çok `transitions[]` girdisi olabiliyor, motor dizi sırasında

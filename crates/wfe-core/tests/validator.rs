@@ -758,6 +758,79 @@ fn start_node_with_escalation_is_allowed() {
     );
 }
 
+// ---- `E11`: start `when`i BEYAZ LİSTE — beş kök serbest ----------------------
+//
+// Neden beyaz liste: kara listede unutulan bir kök tasarımcıya SESSİZCE hiç
+// başlamayan bir akış verir (`$prev`/`$first` boş kabuk döner → false); beyaz listede
+// unutulan kök gürültülü bir hata verir. Kayıt (`Ç7+Ç8`/`E11`) kara listenin üç günde
+// çürüdüğünü ölçmüş.
+
+/// `$ctx` start anında henüz YOK — akış başlamadı, context yazılmadı.
+#[test]
+fn start_when_reading_ctx_is_error() {
+    let mut v = fixture_value();
+    v["actions"]["create_application"]["when"] = json!("$ctx.applicant != null");
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "start_when_namespace"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// `$node` start anında SABİT (start aksiyonunun `from`u) — okumak anlamsız, ve
+/// kayıt onu ADIYLA yasaklıyor.
+#[test]
+fn start_when_reading_node_is_error() {
+    let mut v = fixture_value();
+    v["actions"]["create_application"]["when"] = json!("$node == 'type_branch__branchClerk'");
+    assert!(has_error(&validate_value(v), "start_when_namespace"));
+}
+
+/// Serbest beş kökün hepsi temiz geçer.
+#[test]
+fn start_when_using_the_five_allowed_roots_is_clean() {
+    for expr in [
+        "$action.input.applicant != null",
+        "$actor != null",
+        "$timestamp != null",
+        "$wfe_id != null",
+        "$env.BOOTSTRAP != null",
+    ] {
+        let mut v = fixture_value();
+        v["actions"]["create_application"]["when"] = json!(expr);
+        let report = validate_value(v);
+        assert!(
+            !has_error(&report, "start_when_namespace"),
+            "'{expr}' serbest olmalı: {:#?}",
+            report.errors
+        );
+    }
+}
+
+/// Bare `$action` (ya da `$action.<başka>`) serbest DEĞİL — serbest olan
+/// `$action.input.*`. Kayıt kökü tam bu şekilde yazıyor.
+#[test]
+fn start_when_reading_action_outside_input_is_error() {
+    let mut v = fixture_value();
+    v["actions"]["create_application"]["when"] = json!("$action.result != null");
+    assert!(has_error(&validate_value(v), "start_when_namespace"));
+}
+
+/// Kural YALNIZ start aksiyonuna uygulanır — normal bir aksiyonun `when`i `$ctx`
+/// okuyabilir ve okumalıdır.
+#[test]
+fn a_non_start_action_when_may_read_ctx() {
+    let mut v = fixture_value();
+    v["actions"]["analyst_approve"]["when"] = json!("$ctx.credit_info.amount_requested > 0");
+    let report = validate_value(v);
+    assert!(
+        !has_error(&report, "start_when_namespace"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
 #[test]
 fn start_action_unknown_is_error() {
     // V4 (M16): start.action actions{} içinde tanımlı olmalı
@@ -820,6 +893,115 @@ fn start_with_named_action_selects_matching_rule() {
 // v2.3 (`E08` Faz 1): `escalation_terminate_without_wft_is_still_rejected` SİLİNDİ — assert ettiği kural öldü.
 
 // v2.3 (`E08` Faz 1): `escalation_without_wft_is_error` SİLİNDİ — assert ettiği kural öldü.
+
+// ---- `E13`: grant'ın tasarım zamanı kuralları --------------------------------
+
+/// `escalation_grant_noop` — kademe node'un havuzunu BİREBİR tekrarlıyorsa hata.
+/// §3.7'nin kopyala-yapıştır hatası: escalation'a node'un `c_a`'sı olduğu gibi
+/// yapıştırılırsa kademe hiç kimseyi eklemez, yani hiçbir şey yapmaz.
+#[test]
+fn escalation_grant_repeating_the_node_pool_is_error() {
+    let mut v = fixture_value();
+    let ca = v["nodes"]["self__creditAnalyst"]["c_a"].clone();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["grant"]["c_a"] = ca;
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "escalation_grant_noop"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// Golden'ın kendi kademeleri havuzu GENİŞLETİYOR — temiz geçer.
+#[test]
+fn escalation_grant_widening_the_pool_is_clean() {
+    assert!(!has_error(
+        &validate_value(fixture_value()),
+        "escalation_grant_noop"
+    ));
+}
+
+/// `when` guard'ı YOK SAYILIR (`Ç9` hükmü): guard eklenmesi birebir eşitliği
+/// "genişletme" hâline getirmez.
+#[test]
+fn escalation_grant_noop_ignores_the_guard() {
+    let mut v = fixture_value();
+    let ca = v["nodes"]["self__creditAnalyst"]["c_a"].clone();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["grant"]["c_a"] = ca;
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["grant"]["when"] =
+        json!("$ctx.credit_info.amount_requested > 0");
+    assert!(has_error(&validate_value(v), "escalation_grant_noop"));
+}
+
+/// `grant_when_namespace` — yasak altı kök. `$action.input.*` grant guard'ında
+/// `null` döner ve `null > sayı` ZEN'de sessiz false DEĞİL, `Compare: Unsupported
+/// type` hatasıdır; guard her yetki sorgusunda koştuğu için bu havuz listesinin her
+/// açılışında HTTP 500 demektir.
+#[test]
+fn grant_when_reading_action_input_is_error() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["grant"]["when"] =
+        json!("$action.input.credit_info.amount_requested > 0");
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "grant_when_namespace"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+}
+
+/// `$actor` yasağı YENİ kurala girmez — mevcut `grant_when_actor_ref` kuralı bu
+/// yüzeyde BEŞİNCİ çağrı yerini kazanır (kural ve mesajı olduğu gibi kalır).
+#[test]
+fn grant_when_reading_actor_is_caught_by_the_existing_rule() {
+    let mut v = fixture_value();
+    v["nodes"]["self__creditAnalyst"]["escalation"][0]["grant"]["when"] = json!("$actor != null");
+    let report = validate_value(v);
+    assert!(
+        has_error(&report, "grant_when_actor_ref"),
+        "hatalar: {:#?}",
+        report.errors
+    );
+    assert!(
+        !has_error(&report, "grant_when_namespace"),
+        "$actor yasağı iki kez raporlanmamalı: {:#?}",
+        report.errors
+    );
+}
+
+/// Serbest sekiz kök temiz geçer.
+#[test]
+fn grant_when_using_the_allowed_roots_is_clean() {
+    for expr in [
+        "$ctx.credit_info.amount_requested > 0",
+        "count($wfah, #.action == \"analyst_approve\") > 0",
+        "$node != null",
+        "$wfe_id != null",
+        "$timestamp != null",
+        "$prev.action == \"analyst_approve\"",
+        "$first.action == \"create_application\"",
+    ] {
+        let mut v = fixture_value();
+        v["nodes"]["self__creditAnalyst"]["escalation"][0]["grant"]["when"] = json!(expr);
+        let report = validate_value(v);
+        assert!(
+            !has_error(&report, "grant_when_namespace"),
+            "'{expr}' serbest olmalı: {:#?}",
+            report.errors
+        );
+    }
+}
+
+/// `listable[]` guard'ı da AYNI kapalı listeye tabidir — kural grant tipinin
+/// KENDİSİNE bağlıdır, escalation'a özel değil.
+#[test]
+fn listable_grant_when_reading_call_is_error() {
+    let mut v = fixture_value();
+    v["listable"] = json!([
+        { "c_a": { "c_orgu": "self", "c_r": ["denetci"] }, "when": "$call.status == 'ok'" }
+    ]);
+    assert!(has_error(&validate_value(v), "grant_when_namespace"));
+}
 
 #[test]
 fn claim_timeout_invalid_duration_is_error() {

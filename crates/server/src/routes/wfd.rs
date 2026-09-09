@@ -1490,18 +1490,53 @@ async fn load_execution_stats(
     })
 }
 
-#[derive(serde::Serialize, ToSchema)]
+/// `R03` — birim başına **GÖRÜLEBİLİR AKTİF İŞ**.
+///
+/// ⚠️ **SÜTUNLAR TOPLANAMAZ.** `K10`'dan sonra `current_c_a` "işin bulunduğu havuz"
+/// değil **"işi alabilecek herkesin birleşimi"**dir; bir iş birden çok birimde meşru
+/// biçimde görünür. Birimler arası toplam bir İŞ SAYISI DEĞİLDİR ve hiçbir yüzeyde
+/// sunulmaz — panelde toplam satırı yoktur.
+#[derive(serde::Serialize, ToSchema, sqlx::FromRow)]
 struct UnitWorkloadRow {
-    orgu_id: Uuid,
-    orgu_name: String,
+    /// `None` = **çapasız adaylar kovası** (`c_orgu` taşımayan kural: kişi HER
+    /// birimden eşleşir). Bu satırlar eskiden `JOIN org.orgu` ile sessizce
+    /// DÜŞÜYORDU. Kovanın ekran etiketi **İSTEMCİDE** üretilir (`P05`/E: cümle
+    /// istemcide) — motor `orgu_id: null` gönderir, ad göndermez. Bu ucu tüketen
+    /// pano `agnoflow-frontend`in Dashboard'udur (ölçüldü; kararın "portal" dediği
+    /// yerde bu tabloyu okuyan kod YOK).
+    orgu_id: Option<Uuid>,
+    /// `orgu_id` dolu ama ad `None` ise birim `org.orgu`da bulunamamıştır (silinmiş
+    /// birime çapalanmış aday). Satır yine de DÜŞMEZ: eksik sayma, sessiz düşürmeden
+    /// daha kötüdür.
+    orgu_name: Option<String>,
+    /// Bu birimde **taban `c_a`** üzerinden görülebilen iş sayısı (`DISTINCT` iş).
+    /// `authority` taşımayan eski satırlar da buraya girer (backfill YOK — `R01`).
     active: i64,
+    /// Bu birimde **YALNIZ açık bir escalation grant'ı** sayesinde görülebilen iş
+    /// sayısı — `K10`'un havuz genişletme kazancının ölçüsü (`Ç12`: kazancı ölçen
+    /// rapor yoktu). `active` ile AYRIKTIR (`c_a` kazanır, `E12`).
+    ///
+    /// ⚠️ Guard'ı `false` olan grant adayları da burada görünür: `E03` kolonu
+    /// bilerek over-inclusive tuttu ve bu kayıt onu delmiyor. Kırılım sayesinde
+    /// bozulma `active`i kirletmiyor. Raporda guard koşumu → Aşama 5.
+    ///
+    /// ⚠️ İŞ sayar, KİŞİ saymaz.
+    also_eligible: i64,
+    /// `active`in ALT KÜMESİ: sahiplenilmemiş işler.
     unclaimed: i64,
 }
 
-/// Tenant genelinde current_c_a'ya göre birim başına anlık iş yükü — en çok
-/// işi olan org unit'ler (dashboard insight).
+/// Tenant genelinde birim başına **görülebilir aktif iş** (dashboard insight).
+///
+/// ⚠️ Sayım anahtarı ADAY SATIRI değil **İŞtir** (`R03`/S1-a): `resolve_candidates`
+/// birim × rol çarpımı ürettiği için bir kuralın iki rolü aynı birimde iki aday
+/// satırı demektir; `count(*)` o işi İKİ sayardı (v2.2'de de sayıyordu).
+///
+/// ⚠️ **Sütunlar toplanamaz** — bkz. `UnitWorkloadRow`.
 #[utoipa::path(get, path = "/unit-workload", tag = "wfd", params(ListQuery),
-    responses((status = 200, body = Vec<UnitWorkloadRow>)))]
+    responses((status = 200, description = "Birim başına görülebilir aktif iş. \
+        SÜTUNLAR TOPLANAMAZ: bir iş birden çok birimde meşru biçimde görünür, \
+        birimler arası toplam iş sayısı DEĞİLDİR.", body = Vec<UnitWorkloadRow>)))]
 async fn unit_workload(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
@@ -1517,16 +1552,46 @@ async fn load_unit_workload(
     orgtnt_id: Uuid,
     limit: i64,
 ) -> Result<Vec<UnitWorkloadRow>, AppError> {
-    let rows: Vec<(Uuid, String, i64, i64)> = sqlx::query_as(
-        "SELECT ou.orgu_id, ou.name,
-                count(*)::bigint AS active,
-                count(*) FILTER (WHERE w.claimed_by IS NULL)::bigint AS unclaimed
-         FROM wf.wfe w
-         CROSS JOIN LATERAL jsonb_array_elements(w.current_c_a) AS ca(elem)
-         JOIN org.orgu ou ON ou.orgu_id = (ca.elem->>'orgu_id')::uuid
-         WHERE w.orgtnt_id = $1 AND w.status = 'active'
-         GROUP BY ou.orgu_id, ou.name
-         ORDER BY active DESC
+    // `R03`/S1 — sorgu üç katmanlı, çünkü üç ayrı kusur kapatılıyor:
+    //
+    //   `cand`      : aday satırları. `orgu_id` YOKSA `NULL` kalır (çapasız kural) —
+    //                 eski `JOIN org.orgu` bu satırları sessizce DÜŞÜRÜYORDU. Damgası
+    //                 olmayan eski satır `c_a` sayılır (backfill YOK, `R01`).
+    //   `per_unit`  : (birim, iş) başına TEK satır. Sayım anahtarı burada aday
+    //                 olmaktan çıkıp İŞ oluyor; `count(*)`ın birim × rol çarpımını
+    //                 saymasının (v2.2'de de vardı) kapandığı yer burasıdır.
+    //   son SELECT  : iki AYRIK kova. Bir birim işi tabandan görüyorsa `active`,
+    //                 yalnız açık bir grant'tan görüyorsa `also_eligible`. Ayrıklığı
+    //                 `via_c_a` sağlıyor — `E12`'nin "`c_a` kazanır" önceliği.
+    //
+    // `LEFT JOIN`: çapasız kova (`orgu_id IS NULL`) ve silinmiş birime çapalanmış
+    // aday satır olarak KALIR, adı `NULL` döner. Kovanın etiketini istemci yazar.
+    let rows: Vec<UnitWorkloadRow> = sqlx::query_as(
+        "WITH cand AS (
+             SELECT w.wfe_id,
+                    w.claimed_by,
+                    (ca.elem->>'orgu_id')::uuid AS orgu_id,
+                    coalesce(ca.elem->>'authority', 'c_a') AS authority
+             FROM wf.wfe w
+             CROSS JOIN LATERAL jsonb_array_elements(w.current_c_a) AS ca(elem)
+             WHERE w.orgtnt_id = $1 AND w.status = 'active'
+         ), per_unit AS (
+             SELECT orgu_id,
+                    wfe_id,
+                    bool_or(claimed_by IS NULL) AS unclaimed,
+                    bool_or(authority = 'c_a') AS via_c_a
+             FROM cand
+             GROUP BY orgu_id, wfe_id
+         )
+         SELECT p.orgu_id,
+                ou.name AS orgu_name,
+                count(*) FILTER (WHERE p.via_c_a)::bigint AS active,
+                count(*) FILTER (WHERE NOT p.via_c_a)::bigint AS also_eligible,
+                count(*) FILTER (WHERE p.via_c_a AND p.unclaimed)::bigint AS unclaimed
+         FROM per_unit p
+         LEFT JOIN org.orgu ou ON ou.orgu_id = p.orgu_id
+         GROUP BY p.orgu_id, ou.name
+         ORDER BY active DESC, also_eligible DESC
          LIMIT $2",
     )
     .bind(orgtnt_id)
@@ -1535,15 +1600,7 @@ async fn load_unit_workload(
     .await
     .map_err(internal_error)?;
 
-    Ok(rows
-        .into_iter()
-        .map(|(orgu_id, orgu_name, active, unclaimed)| UnitWorkloadRow {
-            orgu_id,
-            orgu_name,
-            active,
-            unclaimed,
-        })
-        .collect())
+    Ok(rows)
 }
 
 #[derive(serde::Serialize, ToSchema)]

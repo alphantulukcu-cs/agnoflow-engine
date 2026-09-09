@@ -808,7 +808,10 @@ müdahale eder ve yetkisi WFD'den doğar.
   gerekçesi ESCALATION TABANI DEĞİL (R02): taban `to_node != null` olan son satırdır
   (`pipeline::node_entered_at`) ve marker satırları `to_node` taşımaz. Önek
   `parse_marker`/`WfahKind` ayrımı, yayınlanmış `count($wfah, ...)` sayımları ve adımın
-  `settled` sayılması için zorunludur.
+  `settled` sayılması için zorunludur. **Taban bulunamazsa** (defterde `to_node != null`
+  satır YOK) `next_escalation` `None` döner **ve uyarı log'u yazar** (WFE kimliği + node
+  + sebep; marker adı GEÇMEZ) — R01/S3: `to_node` NULL meşru bir hâl olduğu için bu
+  boşluk kalıcıdır, sessiz susma kabul edilmiyor. `WfeView`e alan EKLENMEZ.
 - **Atlama `CommitOutcome::StayAt` commit'i ile yazılır** (v2.3 / `E02`/S2 — KIRICI).
   `append_marker` `WfeStore` trait'inden **KALKTI**; eski gerekçe (*"atlama geçiş değil
   audit satırıdır, `commit` de kullanılamazdı — o node/status taşır"*) `StayAt` ile

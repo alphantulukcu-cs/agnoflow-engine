@@ -5280,6 +5280,82 @@ async fn no_movement_row_means_no_forecast() {
     );
 }
 
+/// R01/S3 yardımcısı: `tracing` çıktısını belleğe yazan writer. Uyarının GERÇEKTEN
+/// üretildiğini görmenin tek yolu abone olmaktır — `Ok(None)` iki hâlde de aynıdır.
+#[derive(Clone)]
+struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    type Writer = CapturedLogs;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// R01/S3: taban bulunamayınca motor SUSMAZ — (d) kapısının ÜSTÜNE yeni kapı.
+/// `Ok(None)` aynen döner (`no_movement_row_means_no_forecast` onu kapıyor) ama yanında
+/// bir uyarı log'u yazılır: WFE kimliği + node + SEBEP. `to_node` NULL meşru bir hâl
+/// olduğu için bu boşluk kalıcıdır; sessiz susma "escalation bozuldu" diye vakit
+/// kaybettiriyordu. Log metnine marker adı GİRMEZ (Değişmez #2).
+#[tokio::test]
+async fn no_movement_row_warns_before_going_silent() {
+    let org = MockOrg {
+        role_assigned: true,
+    };
+    let runner = MockRunner::ok(0, "-", false);
+    let engine = test_engine(&org, &runner);
+    let wfd = golden();
+
+    let t0 = Utc::now();
+    let mut wfes = wfes_at("self__creditAnalyst", None, start_input());
+    let mut wfah = wfah_with_markers("self__creditAnalyst", t0, &[("start_review", t0)]);
+    wfah.0[0].to_node = None;
+    wfes.wfah = wfah;
+
+    let logs = CapturedLogs(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_max_level(tracing::Level::WARN)
+        .without_time()
+        .with_ansi(false)
+        .finish();
+    let forecast = tracing::subscriber::with_default(subscriber, || {
+        engine
+            .next_escalation(&wfd, &wfes, t0 + Duration::days(30), None)
+            .unwrap()
+    });
+    assert_eq!(forecast, None, "davranış DEĞİŞMEDİ: cevap hâlâ None");
+
+    let out = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(out.contains("WARN"), "uyarı seviyesinde log yok: {out:?}");
+    assert!(
+        out.contains(&wfes.wfe_id.to_string()),
+        "log WFE kimliğini taşımalı: {out:?}"
+    );
+    assert!(
+        out.contains("self__creditAnalyst"),
+        "log node anahtarını taşımalı: {out:?}"
+    );
+    assert!(
+        out.contains("SLA-2 tabanı YOK"),
+        "log SEBEBİ söylemeli: {out:?}"
+    );
+    assert!(
+        !out.contains("escalate:"),
+        "Değişmez #2: log metnine marker adı girmez: {out:?}"
+    );
+}
+
 /// Escalation müdahalesi `node.reassign` ile AÇILMAZ — farklı bir güç.
 #[tokio::test]
 async fn skip_escalation_requires_wf_admin() {

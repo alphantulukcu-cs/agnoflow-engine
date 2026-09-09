@@ -1818,6 +1818,9 @@ impl<'a> Engine<'a> {
     /// giriş anı `BranchState.entered_at`'tan okunur (WFAH türetimi değil).
     /// `None` paralel mod dışındaki eski davranıştır (paralel modda `None` ile
     /// çağrılırsa `current_node` NULL olduğundan `None` döner).
+    ///
+    /// Tek-kol yolunda taban BULUNAMAZSA cevap `None`'dır ama motor SUSMAZ: uyarı
+    /// log'u yazılır (R01/S3). Dış yüz değişmez — `WfeView`e alan eklenmedi.
     pub fn next_escalation(
         &self,
         wfd: &Wfd,
@@ -1842,6 +1845,17 @@ impl<'a> Engine<'a> {
                 // onu çağırır. Marker satırları `to_node` taşımadığı için tabanı
                 // kaydırmaz; ad öneki filtresi (eski hâl) KALKTI.
                 let Some(entered_at) = node_entered_at(&wfes.wfah) else {
+                    // R01/S3: susma GÖRÜNÜR olur. `to_node` NULL meşru bir hâldir
+                    // (start, `ForkTo`), dolayısıyla taban bulunamaması kalıcı olarak
+                    // mümkündür; sessizce `None` dönmek geliştiriciye "escalation
+                    // bozuldu" diye vakit kaybettiriyordu. Uyarı motorun İÇİNDE kalır:
+                    // `WfeView`e alan eklenmez, üç tüketicinin şekli değişmez.
+                    // Metne marker adı GİRMEZ (Değişmez #2).
+                    tracing::warn!(
+                        wfe_id = %wfes.wfe_id,
+                        node = %node_key,
+                        "hareket taşıyan satır yok → SLA-2 tabanı YOK, escalation ateşlenmiyor"
+                    );
                     return Ok(None);
                 };
                 (node_key, entered_at)

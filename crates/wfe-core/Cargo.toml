@@ -18,3 +18,5 @@ tokio       = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+# R01/S3: taban bulunamayınca yazılan uyarı log'unu YAKALAMAK için (kapı testi).
+tracing-subscriber = { workspace = true }

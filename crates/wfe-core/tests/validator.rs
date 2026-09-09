@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 use wfe_core::types::wfd_v22::Wfd;
-use wfe_core::validator::{expression_issues, validate, ValidationReport};
+use wfe_core::validator::{expression_issues, validate, ExprPlace, ValidationReport};
 
 const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 const PARALLEL_FIXTURE: &str = include_str!("../../../docs/spec/examples/paralel-onay.json");
@@ -433,7 +433,7 @@ fn expression_issues_matches_wfd_validator_verdicts() {
         r#"$prev.action == "x""#,
         "$ctx.tutar > 1000",
     ] {
-        assert!(expression_issues(ok).is_empty(), "temiz olmalı: {ok}");
+        assert!(expression_issues(ok, None).is_empty(), "temiz olmalı: {ok}");
     }
 
     // Parse hatası TEK hata döner (diğer kontroller anlamsız).
@@ -442,18 +442,18 @@ fn expression_issues_matches_wfd_validator_verdicts() {
         r#"count(filter($wfah, #.action == "x")) >= 1"#,
         "((bozuk ==",
     ] {
-        let issues = expression_issues(broken);
+        let issues = expression_issues(broken, None);
         assert_eq!(issues.len(), 1, "{broken}: {issues:?}");
         assert_eq!(issues[0].0, "zen_parse");
         assert!(issues[0].1, "parse hatası HATA olmalı");
     }
 
     // Negatif indeks: parse geçer, ayrı HATA.
-    let neg = expression_issues(r#"$wfah[-1].action == "x""#);
+    let neg = expression_issues(r#"$wfah[-1].action == "x""#, None);
     assert!(neg.iter().any(|(c, e, _)| *c == "zen_negative_index" && *e));
 
     // Korumasız indeksleme: UYARI (yayını engellemez).
-    let unguarded = expression_issues(r#"$wfah[len($wfah) - 1].action == "x""#);
+    let unguarded = expression_issues(r#"$wfah[len($wfah) - 1].action == "x""#, None);
     assert!(unguarded
         .iter()
         .any(|(c, e, _)| *c == "wfah_index_unguarded" && !*e));
@@ -463,11 +463,136 @@ fn expression_issues_matches_wfd_validator_verdicts() {
     );
 }
 
+// ---- `WOR-129`: tek ifadelik yol da YER-BAĞIMLI kuralları koşar ------------------
+//
+// v2.3 üç yer-bağımlı beyaz/kara liste getirdi (`E09`/`E11`/`E13`) ve üçü de YALNIZ
+// belge yürüyüşünden çağrılıyordu. Editör ifadeleri tek tek soruyor
+// (`POST /wfd/validate-expression`), o yolda YER bilgisi yoktu — yani tasarımcı
+// kaydedemeyeceği bir kökü ancak YAYIN anında öğreniyordu.
+//
+// ⚠️ Kapıların ASIL sorusu "aynı cevap mı": listeler TAŞINMADI, kopyalanmadı; tek
+// ifadelik yol belge yürüyüşünün çağırdığı AYNI gövdeyi çağırıyor. Aşağıdaki parite
+// testi bunu mesaj METNİ üzerinden tutuyor — ikinci bir liste yazılırsa metin ayrışır.
+
+/// Yer VERİLMEZSE davranış bugünküyle BİREBİR aynı: yer-bağımlı hiçbir kural koşmaz.
+/// Mevcut bütün çağıranlar (kurucunun normal `when` kutuları) bu yoldan geçiyor.
+#[test]
+fn place_free_calls_keep_todays_behaviour() {
+    for expr in [
+        "count($branches, true) > 0", // `set_when`de YASAK
+        "$ctx.tutar > 1000",          // start `when`inde YASAK
+        "$env.API == \"x\"",          // grant `when`inde YASAK
+    ] {
+        let issues = expression_issues(expr, None);
+        assert!(
+            issues.iter().all(|(c, _, _)| !c.ends_with("_namespace")),
+            "yer verilmeden yer-bağımlı kural koşmamalı: {expr} → {issues:?}"
+        );
+    }
+}
+
+#[test]
+fn set_when_place_rejects_branch_namespaces() {
+    let issues = expression_issues("count($branches, true) > 0", Some(ExprPlace::SetWhen));
+    assert!(
+        issues
+            .iter()
+            .any(|(c, e, _)| *c == "set_when_namespace" && *e),
+        "{issues:?}"
+    );
+    // Beyaz listenin serbest tarafı temiz kalmalı — kural kökü ADIYLA tanıyor.
+    assert!(
+        expression_issues("$ctx.tutar > 1000", Some(ExprPlace::SetWhen))
+            .iter()
+            .all(|(c, _, _)| *c != "set_when_namespace")
+    );
+}
+
+#[test]
+fn start_when_place_allows_only_the_five_roots() {
+    for yasak in [
+        "$ctx.tutar > 1000",
+        "count($wfah, true) > 0",
+        "$node == \"x\"",
+    ] {
+        let issues = expression_issues(yasak, Some(ExprPlace::StartWhen));
+        assert!(
+            issues
+                .iter()
+                .any(|(c, e, _)| *c == "start_when_namespace" && *e),
+            "{yasak} → {issues:?}"
+        );
+    }
+    for serbest in [
+        "$action.input.tutar > 1000",
+        "$actor.role == \"memur\"",
+        "$env.MAX > 1",
+    ] {
+        assert!(
+            expression_issues(serbest, Some(ExprPlace::StartWhen))
+                .iter()
+                .all(|(c, _, _)| *c != "start_when_namespace"),
+            "{serbest} serbest olmalı"
+        );
+    }
+}
+
+#[test]
+fn grant_when_place_rejects_the_forbidden_roots() {
+    for yasak in [
+        "$env.API == \"x\"",
+        "$action.input.tutar > 1",
+        "$call.status == \"ok\"",
+    ] {
+        let issues = expression_issues(yasak, Some(ExprPlace::GrantWhen));
+        assert!(
+            issues
+                .iter()
+                .any(|(c, e, _)| *c == "grant_when_namespace" && *e),
+            "{yasak} → {issues:?}"
+        );
+    }
+    assert!(
+        expression_issues("$ctx.tutar > 1000", Some(ExprPlace::GrantWhen))
+            .iter()
+            .all(|(c, _, _)| *c != "grant_when_namespace")
+    );
+}
+
+/// ⚠️ **İKİNCİ LİSTE YAZILMADI.** Tek ifadelik yolun verdiği mesaj, belge yürüyüşünün
+/// AYNI ifade için verdiği mesajla BİREBİR aynı olmalı. Kopya bir liste (ya da kopya
+/// bir metin) yazılırsa bu kapı kırılır — kuralların ayrışması tam olarak editörün
+/// "yeşil gördüm, motor reddetti" sınıfını geri getirir.
+#[test]
+fn single_expression_path_gives_the_same_message_as_the_document_walk() {
+    let expr = "count($branches, true) > 0";
+
+    let doc_msg = validate_value(with_set_when(
+        "analyst_approve",
+        expr,
+        json!({"internal_notes": "x"}),
+    ))
+    .errors
+    .iter()
+    .find(|e| e.code == "set_when_namespace")
+    .expect("belge yürüyüşü kuralı koşmalı")
+    .message
+    .clone();
+
+    let single_msg = expression_issues(expr, Some(ExprPlace::SetWhen))
+        .into_iter()
+        .find(|(c, _, _)| *c == "set_when_namespace")
+        .expect("tek ifadelik yol da kuralı koşmalı")
+        .2;
+
+    assert_eq!(single_msg, doc_msg, "iki yol AYNI gövdeden beslenmeli");
+}
+
 // ---- `A02`: `wfah_raw_list` — ham `$wfah` üzerindeki niceleme/toplamalara OLGU notu
 //      ---------------------------------------------------------------------------
 
 fn raw_list_notes(expr: &str) -> Vec<(&'static str, bool, String)> {
-    expression_issues(expr)
+    expression_issues(expr, None)
         .into_iter()
         .filter(|(c, _, _)| *c == "wfah_raw_list")
         .collect()
@@ -548,7 +673,7 @@ fn branch_round_predicate_is_exempt() {
 /// sayımı değil, indeks aritmetiğidir. Orada `wfah_index_unguarded` zaten konuşuyor.
 #[test]
 fn direct_indexing_gets_only_the_index_warning() {
-    let issues = expression_issues(r#"$wfah[len($wfah) - 1].action == "x""#);
+    let issues = expression_issues(r#"$wfah[len($wfah) - 1].action == "x""#, None);
     assert!(issues.iter().any(|(c, _, _)| *c == "wfah_index_unguarded"));
     assert!(
         !issues.iter().any(|(c, _, _)| *c == "wfah_raw_list"),
@@ -2574,12 +2699,12 @@ fn date_wrapped_ordering_is_exempt() {
 /// üzerinden anında görünür, WFD validator'ıyla aynı koddan.
 #[test]
 fn expression_issues_flags_malformed_env_reference() {
-    assert!(expression_issues("$env.AUTH_API == 'x'").is_empty());
-    assert!(expression_issues("$env.MAX_TUTAR > 1000").is_empty());
+    assert!(expression_issues("$env.AUTH_API == 'x'", None).is_empty());
+    assert!(expression_issues("$env.MAX_TUTAR > 1000", None).is_empty());
 
     // Küçük harfli anahtar zen'de GEÇERLİ bir property path'tir — parse geçer,
     // yakalayan tek şey bu kuraldır.
-    let issues = expression_issues("$env.auth_api == 'x'");
+    let issues = expression_issues("$env.auth_api == 'x'", None);
     assert!(
         issues
             .iter()
@@ -2589,7 +2714,7 @@ fn expression_issues_flags_malformed_env_reference() {
 
     // `$env.` tek başına zaten parse edilemez; parse hatası diğer kontrolleri kısa devre
     // yapar (mevcut sözleşme) — bu kural onu değiştirmez.
-    let dangling = expression_issues("$env. == 'x'");
+    let dangling = expression_issues("$env. == 'x'", None);
     assert_eq!(dangling.len(), 1);
     assert_eq!(dangling[0].0, "zen_parse");
 }

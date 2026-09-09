@@ -13,6 +13,7 @@ use crate::v22::duration::parse_iso8601_duration;
 use crate::v22::env;
 use crate::v22::wfah_kind::{parse_marker, WfahKind};
 use bumpalo::Bump;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use zen_expression::lexer::Lexer;
@@ -1646,23 +1647,29 @@ fn dollar_refs_in(expr: &str) -> Vec<String> {
 /// kök (`$hayaliKok`, ya da `E14`ün henüz yazılmamış `$branch_round`ü) validator'dan
 /// HİÇ hata almadan geçiyor — expression yüzeyinde "bilinmeyen kök" diye bir kural yok.
 /// Yeni bir ZEN kökü eklendiğinde bu liste ELLE güncellenmek zorunda.
-fn grant_when_namespace(when: &str, path: String, report: &mut ValidationReport) {
+fn grant_when_namespace_issues(when: &str) -> Vec<(&'static str, bool, String)> {
     const FORBIDDEN: [&str; 6] = ["$action", "$exec", "$call", "$env", "$branches", "$arrived"];
+    let mut out = Vec::new();
     for r in dollar_refs_in(when) {
         let root = r.split('.').next().unwrap_or(&r);
         if FORBIDDEN.contains(&root) {
-            report.error(
+            out.push((
                 "grant_when_namespace",
-                path.clone(),
+                true,
                 format!(
                     "grant guard'ında '{r}' okunamaz. Guard yalnız ctx / defter / node / \
                      zaman görür: $ctx · $wfah · $valid · $prev · $first · $node · $wfe_id · \
                      $timestamp. Aksiyon, otomasyon, çağrı, ortam ve kol bağlamları bu \
                      yolda BAĞLANMAZ — okunursa ya 500 verir ya sessizce yanlış cevap"
                 ),
-            );
+            ));
         }
     }
+    out
+}
+
+fn grant_when_namespace(when: &str, path: String, report: &mut ValidationReport) {
+    report_issues(grant_when_namespace_issues(when), path, report);
 }
 
 /// `E13`/S1 — `escalation_grant_noop`. Bir kademenin `grant.c_a`'sı, bulunduğu node'un
@@ -1697,8 +1704,29 @@ fn check_escalation_grant_noop(wfd: &Wfd, report: &mut ValidationReport) {
     }
 }
 
-fn check_start_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
+fn start_when_namespace_issues(when: &str) -> Vec<(&'static str, bool, String)> {
     const ALLOWED_ROOTS: [&str; 4] = ["$actor", "$timestamp", "$wfe_id", "$env"];
+    let mut out = Vec::new();
+    for r in dollar_refs_in(when) {
+        let root = r.split('.').next().unwrap_or(&r);
+        let ok = ALLOWED_ROOTS.contains(&root) || r == "$action.input";
+        if !ok {
+            out.push((
+                "start_when_namespace",
+                true,
+                format!(
+                    "start `when`inde '{r}' okunamaz. Serbest olan BEŞ kök: \
+                     $action.input.<yol> · $actor · $timestamp · $wfe_id · $env.ANAHTAR. \
+                     Akış henüz başlamadığı için defter, context ve çalışma-anı \
+                     bağlamları YOKTUR; okunsa sessizce false döner ve akış hiç başlamaz"
+                ),
+            ));
+        }
+    }
+    out
+}
+
+fn check_start_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
     for s in &wfd.start {
         let Some(action) = crate::types::wfd_v22::start_action(wfd, s) else {
             continue; // `start_action` kuralı raporlar
@@ -1707,22 +1735,7 @@ fn check_start_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
             continue;
         };
         let path = format!("actions.{}.when (start)", s.action);
-        for r in dollar_refs_in(when) {
-            let root = r.split('.').next().unwrap_or(&r);
-            let ok = ALLOWED_ROOTS.contains(&root) || r == "$action.input";
-            if !ok {
-                report.error(
-                    "start_when_namespace",
-                    path.clone(),
-                    format!(
-                        "start `when`inde '{r}' okunamaz. Serbest olan BEŞ kök: \
-                         $action.input.<yol> · $actor · $timestamp · $wfe_id · $env.ANAHTAR. \
-                         Akış henüz başlamadığı için defter, context ve çalışma-anı \
-                         bağlamları YOKTUR; okunsa sessizce false döner ve akış hiç başlamaz"
-                    ),
-                );
-            }
-        }
+        report_issues(start_when_namespace_issues(when), path, report);
     }
 }
 
@@ -1747,7 +1760,7 @@ fn check_start_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
 /// ⚠️ Taşıyıcı yerin KENDİ yasakları (`sla_effect_namespace`, `call_effect_namespace`)
 /// bu kuralın ÜSTÜNE biner ve `set_when[].when` metnine de uygulanır — burada serbest
 /// görünen `$action.input.*` SLA yolunda yine reddedilir.
-fn check_set_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
+fn set_when_namespace_issues(when: &str) -> Vec<(&'static str, bool, String)> {
     const ALLOWED_ROOTS: [&str; 12] = [
         "$ctx",
         "$wfah",
@@ -1762,27 +1775,33 @@ fn check_set_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
         "$exec",
         "$call",
     ];
+    let mut out = Vec::new();
+    for r in dollar_refs_in(when) {
+        let root = r.split('.').next().unwrap_or(&r);
+        if ALLOWED_ROOTS.contains(&root) || r == "$action.input" {
+            continue;
+        }
+        out.push((
+            "set_when_namespace",
+            true,
+            format!(
+                "koşullu yazımın `when`inde '{r}' okunamaz. `$branches`/`$arrived` \
+                 yalnız join koşulunda, `$branch_round` ise paralel mod bağlamında \
+                 bağlanır; effect yolunda boş okunur ve koşul SESSİZCE false döner \
+                 — yazım hiç ateşlenmez. Serbest kökler: $ctx · $wfah · $valid · \
+                 $prev · $first · $node · $actor · $timestamp · $wfe_id · $env \
+                 (+ taşıyıcı yerin izin verdiği $action.input.* · $exec.result.* · $call.*)"
+            ),
+        ));
+    }
+    out
+}
+
+fn check_set_when_namespace(wfd: &Wfd, report: &mut ValidationReport) {
     for (site, effects) in each_effects(wfd) {
         for (i, entry) in effects.set_when.iter().enumerate() {
             let path = format!("{site}.wfes_effects.set_when[{i}].when");
-            for r in dollar_refs_in(&entry.when) {
-                let root = r.split('.').next().unwrap_or(&r);
-                if ALLOWED_ROOTS.contains(&root) || r == "$action.input" {
-                    continue;
-                }
-                report.error(
-                    "set_when_namespace",
-                    path.clone(),
-                    format!(
-                        "koşullu yazımın `when`inde '{r}' okunamaz. `$branches`/`$arrived` \
-                         yalnız join koşulunda, `$branch_round` ise paralel mod bağlamında \
-                         bağlanır; effect yolunda boş okunur ve koşul SESSİZCE false döner \
-                         — yazım hiç ateşlenmez. Serbest kökler: $ctx · $wfah · $valid · \
-                         $prev · $first · $node · $actor · $timestamp · $wfe_id · $env \
-                         (+ taşıyıcı yerin izin verdiği $action.input.* · $exec.result.* · $call.*)"
-                    ),
-                );
-            }
+            report_issues(set_when_namespace_issues(&entry.when), path, report);
         }
     }
 }
@@ -2562,6 +2581,50 @@ fn scans_raw_wfah_list_expr(expr: &str) -> bool {
     scans_raw_wfah_list(result.root)
 }
 
+/// `WOR-129` — tek ifadelik üreticiyi belge yürüyüşünün rapor biçimine çevirir.
+///
+/// Yer-bağımlı üç kuralın gövdesi artık TEK: hem `validate()` hem
+/// `expression_issues` aynı fonksiyonu çağırır. Bu köprü olmadan gövdeler ya
+/// kopyalanırdı ya da rapor tipine bağlı kalıp tek ifadelik yoldan çağrılamazdı —
+/// ikisi de "editörde yeşil, motorda hata" sınıfını geri getirir.
+///
+/// Üçü de yalnız HATA üretiyor; `is_error` yine de taşınıyor ki bir gün uyarı
+/// seviyesinde bir yer kuralı yazılırsa burası sessizce yanlış seviyeye yazmasın.
+fn report_issues(
+    issues: Vec<(&'static str, bool, String)>,
+    path: String,
+    report: &mut ValidationReport,
+) {
+    for (code, is_error, message) in issues {
+        if is_error {
+            report.error(code, path.clone(), message);
+        } else {
+            report.warn(code, path.clone(), message);
+        }
+    }
+}
+
+/// İfadenin belgede DURDUĞU yer — yer-bağımlı beyaz/kara listeleri seçer.
+///
+/// v2.3'ün üç yer kuralı (`E09` `set_when`, `E11` start `when`, `E13` grant `when`)
+/// yalnız belge yürüyüşünden koşuyordu; editör ifadeleri tek tek sorduğu için o
+/// yolda yer bilgisi YOKTU ve tasarımcı kaydedemeyeceği kökü ancak yayın anında
+/// öğreniyordu.
+///
+/// ⚠️ Bu bir KAPALI listedir ve joker yoktur: yeni bir yer kuralı yazan geliştirici
+/// varyant eklemeden `expression_issues`in `match`ini DERLEYEMEZ. "Yer verilmedi"
+/// hâli `Option`ın `None`ıdır — ucun opsiyonel alanıyla birebir aynı anlam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExprPlace {
+    /// `wfes_effects.set_when[].when`
+    SetWhen,
+    /// Start aksiyonunun `when`i.
+    StartWhen,
+    /// `escalation[].grant.when` (ve öteki grant `when`leri).
+    GrantWhen,
+}
+
 /// TEK bir ZEN ifadesinin yüzey kontrolleri — `(kod, hata_mı, mesaj)` üçlüleri.
 ///
 /// Neden ayrı ve **public**: editörün koşul kurucusu aynı verdiği almak zorundadır.
@@ -2571,7 +2634,10 @@ fn scans_raw_wfah_list_expr(expr: &str) -> bool {
 /// listeyi kullanır — iki yol ayrışamaz.
 ///
 /// `is_error = false` olan girdiler uyarıdır (yayını engellemez).
-pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
+pub fn expression_issues(
+    expr: &str,
+    place: Option<ExprPlace>,
+) -> Vec<(&'static str, bool, String)> {
     if let Err(e) = zen_expression::validate::validate_expression(expr) {
         // Parse edilemeyen ifadede diğer kontroller anlamsız — tek hata döner.
         return vec![(
@@ -2627,6 +2693,17 @@ pub fn expression_issues(expr: &str) -> Vec<(&'static str, bool, String)> {
              hesaba girer. Yalnız geçerli satırlar için $valid kullan."
                 .to_string(),
         ));
+    }
+    // `WOR-129` — yer VERİLDİYSE o yerin kuralı da koşar. Gövdeler belge yürüyüşünün
+    // çağırdığı fonksiyonların TA KENDİSİDİR; burada ikinci bir liste YOK.
+    //
+    // Jokersiz `match`: yeni bir yer kuralı eklendiğinde derleyici burayı işaret eder.
+    if let Some(place) = place {
+        out.extend(match place {
+            ExprPlace::SetWhen => set_when_namespace_issues(expr),
+            ExprPlace::StartWhen => start_when_namespace_issues(expr),
+            ExprPlace::GrantWhen => grant_when_namespace_issues(expr),
+        });
     }
     out
 }
@@ -2802,16 +2879,15 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         check_action_literals(wfd, expr, &path, report);
         // Yüzey kontrolleri (parse/indeks) + TİP kontrolleri aynı kapıdan geçer: editörün
         // koşul kurucusundaki kural setiyle motor tarafı ayrışmasın.
-        let issues = expression_issues(expr)
+        //
+        // ⚠️ Yer VERİLMEZ (`None`): bu yürüyüş belgedeki HER `when`i geziyor, yer-bağımlı
+        // kurallar ise kendi yürüyüşlerinden koşuyor (`check_set_when_namespace` vb.).
+        // Buradan da yer geçirilseydi aynı ifade İKİ KEZ raporlanırdı.
+        let issues: Vec<_> = expression_issues(expr, None)
             .into_iter()
-            .chain(expr_types::expression_type_issues(expr, &env));
-        for (code, is_error, message) in issues {
-            if is_error {
-                report.error(code, path.clone(), message);
-            } else {
-                report.warn(code, path.clone(), message);
-            }
-        }
+            .chain(expr_types::expression_type_issues(expr, &env))
+            .collect();
+        report_issues(issues, path.clone(), report);
     };
 
     let visit_wft = |wft: &Wft, path: &str, report: &mut ValidationReport| {

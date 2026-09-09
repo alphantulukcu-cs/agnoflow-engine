@@ -262,6 +262,24 @@ struct ValidateExpressionRequest {
     /// erken görüyorsun" farkıdır.
     #[serde(default)]
     wfd: Option<Value>,
+    /// `WOR-129` — ifadelerin belgede DURDUĞU yer. Verilirse o yerin kök beyaz/kara
+    /// listesi de koşar (`set_when` · `start_when` · `grant_when`).
+    ///
+    /// Verilmezse davranış AYNEN bugünküdür: yalnız yer-BAĞIMSIZ kurallar. Alan
+    /// opsiyoneldir çünkü kurucunun normal `when` kutularının çoğu yer-bağımsızdır ve
+    /// mevcut çağıranların hiçbirinin değişmesi gerekmesin.
+    ///
+    /// ⚠️ İstek BAŞINA tek yer: bir `when` alanı tek bir yere aittir, editör de bir
+    /// alanın ifadelerini tek istekte gönderiyor.
+    ///
+    /// Şemada düz `string`: kapalı listenin TEK kaynağı `wfe_core`daki
+    /// `ExprPlace`tir ve o crate saf motordur — OpenAPI türetmek için ona
+    /// `utoipa` bağımlılığı eklemek ya da burada ikinci bir enum yazmak,
+    /// listeyi ikiye bölmenin iki farklı yolu olurdu. Geçerli değerler:
+    /// `set_when` · `start_when` · `grant_when`; uydurma değer 400 döner.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    place: Option<wfe_core::validator::ExprPlace>,
 }
 
 /// Koşul kurucusu için: TEK TEK ZEN ifadelerini motorun kendi parser'ıyla doğrula.
@@ -285,7 +303,11 @@ async fn validate_expression(raw: axum::body::Bytes) -> Result<Json<Value>, AppE
             StatusCode::BAD_REQUEST,
         ));
     }
-    Ok(Json(expression_report(&req.expressions, req.wfd.as_ref())))
+    Ok(Json(expression_report(
+        &req.expressions,
+        req.wfd.as_ref(),
+        req.place,
+    )))
 }
 
 const MAX_VALIDATED_EXPRESSIONS: usize = 64;
@@ -296,7 +318,11 @@ const MAX_VALIDATED_EXPRESSIONS: usize = 64;
 /// `wfd` verilmişse tip kuralları da koşar; parse edilemeyen taslak SESSİZCE yüzey
 /// kurallarına düşer (`typed: false`) — kurucu yarım belgede de çalışabilmeli, orada
 /// "belgeniz geçersiz" demek ifade doğrulamasının işi değil.
-fn expression_report(expressions: &[String], wfd: Option<&Value>) -> Value {
+fn expression_report(
+    expressions: &[String],
+    wfd: Option<&Value>,
+    place: Option<wfe_core::validator::ExprPlace>,
+) -> Value {
     let parsed = wfd.and_then(|v| wfe_core::types::wfd_v22::Wfd::from_value(v.clone()).ok());
     let env = parsed.as_ref().map(wfe_core::validator::expr_env);
     let results: Vec<Value> = expressions
@@ -307,7 +333,7 @@ fn expression_report(expressions: &[String], wfd: Option<&Value>) -> Value {
             if expr.trim().is_empty() {
                 return serde_json::json!({ "ok": true, "errors": [], "warnings": [] });
             }
-            let mut issues = wfe_core::validator::expression_issues(expr);
+            let mut issues = wfe_core::validator::expression_issues(expr, place);
             if let Some(env) = &env {
                 issues.extend(wfe_core::expr_types::expression_type_issues(expr, env));
             }
@@ -341,11 +367,77 @@ mod validate_expression_tests {
 
     /// Belge VERİLİRSE tip kuralları da koşar (bkz. `expression_report`).
     fn report_with(exprs: &[&str], wfd: Option<&Value>) -> Vec<Value> {
+        report_at(exprs, wfd, None)
+    }
+
+    /// `WOR-129` — yer VERİLİRSE o yerin kök listesi de koşar.
+    fn report_at(
+        exprs: &[&str],
+        wfd: Option<&Value>,
+        place: Option<wfe_core::validator::ExprPlace>,
+    ) -> Vec<Value> {
         let owned: Vec<String> = exprs.iter().map(|s| s.to_string()).collect();
-        expression_report(&owned, wfd)["results"]
+        expression_report(&owned, wfd, place)["results"]
             .as_array()
             .unwrap()
             .clone()
+    }
+
+    fn codes(row: &Value) -> Vec<String> {
+        row["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["code"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// `WOR-129` — uç YER bilgisi alır ve yer-bağımlı kural o zaman koşar.
+    ///
+    /// Kapının ASIL yükü ikinci iddiadadır: yer VERİLMEZSE aynı ifade temiz döner.
+    /// Yer-bağımlı kuralları koşulsuz açmak, kurucunun normal `when` kutularını
+    /// (yer-bağımsız yerler) sessizce kırardı — orada `$branches` meşrudur.
+    #[test]
+    fn place_switches_on_the_place_dependent_root_lists() {
+        let expr = "count($branches, true) > 0";
+
+        let with_place = report_at(&[expr], None, Some(wfe_core::validator::ExprPlace::SetWhen));
+        assert_eq!(with_place[0]["ok"], false);
+        assert!(
+            codes(&with_place[0]).contains(&"set_when_namespace".to_string()),
+            "{:?}",
+            with_place[0]
+        );
+
+        let without = report(&[expr]);
+        assert_eq!(without[0]["ok"], true, "{:?}", without[0]);
+    }
+
+    /// Gövdedeki `place` alanı üç değeri ADIYLA tanır; bilinmeyen değer REDDEDİLİR
+    /// (istemci değer İCAT EDEMEZ — enum kapalı liste).
+    #[test]
+    fn place_field_parses_the_three_names_and_rejects_others() {
+        for (raw, expected) in [
+            ("set_when", wfe_core::validator::ExprPlace::SetWhen),
+            ("start_when", wfe_core::validator::ExprPlace::StartWhen),
+            ("grant_when", wfe_core::validator::ExprPlace::GrantWhen),
+        ] {
+            let body = format!(r#"{{"expressions":["1 == 1"],"place":"{raw}"}}"#);
+            let req: ValidateExpressionRequest =
+                crate::wfd_body::parse_wfd_body(body.as_bytes()).unwrap();
+            assert_eq!(req.place, Some(expected));
+        }
+        // Alan hiç yoksa `None` — mevcut istemciler aynen çalışır.
+        let req: ValidateExpressionRequest =
+            crate::wfd_body::parse_wfd_body(br#"{"expressions":["1 == 1"]}"#).unwrap();
+        assert_eq!(req.place, None);
+        // Uydurma yer 400 verir.
+        assert!(
+            crate::wfd_body::parse_wfd_body::<ValidateExpressionRequest>(
+                br#"{"expressions":["1 == 1"],"place":"join_when"}"#
+            )
+            .is_err()
+        );
     }
 
     /// EDİTÖR SÖZLEŞMESİ: sıra korunur, `ok` yalnız HATA yokluğunu anlatır.
@@ -431,11 +523,14 @@ mod validate_expression_tests {
     fn typed_flag_reports_whether_type_rules_ran() {
         let wfd = golden();
         let owned = vec!["true".to_string()];
-        assert_eq!(expression_report(&owned, Some(&wfd))["typed"], true);
-        assert_eq!(expression_report(&owned, None)["typed"], false);
+        assert_eq!(expression_report(&owned, Some(&wfd), None)["typed"], true);
+        assert_eq!(expression_report(&owned, None, None)["typed"], false);
         // Yarım/geçersiz taslak: kurucu çalışmaya devam eder, yalnız tip kuralları düşer.
         let draft = serde_json::json!({ "wfd_version": "2.2" });
-        assert_eq!(expression_report(&owned, Some(&draft))["typed"], false);
+        assert_eq!(
+            expression_report(&owned, Some(&draft), None)["typed"],
+            false
+        );
     }
 
     /// Editörün TOPLAMA satırının ürettiği ifade de bu rotadan geçer (kurucu artık ZEN

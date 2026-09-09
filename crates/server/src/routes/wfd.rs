@@ -333,10 +333,9 @@ fn expression_report(
             if expr.trim().is_empty() {
                 return serde_json::json!({ "ok": true, "errors": [], "warnings": [] });
             }
-            let mut issues = wfe_core::validator::expression_issues(expr, place);
-            if let Some(env) = &env {
-                issues.extend(wfe_core::expr_types::expression_type_issues(expr, env));
-            }
+            // `S26`: yüzey + tip kuralları TEK çağrıda, TEK AST üzerinde. `env` yoksa
+            // tip kuralları hiç koşmaz — `typed: false` yolu budur ve korundu.
+            let issues = wfe_core::validator::expression_issues_with(expr, place, env.as_ref());
             let pick = |want_error: bool| -> Vec<Value> {
                 issues
                     .iter()

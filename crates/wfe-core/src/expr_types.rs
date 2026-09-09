@@ -39,7 +39,7 @@ use crate::validator::{schema_type_at, types_compatible};
 /// `$wfah` girdisinin motordaki izdüşümü (`v22/eval.rs::project_entry`) — **11 alan**
 /// (`input` nesnesi ayrı ele alınır, `actor` üç yolla temsil edilir). Editördeki
 /// `WFAH_FIELDS` ile AYNI küme olmak zorundadır.
-const WFAH_SCALARS: &[(&str, &str)] = &[
+pub const WFAH_SCALARS: &[(&str, &str)] = &[
     ("seq", "number"),
     ("action", "string"),
     ("at", "string"),
@@ -69,7 +69,7 @@ const WFAH_SCALARS: &[(&str, &str)] = &[
 /// durur: elenmiş satırları hesaba katmış bir "ilk mi" cevabı ham listede YANLIŞTIR.
 /// Bu, tip denetiminin `#` kökünü ONU SARAN dizi fonksiyonunun İLK ARGÜMANINA göre
 /// çözmesini zorunlu kılar (`Checker::ptr`).
-const VALID_ONLY_SCALARS: &[(&str, &str)] = &[
+pub const VALID_ONLY_SCALARS: &[(&str, &str)] = &[
     ("first_by_actor_at_node", "boolean"),
     ("first_by_orgu_at_node", "boolean"),
 ];
@@ -86,7 +86,7 @@ const ARRAY_FNS: &[&str] = &["count", "some", "all", "none", "one", "filter", "m
 /// sessizce hep-false kalır; `zen_type_mismatch` görmez, iki taraf da `string`.
 ///
 /// Editördeki `zenFunctions.WFAH_TIMESTAMP_FIELDS` ile AYNI küme.
-const WFAH_TIMESTAMP_FIELDS: &[&str] = &["at"];
+pub const WFAH_TIMESTAMP_FIELDS: &[&str] = &["at"];
 
 /// Metin fonksiyonu biçiminde yazılan operatörler — editörün `ZEN_TEXT_OPS`'u.
 /// Motorda `contains(a, b)` gibi çağrılırlar; sayı/bool tarafta anlamsızdır

@@ -1704,12 +1704,20 @@ fn check_escalation_grant_noop(wfd: &Wfd, report: &mut ValidationReport) {
     }
 }
 
+/// `E11`/S1 — start `when`inde okunabilecek kökler: **BEYAZ LİSTE**, dört kök +
+/// `$action.input`. Akış henüz başlamadığı için defter, context ve çalışma-anı
+/// bağlamları YOKTUR; okunsa `zen_context` onları daima doldurduğu için hata değil
+/// SESSİZ false gelir ve akış hiç başlamaz.
+///
+/// `pub`: `x-zen-env`in `zenStart` bağlamı bu tabloya çivilidir
+/// (`tests/zen_env_parity.rs`) — editör aynı daralmayı buradan türetir.
+pub const START_WHEN_ROOTS: &[&str] = &["$actor", "$timestamp", "$wfe_id", "$env"];
+
 fn start_when_namespace_issues(when: &str) -> Vec<(&'static str, bool, String)> {
-    const ALLOWED_ROOTS: [&str; 4] = ["$actor", "$timestamp", "$wfe_id", "$env"];
     let mut out = Vec::new();
     for r in dollar_refs_in(when) {
         let root = r.split('.').next().unwrap_or(&r);
-        let ok = ALLOWED_ROOTS.contains(&root) || r == "$action.input";
+        let ok = START_WHEN_ROOTS.contains(&root) || r == "$action.input";
         if !ok {
             out.push((
                 "start_when_namespace",

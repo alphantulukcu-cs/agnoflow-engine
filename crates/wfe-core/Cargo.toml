@@ -20,3 +20,7 @@ tokio       = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 # R01/S3: taban bulunamayınca yazılan uyarı log'unu YAKALAMAK için (kapı testi).
 tracing-subscriber = { workspace = true }
+
+[[bench]]
+name    = "grant_guard"
+harness = false

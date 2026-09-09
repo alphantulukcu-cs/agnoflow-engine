@@ -78,6 +78,21 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
   (`claim üç yoldan düşer`) `docs/spec/terminology.md` → SAHİPLİK OLAYLARI.
   ⚠️ `authority` bugün DAİMA `c_a`: açık grant'lar claim yoluna `E04` (`authorize_node`)
   ile girecek, değer o zaman oradan gelecek.
+- **Grant guard maliyeti ÖLÇÜLDÜ** (`E04`/S4 → M1/WOR-111, araç:
+  `cargo bench -p wfe-core --bench grant_guard`, DB gerekmez). Ölçülen gövde havuz
+  satırı başına `Engine::can_claim`. Sonuç: maliyet `G × W` ile **doğrusal** büyüyor
+  (G = açık grant, W = |WFAH|) ve çarpanı ~**10 µs / (grant × defter satırı)**'dır.
+  p50/satır: grant yoksa **4,3 µs** (W'den BAĞIMSIZ) · G=1/W=500 **4,9 ms** ·
+  G=10/W=500 **50 ms**. Havuz listesi (`pool_sql`de `LIMIT` YOK): 200 satır × G=1 ×
+  W=500 ≈ **1 s**, G=10 ≈ **10 s**. Guard'ın İFADESİ önemsiz (`$ctx` guard'ı ile
+  defteri tarayan `count($valid, …)` guard'ı **aynı** maliyette): ödenen şey
+  `EvalEnv` kurulumu (`project_entry`/`project_valid` × W) + `zen_context()`in derin
+  kopyası, yani kural BAŞINA W. Guard'sız grant kural başına ~2 µs — pahalı olan
+  grant makinesi değil, **guard ortamı**. `matches_grant_rules` ortamı hâlâ kural
+  döngüsünün İÇİNDE kuruyor; döngü dışına almak yalnız **~1,6×** kazandırır (kalan
+  maliyet `evaluate_bool`un kendi O(W)'sı), yani hoisting tek başına yetmez.
+  **Karar bu ölçümün işi DEĞİL** — önbellek (ifade/sonuç/WFE seviyesi) ayrı bir karar
+  penceresi ister.
 - **Dizi fonksiyonları İKİ argümanlı** (WOR-84): `count($wfah, #.action == "x") >= n` ✅ — `count(filter(...))` parse HATASI, `every` diye fonksiyon YOK karşılığı `all`. Tam liste: `count some all none one filter map flatMap`.
 - **`#.input.*` sıralama karşılaştırması aksiyon kapısı İSTER**: `null` ile `>` `<` zen'de `Compare: Unsupported type` (runtime, parse yakalamaz). Kapı `and` ile ve karşılaştırmadan **ÖNCE** olmalı; `or` kapı değildir; dış `and`'deki kapı iç gruba geçer. `$prev`/`$first` de bağışık değil. Sözleşme testi: `tests/editor_zen_contract.rs`.
 - **İfade TİP denetimi motordadır** (`wfe-core/src/expr_types.rs`, AST tabanlı): obje karşılaştırması (`zen_object_compare` — **obje==obje dahil**, VM eşleştirmez), metinde sıralama (`zen_ordering_not_number`), iki taraf tip uyuşmazlığı (`zen_type_mismatch`), izdüşüm dışı `$wfah` alanı (`zen_wfah_field_unknown`), kapısız `#.input.*` sıralaması (`zen_input_needs_action_gate`), liste öğesi tip uyuşmazlığı (`zen_list_type_mismatch` — `In` opcode'u öğe öğe `Equal` yapar, `#.seq in ["a"]` hep-false), metin operatörünün metin olmayan tarafı (`zen_text_op_not_string` — `contains`/`startsWith`/`endsWith`/`matches`), `#.at` sabitinin biçimi (`zen_timestamp_format` — `at` düz METİNDİR, `yyyyMMddHHmmss`/14 rakam UTC; karşılaştırmaları STRING temellidir, `d()` yok. Eşitlik/`in` tam damga ister, `startsWith` anlamlı önek sınırı (4/6/8/10/12/14), `contains`/`endsWith` yalnız rakam, `matches` muaf. Sıralama `zen_ordering_not_number`a düşer). `#.input.<yol>`un tipi girdiyi context'e yazan `wfes_effects` üzerinden çıkarılır — editör de aynı çıkarımı yapar (`whenFields.collectActionInputCtxMap`). **Elle yazılan JSON ile editörün ürettiği JSON aynı kapıdan geçer**; kural seti motorun, editör yalnız aynı cevabı önden verir.

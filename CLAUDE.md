@@ -126,11 +126,12 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
 
 ## Git remote / push politikası
 
-- İki remote: `origin` = GitHub, `gitlab` = kurumsal GitLab
-  (`gitlab.cs.com.tr:agnoflow/src/agnoflow-backend.git`).
-- **`main` HER İKİ remote'ta senkron tutulur.** Kullanıcı "push" dediğinde main'i **hem GitHub
-  hem GitLab**'e at: `git push origin main && git push gitlab main`. Birine push edilirse
-  diğerine de edilir — ayrı düşmesinler.
+- **TEK remote: `gitlab`** (`gitlab.cs.com.tr:agnoflow/src/agnoflow-backend.git`).
+  GitHub aynası 2026-09-09'da **BIRAKILDI** (kullanıcı kararı) ve remote listesinden
+  çıkarıldı — `origin` diye bir remote YOKTUR. Muhatap yalnız GitLab'dir.
+- `git push gitlab main` yeterlidir; "iki remote'u senkron tut" kuralı **KALKTI**.
+  ⚠️ Eski GitHub deposu silinmedi, yalnız bu klonun remote listesinden çıkarıldı —
+  orada duran son hâl bayattır, oraya push edilmez.
 - **`staging` branch'ine ASLA push/merge etme** — kullanıcı açıkça "deploy" / "deployla"
   demedikçe. `gitlab staging`'e push CI/CD'yi tetikler (build → image.cs.com.tr → Flux →
   `agnoflow-staging` deploy). Deploy istenince: `git push gitlab main:staging`.

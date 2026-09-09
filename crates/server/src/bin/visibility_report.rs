@@ -18,9 +18,7 @@
 //! Bu araç farkı satır satır basar — DB'li test koşulmayan bu repoda kontratın
 //! bekçisi budur.
 //!
-//! ESKİ BAŞLIK (ölçüm modu) — kural değişiminin faturası:
-//!
-//! Yeni kural (onaylandı, 2026-08-13):
+//! Ölçülen kural (2026-08-13'ten beri yürürlükte):
 //! ```text
 //! görünür(WFE, viewer) :=
 //!      listable/wf_admin grant'i eşleşir           -- KALICI, `when` uygulanmış
@@ -29,11 +27,10 @@
 //!                           OR node listable  eşleşir  -- DURUMA BAĞLI (f)
 //!                           OR WFE/kol claim'i viewer'da))
 //! ```
-//! Eski kural = `wfe_core::v22::visibility::can_view` (kriter (b) KATILIMCI dahil).
 //!
-//! Bu araç iki soruyu cevaplar:
-//!   1. **Erişim farkı**: hangi (aktör, WFE) çifti eski kuralda görünürken yeni
-//!      kuralda görünmez oluyor (ve tersi). Anahtar rakam: kaybedilen erişim.
+//! Bu araç ÜÇ soruyu cevaplar:
+//!   1. **Kontrat**: hangi (aktör, WFE) çifti BELGE okumasında (`can_view`) görünürken
+//!      PROJEKSİYONDA görünmez oluyor (ve tersi). Sağlam kontratta iki liste de boştur.
 //!   2. **Projeksiyon sağlamlığı**: `listable`/`wf_admin`, node `listable` VE
 //!      terminal `listable` kuralları VIEWER'DAN
 //!      BAĞIMSIZ mı? Grant'lar commit anında (viewer bilinmezken) yazılacağı için
@@ -44,6 +41,11 @@
 //!          değerlendirir (`grants.rs`) → her viewer için farklı sonuç.
 //!      Bu formları kullanan WFD varsa, ya validator kapısı gerekir ya da o
 //!      belgelere özel canlı değerlendirme. Rapor onları tek tek sayar.
+//!   3. **Grant boyutu** (`E03` → `M2`/WOR-112): predicate'in okuduğu ALTI kolonun
+//!      aday sayısı ve bayt büyüklüğü, act kolonlarında taban/grant kırılımı, en büyük
+//!      on satır. İlk iki soru kolonların DOĞRU olduğunu söylüyor, BÜYÜKLÜĞÜ hakkında
+//!      bir şey söylemiyordu — `E04` yetki kümesini genişlettiği için kolonlar
+//!      `≈ U × (1 + G)` ile büyüyor.
 //!
 //! Koşum: `DATABASE_URL=... cargo run -p wf-server --bin visibility_report`
 
@@ -93,6 +95,196 @@ fn viewer_relative_reasons(rules: &[CaGrantRule], kind: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Grant BOYUTU tablosunun bir satırı — kolon başına aday sayısı ve bayt.
+#[derive(sqlx::FromRow)]
+struct GrantSizeRow {
+    col: String,
+    rows_total: i64,
+    rows_nonempty: i64,
+    entries: i64,
+    max_entries: i32,
+    bytes: i64,
+    max_bytes: i32,
+}
+
+/// `authority` damgası kırılımı (yalnız act kolonlarında yazılır).
+#[derive(sqlx::FromRow)]
+struct AuthorityRow {
+    col: String,
+    authority: String,
+    entries: i64,
+}
+
+/// En büyük projeksiyon satırları — "hangi WFE şişti" sorusu.
+#[derive(sqlx::FromRow)]
+struct BiggestRow {
+    wfe_id: Uuid,
+    col: String,
+    entries: i32,
+    bytes: i32,
+}
+
+/// **Grant BOYUTU** (`E03` → `M2`/WOR-112). `E04` yetki kümesini
+/// `node.c_a ∪ açılmış grantlar` yaptı; her açık grant kuralı çözüldüğü BİRİM SAYISI
+/// kadar aday üretiyor, yani act kolonları `≈ U × (1 + G)` ile büyüyor (`U` = ORGTRVLANG
+/// selector'ının çözdüğü birim sayısı, `G` = açık grant). Rapor bunu ölçmüyordu:
+/// kontrat bölümü kolonların DOĞRU olduğunu söylüyor, BÜYÜKLÜĞÜ hakkında bir şey
+/// söylemiyordu.
+///
+/// Ölçülen altı kolon = görünürlük predicate'inin okuduğu kolonların TAMAMI
+/// (`wf_wfe::visibility::sql`): `wfe.view_c_a` · `current_c_a` · `current_view_c_a` ·
+/// `end_view_c_a` + `wfe_branch.c_a` · `view_c_a`. `bayt` = `pg_column_size` (satırda
+/// duran, sıkıştırılmış hâl — GIN indeksleri buna dahil DEĞİL).
+///
+/// `authority` kırılımı yalnız ACT kolonlarında anlamlıdır (`R03`/S1-c: görünürlük
+/// kolonlarında bu alan hiç yazılmaz) ve asıl soruyu o cevaplar: kolonun ne kadarı
+/// TABANDAN, ne kadarı açık GRANT'tan geliyor. `(yok)` = alan eklenmeden önce yazılmış
+/// satır; `R01` gereği backfill YAZILMAZ, bir sonraki commit'te damga gelir.
+async fn grant_size_report(pool: &PgPool) {
+    println!("\n--- Grant boyutu: projeksiyon kolonları ---");
+
+    // Kolon başına tek geçiş; `UNION ALL` altı kolonu aynı çıktıda sıralı tutar.
+    let per_col = "
+        SELECT $1::text AS col, count(*)::bigint AS rows_total,
+               count(*) FILTER (WHERE jsonb_array_length(%C) > 0)::bigint AS rows_nonempty,
+               coalesce(sum(jsonb_array_length(%C)), 0)::bigint AS entries,
+               coalesce(max(jsonb_array_length(%C)), 0)::int    AS max_entries,
+               coalesce(sum(pg_column_size(%C)), 0)::bigint     AS bytes,
+               coalesce(max(pg_column_size(%C)), 0)::int        AS max_bytes
+          FROM %T";
+    let cols: &[(&str, &str, &str)] = &[
+        ("wfe.view_c_a", "view_c_a", "wf.wfe"),
+        ("wfe.current_c_a", "current_c_a", "wf.wfe"),
+        ("wfe.current_view_c_a", "current_view_c_a", "wf.wfe"),
+        ("wfe.end_view_c_a", "end_view_c_a", "wf.wfe"),
+        ("wfe_branch.c_a", "c_a", "wf.wfe_branch"),
+        ("wfe_branch.view_c_a", "view_c_a", "wf.wfe_branch"),
+    ];
+
+    println!(
+        "\n| kolon | satır | dolu satır | aday | aday/dolu satır | en çok aday | \
+         toplam bayt | en büyük bayt |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    for (label, column, table) in cols {
+        // Kolon/tablo adı BİND EDİLEMEZ (identifier), ama ikisi de bu dosyada sabit
+        // bir listeden gelir — dışarıdan gelen tek değer `$1` ile bağlanan ETİKETtir.
+        let sql = per_col.replace("%C", column).replace("%T", table);
+        let row: GrantSizeRow = match sqlx::query_as(&sql).bind(label).fetch_one(pool).await {
+            Ok(r) => r,
+            Err(e) => {
+                println!("| {label} | — | — | — | — | — | — | HATA: {e} |");
+                continue;
+            }
+        };
+        let per_row = if row.rows_nonempty > 0 {
+            format!("{:.1}", row.entries as f64 / row.rows_nonempty as f64)
+        } else {
+            "—".into()
+        };
+        println!(
+            "| `{}` | {} | {} | {} | {per_row} | {} | {} | {} |",
+            row.col,
+            row.rows_total,
+            row.rows_nonempty,
+            row.entries,
+            row.max_entries,
+            row.bytes,
+            row.max_bytes
+        );
+    }
+
+    // `authority`: kolonun ne kadarı tabandan, ne kadarı açık grant'tan.
+    let auth: Result<Vec<AuthorityRow>, _> = sqlx::query_as(
+        "SELECT 'wfe.current_c_a' AS col,
+                coalesce(e->>'authority', '(yok)') AS authority,
+                count(*)::bigint AS entries
+           FROM wf.wfe, jsonb_array_elements(current_c_a) e
+          GROUP BY 1, 2
+         UNION ALL
+         SELECT 'wfe_branch.c_a' AS col,
+                coalesce(e->>'authority', '(yok)') AS authority,
+                count(*)::bigint AS entries
+           FROM wf.wfe_branch, jsonb_array_elements(c_a) e
+          GROUP BY 1, 2
+         ORDER BY 1, 2",
+    )
+    .fetch_all(pool)
+    .await;
+    println!("\n--- Act kolonlarında `authority` kırılımı (taban vs açık grant) ---");
+    match auth {
+        Ok(rows) if rows.is_empty() => println!("  (act kolonları boş)"),
+        Ok(rows) => {
+            println!("\n| kolon | authority | aday |");
+            println!("|---|---|---:|");
+            for r in &rows {
+                println!("| `{}` | `{}` | {} |", r.col, r.authority, r.entries);
+            }
+            let grant: i64 = rows
+                .iter()
+                .filter(|r| r.authority == "grant")
+                .map(|r| r.entries)
+                .sum();
+            let total: i64 = rows.iter().map(|r| r.entries).sum();
+            if total > 0 {
+                println!(
+                    "\nAçık grant'ın payı: {grant}/{total} = {:.1}%",
+                    100.0 * grant as f64 / total as f64
+                );
+            }
+        }
+        Err(e) => println!("  HATA: {e}"),
+    }
+
+    // En büyük satırlar: hangi WFE'nin hangi kolonu şişmiş.
+    let biggest: Result<Vec<BiggestRow>, _> = sqlx::query_as(
+        "SELECT wfe_id, col, entries, bytes FROM (
+             SELECT wfe_id, 'wfe.view_c_a' AS col,
+                    jsonb_array_length(view_c_a) AS entries,
+                    pg_column_size(view_c_a) AS bytes
+               FROM wf.wfe
+             UNION ALL
+             SELECT wfe_id, 'wfe.current_c_a', jsonb_array_length(current_c_a),
+                    pg_column_size(current_c_a) FROM wf.wfe
+             UNION ALL
+             SELECT wfe_id, 'wfe.current_view_c_a', jsonb_array_length(current_view_c_a),
+                    pg_column_size(current_view_c_a) FROM wf.wfe
+             UNION ALL
+             SELECT wfe_id, 'wfe.end_view_c_a', jsonb_array_length(end_view_c_a),
+                    pg_column_size(end_view_c_a) FROM wf.wfe
+             UNION ALL
+             SELECT wfe_id, 'wfe_branch.c_a', jsonb_array_length(c_a),
+                    pg_column_size(c_a) FROM wf.wfe_branch
+             UNION ALL
+             SELECT wfe_id, 'wfe_branch.view_c_a', jsonb_array_length(view_c_a),
+                    pg_column_size(view_c_a) FROM wf.wfe_branch
+         ) x
+         WHERE entries > 0
+         ORDER BY entries DESC, bytes DESC, wfe_id, col
+         LIMIT 10",
+    )
+    .fetch_all(pool)
+    .await;
+    println!("\n--- En büyük on projeksiyon satırı ---");
+    match biggest {
+        Ok(rows) if rows.is_empty() => println!("  (dolu kolon yok)"),
+        Ok(rows) => {
+            println!("\n| WFE | kolon | aday | bayt |");
+            println!("|---|---|---:|---:|");
+            for r in &rows {
+                println!(
+                    "| {} | `{}` | {} | {} |",
+                    &r.wfe_id.to_string()[..8],
+                    r.col,
+                    r.entries,
+                    r.bytes
+                );
+            }
+        }
+        Err(e) => println!("  HATA: {e}"),
+    }
 }
 
 #[tokio::main]
@@ -194,6 +386,9 @@ async fn main() {
             println!("  {m}");
         }
     }
+
+    // ---- Grant boyutu (`M2`/WOR-112) ----
+    grant_size_report(&pool).await;
 
     // ---- 1. soru: erişim farkı ----
     let tenants: Vec<Uuid> = {

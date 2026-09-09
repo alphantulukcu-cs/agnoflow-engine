@@ -93,6 +93,32 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
   maliyet `evaluate_bool`un kendi O(W)'sı), yani hoisting tek başına yetmez.
   **Karar bu ölçümün işi DEĞİL** — önbellek (ifade/sonuç/WFE seviyesi) ayrı bir karar
   penceresi ister.
+- **Kol okuma + `reproject` maliyeti ÖLÇÜLDÜ** (`E03` → M2/WOR-112, araç:
+  `cargo bench -p wf-wfe --bench branch_view`, DB gerekmez). `M1`in birim maliyetinin
+  hangi çarpanla ödendiğini ayırır:
+  - **Guard'ı yalnız yetki yolu koşar.** `node_candidates` guard'ları `E03` gereği YOK
+    SAYAR (kolon over-inclusive önbellek) → G=10/W=500'de bile **3,2 µs**.
+    `BranchView::new` **~0,1 µs**. Kol okumasında pahalı olan tek çağrı
+    `claim_decision` (→ `authorize_node_decision` → `matches_grant_rules`).
+  - **Kol BAŞINA p50:** G=0 **2,1 µs** (W'den bağımsız) · G=1/W=500 **4,9 ms** ·
+    G=10/W=500 **49 ms**. Kol döngüsü ardışık → `GET /wfe/:id` B=10/G=10/W=500'de
+    **~0,5 s**.
+  - **`reproject` G'den BAĞIMSIZDIR** (act kolonları guard koşmuyor); çarpanı node
+    `listable` kural sayısı `L` ve `(1 + B)`: L=0'da **~5 ms** sabit (yalnız kök
+    `listable`), L=2'de B=1 **25 ms** · B=3 **45 ms** · B=10 **114 ms**. Kolonların
+    jsonb serileşmesi ihmal edilebilir (**≤7 µs**).
+  - **Grant BOYUTU:** act kolonu (`current_c_a` / kol `c_a`) `≈ U × (1 + G)` aday,
+    **~96 B/aday** ve guard'dan BAĞIMSIZ (`U` = ORGTRVLANG selector'ının çözdüğü birim
+    sayısı). U=25/G=10 → **275 aday / ~25 KB** ve bu yük `(1 + B)` satırda tekrarlanır.
+    Görünürlük kolonları guard UYGULAR → boyutları `U` ile büyür, `G` onları
+    büyütMEZ. Sahadaki karşılığını `visibility_report` basar (3. bölüm: kolon başına
+    aday/bayt + act kolonlarında taban/grant kırılımı + en büyük on satır).
+  - ⚠️ **Saat payı bu makinede ~1,4 µs.** `M1`in mikrosaniye altı sayıları (ör.
+    "grant yoksa 4,3 µs") bu payı İÇERİR; `branch_view` her örneği tekrarlı koşup
+    böldüğü için içermez (aynı taban orada 2,1 µs).
+  - Sonuç: büyüyen eksen **kural sayısı × W** (kural başına kurulan guard ortamı,
+    `S34`in gövdesi); kol ve `reproject` onu yalnız `B` / `(1 + B)` ile ÇARPAR.
+    **Karar VERİLMEDİ** — `S34` ailesinin işi.
 - **Dizi fonksiyonları İKİ argümanlı** (WOR-84): `count($wfah, #.action == "x") >= n` ✅ — `count(filter(...))` parse HATASI, `every` diye fonksiyon YOK karşılığı `all`. Tam liste: `count some all none one filter map flatMap`.
 - **`#.input.*` sıralama karşılaştırması aksiyon kapısı İSTER**: `null` ile `>` `<` zen'de `Compare: Unsupported type` (runtime, parse yakalamaz). Kapı `and` ile ve karşılaştırmadan **ÖNCE** olmalı; `or` kapı değildir; dış `and`'deki kapı iç gruba geçer. `$prev`/`$first` de bağışık değil. Sözleşme testi: `tests/editor_zen_contract.rs`.
 - **İfade TİP denetimi motordadır** (`wfe-core/src/expr_types.rs`, AST tabanlı): obje karşılaştırması (`zen_object_compare` — **obje==obje dahil**, VM eşleştirmez), metinde sıralama (`zen_ordering_not_number`), iki taraf tip uyuşmazlığı (`zen_type_mismatch`), izdüşüm dışı `$wfah` alanı (`zen_wfah_field_unknown`), kapısız `#.input.*` sıralaması (`zen_input_needs_action_gate`), liste öğesi tip uyuşmazlığı (`zen_list_type_mismatch` — `In` opcode'u öğe öğe `Equal` yapar, `#.seq in ["a"]` hep-false), metin operatörünün metin olmayan tarafı (`zen_text_op_not_string` — `contains`/`startsWith`/`endsWith`/`matches`), `#.at` sabitinin biçimi (`zen_timestamp_format` — `at` düz METİNDİR, `yyyyMMddHHmmss`/14 rakam UTC; karşılaştırmaları STRING temellidir, `d()` yok. Eşitlik/`in` tam damga ister, `startsWith` anlamlı önek sınırı (4/6/8/10/12/14), `contains`/`endsWith` yalnız rakam, `matches` muaf. Sıralama `zen_ordering_not_number`a düşer). `#.input.<yol>`un tipi girdiyi context'e yazan `wfes_effects` üzerinden çıkarılır — editör de aynı çıkarımı yapar (`whenFields.collectActionInputCtxMap`). **Elle yazılan JSON ile editörün ürettiği JSON aynı kapıdan geçer**; kural seti motorun, editör yalnız aynı cevabı önden verir.

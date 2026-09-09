@@ -463,27 +463,13 @@ async fn write_and_start(
         )
         .await?;
 
-    // Kapı hedefi + o aksiyonu kapayan grupların katalogu. Aynı çözüm preflight'ta da
-    // var; İKİSİ AYNI SORUYU SORAR (hangi slotlar bu başlatmaya ait).
+    // Kapı hedefi + o aksiyonu kapayan grupların katalogu. Preflight AYNI SORUYU sorar
+    // (hangi slotlar bu başlatmaya ait) — türetme `gated_start_slots`ta TEK yerdedir.
     let gate = start_gate_target(wfd, payload.action.as_deref());
-    let mut catalog: std::collections::HashMap<
-        (String, String),
-        &wfe_core::types::wfd_v22::AttachmentItem,
-    > = std::collections::HashMap::new();
-    if let Some((node_key, action)) = &gate {
-        if let Some(node) = wfd.nodes.get(node_key) {
-            for aref in &node.attachments {
-                if !aref.gates_action(Some(action)) {
-                    continue;
-                }
-                if let Some(group) = wfd.attachments.get(aref.group()) {
-                    for item in &group.items {
-                        catalog.insert((aref.group().to_string(), item.id.clone()), item);
-                    }
-                }
-            }
-        }
-    }
+    let catalog = gate
+        .as_ref()
+        .map(|(node_key, action)| slot_catalog(&gated_start_slots(wfd, node_key, action)))
+        .unwrap_or_default();
 
     let declared: std::collections::HashMap<(String, String), &PayloadAttachment> = payload
         .attachments
@@ -833,6 +819,61 @@ fn start_gate_target(
     Some((action_def.from.clone(), rule.action.clone()))
 }
 
+/// Kapı hedefindeki bir slot: hangi grup key'i, o grubun katalog tanımı, tek item.
+struct GatedSlot<'a> {
+    /// Katalog grubunun key'i — `{grup}/{slot}` part adının sol yarısı.
+    group: &'a str,
+    group_def: &'a wfe_core::types::wfd_v22::AttachmentGroup,
+    item: &'a wfe_core::types::wfd_v22::AttachmentItem,
+}
+
+/// `(node, aksiyon)` kapı hedefine ait dosya slotlarını çözer. Başlatma yolu
+/// (`write_and_start`) ile `preflight` AYNI SORUYU sorar; iki kopya ayrışırsa iki yol
+/// farklı slot kümesi görür — bu yüzden türetme burada TEKTİR.
+///
+/// `gates_action` çapasız/kapsam dışı referansları eler (aynı süzme `status_for_node`
+/// ve `apply_action`daki gate kontrolünde de var). Katalogda karşılığı olmayan grup
+/// runtime'da SESSİZ atlanır — validator zaten yakalar (`status_for_node` ile aynı).
+///
+/// Sıra korunur: node'un referans sırası, sonra grubun item sırası.
+fn gated_start_slots<'a>(
+    wfd: &'a wfe_core::types::wfd_v22::Wfd,
+    node_key: &str,
+    action: &str,
+) -> Vec<GatedSlot<'a>> {
+    let mut out = Vec::new();
+    let Some(node) = wfd.nodes.get(node_key) else {
+        return out;
+    };
+    for aref in &node.attachments {
+        if !aref.gates_action(Some(action)) {
+            continue;
+        }
+        let group = aref.group();
+        let Some(group_def) = wfd.attachments.get(group) else {
+            continue;
+        };
+        for item in &group_def.items {
+            out.push(GatedSlot {
+                group,
+                group_def,
+                item,
+            });
+        }
+    }
+    out
+}
+
+/// `gated_start_slots` çıktısının `(grup, slot)` → katalog item'ı bakış tablosu hâli.
+fn slot_catalog<'a>(
+    gated: &[GatedSlot<'a>],
+) -> std::collections::HashMap<(String, String), &'a wfe_core::types::wfd_v22::AttachmentItem> {
+    gated
+        .iter()
+        .map(|g| ((g.group.to_string(), g.item.id.clone()), g.item))
+        .collect()
+}
+
 #[derive(Deserialize, ToSchema)]
 struct PreflightItem {
     group: String,
@@ -992,38 +1033,23 @@ async fn preflight_wfe(
         }));
     };
 
-    // Node'un attachment referanslarından YALNIZ bu aksiyonu kapıyanları çöz —
-    // `gates_action` çapasız/kapsam dışı referansları eler (aynı süzme `status_for_node`
-    // ve `apply_action`daki gate kontrolünde de var). Aynı zamanda validasyon için
-    // (group,item) → katalog `AttachmentItem`'ına bir bakış tablosu tutulur; `slots`
-    // listesi buradan üretilir, `items` denetimi de aynı tablodan okur — iki liste
-    // birbirinden SAPAMAZ.
-    let mut slots = Vec::new();
-    let mut catalog: std::collections::HashMap<(String, String), &wfe_core::types::wfd_v22::AttachmentItem> =
-        std::collections::HashMap::new();
-    if let Some(node) = wfd.nodes.get(&node_key) {
-        for aref in &node.attachments {
-            if !aref.gates_action(Some(&action)) {
-                continue;
-            }
-            let group_ref = aref.group();
-            let Some(group) = wfd.attachments.get(group_ref) else {
-                continue; // validator zaten yakalar; runtime'da sessiz atla (status_for_node ile aynı)
-            };
-            for item in &group.items {
-                catalog.insert((group_ref.to_string(), item.id.clone()), item);
-                slots.push(PreflightSlot {
-                    group: group_ref.to_string(),
-                    group_label: group.label.clone(),
-                    item: item.id.clone(),
-                    label: item.label.clone(),
-                    required: item.required,
-                    accept: crate::attachments::all_accept_patterns(item),
-                    max_size_mb: slot_max_size_mb(item),
-                });
-            }
-        }
-    }
+    // Bu aksiyonu kapayan slotlar — başlatma yolunun kullandığı TEK türetme
+    // (`gated_start_slots`). `slots` listesi ile validasyonun okuduğu katalog aynı
+    // vektörden üretilir; iki liste birbirinden SAPAMAZ.
+    let gated = gated_start_slots(&wfd, &node_key, &action);
+    let catalog = slot_catalog(&gated);
+    let slots: Vec<PreflightSlot> = gated
+        .iter()
+        .map(|g| PreflightSlot {
+            group: g.group.to_string(),
+            group_label: g.group_def.label.clone(),
+            item: g.item.id.clone(),
+            label: g.item.label.clone(),
+            required: g.item.required,
+            accept: crate::attachments::all_accept_patterns(g.item),
+            max_size_mb: slot_max_size_mb(g.item),
+        })
+        .collect();
 
     // İstemci dosya BİLDİRDİYSE (henüz yüklemedi) her biri katalogla erkenden
     // karşılaştırılır. Eşleşme mantığı (`image/*` joker dahil) `crate::attachments::

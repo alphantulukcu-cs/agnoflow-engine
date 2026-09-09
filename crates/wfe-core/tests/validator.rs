@@ -463,6 +463,74 @@ fn expression_issues_matches_wfd_validator_verdicts() {
     );
 }
 
+// ---- `S26`/`WOR-117`: ifade TEK KEZ parse edilir ------------------------------
+//
+// `A02` `wfah_raw_list` notunu eklerken `validator.rs`e İKİNCİ bir `Lexer`+`Parser`
+// kurdurdu; `expr_types` zaten kendi ağacını kuruyordu. Aynı ifade iki kez parse
+// ediliyordu ve asıl risk maliyet DEĞİLDİ: iki parse **iki ayrı "bu ifade ayrıştı mı"
+// cevabı** demektir — birinde geçen bir ifade ötekinde sessizce atlanabilir.
+//
+// Kapı davranışa bakamaz (parse sayısı gözlemlenebilir bir çıktı değil), o yüzden
+// KAYNAĞA bakıyor: `wfe-core` içinde AST kuran tek yer `expr_types::parse_ast`tır.
+
+/// `Lexer::new()` `wfe-core` kaynağında YALNIZ BİR kez geçer ve o geçiş `parse_ast`ın
+/// içindedir. İkinci bir parse eklemek isteyen buradan geçmek zorunda.
+#[test]
+fn the_expression_is_parsed_in_exactly_one_place() {
+    use std::path::Path;
+
+    fn rust_sources(dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).expect("src okunabilmeli") {
+            let path = entry.expect("dizin girdisi").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let body = std::fs::read_to_string(&path).expect("kaynak okunabilmeli");
+                out.push((path.display().to_string(), body));
+            }
+        }
+    }
+
+    let mut sources = Vec::new();
+    rust_sources(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src").as_path(),
+        &mut sources,
+    );
+
+    let hits: Vec<&str> = sources
+        .iter()
+        .filter(|(_, body)| body.contains("Lexer::new()"))
+        .map(|(name, _)| name.as_str())
+        .collect();
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "AST birden çok yerde kuruluyor: {hits:?}. Tek yer `expr_types::parse_ast`."
+    );
+    assert!(
+        hits[0].ends_with("expr_types.rs"),
+        "AST kuran yer `expr_types.rs` olmalı, bulunan: {}",
+        hits[0]
+    );
+
+    let (_, expr_types_src) = sources
+        .iter()
+        .find(|(name, _)| name.ends_with("expr_types.rs"))
+        .expect("expr_types.rs bulunmalı");
+    let after_parse_ast = expr_types_src
+        .split_once("pub fn parse_ast")
+        .expect("`parse_ast` var olmalı")
+        .1;
+    let body_end = after_parse_ast
+        .find("\n}\n")
+        .expect("`parse_ast` gövdesi kapanmalı");
+    assert!(
+        after_parse_ast[..body_end].contains("Lexer::new()"),
+        "`Lexer::new()` `parse_ast`ın DIŞINDA — kapı ölçtüğünü ölçmüyor"
+    );
+}
+
 // ---- `WOR-129`: tek ifadelik yol da YER-BAĞIMLI kuralları koşar ------------------
 //
 // v2.3 üç yer-bağımlı beyaz/kara liste getirdi (`E09`/`E11`/`E13`) ve üçü de YALNIZ

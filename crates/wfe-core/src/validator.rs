@@ -16,8 +16,7 @@ use bumpalo::Bump;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use zen_expression::lexer::Lexer;
-use zen_expression::parser::{Node, Parser};
+use zen_expression::parser::Node;
 
 #[derive(Debug, Clone)]
 pub struct ValidationIssue {
@@ -2569,26 +2568,6 @@ fn scans_raw_wfah_list(node: &Node<'_>) -> bool {
     }
 }
 
-/// `A02` — ifadenin AST'si üzerinden ham liste taraması. Metin taraması BİLEREK
-/// yazılmadı: boşluk, satır sonu ve iç içe `filter(...)` sarmalı metin aramasını
-/// kırar, kapsam kararı zaten "fonksiyonun liste argümanı" olduğu için ağaç ister.
-fn scans_raw_wfah_list_expr(expr: &str) -> bool {
-    let bump = Bump::new();
-    let source = bump.alloc_str(expr);
-    let mut lexer = Lexer::new();
-    let Ok(tokens) = lexer.tokenize(source) else {
-        return false;
-    };
-    let Ok(parser) = Parser::try_new(tokens, &bump) else {
-        return false;
-    };
-    let result = parser.standard().parse();
-    if result.error().is_err() {
-        return false;
-    }
-    scans_raw_wfah_list(result.root)
-}
-
 /// `WOR-129` — tek ifadelik üreticiyi belge yürüyüşünün rapor biçimine çevirir.
 ///
 /// Yer-bağımlı üç kuralın gövdesi artık TEK: hem `validate()` hem
@@ -2646,6 +2625,23 @@ pub fn expression_issues(
     expr: &str,
     place: Option<ExprPlace>,
 ) -> Vec<(&'static str, bool, String)> {
+    expression_issues_with(expr, place, None)
+}
+
+/// `S26`/`WOR-117` — yüzey kuralları + (belge verildiyse) TİP kuralları, **TEK AST**
+/// üzerinde.
+///
+/// Önceden bu iki küme ayrı ayrı çağrılıyor ve her biri ifadeyi kendi başına parse
+/// ediyordu. Maliyet önemsizdi; asıl risk **iki ayrı "ayrıştı mı" cevabı** idi.
+///
+/// ⚠️ `env: None` yolu BİLİNÇLİ olarak korundu: `expression_issues` belge bilgisi
+/// İSTEMEZ ve editörün yarım taslağında da koşar (`/wfd/validate-expression`in
+/// `typed: false` yolu). Birleştirme o ayrımı bozmuyor — yalnız AST'yi paylaşıyor.
+pub fn expression_issues_with(
+    expr: &str,
+    place: Option<ExprPlace>,
+    env: Option<&ExprEnv>,
+) -> Vec<(&'static str, bool, String)> {
     if let Err(e) = zen_expression::validate::validate_expression(expr) {
         // Parse edilemeyen ifadede diğer kontroller anlamsız — tek hata döner.
         return vec![(
@@ -2687,12 +2683,16 @@ pub fn expression_issues(
         }
         out.push(("wfah_index_unguarded", false, msg));
     }
+    // AST BİR KEZ kurulur ve aşağıdaki iki kural seti onu PAYLAŞIR (`S26`).
+    let bump = Bump::new();
+    let root = expr_types::parse_ast(expr, &bump);
+
     // `A02` — ham `$wfah` üzerindeki niceleme/toplamalara OLGU notu. Yayını
     // ENGELLEMEZ (`wfah_index_unguarded` emsali birebir). Çerçeve OLGUDUR: metin
     // "bunu mu demek istediniz" DEMEZ, ifadenin ŞU ANDA ne yaptığını söyler ve
     // alternatifini gösterir — motor niyet okumaz, olgu bildirir. İfade başına TEK
     // not düşer (`$wfah` kaç kez geçerse geçsin).
-    if scans_raw_wfah_list_expr(expr) {
+    if root.is_some_and(scans_raw_wfah_list) {
         out.push((
             "wfah_raw_list",
             false,
@@ -2712,6 +2712,11 @@ pub fn expression_issues(
             ExprPlace::StartWhen => start_when_namespace_issues(expr),
             ExprPlace::GrantWhen => grant_when_namespace_issues(expr),
         });
+    }
+    // Belge VERİLDİYSE tip kuralları da AYNI ağaç üzerinden koşar. Verilmediyse
+    // hiç koşmaz — `typed: false` yolu budur.
+    if let (Some(env), Some(root)) = (env, root) {
+        out.extend(expr_types::type_issues_of_ast(root, env));
     }
     out
 }
@@ -2891,10 +2896,9 @@ fn check_expressions(wfd: &Wfd, report: &mut ValidationReport) {
         // ⚠️ Yer VERİLMEZ (`None`): bu yürüyüş belgedeki HER `when`i geziyor, yer-bağımlı
         // kurallar ise kendi yürüyüşlerinden koşuyor (`check_set_when_namespace` vb.).
         // Buradan da yer geçirilseydi aynı ifade İKİ KEZ raporlanırdı.
-        let issues: Vec<_> = expression_issues(expr, None)
-            .into_iter()
-            .chain(expr_types::expression_type_issues(expr, &env))
-            .collect();
+        // `S26`: yüzey + tip kuralları TEK çağrıda, TEK AST üzerinde. Eskiden iki ayrı
+        // çağrıydı ve her biri ifadeyi kendi başına parse ediyordu.
+        let issues = expression_issues_with(expr, None, Some(&env));
         report_issues(issues, path.clone(), report);
     };
 

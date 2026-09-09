@@ -1107,18 +1107,41 @@ fn op_symbol(op: ComparisonOperator) -> &'static str {
 /// (`zen_parse`) zaten reddeder, iki kez bağırmak gerekmez.
 pub fn expression_type_issues(expr: &str, env: &ExprEnv) -> Vec<Issue> {
     let bump = Bump::new();
+    match parse_ast(expr, &bump) {
+        Some(root) => type_issues_of_ast(root, env),
+        None => Vec::new(),
+    }
+}
+
+/// **İfadeyi AST'ye çeviren TEK yer** (`S26`/`WOR-117`).
+///
+/// Önceden iki ayrı yer kendi `Lexer`+`Parser`ını kuruyordu: burası (tip kuralları)
+/// ve `validator::scans_raw_wfah_list_expr` (`A02`nin ham liste notu). Aynı ifade iki
+/// kez parse ediliyordu ve asıl risk maliyet değildi — **iki parse iki ayrı "bu ifade
+/// ayrıştı mı" cevabı** demekti; birinde geçen bir ifade ötekinde sessizce atlanabilirdi.
+///
+/// `None` = lex/parse başarısız. Çağıranlar bunu SESSİZ geçer, çünkü parse hatasını
+/// zaten `expression_issues` bildiriyor (`zen_parse`) ve iki kez bağırmak gerekmez.
+///
+/// ⚠️ `zen_expression::validate::validate_expression` bunun yerine GEÇMEZ ve
+/// geçmemeli: o `compile_standard` çağırır, yani lex+parse'ın ÜSTÜNE bir de derler.
+/// Parse eden ama derlenmeyen bir ifade orada yakalanır, burada yakalanmaz — `zen_parse`
+/// kapısını çıplak parse'a indirmek onu ZAYIFLATIRDI.
+pub fn parse_ast<'b>(expr: &str, bump: &'b Bump) -> Option<&'b Node<'b>> {
     let source = bump.alloc_str(expr);
     let mut lexer = Lexer::new();
-    let Ok(tokens) = lexer.tokenize(source) else {
-        return Vec::new();
-    };
-    let Ok(parser) = Parser::try_new(tokens, &bump) else {
-        return Vec::new();
-    };
+    let tokens = lexer.tokenize(source).ok()?;
+    let parser = Parser::try_new(tokens, bump).ok()?;
     let result = parser.standard().parse();
     if result.error().is_err() {
-        return Vec::new();
+        return None;
     }
+    Some(result.root)
+}
+
+/// Tip kuralları — AST üzerinden. `expression_type_issues`in gövdesi; ayrı durması
+/// AST'yi PAYLAŞABİLMEK içindir (bkz. `parse_ast`).
+pub fn type_issues_of_ast(root: &Node, env: &ExprEnv) -> Vec<Issue> {
     let mut checker = Checker {
         env,
         out: Vec::new(),
@@ -1128,6 +1151,6 @@ pub fn expression_type_issues(expr: &str, env: &ExprEnv) -> Vec<Issue> {
         ptr: Root::WfahEntry,
         seen_roots: HashSet::new(),
     };
-    checker.visit(result.root, false);
+    checker.visit(root, false);
     checker.out
 }

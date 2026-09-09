@@ -22,7 +22,7 @@
 //! unutan bir kapı sessizce derlenirdi.
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -55,7 +55,10 @@ pub enum ClaimVia {
 /// grant'a uyuyorsa `c_a` yazılır; `grant` değerinin anlamı *"o grant açılmasaydı
 /// bu kişi bu işi ALAMAZDI"*tır. K10'un havuz genişletme kazancının tek sorguluk
 /// kanıtı budur.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// `R03`/S1-c: aynı enum ÇÖZÜLMÜŞ ADAY kaydında da yaşıyor
+/// (`types::actor::CandidateActor::authority`) ve o kayıt `current_c_a`dan geri
+/// OKUNUYOR — `Deserialize` bu yüzden burada.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimAuthority {
     /// Node'un taban `c_a` kuralı yetti.

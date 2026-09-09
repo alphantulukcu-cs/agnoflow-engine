@@ -3893,15 +3893,28 @@ impl<'a> Engine<'a> {
         // ⚠️ **Guard'lar YOK SAYILIR** — kolon over-inclusive bir cache'tir (`E03`):
         // commit anında viewer bilinmez ve `when` kişiye bağlı olabilir. Ayrım OKUMA
         // anında yapılır ("görebilir ≠ yapabilir", `P05`/G).
+        //
+        // ⚠️ `R03`/S1-c: adayın KAYNAĞI burada damgalanır ve TEK üretim yeri burasıdır.
+        // `resolve_candidates` kural-agnostik KALIR — onu `listable`/`wf_admin`
+        // yolları da çağırıyor ve o yollarda `authority` YAZILMAZ.
         let mut out = self
             .resolve_candidates(node.act_c_a(), staged, wfah, anchor_orgu, orgtnt_id)
             .await?;
+        for cand in &mut out {
+            cand.authority = Some(ClaimAuthority::Ca);
+        }
         for grant in crate::v22::grants::open_grants(wfd, wfah, node_key) {
             let extra = self
                 .resolve_candidates(&grant.c_a, staged, wfah, anchor_orgu, orgtnt_id)
                 .await?;
-            for cand in extra {
-                if !out.contains(&cand) {
+            for mut cand in extra {
+                // Tekilleştirme kaynağı DIŞARIDA tutar (`same_actor`): gölgelenen aday
+                // (`R05` — grant tabanın aynı kişisini de kapsıyor) tek satır kalır ve
+                // damgası `c_a` OLARAK KORUNUR. `E12`'nin öncelik kuralı AYNEN: `c_a`
+                // kazanır, çünkü `grant` değerinin anlamı *"o grant açılmasaydı bu kişi
+                // bu işi ALAMAZDI"*tır.
+                if !out.iter().any(|c| c.same_actor(&cand)) {
+                    cand.authority = Some(ClaimAuthority::Grant);
                     out.push(cand);
                 }
             }
@@ -3999,6 +4012,8 @@ impl<'a> Engine<'a> {
                         user_id: None,
                         user_ident: None,
                         any_orgu: false,
+                        // Kural-agnostik: kaynağı ÇAĞIRAN bilir (`node_candidates`).
+                        authority: None,
                     });
                 }
             }
@@ -4030,6 +4045,7 @@ impl<'a> Engine<'a> {
                                 user_id,
                                 user_ident: user_ident.clone(),
                                 any_orgu: false,
+                                authority: None,
                             });
                         }
                     }
@@ -4040,6 +4056,7 @@ impl<'a> Engine<'a> {
                         user_id,
                         user_ident: user_ident.clone(),
                         any_orgu: true,
+                        authority: None,
                     }),
                 }
             }
@@ -5435,6 +5452,229 @@ mod tests {
         assert!(
             !out.iter().any(|c| c.role == "izleyen"),
             "node listable kalıcı `view_c_a` projeksiyonuna sızmış: {out:?}"
+        );
+    }
+
+    // ==================================================== R03 — aday KAYNAĞI (`authority`)
+    //
+    // `R03`/S1-c: çözülmüş ACT adayı, kendisini kimin uygun kıldığını taşır —
+    // `E12`'nin `ClaimAuthority` enum'u AYNEN (yeni sözcük açılmadı, `P04`/tek kaynak).
+    // Bu olmadan `unit-workload` raporu "kaç iş grant sayesinde ikinci bir birime
+    // açıldı" sorusunu SORAMAZ (`Ç12`: kazancı ölçen rapor yok) — `also_eligible`
+    // sütununun tamamı bu alana dayanır.
+
+    /// Tek node, İKİ escalation kademesi:
+    ///   · kademe 0'ın grant'ı YENİ bir rol açar (`denetci`) → kaynak `grant`;
+    ///   · kademe 1'in grant'ı tabanın AYNI adayını açar (`memur`) → `R05` gölgelemesi,
+    ///     öncelik kuralı sınanır (`c_a` KAZANIR).
+    fn authority_wfd() -> Wfd {
+        let doc = r#"{
+              "wfd_version": "2.3",
+              "id": "authority-test",
+              "name": "Authority Test",
+              "version": "1.0.0",
+              "context": { "type": "object", "properties": {} },
+              "listable": [ { "c_a": { "c_orgu": "self", "c_r": ["izleyen"] } } ],
+              "start": [ { "id": "start__adim", "action": "basla" } ],
+              "nodes": {
+                "adim": {
+                  "c_a": { "c_orgu": "self", "c_r": ["memur"] },
+                  "escalation": [
+                    { "after": "PT1H",
+                      "grant": { "c_a": { "c_orgu": "self", "c_r": ["denetci"] } } },
+                    { "after": "PT2H",
+                      "grant": { "c_a": { "c_orgu": "self", "c_r": ["memur"] } } }
+                  ]
+                }
+              },
+              "actions": {
+                "basla": { "input": { "required": [], "optional": [] },
+                           "from": "adim", "wft": { "terminal": "bitti" } }
+              },
+              "terminals": [
+                { "id": "bitti", "label": "Bitti", "wfe_end_response": { "status": "ok" } }
+              ]
+            }"#;
+        Wfd::from_json(doc).expect("fixture geçerli olmalı")
+    }
+
+    /// `escalate:adim:<idx>` satırı — grant'ı AÇAN tek şey budur (`open_grants`).
+    fn escalated(idx: usize) -> Wfah {
+        Wfah::empty().push(
+            format!("escalate:adim:{idx}"),
+            Actor {
+                orgu_id: Uuid::nil(),
+                user_id: Uuid::nil(),
+                role: "sistem".into(),
+            },
+            None,
+        )
+    }
+
+    /// Hiç kademe ateşlenmemişken havuzda YALNIZ taban `c_a` vardır ve kaynağı
+    /// `c_a`dır. Alan `Option` olduğu için "yazmayı unutmak" sessizce geçerdi —
+    /// raporda o iş `active` kovasında görünür, yani hata KAYBOLUR. Kapı burada.
+    #[tokio::test]
+    async fn node_candidates_stamp_base_c_a_as_authority_ca() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+
+        let out = engine
+            .node_candidates(
+                "adim",
+                &authority_wfd(),
+                &json!({}),
+                &Wfah::empty(),
+                Uuid::new_v4(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(out.len(), 1, "taban havuzu tek aday üretmeli: {out:?}");
+        assert_eq!(out[0].role, "memur");
+        assert_eq!(out[0].authority, Some(ClaimAuthority::Ca));
+    }
+
+    /// Kademe 0 ateşlendi: `denetci` YALNIZ grant sayesinde havuzda. Bu satır
+    /// raporun `also_eligible` kovasını dolduran tek şeydir (`K10`'un kazancının
+    /// ölçüsü) — kaynağı `grant` yazılmazsa kazanç `active`e karışır ve ölçülemez.
+    #[tokio::test]
+    async fn node_candidates_stamp_open_grant_as_authority_grant() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+
+        let out = engine
+            .node_candidates(
+                "adim",
+                &authority_wfd(),
+                &json!({}),
+                &escalated(0),
+                Uuid::new_v4(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        let by_role: Vec<(&str, Option<ClaimAuthority>)> =
+            out.iter().map(|c| (c.role.as_str(), c.authority)).collect();
+        assert!(
+            by_role.contains(&("memur", Some(ClaimAuthority::Ca))),
+            "taban adayı kaynağını kaybetmiş: {by_role:?}"
+        );
+        assert!(
+            by_role.contains(&("denetci", Some(ClaimAuthority::Grant))),
+            "grant adayı `grant` damgalanmamış: {by_role:?}"
+        );
+    }
+
+    /// `R05` gölgelemesi: grant tabanın AYNI adayını açıyor. İki hüküm birden:
+    ///   · aday TEK satır kalır (`R03`/S1-a'nın `DISTINCT`i satır sayısına değil,
+    ///     kolonun kendisine de yansımalı);
+    ///   · kaynağı `c_a`dır — öncelik `E12`'den AYNEN devralındı.
+    ///
+    /// ⚠️ Alan `PartialEq`e girdiği için mevcut `out.contains(&cand)` tekilleştirmesi
+    /// bu adayı ARTIK ayırt eder ve İKİ satır yazardı: rapor o işi o birimde hem
+    /// `active` hem `also_eligible` sayardı. Kapı tam olarak o regresyonu tutuyor.
+    #[tokio::test]
+    async fn shadowing_grant_keeps_one_row_and_c_a_wins() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+
+        let out = engine
+            .node_candidates(
+                "adim",
+                &authority_wfd(),
+                &json!({}),
+                &escalated(1),
+                Uuid::new_v4(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        let memur: Vec<_> = out.iter().filter(|c| c.role == "memur").collect();
+        assert_eq!(memur.len(), 1, "gölgelenen aday iki kez yazılmış: {out:?}");
+        assert_eq!(memur[0].authority, Some(ClaimAuthority::Ca));
+    }
+
+    /// `R03`/S1-c'nin SINIRI: alan YALNIZ act adaylarında yazılır. Görünürlük
+    /// kolonlarında (`view_c_a`, `current_view_c_a`, `end_view_c_a`,
+    /// `wfe_branch.view_c_a`) escalation grant'ı kavramı YOKTUR; oradaki genişleme
+    /// `listable`/`wf_admin` eksenidir ve bu alan o ekseni adlandırmıyor.
+    #[tokio::test]
+    async fn visibility_candidates_carry_no_authority() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+
+        let out = engine
+            .view_grants(
+                &authority_wfd(),
+                &json!({}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!out.is_empty(), "fixture görünürlük adayı üretmeli");
+        assert!(
+            out.iter().all(|c| c.authority.is_none()),
+            "görünürlük adayına kaynak damgası sızmış: {out:?}"
+        );
+    }
+
+    /// Kolonun WIRE biçimi: `authority` yazılınca `E12`'nin sözcüğüyle (`c_a`/`grant`)
+    /// çıkar, yazılmayınca ALAN HİÇ YOKTUR. İkincisi bir uyumluluk yolu değil, kolonun
+    /// bugünkü satırlarının biçimini koruma sözüdür — `current_c_a @> {...}` containment
+    /// sorguları alt küme semantiğiyle AYNEN eşleşmeye devam eder.
+    #[tokio::test]
+    async fn authority_wire_shape_matches_e12_and_stays_absent_when_unset() {
+        let org = MockOrg;
+        let runner = DummyRunner;
+        let engine = grants_engine(&org, &runner);
+        let anchor = Uuid::new_v4();
+
+        let act = engine
+            .node_candidates(
+                "adim",
+                &authority_wfd(),
+                &json!({}),
+                &escalated(0),
+                anchor,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        let denetci = act.iter().find(|c| c.role == "denetci").unwrap();
+        assert_eq!(
+            serde_json::to_value(denetci).unwrap(),
+            json!({ "orgu_id": anchor, "role": "denetci", "authority": "grant" })
+        );
+
+        let view = engine
+            .view_grants(
+                &authority_wfd(),
+                &json!({}),
+                &Wfah::empty(),
+                Some("adim"),
+                Uuid::new_v4(),
+                anchor,
+                Uuid::nil(),
+            )
+            .await
+            .unwrap();
+        let izleyen = view.iter().find(|c| c.role == "izleyen").unwrap();
+        assert_eq!(
+            serde_json::to_value(izleyen).unwrap(),
+            json!({ "orgu_id": anchor, "role": "izleyen" })
         );
     }
 }

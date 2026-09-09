@@ -1,3 +1,4 @@
+use crate::v22::ownership::ClaimAuthority;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -48,4 +49,50 @@ pub struct CandidateActor {
     /// `current_c_a` satırlarının biçimi değişmez.
     #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub any_orgu: bool,
+    /// `R03`/S1-c — adayı HANGİ KURALIN uygun kıldığı. `E12`'nin enum'u AYNEN
+    /// (`c_a | grant`); ikinci bir sözcük (`source`, `via_grant`) açılmadı çünkü
+    /// soru defterdekiyle aynıdır, yalnız öznesi tekil owner değil aday kümesidir.
+    ///
+    /// **YALNIZ act kolonlarında yazılır** (`wf.wfe.current_c_a`,
+    /// `wf.wfe_branch.c_a`). Görünürlük kolonlarında (`view_c_a`,
+    /// `current_view_c_a`, `end_view_c_a`, `wfe_branch.view_c_a`) escalation grant'ı
+    /// kavramı YOKTUR — oradaki genişleme `listable`/`wf_admin` eksenidir ve bu alan
+    /// o ekseni adlandırmıyor. Ayrımı kolon kimliği taşır.
+    ///
+    /// **Öncelik `E12`'den AYNEN: `c_a` kazanır.** Aynı aday hem tabandan hem açık bir
+    /// grant'tan doğuyorsa (`R05` gölgelemesi meşrudur) satır `c_a` sayılır; böylece
+    /// `unit-workload`un iki sayacı (`active` / `also_eligible`) AYRIK kalır.
+    ///
+    /// `None` iki şey demektir: ya bu bir act adayı değildir, ya da satır alan
+    /// eklenmeden önce yazılmıştır. İkincisi rapora `active` olarak girer — backfill
+    /// YAZILMAZ (`R01`), kolon canlı durumdur ve bir sonraki commit'te yeniden yazılır.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub authority: Option<ClaimAuthority>,
+}
+
+impl CandidateActor {
+    /// İki adayın AYNI KİŞİ/KÜME'yi gösterip göstermediği — kaynak damgası HARİÇ.
+    ///
+    /// `node_candidates` gölgelenen adayı (`R05`) tek satırda tutmak için buna sorar;
+    /// türetilmiş `PartialEq` kullanılamaz, çünkü `authority` ona dahildir ve aynı
+    /// aday "taban" ile "grant" damgalarıyla İKİ satır olurdu — rapor o işi o birimde
+    /// hem `active` hem `also_eligible` sayardı.
+    ///
+    /// Gövde alanları TEK TEK açıyor (joker yok): kimliğe yeni bir alan eklendiğinde
+    /// derleyici burayı işaret eder ve "eşitliğe girer mi" sorusu cevapsız geçemez.
+    pub fn same_actor(&self, other: &Self) -> bool {
+        let Self {
+            orgu_id,
+            role,
+            user_id,
+            user_ident,
+            any_orgu,
+            authority: _,
+        } = self;
+        *orgu_id == other.orgu_id
+            && *role == other.role
+            && *user_id == other.user_id
+            && *user_ident == other.user_ident
+            && *any_orgu == other.any_orgu
+    }
 }

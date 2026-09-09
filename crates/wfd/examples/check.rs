@@ -24,7 +24,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut bad = 0;
     for (path, wfd) in &docs {
-        let report = validator::validate_with(wfd, Some(&catalog));
+        let report = validator::validate_with(wfd, &catalog);
         println!("\n=== {path}  ({}, v{})", wfd.id, wfd.version);
         if report.errors.is_empty() {
             println!("  HATA YOK");

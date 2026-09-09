@@ -21,7 +21,6 @@ use wf_wfe::{
 use wfe_core::types::actor::Actor;
 use wfe_core::types::wfd_v22::Wfd;
 use wfe_core::v22::pipeline::Engine;
-use wfe_core::validator;
 
 pub fn router(state: AppState) -> OpenApiRouter {
     OpenApiRouter::new()
@@ -35,13 +34,22 @@ pub fn router(state: AppState) -> OpenApiRouter {
         .with_state(state)
 }
 
-fn parse_and_validate(wfd_json: Value) -> Result<Wfd, AppError> {
-    // Simülasyon da tam validator'dan geçiyor (aşağıda) → şema kapısı da burada geçerli:
-    // editörde koşan belge ile yayınlanacak belge AYNI kapıdan geçmeli, yoksa simülasyonda
-    // yeşil görünen bir doküman publish'te 422'ye düşerdi.
+/// Simülasyon da **yayın kapısının TA KENDİSİNDEN** geçer: şema kapısı + yerel
+/// kurallar + WFC cross-WFD kuralları. Aksi halde editörde koşan belge ile
+/// yayınlanacak belge farklı kapılardan geçerdi ve simülasyonda yeşil görünen bir
+/// doküman publish'te 422'ye düşerdi (`WOR-135`).
+///
+/// `orgtnt_id` çağrılan akış katalogunu getirmek için gerekir; verilmezse katalog
+/// BOŞ olur ve `calls` taşıyan belge `call_version_not_published` alır — sessizce
+/// geçmez.
+async fn parse_and_validate(
+    s: &AppState,
+    orgtnt_id: Option<uuid::Uuid>,
+    wfd_json: Value,
+) -> Result<Wfd, AppError> {
     let wfd = Wfd::from_value_checked(wfd_json)
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
-    let report = validator::validate(&wfd);
+    let report = s.wfd.validate_document(orgtnt_id, &wfd).await;
     if !report.is_valid() {
         let summary = report
             .errors
@@ -146,7 +154,7 @@ async fn sim_start(
     raw: axum::body::Bytes,
 ) -> Result<Json<SimStartResponse>, AppError> {
     let body: SimStartBody = crate::wfd_body::parse_wfd_body(&raw)?;
-    let wfd = parse_and_validate(body.wfd)?;
+    let wfd = parse_and_validate(&s, body.orgtnt_id, body.wfd).await?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
     let engine = Engine {
@@ -228,7 +236,7 @@ async fn sim_apply(
     raw: axum::body::Bytes,
 ) -> Result<Json<SimApplyResponse>, AppError> {
     let body: SimApplyBody = crate::wfd_body::parse_wfd_body(&raw)?;
-    let wfd = parse_and_validate(body.wfd)?;
+    let wfd = parse_and_validate(&s, body.orgtnt_id, body.wfd).await?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
     let engine = Engine {
@@ -339,7 +347,7 @@ async fn sim_call_return(
     raw: axum::body::Bytes,
 ) -> Result<Json<SimCallReturnResponse>, AppError> {
     let body: SimCallReturnBody = crate::wfd_body::parse_wfd_body(&raw)?;
-    let wfd = parse_and_validate(body.wfd)?;
+    let wfd = parse_and_validate(&s, body.orgtnt_id, body.wfd).await?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
     let engine = Engine {
@@ -408,7 +416,7 @@ async fn sim_possible_actions(
     raw: axum::body::Bytes,
 ) -> Result<Json<Vec<PossibleAction>>, AppError> {
     let body: SimPossibleActionsBody = crate::wfd_body::parse_wfd_body(&raw)?;
-    let wfd = parse_and_validate(body.wfd)?;
+    let wfd = parse_and_validate(&s, body.orgtnt_id, body.wfd).await?;
     let org = Arc::new(OrgAdapter::new(s.pool.clone()));
     let runner = LiveAutoexecRunner::new(Some(s.pool.clone()));
     let engine = Engine {
@@ -450,6 +458,11 @@ struct SimAttachBody {
     content_type: Option<String>,
     #[serde(default)]
     size_bytes: i64,
+    /// Cross-WFD kapısı için çağrılan akış katalogu bu tenant'tan getirilir
+    /// (`WOR-135`). Öteki sim uçlarındaki alanla aynı; burada `$env` çözümü yok,
+    /// yalnız doğrulama için var.
+    #[serde(default)]
+    orgtnt_id: Option<uuid::Uuid>,
 }
 
 #[derive(serde::Serialize, ToSchema)]
@@ -464,11 +477,11 @@ struct SimStateOnlyResponse {
         (status = 200, description = "Belge yüklenmiş sayıldıktan sonraki sim durumu", body = SimStateOnlyResponse),
         (status = 422, description = "Bilinmeyen slot / aktif adımda toplanmıyor / format-boyut reddi")))]
 async fn sim_attach(
-    State(_s): State<AppState>,
+    State(s): State<AppState>,
     raw: axum::body::Bytes,
 ) -> Result<Json<SimStateOnlyResponse>, AppError> {
     let body: SimAttachBody = crate::wfd_body::parse_wfd_body(&raw)?;
-    let wfd = parse_and_validate(body.wfd)?;
+    let wfd = parse_and_validate(&s, body.orgtnt_id, body.wfd).await?;
     let mut sim_state = body.sim_state;
     wf_wfe::sim::step::attach(
         &wfd,

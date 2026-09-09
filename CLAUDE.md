@@ -102,6 +102,8 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
   `ENGINE_ONLY` listesinde GEREKÇESİYLE yazılır. Sebep: `docs/` altında olduğu için
   hiçbir derleyici bakmıyordu ve sessizce çürümüştü (2026-08-17 ölçümü: 8 tip + 10'dan
   fazla alan eksik, `c_u` hâlâ `Vec<String>`). Motora alan eklenince ORASI da güncellenir.
+- **WFC cross-WFD kapısı `WfdAdapter::validate_document` ÜZERİNDEN koşar ve resolver ZORUNLUDUR** (`WOR-135`, 2026-09-09). `validator::validate()` ve `Option<&dyn WfdProvider>` KALDIRILDI: opsiyonellik, `/wfd/validate` · `/wfe/simulate/*` · senaryo koşucusu yollarında kapıyı **sessizce** atlatıyordu, yani editörde/simülasyonda yeşil görünen belge publish'te 422 alıyordu. Belge taşıyan yeni bir uç yazarken `wfe_core::validator::*` ÇAĞIRMA — `s.wfd.validate_document(orgtnt_id, &wfd)` (tenant elde) ya da `s.wfd.validate_stored_document(id, ver, &wfd)` (tenant satırdan) kullan. Katalog tenant ister: `/wfe/simulate/*` gövdede `orgtnt_id` alır, `/wfd/validate` **sorguda** (gövdesi belgenin kendisi, çift-anahtar kapısı ham baytı görüyor). Tenant yoksa katalog boşalır (`NoCallees`) ve her çağrı `call_version_not_published` verir — atlama sessiz DEĞİLDİR.
+
 - **`docs/spec/schema.json` RUNTIME kapısıdır** (`wfe_core::schema`, `include_str!` ile gömülü): `Wfd::from_value_checked`/`from_json_checked` upload/publish/submit/approve/**fetch**, `/wfd/validate`, `/wfe/simulate` ve senaryo koşumunda şemayı zorlar — serde `minItems`/`pattern` bilmez, elle yazılan JSON o boşluktan giriyordu (`"c_r": []`). Taslak KAYDI kapsam dışı; ham `from_value` testler için açık. Şema TEK kopyadır (`agnoflow-spec` submodule'ü); frontend aynı submodule'ü pinler.
 
 - **Senaryo sidecar'ında `folders` alanı FRONTEND'e aittir** (2026-08-20). `ScenarioSet`

@@ -56,21 +56,36 @@ impl ValidationReport {
 /// Çağrılan WFD'leri çözebilen kaynak — WFC'nin cross-WFD kuralları (girdi kümesi,
 /// tip uyumu, `wfe_end_response` anahtarları, döngü) için gerekir.
 ///
-/// Neden opsiyonel: `wfe-core` saf bir crate'tir, I/O yapmaz. Saf unit testler
-/// resolver vermez ve yalnız yerel kurallar koşar. Upload yolunda (`wfd` crate)
-/// resolver DAİMA verilir — yani üretimde tam kontrol vardır.
+/// `wfe-core` saf bir crate'tir, I/O yapmaz: çağrılanlar çağıran tarafından ÖNCE
+/// toplanır (`wfd` crate'inde `prefetch_callees`), sonra senkron bir resolver olarak
+/// verilir. Resolver vermek ZORUNLUDUR; hiçbirini çözemeyen `NoCallees` de bir
+/// resolver'dır ve sessiz değildir.
 pub trait WfdProvider {
     /// `(wfd_id, version)` → çağrılan WFD. `version: None` = en son yayınlanmış.
     /// `None` dönmek "bulunamadı / yayınlanmamış" demektir.
     fn resolve(&self, wfd_id: &str, version: Option<&str>) -> Option<Wfd>;
 }
 
-pub fn validate(wfd: &Wfd) -> ValidationReport {
-    validate_with(wfd, None)
+/// Çağrılan HİÇBİR akışı çözemeyen resolver.
+///
+/// Saf `wfe-core` testleri ve tenant'ı çözülemeyen çağıranlar bunu verir. Sessiz
+/// DEĞİLDİR: `calls` taşıyan bir belgede her çağrı `call_version_not_published`
+/// hatası alır. Kasıt bu — `WOR-135` öncesinde resolver'sız yol cross-WFD kapısını
+/// sessizce atlıyordu ve "simülasyonda yeşil, yayında 422" ayrışmasını üretiyordu.
+pub struct NoCallees;
+
+impl WfdProvider for NoCallees {
+    fn resolve(&self, _wfd_id: &str, _version: Option<&str>) -> Option<Wfd> {
+        None
+    }
 }
 
 /// WFC cross-WFD kurallarını da koşan tam validasyon.
-pub fn validate_with(wfd: &Wfd, provider: Option<&dyn WfdProvider>) -> ValidationReport {
+///
+/// `provider` ZORUNLUDUR. Opsiyonel olduğu sürece her yeni çağıran kapıyı kazayla
+/// kapatabiliyordu (`WOR-135`); atlamak isteyen `NoCallees` vermek zorunda ve o da
+/// sessiz değil, gürültülü bir atlamadır.
+pub fn validate_with(wfd: &Wfd, provider: &dyn WfdProvider) -> ValidationReport {
     let mut report = validate_local(wfd);
     check_calls_cross_wfd(wfd, provider, &mut report);
     report
@@ -566,7 +581,7 @@ fn check_c_u_items(wfd: &Wfd, report: &mut ValidationReport) {
 // ---- WFC — İş Akışı Çağrısı: yerel kurallar ----
 //
 // Cross-WFD kurallar (girdi kümesi, tip uyumu, sonuç anahtarları, döngü)
-// `check_calls_cross_wfd`'de, `WfdProvider` varsa koşar.
+// `check_calls_cross_wfd`'de koşar (`WfdProvider` zorunlu).
 
 /// WFC-IN'de izin verilen namespace'ler. `$action.input.*` YASAK — iki gerekçe:
 /// (1) moddan bağımsızlık: `terminal` modunda ACT girdisi güvenilir biçimde mevcut
@@ -970,16 +985,7 @@ pub(crate) fn schema_type_at(context: &Value, dotted: &str) -> Option<String> {
     schema.get("type").and_then(Value::as_str).map(String::from)
 }
 
-fn check_calls_cross_wfd(
-    wfd: &Wfd,
-    provider: Option<&dyn WfdProvider>,
-    report: &mut ValidationReport,
-) {
-    let Some(provider) = provider else {
-        // Resolver yok (saf çekirdek testi) — cross-WFD kuralları atlanır.
-        // Upload yolunda resolver DAİMA verilir, bkz. `validate_with` dokümantasyonu.
-        return;
-    };
+fn check_calls_cross_wfd(wfd: &Wfd, provider: &dyn WfdProvider, report: &mut ValidationReport) {
     let sites = call_sites(wfd);
 
     for (key, def) in &wfd.calls {

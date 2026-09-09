@@ -207,11 +207,33 @@ async fn upload_wfd(
     ))
 }
 
+/// `POST /wfd/validate` sorgu parametreleri.
+#[derive(Deserialize, IntoParams)]
+struct ValidateWfdQuery {
+    /// `WOR-135` — WFC cross-WFD kapısı çağrılan akış katalogunu bu tenant'tan getirir.
+    /// Gövde belgenin KENDİSİ olduğu için (çift-anahtar kapısı ham baytı görmek zorunda)
+    /// tenant zarfa değil sorguya taşınır.
+    ///
+    /// Verilmezse katalog boş kalır ve `calls` taşıyan belge `call_version_not_published`
+    /// alır — yani "cross-WFD denetlenmedi" durumu SESSİZ değil, kırmızıdır.
+    #[serde(default)]
+    orgtnt_id: Option<Uuid>,
+}
+
 /// Editör için: kaydetmeden doğrula — hata/uyarı listesi döner.
+///
+/// Yayın kapısıyla AYNI validator, AYNI resolver: `WOR-135` öncesinde bu uç cross-WFD
+/// kurallarını hiç koşmuyordu, dolayısıyla "Doğrulama sekmesi yeşil, publish 422"
+/// mümkündü.
 #[utoipa::path(post, path = "/validate", tag = "wfd",
+    params(ValidateWfdQuery),
     request_body = serde_json::Value,
     responses((status = 200, description = "valid/errors/warnings", body = serde_json::Value)))]
-async fn validate_wfd(raw: axum::body::Bytes) -> Result<Json<Value>, AppError> {
+async fn validate_wfd(
+    State(s): State<AppState>,
+    Query(q): Query<ValidateWfdQuery>,
+    raw: axum::body::Bytes,
+) -> Result<Json<Value>, AppError> {
     let wfd_json: Value = crate::wfd_body::parse_wfd_body(&raw)?;
     // Şema ihlalleri AYRI kod (`schema`) ile ve tek tek raporlanır — yayın kapısı (upload/
     // publish) aynı şemayı reddederek durdurur, editör de aynı listeyi burada görür.
@@ -236,7 +258,7 @@ async fn validate_wfd(raw: axum::body::Bytes) -> Result<Json<Value>, AppError> {
             })));
         }
     };
-    let report = wfe_core::validator::validate(&wfd);
+    let report = s.wfd.validate_document(q.orgtnt_id, &wfd).await;
     let issue = |i: &wfe_core::validator::ValidationIssue| serde_json::json!({"code": i.code, "path": i.path, "message": i.message});
     let mut errors = schema_errors;
     errors.extend(report.errors.iter().map(issue));
@@ -1327,7 +1349,10 @@ async fn run_scenarios_inner(
     };
     let wfd = wfe_core::types::wfd_v22::Wfd::from_value_checked(wfd_json.clone())
         .map_err(|e| AppError(e.to_string(), StatusCode::UNPROCESSABLE_ENTITY))?;
-    let report = wfe_core::validator::validate(&wfd);
+    // Yayın kapısının TA KENDİSİ — WFC cross-WFD kuralları dahil (`WOR-135`).
+    // Tenant `(id, ver)` satırından çözülür: gövdeden gelen doküman kaydedilmemiş
+    // olabilir ama hangi tenant'ta koştuğu satırda yazılıdır.
+    let report = s.wfd.validate_stored_document(id, ver, &wfd).await;
     if !report.is_valid() {
         let summary = report
             .errors

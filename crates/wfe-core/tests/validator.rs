@@ -3,7 +3,8 @@
 
 use serde_json::{json, Value};
 use wfe_core::types::wfd_v22::Wfd;
-use wfe_core::validator::{expression_issues, validate, ExprPlace, ValidationReport};
+use wfe_core::validator::{expression_issues, validate_with, ExprPlace, NoCallees};
+use wfe_core::validator::ValidationReport;
 
 const FIXTURE: &str = include_str!("../../../docs/spec/examples/kredi-basvuru.golden.json");
 const PARALLEL_FIXTURE: &str = include_str!("../../../docs/spec/examples/paralel-onay.json");
@@ -19,7 +20,7 @@ fn parallel_fixture_value() -> Value {
 
 fn validate_value(v: Value) -> ValidationReport {
     let wfd = Wfd::from_value(v).expect("mutasyon parse edilebilir kalmalı");
-    validate(&wfd)
+    validate_with(&wfd, &NoCallees)
 }
 
 fn has_error(report: &ValidationReport, code: &str) -> bool {
@@ -1916,7 +1917,7 @@ fn attachment_and_parallel_fixtures_are_valid() {
         ("paralel-onay", PARALLEL_FIXTURE),
     ] {
         let wfd = Wfd::from_json(raw).expect("fixture parse etmeli");
-        let report = validate(&wfd);
+        let report = validate_with(&wfd, &NoCallees);
         assert!(
             report.is_valid(),
             "{name} geçerli olmalı, hatalar: {:#?}",
@@ -1998,7 +1999,7 @@ fn actor_written_into_string_field_is_error() {
 #[test]
 fn actor_written_into_object_field_is_clean() {
     // Golden zaten `initiated_by: {type: object}` bildiriyor — kural sessiz kalmalı.
-    let report = validate(&Wfd::from_json(FIXTURE).unwrap());
+    let report = validate_with(&Wfd::from_json(FIXTURE).unwrap(), &NoCallees);
     assert!(
         !report
             .errors
@@ -2109,7 +2110,7 @@ fn literal_effect_value_type_is_checked() {
 fn whole_object_effect_covers_nested_leaves() {
     // Golden'da `applicant` tek parça yazılıyor; name/tckid/income yaprakları
     // ölü sayılmamalı.
-    let report = validate(&Wfd::from_json(FIXTURE).unwrap());
+    let report = validate_with(&Wfd::from_json(FIXTURE).unwrap(), &NoCallees);
     assert!(
         !report
             .errors

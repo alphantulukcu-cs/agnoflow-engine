@@ -3,12 +3,13 @@
 //! Üç mod: `wait` / `detached` (node yerleşimi, `nodes.<k>.call`) ve `terminal`
 //! (ardıl akış, `terminals[].call`). Plan: docs/plans/workflow-call.md.
 //!
-//! Cross-WFD kurallar `WfdProvider` gerektirir; `validate()` (resolver'sız) yalnız yerel
-//! kuralları koşar. Buradaki `Catalog` sahte bir resolver'dır.
+//! Cross-WFD kurallar `WfdProvider` gerektirir. Buradaki `Catalog` sahte bir
+//! resolver'dır; `NoCallees` ise hiçbirini çözemeyen resolver — onunla koşan test
+//! yerel kuralları ölçer ve cross-WFD hatalarını GÖRÜR (sessiz atlama yok).
 
 use serde_json::{json, Value};
 use wfe_core::types::wfd_v22::Wfd;
-use wfe_core::validator::{validate, validate_with, ValidationReport, WfdProvider};
+use wfe_core::validator::{validate_with, NoCallees, ValidationReport, WfdProvider};
 
 const CALLER: &str = include_str!("../../../docs/spec/examples/akis-cagrisi.json");
 const SKOR: &str = include_str!("../../../docs/spec/examples/kredi-skor.json");
@@ -52,18 +53,18 @@ fn parse(v: Value) -> Wfd {
     Wfd::from_value(v).expect("mutasyon parse edilebilir kalmalı")
 }
 
-/// Yalnız yerel kurallar (resolver yok).
+/// Çözemeyen resolver — yerel kurallar + "hiçbir çağrı çözülemedi" hataları.
 fn local(v: Value) -> ValidationReport {
-    validate(&parse(v))
+    validate_with(&parse(v), &NoCallees)
 }
 
 /// Yerel + cross-WFD kurallar.
 fn full(v: Value) -> ValidationReport {
-    validate_with(&parse(v), Some(&Catalog::new()))
+    validate_with(&parse(v), &Catalog::new())
 }
 
 fn full_with(v: Value, catalog: Catalog) -> ValidationReport {
-    validate_with(&parse(v), Some(&catalog))
+    validate_with(&parse(v), &catalog)
 }
 
 fn has_error(report: &ValidationReport, code: &str) -> bool {
@@ -84,26 +85,52 @@ fn mutate(f: impl FnOnce(&mut Value)) -> Value {
 // ---- temel: fixture'lar temiz ----
 
 #[test]
-fn caller_fixture_is_valid_with_and_without_resolver() {
-    for report in [local(caller_value()), full(caller_value())] {
-        assert!(
-            report.errors.is_empty(),
-            "çağıran fixture temiz geçmeli, hatalar: {:#?}",
-            report.errors
-        );
-        assert!(
-            report.warnings.is_empty(),
-            "çağıran fixture uyarısız geçmeli, uyarılar: {:#?}",
-            report.warnings
-        );
-    }
+fn caller_fixture_is_valid_with_a_resolver() {
+    let report = full(caller_value());
+    assert!(
+        report.errors.is_empty(),
+        "çağıran fixture temiz geçmeli, hatalar: {:#?}",
+        report.errors
+    );
+    assert!(
+        report.warnings.is_empty(),
+        "çağıran fixture uyarısız geçmeli, uyarılar: {:#?}",
+        report.warnings
+    );
+}
+
+/// `WOR-135` KİLİDİ — resolver'sız yol SESSİZ DEĞİLDİR.
+///
+/// Eski davranış: `provider: None` verilince cross-WFD kapısı sessizce atlanıyordu,
+/// yani aynı belge simülasyonda / `/wfd/validate`te YEŞİL, publish'te 422 oluyordu.
+/// Artık atlamak `NoCallees` vermek demektir ve o da her çağrıyı reddeder.
+///
+/// Bu test kırılırsa ayrışma geri gelmiş demektir: kapıyı "opsiyonel" yapmayın.
+#[test]
+fn a_resolver_that_finds_nothing_rejects_every_call_site() {
+    let report = local(caller_value());
+    let unresolved: Vec<&str> = report
+        .errors
+        .iter()
+        .filter(|e| e.code == "call_version_not_published")
+        .map(|e| e.path.as_str())
+        .collect();
+    assert_eq!(
+        unresolved,
+        [
+            "calls[kredi_kullandirim].wfd_id",
+            "calls[kredi_skor_sorgusu].wfd_id"
+        ],
+        "boş katalogda HER çağrı hata vermeli, rapor: {:#?}",
+        report.errors
+    );
 }
 
 #[test]
 fn callee_fixtures_are_valid() {
     for src in [SKOR, KULLANDIRIM] {
         let wfd = Wfd::from_json(src).unwrap();
-        let report = validate(&wfd);
+        let report = validate_with(&wfd, &NoCallees);
         assert!(
             report.errors.is_empty(),
             "çağrılan '{}' temiz geçmeli: {:#?}",

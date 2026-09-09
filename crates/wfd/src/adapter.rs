@@ -66,12 +66,7 @@ impl WfdAdapter {
         let wfd = Wfd::from_value_checked(wfd_json.clone())
             .map_err(|e| crate::error::WfdError::InvalidJson(e.to_string()))?;
 
-        // WFC cross-WFD kuralları (girdi kümesi, tip uyumu, `$call.result.*` anahtarları,
-        // döngü) çağrılan WFD'leri okumayı gerektirir. Validator SAF ve SENKRONdur, bu
-        // yüzden gerekli dokümanlar önce async olarak toplanır, sonra bellekteki bir
-        // katalog sync provider olarak verilir.
-        let callees = self.prefetch_callees(orgtnt_id, &wfd).await;
-        let report = validator::validate_with(&wfd, Some(&callees));
+        let report = self.validate_document(Some(orgtnt_id), &wfd).await;
         if !report.is_valid() {
             return Err(Self::validation_error(&report));
         }
@@ -326,37 +321,57 @@ impl WfdAdapter {
         repo::release_lock(&self.pool, wfd_id, version, orgtnt_id, user_id).await
     }
 
-    /// Draft/pending bir WFD'yi **upload ile AYNI kapıdan** doğrular.
+    /// **Belge taşıyan HER yolun TEK doğrulama yüzeyi** — yerel kurallar + WFC
+    /// cross-WFD kuralları (çağrılanın var/yayınlanmış olması, girdi sözleşmesi, tip
+    /// uyumu, `$call.result.*` anahtarları, döngü).
     ///
-    /// Neden ayrı bir yardımcı: `publish`/`submit`/`approve` yolları resolver'sız
-    /// `validate()` çağırıyordu, yani WFC'nin cross-WFD kuralları (çağrılanın var
-    /// olması, girdi sözleşmesi, tip uyumu, döngü) BU YOLLARDA HİÇ KOŞMUYORDU.
-    /// Sonuç: çağıran akış, çağrılan henüz yayınlanmamışken sessizce publish
-    /// edilebiliyordu ve hata ancak ÇALIŞMA ANINDA `WFD.CallNotFound` olarak
-    /// ortaya çıkıyordu — `wait` modunda WFE o node'da sonsuza kadar bekler.
+    /// Cross-WFD kuralları çağrılan WFD'leri okumayı gerektirir. Validator SAF ve
+    /// SENKRONdur, bu yüzden dokümanlar önce async toplanır, sonra bellekteki katalog
+    /// sync provider olarak verilir.
+    ///
+    /// `orgtnt_id: None` katalogu ATLAMAZ, BOŞALTIR (`NoCallees`): `calls` taşıyan bir
+    /// belge o zaman `call_version_not_published` alır. Sessiz atlama YOKTUR — `WOR-135`
+    /// tam olarak o sessizliğin ürettiği "simülasyonda yeşil, yayında 422" ayrışmasıydı.
+    pub async fn validate_document(
+        &self,
+        orgtnt_id: Option<Uuid>,
+        wfd: &Wfd,
+    ) -> validator::ValidationReport {
+        match orgtnt_id {
+            Some(tid) => {
+                let callees = self.prefetch_callees(tid, wfd).await;
+                validator::validate_with(wfd, &callees)
+            }
+            None => validator::validate_with(wfd, &validator::NoCallees),
+        }
+    }
+
+    /// Depoda satırı olan bir WFD'yi doğrular; tenant'ı `(wfd_id, version)`'dan çözer.
+    ///
+    /// Versiyon ZORUNLU: `get_meta_any` (wfd_id, version) ile arar. Sabit 0 geçilirse
+    /// satır bulunamaz ve katalog BOŞ kalır — kapı kapanmaz ama sessizce de geçmez,
+    /// çağrılar hata verir.
+    pub async fn validate_stored_document(
+        &self,
+        wfd_id: Uuid,
+        version: i32,
+        wfd: &Wfd,
+    ) -> validator::ValidationReport {
+        let orgtnt_id = repo::get_meta_any(&self.pool, wfd_id, version)
+            .await
+            .map(|m| m.orgtnt_id)
+            .ok();
+        self.validate_document(orgtnt_id, wfd).await
+    }
+
+    /// Draft/pending bir WFD'yi **upload ile AYNI kapıdan** doğrular.
     async fn validate_for_release(
         &self,
         wfd_id: Uuid,
         version: i32,
         wfd: &Wfd,
     ) -> Result<(), crate::error::WfdError> {
-        // Versiyon ZORUNLU: `get_meta_any` (wfd_id, version) ile arar. Sabit 0
-        // geçilirse satır bulunamaz, tenant None olur ve cross-WFD kuralları
-        // sessizce atlanır — yani kapı hiç kapanmaz.
-        let orgtnt_id = repo::get_meta_any(&self.pool, wfd_id, version)
-            .await
-            .map(|m| m.orgtnt_id)
-            .ok();
-        let report = match orgtnt_id {
-            Some(tid) => {
-                let callees = self.prefetch_callees(tid, wfd).await;
-                validator::validate_with(wfd, Some(&callees))
-            }
-            // Tenant çözülemezse cross-WFD kurallarını atlamak yerine yerel
-            // doğrulama ile devam et — sessizce geçirmekten iyidir, ama bu yol
-            // pratikte oluşmaz (satır zaten okundu).
-            None => validator::validate(wfd),
-        };
+        let report = self.validate_stored_document(wfd_id, version, wfd).await;
         if !report.is_valid() {
             return Err(Self::validation_error(&report));
         }

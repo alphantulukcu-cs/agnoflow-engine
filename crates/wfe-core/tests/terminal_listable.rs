@@ -289,7 +289,7 @@ fn validator_rejects_actor_ref_in_terminal_listable_guard() {
         "terminal_rejected",
         json!([{ "c_a": { "c_orgu": "self", "c_r": ["auditor"] }, "when": "$actor.role == \"x\"" }]),
     );
-    let report = wfe_core::validator::validate(&wfd);
+    let report = wfe_core::validator::validate_with(&wfd, &wfe_core::validator::NoCallees);
     // `grant_when_actor_ref` bir HATA kodudur (yayını engeller) — uyarı değil.
     assert!(
         report

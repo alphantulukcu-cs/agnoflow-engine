@@ -35,7 +35,10 @@ pub enum DollarForm {
 }
 
 /// Tam eşleşen referanslar (motorun `match` kolları).
-const EXACT: &[&str] = &[
+/// **`pub`**: `dollar_env_parity` bu tabloyu spec'teki `x-dollar-env` ile
+/// karşılaştırıyor (`S25`). Metinden çıkarmak yerine değerin kendisini okumak,
+/// yeniden biçimlendirmeye dayanıklı ve derleme zamanında bağlı.
+pub const EXACT: &[&str] = &[
     "$actor",
     "$timestamp",
     "$wfe_id",
@@ -45,7 +48,8 @@ const EXACT: &[&str] = &[
 ];
 
 /// Yol taşıyan referanslar — önek + BOŞ OLMAYAN yol.
-const PREFIXES: &[&str] = &[
+/// **`pub`** — gerekçe `EXACT` ile aynı.
+pub const PREFIXES: &[&str] = &[
     "$ctx.",
     "$action.input.",
     "$exec.result.",

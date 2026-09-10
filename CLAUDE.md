@@ -119,6 +119,18 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
   - Sonuç: büyüyen eksen **kural sayısı × W** (kural başına kurulan guard ortamı,
     `S34`in gövdesi); kol ve `reproject` onu yalnız `B` / `(1 + B)` ile ÇARPAR.
     **Karar VERİLMEDİ** — `S34` ailesinin işi.
+- **Timeline gürültüsü ÖLÇÜLDÜ** (`P05`/S2 → M4/WOR-114, araç:
+  `cargo bench -p wf-wfe --bench timeline_noise`, DB gerekmez). Ölçülen şey süre değil
+  SATIR SAYISI: `GET /wfe/:id` → `wfah[]`, gruplama motorun `WfahView.group`u. Dört
+  gerçekçi profil + ölçek koşumu. Sonuç: `ownership` grubu defterin **%29–%62**'si ve
+  al/bırak turu başına **TAM 2 satır** (doğrusal, üst sınırsız); ama `P05`/S2'nin
+  varsayılan-kapalı filtresi bu büyümenin **tamamını** yutuyor — varsayılan görünümdeki
+  satır sayısı 50 tur çalkantıda bile **sabit** kalıyor (tur başına +0,0). `E12`nin
+  defter büyümesi YALNIZ iki yerden gelir: doğrudan alma (+1) ve kişiden kişiye devrin
+  ikinci satırı (+1); profillerde **+2…+5 satır**. ⚠️ Yan bulgu: SLA-1 zaman aşımı
+  bırakması (`claim_released` / `reason: "timeout"`) `Ownership` grubunda olduğu için
+  varsayılan görünümde GÖRÜNMÜYOR — eski `claim_timeout` sınıfı `Sla` rozetindeydi.
+  **Karar bu ölçümün işi DEĞİL** (`S15`).
 - **Dizi fonksiyonları İKİ argümanlı** (WOR-84): `count($wfah, #.action == "x") >= n` ✅ — `count(filter(...))` parse HATASI, `every` diye fonksiyon YOK karşılığı `all`. Tam liste: `count some all none one filter map flatMap`.
 - **`#.input.*` sıralama karşılaştırması aksiyon kapısı İSTER**: `null` ile `>` `<` zen'de `Compare: Unsupported type` (runtime, parse yakalamaz). Kapı `and` ile ve karşılaştırmadan **ÖNCE** olmalı; `or` kapı değildir; dış `and`'deki kapı iç gruba geçer. `$prev`/`$first` de bağışık değil. Sözleşme testi: `tests/editor_zen_contract.rs`.
 - **İfade TİP denetimi motordadır** (`wfe-core/src/expr_types.rs`, AST tabanlı): obje karşılaştırması (`zen_object_compare` — **obje==obje dahil**, VM eşleştirmez), metinde sıralama (`zen_ordering_not_number`), iki taraf tip uyuşmazlığı (`zen_type_mismatch`), izdüşüm dışı `$wfah` alanı (`zen_wfah_field_unknown`), kapısız `#.input.*` sıralaması (`zen_input_needs_action_gate`), liste öğesi tip uyuşmazlığı (`zen_list_type_mismatch` — `In` opcode'u öğe öğe `Equal` yapar, `#.seq in ["a"]` hep-false), metin operatörünün metin olmayan tarafı (`zen_text_op_not_string` — `contains`/`startsWith`/`endsWith`/`matches`), `#.at` sabitinin biçimi (`zen_timestamp_format` — `at` düz METİNDİR, `yyyyMMddHHmmss`/14 rakam UTC; karşılaştırmaları STRING temellidir, `d()` yok. Eşitlik/`in` tam damga ister, `startsWith` anlamlı önek sınırı (4/6/8/10/12/14), `contains`/`endsWith` yalnız rakam, `matches` muaf. Sıralama `zen_ordering_not_number`a düşer). `#.input.<yol>`un tipi girdiyi context'e yazan `wfes_effects` üzerinden çıkarılır — editör de aynı çıkarımı yapar (`whenFields.collectActionInputCtxMap`). **Elle yazılan JSON ile editörün ürettiği JSON aynı kapıdan geçer**; kural seti motorun, editör yalnız aynı cevabı önden verir.

@@ -38,8 +38,9 @@ pub enum WfahKind {
     Deadline,
     Escalation,
     EscalationSkipped,
-    /// Ç13: sahiplik DOĞDU — `claim_taken:<node>`. Satırı **`E12`** yazar; o iş
-    /// inmeden `#.kind == "claim_taken"` hep-false okur (`E07`, FEDA EDİLENLER).
+    /// Ç13: sahiplik DOĞDU — `claim_taken:<node>`. Satırı `E12` yazar
+    /// (`v22::ownership::ClaimTaken`); `E07`nin *"iş inmeden hep-false okur"* notu
+    /// DÜŞTÜ — `E12` indi, satır üretiliyor.
     ClaimTaken,
     /// Ç1-EK: sahiplik DÜŞTÜ — `claim_released:<node>`. Sebep payload'daki `reason`
     /// alanındadır (`timeout` | `grant_guard_false` | …), ADda değil.

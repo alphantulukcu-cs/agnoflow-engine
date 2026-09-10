@@ -30,3 +30,7 @@ tokio = { workspace = true }
 [[bench]]
 name    = "branch_view"
 harness = false
+
+[[bench]]
+name    = "timeline_noise"
+harness = false

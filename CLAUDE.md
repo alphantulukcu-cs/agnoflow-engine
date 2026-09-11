@@ -178,6 +178,15 @@ olarak listelidir; `seq` ve hedef başına label KAPANDI).
 - Zamana bağlı testlerde `#[tokio::test(start_paused = true)]` kullan (retry/timeout gerçek beklemeden koşar).
 - Migration'lar psql ile manuel uygulanır (`migrations/org`, `migrations/wf` sırasıyla); sqlx migrate kullanılmıyor.
 - Çok elemanlı eski c_a array'i ile karşılaşırsan OTOMATİK dönüştürme — dur ve sor (M10).
+- **Wire değişti → agnobook aynı işte güncellenir** (2026-09-11, `S21`). Şemayı,
+  motorun kabul ettiği belgeyi ya da bir wire alanını değiştiren iş, kitabın
+  karşılıklarını da günceller: `agnoflow-frontend/wfd-book/{tr,en}/*.md` — **iki dil
+  birden**. ⚠️ Kitabın ` ```json ` blokları (her dilde 83 adet) **hiçbir kapıdan
+  geçmiyor**; kapı yalnız `wfd-flow` bloklarındadır. `S21` kapı koymayı REDDETTİ,
+  tazelik insan disiplinine bırakıldı. Bayat kitap kullanıcıya yanlış öğretir ve
+  sessizdir — `WOR-130` böyle, **elle** bulundu. Hangi bölüme bakılacağı:
+  `agnoflow-frontend/CLAUDE.md` → `## agnobook` → *"Kitabı güncellemek işin
+  PARÇASIDIR"* tablosu.
 
 ## Git remote / push politikası
 
